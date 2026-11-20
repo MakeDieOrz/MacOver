@@ -412,6 +412,31 @@ final class PlaySettingsTests: XCTestCase {
             _ = PTSafeMode.shared.evaluateAndBeginLaunch(environment: ["PLAYTOOLS_SAFE_MODE": "1"])
             XCTAssertEqual(ps13.reportedIOSVersion as String, "automatic")
         }
+
+        // Default iPad13,8 + compat13_7 coerces to iPad8,6 in normal mode and reverts in Safe Mode
+        var mismatchedPad13 = AppSettingsData()
+        mismatchedPad13.bundleIdentifier = "com.example.settings.compat13.pad"
+        mismatchedPad13.reportedIOSVersion = "compat13_7"
+        mismatchedPad13.iosDeviceModel = "iPad13,8"
+        try encoder.encode(mismatchedPad13).write(to: url)
+        _ = PTSafeMode.shared.evaluateAndBeginLaunch(environment: ["PLAYTOOLS_SAFE_MODE": "0"])
+        let psPad13 = PlaySettings(settingsURL: url, bundleIdentifier: "com.example.settings.compat13.pad")
+        XCTAssertEqual(psPad13.deviceModel as String, "iPad8,6")
+        XCTAssertEqual(psPad13.oemID as String, "J320xAP")
+        _ = PTSafeMode.shared.evaluateAndBeginLaunch(environment: ["PLAYTOOLS_SAFE_MODE": "1"])
+        XCTAssertEqual(psPad13.deviceModel as String, "iPad13,8")
+        XCTAssertEqual(psPad13.oemID as String, "J522AP")
+
+        // Modern iPhone + compat13_7 coerces to iPhone12,5
+        var mismatchedPhone13 = AppSettingsData()
+        mismatchedPhone13.bundleIdentifier = "com.example.settings.compat13.phone"
+        mismatchedPhone13.reportedIOSVersion = "compat13_7"
+        mismatchedPhone13.iosDeviceModel = "iPhone17,2"
+        try encoder.encode(mismatchedPhone13).write(to: url)
+        _ = PTSafeMode.shared.evaluateAndBeginLaunch(environment: ["PLAYTOOLS_SAFE_MODE": "0"])
+        let psPhone13 = PlaySettings(settingsURL: url, bundleIdentifier: "com.example.settings.compat13.phone")
+        XCTAssertEqual(psPhone13.deviceModel as String, "iPhone12,5")
+        XCTAssertEqual(psPhone13.oemID as String, "D431AP")
     }
 
     func testRightClickLongPressDefaultsAndDecodingPersistence() throws {

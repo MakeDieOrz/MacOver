@@ -408,6 +408,10 @@ class AppSettings: ObservableObject {
                 updatedSettings.windowWidth = autoRes.width
                 updatedSettings.windowHeight = autoRes.height
             }
+            updatedSettings.iosDeviceModel = ReportedIOSVersionMode.effectiveDeviceModel(
+                updatedSettings.iosDeviceModel,
+                for: updatedSettings.reportedIOSVersionMode
+            )
         }
     }
 

@@ -32,6 +32,22 @@ struct ConfigDevicePane: View {
         return shown.contains(where: { $0.model == currentModel })
     }
 
+    private var reportedIOSVersionSelection: Binding<ReportedIOSVersionMode> {
+        Binding(
+            get: { settings.settings.reportedIOSVersionMode },
+            set: { newMode in
+                settings.update { updated in
+                    updated.reportedIOSVersionMode = newMode
+                    if newMode == .compat13_7 && !DeviceProfileOption.supportsIOS13(updated.iosDeviceModel) {
+                        updated.iosDeviceModel = DeviceProfileOption.recommendedIOS13Model(
+                            isIPhone: DeviceProfileOption.isIPhone(updated.iosDeviceModel)
+                        )
+                    }
+                }
+            }
+        )
+    }
+
     var body: some View {
         Form {
             if isLegacy && !isCompat13_7 {
@@ -82,7 +98,7 @@ struct ConfigDevicePane: View {
             }
 
             Section {
-                Picker("device.reportedIOS.title", selection: $settings.settings.reportedIOSVersionMode) {
+                Picker("device.reportedIOS.title", selection: reportedIOSVersionSelection) {
                     Text("device.reportedIOS.automatic").tag(ReportedIOSVersionMode.automatic)
                     Text("device.reportedIOS.followHost").tag(ReportedIOSVersionMode.followHost)
                     Text("device.reportedIOS.compat18_3").tag(ReportedIOSVersionMode.compat18_3)

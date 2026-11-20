@@ -188,14 +188,18 @@ public final class PTUnfairLock {
         self.configuredInverseScreenValues = decoded.inverseScreenValues
         self.adaptiveDisplay = decoded.resolution != 0
         self.resizableWindow = decoded.resolution == 6
-        self.deviceModel = decoded.iosDeviceModel as NSString
-        self.oemID = Self.resolveOEMID(for: decoded.iosDeviceModel)
+        let normalizedIOSVersion = Self.normalizedReportedIOSVersion(decoded.reportedIOSVersion)
+        self.configuredDeviceModel = decoded.iosDeviceModel
+        self.coercedDeviceModel = Self.effectiveDeviceModel(
+            decoded.iosDeviceModel,
+            reportedIOSVersion: normalizedIOSVersion
+        )
         self.playChain = decoded.playChain
         self.playChainDebugging = decoded.playChainDebugging
         self.configuredWindowFixMethod = decoded.windowFixMethod
         self.configuredCustomScaler = decoded.customScaler
         self.configuredFrameRateTarget = Self.normalizedFrameRateTarget(decoded.frameRateTarget)
-        self.configuredReportedIOSVersion = Self.normalizedReportedIOSVersion(decoded.reportedIOSVersion)
+        self.configuredReportedIOSVersion = normalizedIOSVersion
         self.rootWorkDir = decoded.rootWorkDir
         self.noKMOnInput = decoded.noKMOnInput
         self.enableScrollWheel = decoded.enableScrollWheel
@@ -247,9 +251,21 @@ public final class PTUnfairLock {
 
     @objc public let resizableWindow: Bool
 
-    @objc public let deviceModel: NSString
+    private let configuredDeviceModel: String
+    private let coercedDeviceModel: String
 
-    @objc public let oemID: NSString
+    @objc public var rawConfiguredDeviceModel: NSString {
+        configuredDeviceModel as NSString
+    }
+
+    @objc public var deviceModel: NSString {
+        (PTSafeMode.isActive ? configuredDeviceModel : coercedDeviceModel) as NSString
+    }
+
+    @objc public var oemID: NSString {
+        let model = PTSafeMode.isActive ? configuredDeviceModel : coercedDeviceModel
+        return Self.resolveOEMID(for: model)
+    }
 
     @objc public var keymappingDisabledAt: Float {
         get {
@@ -372,6 +388,15 @@ public final class PTUnfairLock {
         default:
             return "automatic"
         }
+    }
+
+    private static let ios13CompatibleModels: Set<String> = ["iPad6,7", "iPad8,6", "iPhone12,5"]
+
+    private static func effectiveDeviceModel(_ model: String, reportedIOSVersion: String) -> String {
+        guard reportedIOSVersion == "compat13_7", !ios13CompatibleModels.contains(model) else {
+            return model
+        }
+        return model.hasPrefix("iPhone") ? "iPhone12,5" : "iPad8,6"
     }
 
     @objc public let rootWorkDir: Bool

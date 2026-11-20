@@ -603,5 +603,19 @@ final class ArchitectureAndHostTests: XCTestCase {
         XCTAssertEqual(DeviceProfileOption.recommendedIOS13Model(isIPhone: true), "iPhone12,5")
         XCTAssertTrue(DeviceProfileOption.isIPhone("iPhone18,2"))
         XCTAssertFalse(DeviceProfileOption.isIPhone("iPad17,3"))
+
+        appSettings.update {
+            $0.iosDeviceModel = "iPad13,8"
+            $0.reportedIOSVersionMode = .compat13_7
+        }
+        appSettings.sync()
+        XCTAssertEqual(appSettings.settings.iosDeviceModel, "iPad8,6")
+
+        appSettings.update {
+            $0.iosDeviceModel = "iPhone18,2"
+            $0.reportedIOSVersionMode = .compat13_7
+        }
+        appSettings.sync()
+        XCTAssertEqual(appSettings.settings.iosDeviceModel, "iPhone12,5")
     }
 }

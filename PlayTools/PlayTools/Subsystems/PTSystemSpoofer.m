@@ -17,12 +17,14 @@ static _Thread_local int s_tls_early_device_init = 0;
 __attribute__((visibility("hidden"))) _Atomic int s_playchain_cached = -1;
 __attribute__((visibility("hidden"))) _Atomic int s_playchain_debug_cached = -1;
 __attribute__((visibility("hidden"))) pthread_once_t s_pt_bypass_early_once = PTHREAD_ONCE_INIT;
+static char s_uncoerced_device_model[64] = "iPad13,8";
 static char s_early_device_model[64] = "iPad13,8";
 static char s_early_oem_id[64] = "J522AP";
 static char s_final_device_model[64] = "iPad13,8";
 static char s_final_oem_id[64] = "J522AP";
 static _Atomic(const char *) s_active_device_model = s_early_device_model;
 static _Atomic(const char *) s_active_oem_id = s_early_oem_id;
+static _Atomic BOOL s_reported_ios_override_forced_off = NO;
 static pthread_once_t s_pt_early_device_once = PTHREAD_ONCE_INIT;
 __attribute__((visibility("hidden"))) pthread_once_t s_pt_device_info_once = PTHREAD_ONCE_INIT;
 __attribute__((visibility("hidden"))) _Thread_local BOOL s_tls_initializing_device_info = NO;
@@ -857,14 +859,48 @@ static const pt_device_profile_t *pt_set_cached_device_profile_from_model(const 
     return profile;
 }
 
+static BOOL pt_is_safe_mode_env_active(void);
+
+static BOOL pt_is_compat13_7_mode_cstr(const char *rep_mode) {
+    if (rep_mode == NULL || rep_mode[0] == '\0') {
+        return NO;
+    }
+    return (strcasecmp(rep_mode, "compat13_7") == 0 ||
+            strcmp(rep_mode, "13.7") == 0 ||
+            strcasecmp(rep_mode, "ios13_7") == 0);
+}
+
+static const char *pt_coerce_model_for_compat13_7(const char *model) {
+    if (model != NULL &&
+        (strcmp(model, "iPad6,7") == 0 ||
+         strcmp(model, "iPad8,6") == 0 ||
+         strcmp(model, "iPhone12,5") == 0)) {
+        return model;
+    }
+    if (model != NULL && strncmp(model, "iPhone", 6) == 0) {
+        return "iPhone12,5";
+    }
+    return "iPad8,6";
+}
+
 static void pt_init_early_device_info(void) {
     int fd = pt_open_early_settings_plist_fd();
     if (fd >= 0) {
-        char parsed_model[64];
-        if (pt_read_plist_top_string_from_fd(fd, "iosDeviceModel", parsed_model, sizeof(parsed_model)) &&
-            parsed_model[0] != '\0') {
+        char parsed_model[64] = {0};
+        BOOL has_model = (pt_read_plist_top_string_from_fd(fd, "iosDeviceModel", parsed_model, sizeof(parsed_model)) &&
+                          parsed_model[0] != '\0');
+        const char *base_model = has_model ? parsed_model : "iPad13,8";
+        strlcpy(s_uncoerced_device_model, base_model, sizeof(s_uncoerced_device_model));
+
+        char rep_mode[32] = {0};
+        BOOL is_compat13 = (!atomic_load_explicit(&s_reported_ios_override_forced_off, memory_order_acquire) &&
+                            !pt_is_safe_mode_env_active() &&
+                            pt_read_plist_top_string_from_fd(fd, "reportedIOSVersion", rep_mode, sizeof(rep_mode)) &&
+                            pt_is_compat13_7_mode_cstr(rep_mode));
+        const char *effective_model = is_compat13 ? pt_coerce_model_for_compat13_7(base_model) : base_model;
+        if (has_model || is_compat13) {
             const pt_device_profile_t *profile = pt_set_cached_device_profile_from_model(
-                parsed_model,
+                effective_model,
                 s_early_device_model, sizeof(s_early_device_model),
                 s_early_oem_id, sizeof(s_early_oem_id));
             atomic_store_explicit(&s_active_device_profile, profile, memory_order_release);
@@ -886,15 +922,26 @@ __attribute__((visibility("hidden"))) void pt_init_device_info(void) {
     BOOL prev_tls = s_tls_initializing_device_info;
     s_tls_initializing_device_info = YES;
     @autoreleasepool {
-        NSString *model = [[PlaySettings shared] deviceModel];
+        PlaySettings *ps = [PlaySettings shared];
+        NSString *rawCfg = [ps rawConfiguredDeviceModel];
+        const char *rm = [rawCfg UTF8String];
+        if (rm != NULL && rm[0] != '\0') {
+            strlcpy(s_uncoerced_device_model, rm, sizeof(s_uncoerced_device_model));
+        }
+        NSString *model = [ps deviceModel];
         const char *m = [model UTF8String];
         if (m != NULL && m[0] != '\0') {
+            const char *eff_m = m;
+            if (atomic_load_explicit(&s_reported_ios_override_forced_off, memory_order_acquire) ||
+                pt_is_safe_mode_env_active()) {
+                eff_m = s_uncoerced_device_model;
+            }
             final_profile = pt_set_cached_device_profile_from_model(
-                m,
+                eff_m,
                 s_final_device_model, sizeof(s_final_device_model),
                 s_final_oem_id, sizeof(s_final_oem_id));
         } else {
-            NSString *oem = [[PlaySettings shared] oemID];
+            NSString *oem = [ps oemID];
             const char *o = [oem UTF8String];
             if (o != NULL && o[0] != '\0') {
                 strlcpy(s_final_oem_id, o, sizeof(s_final_oem_id));
@@ -1134,7 +1181,6 @@ static char s_compat13_kern_version_prefix[256] = "Darwin Kernel Version 19.6.0:
 static char s_spoofed_osversion[64] = "22D63";
 static char s_spoofed_ios_version[32] = "18.3";
 static _Atomic int s_reported_ios_override_mode = PT_REPORTED_IOS_OVERRIDE_NONE;
-static _Atomic BOOL s_reported_ios_override_forced_off = NO;
 static pthread_once_t s_host_kern_once = PTHREAD_ONCE_INIT;
 
 static BOOL pt_is_safe_mode_env_active(void) {
@@ -1326,6 +1372,21 @@ static pt_reported_ios_override_t pt_active_reported_ios_override(void) {
 __attribute__((visibility("hidden"))) void pt_disable_reported_ios_override_for_safe_mode(void) {
     atomic_store_explicit(&s_reported_ios_override_forced_off, YES, memory_order_release);
     atomic_store_explicit(&s_reported_ios_override_mode, PT_REPORTED_IOS_OVERRIDE_NONE, memory_order_release);
+    if (s_uncoerced_device_model[0] != '\0') {
+        const pt_device_profile_t *orig_profile = pt_device_profile_for_model(s_uncoerced_device_model);
+        strlcpy(s_early_device_model, orig_profile->model, sizeof(s_early_device_model));
+        strlcpy(s_early_oem_id, orig_profile->oem_id, sizeof(s_early_oem_id));
+        if (atomic_load_explicit(&s_pt_device_info_ready, memory_order_acquire)) {
+            strlcpy(s_final_device_model, orig_profile->model, sizeof(s_final_device_model));
+            strlcpy(s_final_oem_id, orig_profile->oem_id, sizeof(s_final_oem_id));
+            atomic_store_explicit(&s_active_device_model, s_final_device_model, memory_order_release);
+            atomic_store_explicit(&s_active_oem_id, s_final_oem_id, memory_order_release);
+        } else {
+            atomic_store_explicit(&s_active_device_model, s_early_device_model, memory_order_release);
+            atomic_store_explicit(&s_active_oem_id, s_early_oem_id, memory_order_release);
+        }
+        atomic_store_explicit(&s_active_device_profile, orig_profile, memory_order_release);
+    }
 }
 
 __attribute__((visibility("hidden"))) const char *pt_get_reported_ios_version_override(const char **out_build) {
