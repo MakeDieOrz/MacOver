@@ -54,7 +54,65 @@ class LegacySettings {
                 }
             }
         } catch {
-            Log.shared.error("Failed to read playcover.plist")
+            PlayCoverDiagnostics.reportError("Failed to read playcover.plist")
+        }
+    }
+
+    private static func isBoolean(_ value: Any?) -> Bool {
+        if value is Bool {
+            return true
+        }
+        if let num = value as? NSNumber {
+            return CFGetTypeID(num) == CFBooleanGetTypeID()
+        }
+        return false
+    }
+
+    private static func floatValue(_ value: Any?, default defaultValue: Float) -> Float {
+        guard !isBoolean(value) else { return defaultValue }
+        switch value {
+        case let val as Float:
+            return val
+        case let val as Double:
+            return Float(val)
+        case let val as CGFloat:
+            return Float(val)
+        case let val as Int:
+            return Float(val)
+        case let val as NSNumber:
+            return val.floatValue
+        default:
+            return defaultValue
+        }
+    }
+
+    private static func cgFloatValue(_ value: Any?, default defaultValue: CGFloat) -> CGFloat {
+        guard !isBoolean(value) else { return defaultValue }
+        switch value {
+        case let val as CGFloat:
+            return val
+        case let val as Double:
+            return CGFloat(val)
+        case let val as Float:
+            return CGFloat(val)
+        case let val as Int:
+            return CGFloat(val)
+        case let val as NSNumber:
+            return CGFloat(val.doubleValue)
+        default:
+            return defaultValue
+        }
+    }
+
+    private static func intValue(_ value: Any?, default defaultValue: Int) -> Int {
+        guard !isBoolean(value) else { return defaultValue }
+        switch value {
+        case let val as Int:
+            return val
+        case let val as NSNumber:
+            return val.intValue
+        default:
+            return defaultValue
         }
     }
 
@@ -66,7 +124,7 @@ class LegacySettings {
 
             var settingsData = AppSettingsData()
             settingsData.keymapping = dictionary["pc.keymapping"] as? Bool ?? true
-            settingsData.sensitivity = dictionary["pc.sensivity"] as? Float ?? 50
+            settingsData.sensitivity = floatValue(dictionary["pc.sensivity"], default: 50)
             settingsData.disableTimeout = dictionary["pc.disableTimeout"] as? Bool ?? false
 
             return settingsData
@@ -81,34 +139,34 @@ class LegacySettings {
         for item in from {
             if let data = item as? [Any] {
                 if data.count == 4 {
-                    let size = data[3] as? CGFloat ?? 5
-                    let xCoord = data[1] as? CGFloat ?? 0
-                    let yCoord = data[2] as? CGFloat ?? 0
+                    let size = cgFloatValue(data[3], default: 5)
+                    let xCoord = cgFloatValue(data[1], default: 0)
+                    let yCoord = cgFloatValue(data[2], default: 0)
 
                     let transform = KeyModelTransform(size: size, xCoord: xCoord, yCoord: yCoord)
 
-                    let keyCode = data[0] as? Int ?? 0
+                    let keyCode = intValue(data[0], default: 0)
                     keymap.buttonModels.append(ButtonModel(keyCode: keyCode,
                                                            keyName: KeyCodeNames.keyCodes[keyCode] ?? "Btn",
                                                            transform: transform))
                 } else if data.count == 2 {
-                    let xCoord = data[0] as? CGFloat ?? 0
-                    let yCoord = data[1] as? CGFloat ?? 0
+                    let xCoord = cgFloatValue(data[0], default: 0)
+                    let yCoord = cgFloatValue(data[1], default: 0)
 
                     let transform = KeyModelTransform(size: 25, xCoord: xCoord, yCoord: yCoord)
 
                     keymap.mouseAreaModel.append(MouseAreaModel(keyName: "Mouse", transform: transform))
                 } else if data.count == 8 {
-                    let size = data[6] as? CGFloat ?? 5
-                    let xCoord = data[4] as? CGFloat ?? 0
-                    let yCoord = data[5] as? CGFloat ?? 0
+                    let size = cgFloatValue(data[6], default: 5)
+                    let xCoord = cgFloatValue(data[4], default: 0)
+                    let yCoord = cgFloatValue(data[5], default: 0)
 
                     let transform = KeyModelTransform(size: size, xCoord: xCoord, yCoord: yCoord)
 
-                    let upKeyCode = data[0] as? Int ?? 0
-                    let leftKeyCode = data[2] as? Int ?? 0
-                    let rightKeyCode = data[3] as? Int ?? 0
-                    let downKeyCode = data[1] as? Int ?? 0
+                    let upKeyCode = intValue(data[0], default: 0)
+                    let leftKeyCode = intValue(data[2], default: 0)
+                    let rightKeyCode = intValue(data[3], default: 0)
+                    let downKeyCode = intValue(data[1], default: 0)
                     keymap.joystickModel.append(JoystickModel(upKeyCode: upKeyCode,
                                                               rightKeyCode: rightKeyCode,
                                                               downKeyCode: downKeyCode,
@@ -117,13 +175,13 @@ class LegacySettings {
                                                               transform: transform,
                                                               mode: .FIXED))
                 } else if data.count == 5 {
-                    let size = data[3] as? CGFloat ?? 5
-                    let xCoord = data[1] as? CGFloat ?? 0
-                    let yCoord = data[2] as? CGFloat ?? 0
+                    let size = cgFloatValue(data[3], default: 5)
+                    let xCoord = cgFloatValue(data[1], default: 0)
+                    let yCoord = cgFloatValue(data[2], default: 0)
 
                     let transform = KeyModelTransform(size: size, xCoord: xCoord, yCoord: yCoord)
 
-                    let keyCode = data[0] as? Int ?? 0
+                    let keyCode = intValue(data[0], default: 0)
                     keymap.draggableButtonModels.append(ButtonModel(keyCode: keyCode,
                                                                     keyName: "Mouse",
                                                                     transform: transform))
@@ -144,7 +202,7 @@ class LegacySettings {
                     if let legacyKeymaps = dictionary["pc.layout"] as? [Any] {
                         return convertLegacyKeymapArray(legacyKeymaps, from.deletingPathExtension().lastPathComponent)
                     } else {
-                        Log.shared.error("Could not find keymapping in legacy file!")
+                        PlayCoverDiagnostics.reportError("Could not find keymapping in legacy file!")
                     }
                 }
             }

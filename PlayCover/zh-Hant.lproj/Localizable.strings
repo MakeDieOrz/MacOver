@@ -355,6 +355,8 @@
 "settings.toggle.enableScrollWheel.help" = "在鍵盤映射中啟用滾輪";
 "settings.toggle.iosFrameworks.help" = "將系統 ios 庫新增至應用程式。 已知修復某些應用程式找不到 ios 框架的問題";
 "settings.toggle.enableScrollWheel" = "啟用滾輪";
+"settings.toggle.rightClickLongPress" = "右鍵映射為長按";
+"settings.toggle.rightClickLongPress.help" = "當滑鼠右鍵未綁定按鍵映射時，預設將其模擬為觸控長按（作用中輸入區域內保留右鍵選單）。";
 "ipaLibrary.info.notAvailable" = "Link not valid for this app";
 "ipaLibrary.info" = "App Info";
 "ipaLibrary.info.checksum.none" = "None provided";

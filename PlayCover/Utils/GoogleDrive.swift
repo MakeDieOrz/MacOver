@@ -8,71 +8,48 @@
 import Foundation
 import SwiftSoup
 
-class RedirectHandler: NSObject, URLSessionTaskDelegate {
-    private var finalURL: URL
-    private let dispatchGroup = DispatchGroup() // DispatchGroup
-    private var completion: (() -> Void)? // completion handler
-    lazy var session: URLSession = {
-        let configuration = URLSessionConfiguration.default
-        return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
-    }()
-    init(url: URL) {
-        self.finalURL = url
-        super.init()
+final class RedirectHandler: NSObject, URLSessionTaskDelegate {
+    private let lock = NSLock()
+    private var redirectedGoogleDriveURL: URL?
+
+    static func resolveDirectDownloadURL(
+        for url: URL,
+        session: URLSession? = nil,
+        timeout: TimeInterval = 5
+    ) async -> URL {
         if url.absoluteString.contains("drive.google.com") {
-            if let myurl = self.convertGoogleDriveLink(url.absoluteString) {
-                self.scrapeWebsite(from: URLRequest(url: myurl))
+            if let converted = convertGoogleDriveLink(url.absoluteString) {
+                return await scrapeDownloadLink(from: converted, session: session, timeout: timeout) ?? url
             }
-        } else if url.absoluteString.contains("drive.usercontent.google.com") {
-            self.scrapeWebsite(from: URLRequest(url: url))
-        } else {
-            self.redirectCatch(from: url)
+            return url
         }
-        self.waitForAllTasksToComplete()
-    }
-    func getFinal() -> URL {
-        return finalURL
-    }
-    private func setFinal(url: URL) {
-        self.finalURL = url
-    }
-    private func fetchGoogleDrivePageContent(url: String, completion: @escaping (String?) -> Void) {
-        guard let url = URL(string: url) else {
-            completion(nil)
-            return
+        if url.absoluteString.contains("drive.usercontent.google.com") {
+            return await scrapeDownloadLink(from: url, session: session, timeout: timeout) ?? url
         }
-        dispatchGroup.enter() // Enter Group
-        let task = session.dataTask(with: url) { data, _, error in
-            defer { self.dispatchGroup.leave() } // Leave group
-            guard let data = data, error == nil else {
-                completion(nil)
-                return
+
+        let handler = RedirectHandler()
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = timeout
+        configuration.timeoutIntervalForResource = timeout
+        let ownedSession = session == nil
+        let activeSession = session ?? URLSession(configuration: configuration, delegate: handler, delegateQueue: nil)
+        defer {
+            if ownedSession {
+                activeSession.finishTasksAndInvalidate()
             }
-            let htmlContent = String(data: data, encoding: .utf8)
-            completion(htmlContent)
         }
-        task.resume()
-    }
-    private func extractDownloadLink(from htmlContent: String) {
-        do {
-            let doc = try SwiftSoup.parse(htmlContent)
-            guard let form = try doc.select("form#download-form").first() else {
-                return
-            }
-            let action = try form.attr("action")
-            let id = try form.select("input[name=id]").attr("value")
-            let confirm = try form.select("input[name=confirm]").attr("value")
-            let uuid = try form.select("input[name=uuid]").attr("value")
-            let directDownloadLink = "\(action)?id=\(id)&confirm=\(confirm)&uuid=\(uuid)"
-            let url = URL(string: directDownloadLink)
-            if let url = url {
-                setFinal(url: url)
-            }
-        } catch {
-            return
+
+        var request = URLRequest(url: url, timeoutInterval: timeout)
+        request.httpMethod = "GET"
+        _ = try? await activeSession.data(for: request)
+
+        if let redirected = handler.takeRedirectedGoogleDriveURL() {
+            return await scrapeDownloadLink(from: redirected, session: session, timeout: timeout) ?? url
         }
+        return url
     }
-    private func convertGoogleDriveLink(_ originalLink: String) -> URL? {
+
+    static func convertGoogleDriveLink(_ originalLink: String) -> URL? {
         guard let fileIdRange = originalLink.range(of: "/file/d/") else {
             return nil
         }
@@ -81,64 +58,71 @@ class RedirectHandler: NSObject, URLSessionTaskDelegate {
             return nil
         }
         let fileId = originalLink[startIndex..<endIndex]
+        guard !fileId.isEmpty else {
+            return nil
+        }
         let newLink = "https://drive.usercontent.google.com/download?id=\(fileId)&export=download&authuser=0"
         return URL(string: newLink)
     }
-    private func getDirectDownloadLink(for googleDriveLink: String, completion: @escaping () -> Void) {
-        self.completion = completion
-        fetchGoogleDrivePageContent(url: googleDriveLink) { htmlContent in
-            guard htmlContent != nil else {
-                        return
-                    }
-                    completion()
-                }
-    }
-    private func redirectCatch(from url: URL) {
-        dispatchGroup.enter() // Enter group
-        let task = session.dataTask(with: url) { _, _, error in
-            defer { self.dispatchGroup.leave() } // Exit from the group at end of task
-            if error != nil {
-                return
+
+    static func extractDownloadLink(from htmlContent: String) -> URL? {
+        do {
+            let doc = try SwiftSoup.parse(htmlContent)
+            guard let form = try doc.select("form#download-form").first() else {
+                return nil
             }
-        }
-        task.resume()
-    }
-    private func scrapeWebsite(from request: URLRequest) {
-        dispatchGroup.enter() // Enter group
-        let task = session.dataTask(with: request) { data, _, error in
-            defer { self.dispatchGroup.leave() } // Exit from the group at end of task
-            if error != nil {
-                return
-            }
-            if let data = data, let html = String(data: data, encoding: .utf8) {
-                self.extractDownloadLink(from: html)
-            }
-        }
-        task.resume()
-    }
-    // Handle redirects manually
-    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
-                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
-        if let redirectURL = request.url {
-            if let url = self.convertGoogleDriveLink(redirectURL.absoluteString) {
-                var newRequest = URLRequest(url: url)
-                newRequest.httpMethod = "GET"
-                newRequest.setValue("""
-                Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko)
-                Chrome/124.0.0.0 Safari/537.36
-                """, forHTTPHeaderField: "User-Agent")
-                self.scrapeWebsite(from: newRequest)
-                completionHandler(nil)
-            } else {
-                completionHandler(nil)
-            }
-        } else {
-            completionHandler(nil)
+            let action = try form.attr("action")
+            guard !action.isEmpty else { return nil }
+            let id = try form.select("input[name=id]").attr("value")
+            let confirm = try form.select("input[name=confirm]").attr("value")
+            let uuid = try form.select("input[name=uuid]").attr("value")
+            let directDownloadLink = "\(action)?id=\(id)&confirm=\(confirm)&uuid=\(uuid)"
+            return URL(string: directDownloadLink)
+        } catch {
+            return nil
         }
     }
-    // Wait URL Session
-    private func waitForAllTasksToComplete() {
-        let timeout = DispatchTime.now() + DispatchTimeInterval.seconds(5)
-        _ = dispatchGroup.wait(timeout: timeout)
+
+    private static func scrapeDownloadLink(
+        from url: URL,
+        session: URLSession?,
+        timeout: TimeInterval
+    ) async -> URL? {
+        let activeSession = session ?? URLSession.shared
+        var request = URLRequest(url: url, timeoutInterval: timeout)
+        request.httpMethod = "GET"
+        request.setValue(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            forHTTPHeaderField: "User-Agent"
+        )
+
+        guard let (data, _) = try? await activeSession.data(for: request),
+              let html = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return extractDownloadLink(from: html)
+    }
+
+    private func takeRedirectedGoogleDriveURL() -> URL? {
+        lock.lock()
+        defer { lock.unlock() }
+        return redirectedGoogleDriveURL
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        if let redirectURL = request.url,
+           let converted = Self.convertGoogleDriveLink(redirectURL.absoluteString) {
+            lock.lock()
+            redirectedGoogleDriveURL = converted
+            lock.unlock()
+        }
+        completionHandler(nil)
     }
 }

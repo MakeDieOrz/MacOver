@@ -41,6 +41,7 @@ class UpdateScheme {
     ]
 
     public static func checkForUpdate() {
+        guard !ProcessInfo.isRunningUnitTests else { return }
         let maxSteps = migrations.count
         var steps = 0
 
@@ -56,7 +57,7 @@ class UpdateScheme {
                 print("Migrating \(migration.fromVersion) → \(migration.toVersion)")
                 try migration.action()
             } catch {
-                Log.shared.error(error)
+                PlayCoverDiagnostics.reportError(error)
                 return
             }
 

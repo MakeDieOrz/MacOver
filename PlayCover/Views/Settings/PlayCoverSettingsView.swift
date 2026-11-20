@@ -1,10 +1,9 @@
 //
-//  SettingsView.swift
+//  PlayCoverSettingsView.swift
 //  PlayCover
 //
-//  Created by Andrew Glaze on 7/16/22.
-//
 
+import PlayCoverSandbox
 import Sparkle
 import SwiftUI
 
@@ -12,38 +11,97 @@ struct PlayCoverSettingsView: View {
     @ObservedObject var updaterViewModel: UpdaterViewModel
     @EnvironmentObject var storeVM: StoreVM
 
-    private enum Tabs: Hashable {
-        case updates, ipasource, keyCover, install, uninstall
-    }
-
     var body: some View {
         TabView {
-            UpdateSettings(updaterViewModel: updaterViewModel)
-                .tabItem {
-                    Label("preferences.tab.updates", systemImage: "square.and.arrow.down")
+            Tab("ui51.settings.tab.general", systemImage: "gearshape") {
+                GeneralSettingsTab()
+            }
+
+            Tab("ui51.settings.tab.signing", systemImage: "lock.shield") {
+                SigningSettingsTab()
+            }
+
+            Tab("preferences.tab.updates", systemImage: "square.and.arrow.down") {
+                UpdateSettings(updaterViewModel: updaterViewModel)
+            }
+
+            Tab("preferences.tab.ipasource", systemImage: "list.bullet") {
+                IPASourceSettings()
+                    .environmentObject(storeVM)
+            }
+
+            Tab("KeyCover", systemImage: "key.fill") {
+                KeyCoverSettings()
+            }
+
+            Tab("preferences.tab.install", systemImage: "arrow.down.app") {
+                InstallSettings()
+            }
+
+            Tab("preferences.tab.uninstall", systemImage: "trash.square") {
+                UninstallSettings()
+            }
+        }
+        .frame(minWidth: 580, minHeight: 340)
+    }
+}
+
+private struct GeneralSettingsTab: View {
+    @AppStorage("showMenuBarExtra") private var showMenuBarExtra = true
+
+    var body: some View {
+        Form {
+            Section("ui51.settings.general.appearance") {
+                Text("ui51.settings.general.glassNote")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Toggle("ui51.settings.general.menuBarExtra", isOn: $showMenuBarExtra)
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+private struct SigningSettingsTab: View {
+    @State private var status: PrivilegePreFlightStatus?
+    @State private var showGuide = false
+
+    var body: some View {
+        Form {
+            Section("ui51.signing.guide.title") {
+                LabeledContent("configSigning.info.SIPHeader") {
+                    if let status {
+                        Text(status.sipDisabled ? "state.disabled" : "state.enabled")
+                            .foregroundStyle(status.sipDisabled ? .orange : .green)
+                    } else {
+                        ProgressView().controlSize(.small)
+                    }
                 }
-                .tag(Tabs.updates)
-            IPASourceSettings()
-                .tabItem {
-                    Label("preferences.tab.ipasource", systemImage: "list.bullet")
+                LabeledContent("configSigning.info.AMFIHeader") {
+                    if let status {
+                        Text(status.amfiDisabledInRunningOS
+                             ? "state.disabled"
+                             : (status.amfiDisabledInNVRAM ? "state.pendingReboot" : "state.enabled"))
+                            .foregroundStyle(status.amfiDisabledInRunningOS ? .blue : .secondary)
+                    } else {
+                        ProgressView().controlSize(.small)
+                    }
                 }
-                .tag(Tabs.ipasource)
-                .environmentObject(storeVM)
-            KeyCoverSettings.shared
-                .tabItem {
-                    Label("KeyCover", systemImage: "key.fill")
+                Button("menubar.configSigning") {
+                    showGuide = true
                 }
-                .tag(Tabs.keyCover)
-            InstallSettings.shared
-                .tabItem {
-                    Label("preferences.tab.install", systemImage: "arrow.down.app")
-                }
-                .tag(Tabs.install)
-            UninstallSettings.shared
-                .tabItem {
-                  Label("preferences.tab.uninstall", systemImage: "trash.square")
-                }
-                .tag(Tabs.uninstall)
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .formStyle(.grouped)
+        .task(id: showGuide) {
+            let refreshed = await Task.detached(priority: .utility) {
+                SystemConfig.preFlightStatus()
+            }.value
+            status = refreshed
+        }
+        .sheet(isPresented: $showGuide) {
+            SigningGuideView(isSigningSetupShown: $showGuide)
         }
     }
 }

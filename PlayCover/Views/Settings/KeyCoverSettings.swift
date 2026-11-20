@@ -7,30 +7,15 @@
 
 import SwiftUI
 
-enum KeyCoverStatus: String, Codable, Hashable {
-    case disabled
-    case selfGeneratedPassword
-    case userProvidedPassword
-}
-
-class KeyCoverPreferences: NSObject, ObservableObject {
-    static var shared = KeyCoverPreferences()
-
-    @AppStorage("keyCoverEnabled") var keyCoverEnabled: KeyCoverStatus = KeyCoverStatus.disabled
-    @AppStorage("promptForKeyCoverPasswordAtLaunch") var promptForKeyCoverPasswordAtLaunch = true
-}
-
 struct KeyCoverSettings: View {
-    static let shared = KeyCoverSettings()
-
     @State private var keyCoverInitialSetupShown = false
     @State private var keyCoverUpdatePasswordShown = false
     @State private var keyCoverRemovalViewShown = false
 
-    @ObservedObject var keyCoverPreferences = KeyCoverPreferences.shared
-    @ObservedObject var keyCoverObserved = KeyCoverObservable.shared
-
-    @ObservedObject var modifierKeyObserver = ModifierKeyObserver.shared
+    @EnvironmentObject var dependencies: PlayCoverDependencies
+    @EnvironmentObject var keyCoverPreferences: KeyCoverPreferences
+    @EnvironmentObject var keyCoverObserved: KeyCoverObservable
+    @EnvironmentObject var modifierKeyObserver: ModifierKeyObserver
 
     var body: some View {
         VStack {
@@ -38,7 +23,7 @@ struct KeyCoverSettings: View {
                 HStack {
                     Text("keycover.status.title")
                     Text(keyCoverObserved.keyCoverEnabled ?
-                             KeyCoverPreferences.shared.keyCoverEnabled == .selfGeneratedPassword ?
+                             keyCoverPreferences.keyCoverEnabled == .selfGeneratedPassword ?
                              "keycover.status.managedPassword" : "keycover.status.userPassword"
                          : "state.disabled")
                         .foregroundColor(keyCoverObserved.keyCoverEnabled ? .green : .none)
@@ -48,7 +33,7 @@ struct KeyCoverSettings: View {
                 Button(keyCoverObserved.keyCoverEnabled ? "button.Reset" : "button.Enable") {
                     if keyCoverObserved.keyCoverEnabled {
                         if modifierKeyObserver.isOptionKeyPressed {
-                            KeyCoverPassword.shared.forceResetKeyCoverPassword()
+                            dependencies.keyCoverPassword.forceResetKeyCoverPassword()
                         } else {
                             keyCoverRemovalViewShown = true
                         }
@@ -71,7 +56,7 @@ struct KeyCoverSettings: View {
                 }
                 Spacer()
                 Button("keycover.button.lockAll") {
-                    KeyCover.shared.lockAllChainsAsync()
+                    dependencies.keyCover.lockAllChainsAsync()
                 }
                 .disabled(!keyCoverObserved.keyCoverEnabled)
             }
@@ -95,12 +80,15 @@ struct KeyCoverSettings: View {
         .frame(width: 600, height: 300)
         .sheet(isPresented: $keyCoverInitialSetupShown) {
             KeyCoverInitialSetupView(isPresented: $keyCoverInitialSetupShown)
+                .environmentObject(dependencies)
         }
         .sheet(isPresented: $keyCoverUpdatePasswordShown) {
             KeyCoverUpdatePasswordView(isPresented: $keyCoverUpdatePasswordShown)
+                .environmentObject(dependencies)
         }
         .sheet(isPresented: $keyCoverRemovalViewShown) {
             KeyCoverRemovalView(isPresented: $keyCoverRemovalViewShown)
+                .environmentObject(dependencies)
         }
     }
 }

@@ -17,7 +17,7 @@ class Keymapping {
                                                         withIntermediateDirectories: true,
                                                         attributes: [:])
             } catch {
-                Log.shared.error(error)
+                PlayCoverDiagnostics.reportError(error)
             }
         }
         return keymappingFolder
@@ -28,6 +28,7 @@ class Keymapping {
     let configURL: URL
 
     let encoder: PropertyListEncoder
+    weak var alertPresenter: AlertPresenter?
 
     var keymapConfig: KeymapConfig {
         get {
@@ -50,8 +51,9 @@ class Keymapping {
         }
     }
 
-    init(_ info: AppInfo) {
+    init(_ info: AppInfo, alertPresenter: AlertPresenter? = nil) {
         self.info = info
+        self.alertPresenter = alertPresenter
 
         self.baseKeymapURL = Keymapping.keymappingDir.appendingPathComponent(info.bundleIdentifier)
         self.configURL = baseKeymapURL.appendingPathComponent(".config").appendingPathExtension("plist")
@@ -61,7 +63,7 @@ class Keymapping {
                 try FileManager.default.createDirectory(at: self.baseKeymapURL,
                                                         withIntermediateDirectories: true)
             } catch {
-                Log.shared.error(error)
+                PlayCoverDiagnostics.reportError(error)
             }
         }
 
@@ -104,7 +106,7 @@ class Keymapping {
             }
         } catch {
             print("failed to get keymapping directory")
-            Log.shared.error(error)
+            PlayCoverDiagnostics.reportError(error)
         }
 
         setKeymap(name: "default", map: Keymap(bundleIdentifier: info.bundleIdentifier))
@@ -155,7 +157,7 @@ class Keymapping {
 
                 return true
             } catch {
-                Log.shared.error(error)
+                PlayCoverDiagnostics.reportError(error)
                 return false
             }
         } else {
@@ -175,7 +177,7 @@ class Keymapping {
 
                 return true
             } catch {
-                Log.shared.error(error)
+                PlayCoverDiagnostics.reportError(error)
                 return false
             }
         } else {
@@ -215,42 +217,38 @@ class Keymapping {
 
         openPanel.begin { result in
             if result == .OK {
-                do {
-                    if let selectedPath = openPanel.url {
+                let selectedPath = openPanel.url
+                openPanel.close()
+                guard let selectedPath else { return }
+                Task { @MainActor in
+                    do {
                         let data = try Data(contentsOf: selectedPath)
                         let importedKeymap = try PropertyListDecoder().decode(Keymap.self, from: data)
                         if importedKeymap.bundleIdentifier == self.info.bundleIdentifier {
                             self.setKeymap(name: name, map: importedKeymap)
                             success(true)
+                        } else if await self.differentBundleIdKeymapAlert() {
+                            self.setKeymap(name: name, map: importedKeymap)
+                            success(true)
                         } else {
-                            if self.differentBundleIdKeymapAlert() {
-                                self.setKeymap(name: name, map: importedKeymap)
-                                success(true)
-                            } else {
-                                success(false)
-                            }
+                            success(false)
                         }
-                    }
-                } catch {
-                    if let selectedPath = openPanel.url {
+                    } catch {
                         if let keymap = LegacySettings.convertLegacyKeymapFile(selectedPath) {
                             if keymap.bundleIdentifier == self.info.bundleIdentifier {
                                 self.setKeymap(name: name, map: keymap)
                                 success(true)
+                            } else if await self.differentBundleIdKeymapAlert() {
+                                self.setKeymap(name: name, map: keymap)
+                                success(true)
                             } else {
-                                if self.differentBundleIdKeymapAlert() {
-                                    self.setKeymap(name: name, map: keymap)
-                                    success(true)
-                                } else {
-                                    success(false)
-                                }
+                                success(false)
                             }
                         } else {
                             success(false)
                         }
                     }
                 }
-                openPanel.close()
             }
         }
     }
@@ -274,21 +272,28 @@ class Keymapping {
                     }
                 } catch {
                     savePanel.close()
-                    Log.shared.error(error)
+                    PlayCoverDiagnostics.reportError(error)
                 }
                 savePanel.close()
             }
         }
     }
 
-    private func differentBundleIdKeymapAlert() -> Bool {
-        let alert = NSAlert()
-        alert.messageText = NSLocalizedString("alert.differentBundleIdKeymap.message", comment: "")
-        alert.informativeText = NSLocalizedString("alert.differentBundleIdKeymap.text", comment: "")
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: NSLocalizedString("button.Proceed", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("button.Cancel", comment: ""))
-
-        return alert.runModal() == .alertFirstButtonReturn
+    @MainActor
+    private func differentBundleIdKeymapAlert() async -> Bool {
+        let presenter = alertPresenter ?? AlertPresenter()
+        let response = await presenter.present(
+            PlayCoverAlertRequest(
+                title: NSLocalizedString("alert.differentBundleIdKeymap.message", comment: ""),
+                message: NSLocalizedString("alert.differentBundleIdKeymap.text", comment: ""),
+                style: .warning,
+                buttons: [
+                    PlayCoverAlertButton(title: NSLocalizedString("button.Proceed", comment: "")),
+                    PlayCoverAlertButton(title: NSLocalizedString("button.Cancel", comment: ""), isCancel: true)
+                ],
+                defaultCancelIndex: 1
+            )
+        )
+        return response.buttonIndex == 0
     }
 }

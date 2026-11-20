@@ -1,0 +1,79 @@
+//
+//  GlassToastStack.swift
+//  PlayCover
+//
+
+import SwiftUI
+
+struct GlassToastStack: View {
+    @EnvironmentObject var toastVM: ToastVM
+
+    private var visibleToasts: [ToastInfo] {
+        Array(toastVM.toasts.suffix(3))
+    }
+
+    var body: some View {
+        if toastVM.isShown && !visibleToasts.isEmpty {
+            VStack(spacing: 8) {
+                ForEach(visibleToasts) { toast in
+                    GlassToastCapsule(toast: toast) {
+                        withAnimation(.snappy) {
+                            toastVM.dismiss(id: toast.id)
+                        }
+                    }
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .task(id: toast.id) {
+                        let seconds = max(toast.timeRemaining, 4)
+                        try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+                        guard !Task.isCancelled else { return }
+                        withAnimation(.snappy) {
+                            toastVM.dismiss(id: toast.id)
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 16)
+            .animation(.snappy, value: visibleToasts)
+        }
+    }
+}
+
+private struct GlassToastCapsule: View {
+    let toast: ToastInfo
+    let onDismiss: () -> Void
+
+    private var iconName: String {
+        switch toast.toastType {
+        case .notice: return "info.circle.fill"
+        case .error: return "exclamationmark.triangle.fill"
+        case .network: return "network"
+        }
+    }
+
+    private var tintColor: Color {
+        switch toast.toastType {
+        case .notice: return .accentColor
+        case .error: return .orange
+        case .network: return .blue
+        }
+    }
+
+    var body: some View {
+        Button(action: onDismiss) {
+            HStack(spacing: 8) {
+                Image(systemName: iconName)
+                    .foregroundStyle(tintColor)
+                Text(toast.toastDetails)
+                    .font(.callout)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+        }
+        .buttonStyle(.plain)
+        .glassEffect(.regular.interactive(), in: .capsule)
+        .shadow(color: .black.opacity(0.14), radius: 8, y: 3)
+    }
+}

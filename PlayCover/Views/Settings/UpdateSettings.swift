@@ -2,8 +2,6 @@
 //  UpdateSettings.swift
 //  PlayCover
 //
-//  Created by Andrew Glaze on 7/23/22.
-//
 
 import Sparkle
 import SwiftUI
@@ -14,14 +12,15 @@ struct UpdateSettings: View {
 
     var body: some View {
         Form {
-            Toggle("preferences.toggle.automaticUpdates", isOn: $autoUpdate)
-            Button("preferences.button.checkForUpdates") {
-                updaterViewModel.checkForUpdates()
+            Section {
+                Toggle("preferences.toggle.automaticUpdates", isOn: $autoUpdate)
+                Button("preferences.button.checkForUpdates") {
+                    updaterViewModel.checkForUpdates()
+                }
             }
         }
-        .padding(20)
-        .frame(width: 600, height: 100, alignment: .center)
-        .onChange(of: autoUpdate) { value in
+        .formStyle(.grouped)
+        .onChange(of: autoUpdate) { _, value in
             updaterViewModel.automaticallyCheckForUpdates = value
         }
     }

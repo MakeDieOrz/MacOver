@@ -1,5 +1,5 @@
 //
-//  AppViewModel.swift
+//  AppsVM.swift
 //  PlayCover
 //
 
@@ -9,12 +9,15 @@ class AppsVM: ObservableObject {
 
     public static let appDirectory = PlayTools.playCoverContainer.appendingPathComponent("Applications")
 
-    static let shared = AppsVM()
+    weak var dependencies: PlayCoverDependencies?
 
-    private init() {
+    init(dependencies: PlayCoverDependencies? = nil, loadOnInit: Bool = !ProcessInfo.isRunningUnitTests) {
+        self.dependencies = dependencies
         try? AppsVM.ensureBaseDirectoriesExist()
-        PlayTools.installOnSystem()
-        fetchApps()
+        if loadOnInit {
+            PlayTools.installOnSystem()
+            fetchApps()
+        }
     }
 
     static func ensureBaseDirectoriesExist() throws {
@@ -29,60 +32,94 @@ class AppsVM: ObservableObject {
     @Published var searchText: String = ""
     @Published var updatingApps = true
 
+    private var fetchTask: Task<Void, Never>?
+
+    @MainActor
+    func applyFilter() {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let nextFiltered = query.isEmpty
+            ? apps
+            : apps.filter { $0.searchText.contains(query) }
+        filteredApps = nextFiltered.sorted { $0.name.lowercased() < $1.name.lowercased() }
+    }
+
     func fetchApps() {
-        Task { @MainActor in
-            updatingApps = true
+        fetchTask?.cancel()
+        let deps = self.dependencies
+        fetchTask = Task(priority: .userInitiated) { [weak self] in
+            guard let self else { return }
+            await MainActor.run {
+                self.updatingApps = true
+            }
 
-            filteredApps.removeAll()
-            apps.removeAll()
+            let existingByURL = await MainActor.run {
+                Dictionary(self.apps.map { ($0.url, $0) }, uniquingKeysWith: { first, _ in first })
+            }
 
-            do {
-                let directoryContents = try FileManager.default
-                    .contentsOfDirectory(at: AppsVM.appDirectory, includingPropertiesForKeys: nil, options: [])
+            let loadedApps: [PlayApp] = await Task.detached(priority: .userInitiated) {
+                var discovered: [PlayApp] = []
+                do {
+                    let fm = FileManager.default
+                    let directoryContents = try fm.contentsOfDirectory(
+                        at: AppsVM.appDirectory,
+                        includingPropertiesForKeys: [.isDirectoryKey],
+                        options: []
+                    )
 
-                let subdirs = directoryContents.filter { $0.hasDirectoryPath }
-
-                for sub in subdirs {
-                    if sub.pathExtension.contains("app") &&
-                        FileManager.default.fileExists(atPath: sub.appendingPathComponent("Info")
-                                                                  .appendingPathExtension("plist")
-                                                                  .path) {
-                        let app = PlayApp(appUrl: sub)
-                        print("Application installed under:", sub.path)
-
-                        apps.append(app)
-                        if searchText.isEmpty || app.searchText.contains(searchText.lowercased()) {
-                            filteredApps.append(app)
+                    for sub in directoryContents where sub.hasDirectoryPath {
+                        if Task.isCancelled { return discovered }
+                        if sub.pathExtension.contains("app") &&
+                            fm.fileExists(atPath: sub.appendingPathComponent("Info")
+                                .appendingPathExtension("plist")
+                                .path) {
+                            let app = existingByURL[sub] ?? PlayApp(appUrl: sub, dependencies: deps)
+                            app.dependencies = deps
+                            app.ensureAliasUpToDate()
+                            print("Application installed under:", sub.path)
+                            discovered.append(app)
                         }
                     }
-                }
-            } catch {
-                print(error)
-            }
-
-            filteredApps.sort(by: { $0.name.lowercased() < $1.name.lowercased() })
-
-            do {
-                if !FileManager.default.fileExists(atPath: PlayApp.bundleIDCacheURL.path),
-                   let firstBundleID = apps.first?.info.bundleIdentifier {
-                    try "\(firstBundleID)\n"
-                        .write(to: PlayApp.bundleIDCacheURL, atomically: false, encoding: .utf8)
+                } catch {
+                    print(error)
                 }
 
-                for bundleId in apps.map({ $0.info.bundleIdentifier })
-                    where !(try PlayApp.bundleIDCache).contains(bundleId) {
-                    if let bundleID = "\(bundleId)\n".data(using: .utf8) {
-                        let cacheFile = try FileHandle(forUpdating: PlayApp.bundleIDCacheURL)
-                        try cacheFile.seekToEnd()
-                        try cacheFile.write(contentsOf: bundleID)
-                        try cacheFile.close()
+                if Task.isCancelled { return discovered }
+
+                do {
+                    let existingCache: [String]
+                    if FileManager.default.fileExists(atPath: PlayApp.bundleIDCacheURL.path) {
+                        existingCache = try PlayApp.bundleIDCache
+                    } else {
+                        existingCache = []
                     }
+                    let existingSet = Set(existingCache)
+                    var missingIDs: [String] = []
+                    var seenMissing = Set<String>()
+                    for app in discovered {
+                        let bid = app.info.bundleIdentifier
+                        if !bid.isEmpty && !existingSet.contains(bid) && seenMissing.insert(bid).inserted {
+                            missingIDs.append(bid)
+                        }
+                    }
+                    if !missingIDs.isEmpty {
+                        let merged = existingCache + missingIDs
+                        let payload = merged.joined(separator: "\n") + "\n"
+                        try payload.write(to: PlayApp.bundleIDCacheURL, atomically: true, encoding: .utf8)
+                    }
+                } catch {
+                    PlayCoverDiagnostics.reportError(error)
                 }
-            } catch {
-                Log.shared.error(error)
-            }
 
-            updatingApps = false
+                return discovered
+            }.value
+
+            guard !Task.isCancelled else { return }
+
+            await MainActor.run {
+                self.apps = loadedApps
+                self.applyFilter()
+                self.updatingApps = false
+            }
         }
     }
 }

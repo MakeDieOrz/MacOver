@@ -4,19 +4,23 @@
 //
 
 import AppKit
-import SwiftUI
+import Combine
 import DataCache
+import SwiftUI
 
 struct PlayCoverMenuView: Commands {
-    @Binding var isSigningSetupShown: Bool
+    @ObservedObject var navState: AppNavigationState
+    let dependencies: PlayCoverDependencies
+
     var body: some Commands {
         CommandGroup(after: .systemServices) {
             Button("menubar.log.copy", systemImage: "document.on.document.fill") {
-                Log.shared.logdata.copyToClipBoard()
+                dependencies.log.logdata.copyToClipBoard()
             }
             .keyboardShortcut("L", modifiers: [.command, .option])
+
             Button("menubar.configSigning", systemImage: "signature") {
-                isSigningSetupShown = true
+                navState.isSigningSetupShown = true
             }
         }
     }
@@ -63,53 +67,38 @@ struct PlayCoverHelpMenuView: Commands {
 }
 
 struct PlayCoverViewMenuView: Commands {
+    @ObservedObject var navState: AppNavigationState
+    let dependencies: PlayCoverDependencies
+
     var body: some Commands {
         CommandGroup(replacing: .newItem) {}
         CommandGroup(replacing: .importExport) {
+            Button("ui51.menubar.importIPA", systemImage: "plus.app") {
+                navState.pendingImportIPATrigger = UUID()
+            }
+            .keyboardShortcut("O", modifiers: .command)
+
             Button("menubar.exportToSideloady", systemImage: "square.and.arrow.up.fill") {
-                Task {
-                    if InstallVM.shared.inProgress {
-                        Log.shared.error(PlayCoverError.waitInstallation)
-                    } else if DownloadVM.shared.inProgress {
-                        Log.shared.error(PlayCoverError.waitDownload)
-                    } else {
-                        // remove await for Swift 6 (no async operation occurs)
-                        await NSOpenPanel.selectIPA { result in
-                            if case .success(let url) = result {
-                                Task {
-                                    Installer.install(ipaUrl: url,
-                                                            export: true,
-                                                            returnCompletion: { ipa in
-                                        Task { @MainActor in
-                                            if let ipa = ipa {
-                                                ipa.showInFinder()
-                                                let config = NSWorkspace.OpenConfiguration()
-                                                config.promptsUserIfNeeded = true
-                                                let url = NSWorkspace.shared
-                                                    .urlForApplication(withBundleIdentifier:
-                                                                        "io.sideloadly.sideloadly")
-                                                if let url = url {
-                                                    NSWorkspace.shared
-                                                        .open([ipa], withApplicationAt: url, configuration: config)
-                                                } else {
-                                                    Log.shared.error("Could not find Sideloadly!")
-                                                }
-                                            } else {
-                                                Log.shared.error("Could not find file!")
-                                            }
-                                        }
-                                    })
-                                }
-                            }
-                        }
-                    }
+                exportToSideloadly()
+            }
+        }
+        CommandGroup(after: .sidebar) {
+            Button("ui51.inspector.toggle", systemImage: "sidebar.right") {
+                navState.showInspector.toggle()
+            }
+            .keyboardShortcut("I", modifiers: .command)
+
+            if navState.configTargetID != nil {
+                Button("ui51.sidebar.backToLibrary", systemImage: "chevron.left") {
+                    navState.closeConfiguration()
                 }
+                .keyboardShortcut("[", modifiers: .command)
             }
         }
         CommandGroup(before: .sidebar) {
             Button("menubar.clearCache", systemImage: "eraser.fill") {
                 DataCache.instance.cleanAll()
-                Cacher.shared.removeImageCache()
+                dependencies.cacher.removeImageCache()
 
                 if let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first,
                    let bundleID = Bundle.main.bundleIdentifier {
@@ -119,6 +108,119 @@ struct PlayCoverViewMenuView: Commands {
             }
             .keyboardShortcut("R", modifiers: [.command, .shift])
             Divider()
+        }
+    }
+
+    private func exportToSideloadly() {
+        Task {
+            if dependencies.installVM.inProgress {
+                dependencies.log.error(PlayCoverError.waitInstallation)
+            } else if dependencies.downloadVM.inProgress {
+                dependencies.log.error(PlayCoverError.waitDownload)
+            } else {
+                await MainActor.run {
+                    NSOpenPanel.selectIPA { result in
+                        if case .success(let url) = result {
+                            installAndOpenWithSideloadly(ipaUrl: url)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func installAndOpenWithSideloadly(ipaUrl: URL) {
+        Task {
+            Installer.install(
+                ipaUrl: ipaUrl,
+                export: true,
+                dependencies: dependencies,
+                returnCompletion: { ipa in
+                    Task { @MainActor in
+                        if let ipa {
+                            ipa.showInFinder()
+                            let config = NSWorkspace.OpenConfiguration()
+                            config.promptsUserIfNeeded = true
+                            let sideloadlyURL = NSWorkspace.shared
+                                .urlForApplication(withBundleIdentifier: "io.sideloadly.sideloadly")
+                            if let sideloadlyURL {
+                                _ = try? await NSWorkspace.shared.open(
+                                    [ipa],
+                                    withApplicationAt: sideloadlyURL,
+                                    configuration: config
+                                )
+                            } else {
+                                dependencies.log.error("Could not find Sideloadly!")
+                            }
+                        } else {
+                            dependencies.log.error("Could not find file!")
+                        }
+                    }
+                }
+            )
+        }
+    }
+}
+
+struct PlayCoverMenuBarExtraContent: View {
+    @Environment(\.openWindow) private var openWindow
+    @EnvironmentObject var appsVM: AppsVM
+
+    @State private var refreshToken = 0
+
+    private var runningApps: [PlayApp] {
+        _ = refreshToken
+        return appsVM.apps.filter(\.isRunning)
+    }
+
+    var body: some View {
+        Button("ui51.menubar.openWindow") {
+            NSApp.activate(ignoringOtherApps: true)
+            openWindow(id: "main")
+        }
+
+        if !runningApps.isEmpty {
+            Divider()
+            Section("ui51.sidebar.section.running") {
+                ForEach(runningApps) { app in
+                    Button("\(app.name) — \(NSLocalizedString("ui51.action.quit", comment: ""))") {
+                        Task { await app.terminate() }
+                    }
+                }
+            }
+        }
+
+        if !appsVM.apps.isEmpty {
+            Divider()
+            ForEach(appsVM.apps.prefix(8)) { app in
+                Menu(app.name) {
+                    Button(app.isRunning ? "ui51.action.quit" : "ui51.action.launch") {
+                        Task {
+                            if app.isRunning {
+                                await app.terminate()
+                            } else if !app.isStarting {
+                                await app.launch()
+                            }
+                        }
+                    }
+                    Button("ui51.action.launchSafeMode") {
+                        Task {
+                            if app.isRunning {
+                                await app.restart(safeModeOneShot: true)
+                            } else if !app.isStarting {
+                                await app.launch(safeModeOneShot: true)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Divider()
+        Button("button.Quit") {
+            NSApp.terminate(nil)
+        }
+        .onReceive(Publishers.MergeMany(appsVM.apps.map(\.objectWillChange))) { _ in
+            refreshToken &+= 1
         }
     }
 }

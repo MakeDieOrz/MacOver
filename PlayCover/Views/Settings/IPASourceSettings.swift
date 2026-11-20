@@ -40,6 +40,7 @@ struct IPASourceSettings: View {
     @State var addSourceSheet = false
     @State var triggerUpdate = false
     @EnvironmentObject var storeVM: StoreVM
+    @EnvironmentObject var urlObservable: URLObservable
 
     var body: some View {
         Form {
@@ -100,6 +101,7 @@ struct IPASourceSettings: View {
         .sheet(isPresented: $addSourceSheet) {
             AddSourceView(addSourceSheet: $addSourceSheet)
                 .environmentObject(storeVM)
+                .environmentObject(urlObservable)
         }
     }
 }
@@ -108,6 +110,7 @@ struct SourceView: View {
     var source: SourceData
     @State var isEnabled: Bool
     @State var showingPopover = false
+    @EnvironmentObject var storeVM: StoreVM
 
     var body: some View {
         HStack {
@@ -153,8 +156,8 @@ struct SourceView: View {
             }
         }
         .onChange(of: isEnabled) { value in
-            StoreVM.shared.enableSourceToggle(source: source, value: value)
-            StoreVM.shared.updateSourcesApps()
+            storeVM.enableSourceToggle(source: source, value: value)
+            storeVM.updateSourcesApps()
         }
     }
 }
@@ -190,6 +193,7 @@ struct AddSourceView: View {
     @State var sourceValidationState = SourceValidation.empty
     @Binding var addSourceSheet: Bool
     @EnvironmentObject var storeVM: StoreVM
+    @EnvironmentObject var urlObservable: URLObservable
 
     @State var checkTask: Task<Void, Error>?
     @State var urlSessionTask: URLSessionTask?
@@ -261,14 +265,14 @@ struct AddSourceView: View {
             validateSource(source)
         }
         .onAppear {
-            if URLObservable.shared.type == .source {
-                newSource = URLObservable.shared.url ?? ""
+            if urlObservable.type == .source {
+                newSource = urlObservable.url ?? ""
             }
         }
         .onDisappear {
-            URLObservable.shared.url = nil
-            URLObservable.shared.type = nil
-            URLObservable.shared.action = nil
+            urlObservable.url = nil
+            urlObservable.type = nil
+            urlObservable.action = nil
         }
     }
 

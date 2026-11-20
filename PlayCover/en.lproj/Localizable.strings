@@ -165,6 +165,8 @@
 "settings.toggle.autoKM.help" = "Automatically disable keymapping when text input is sensed";
 "settings.toggle.enableScrollWheel" = "Enable Scroll Wheel";
 "settings.toggle.enableScrollWheel.help" = "Enable scroll wheel in keymapping";
+"settings.toggle.rightClickLongPress" = "Right-Click Long Press";
+"settings.toggle.rightClickLongPress.help" = "Simulate touch long-press with right click when right mouse button is unmapped.";
 "settings.toggle.disableBuiltinMouse" = "Disable Built-in Mouse Support";
 "settings.toggle.disableBuiltinMouse.help" = "Disable the app’s built-in mouse support to avoid click conflicts.";
 
@@ -345,4 +347,189 @@
 "alert.start.anyway" = "Start Anyway";
 "alert.version.title" = "New Version Available";
 "alert.version.text" = "A new version for %@ is available. Do you want to download it?";
+"settings.tab.network" = "Network Rules";
+"settings.network.enable" = "Enable Network Rules";
+"settings.network.mock200" = "Return Mock HTTP 200";
+"settings.network.placeholder" = "Rule pattern (e.g. ||example.com, @@||a.com/api/*, DOMAIN-SUFFIX,b.com,REJECT)";
+"settings.network.add" = "Block";
+"settings.network.addAllow" = "Allow";
+"settings.network.search" = "Filter";
+"settings.network.actions" = "Actions";
+"settings.network.paste" = "Paste Clipboard";
+"settings.network.copyAll" = "Copy All Rules";
+"settings.network.importFile" = "Import from File…";
+"settings.network.exportFile" = "Export to File…";
+"settings.network.clear" = "Clear All";
+"settings.network.stats" = "Block %d · Allow %d · Off %d";
+"settings.network.badge.block" = "BLOCK";
+"settings.network.badge.allow" = "ALLOW";
+"settings.network.badge.disabled" = "OFF";
+"settings.network.kind.domain" = "HOST";
+"settings.network.kind.suffix" = "SUFFIX";
+"settings.network.kind.keyword" = "KEYWORD";
+"settings.network.kind.url" = "URL";
+"settings.network.kind.regex" = "REGEX";
+"preferences.toggle.removeNetworkRules" = "Remove network rules";
+"alert.download.downloadAnyway" = "Download Anyway";
+"settings.picker.windowFixMethod.help" = "Select the window fix method used to resolve windowed display issues";
 
+
+/* PlayCover 5.1 Liquid Glass UI */
+"ui51.sidebar.section.library" = "Library";
+"ui51.sidebar.section.running" = "Running";
+"ui51.sidebar.section.sources" = "IPA Sources";
+"ui51.sidebar.backToLibrary" = "Library";
+"ui51.sidebar.runningBadge" = "Running";
+"ui51.sidebar.quit" = "Quit";
+
+"ui51.activity.title" = "Activity Center";
+"ui51.activity.idle" = "Idle";
+"ui51.activity.noTasks" = "No active downloads or installations.";
+"ui51.activity.stage.unzip" = "Unzip";
+"ui51.activity.stage.library" = "Verify";
+"ui51.activity.stage.playtools" = "PlayTools";
+"ui51.activity.stage.sign" = "Sign";
+"ui51.activity.stage.finish" = "Done";
+
+"ui51.signing.capsule.playchain" = "PlayChain Ready";
+"ui51.signing.capsule.native" = "Native Keychain";
+"ui51.signing.capsule.reboot" = "Reboot Pending";
+"ui51.signing.guide.title" = "Signing & Keychain Mode";
+"ui51.signing.guide.subtitle" = "Choose how apps store credentials and sign entitlements on macOS.";
+"ui51.signing.mode.playchain.title" = "PlayChain Mode";
+"ui51.signing.mode.playchain.badge" = "Recommended · SIP On";
+"ui51.signing.mode.playchain.desc" = "Isolated per-app credential store. Keeps SIP and AMFI fully enabled without rebooting.";
+"ui51.signing.mode.native.title" = "Native Apple Keychain";
+"ui51.signing.mode.native.badge" = "Advanced · Reversible";
+"ui51.signing.mode.native.desc" = "Uses system iCloud Keychain directly. Requires SIP disabled and AMFI boot-args.";
+"ui51.signing.wizard.title" = "3-Step Native Keychain Setup (Optional)";
+"ui51.signing.wizard.step1" = "1. Disable SIP in macOS Recovery (`csrutil disable`), then boot back into macOS.";
+"ui51.signing.wizard.step2" = "2. Enable AMFI bypass boot arguments via PlayCover Helper or Terminal.";
+"ui51.signing.wizard.step3" = "3. Reboot once for NVRAM changes to take effect. To revert later, run `sudo nvram -d boot-args` and `csrutil enable`.";
+
+"ui51.config.pane.overview" = "Overview";
+"ui51.config.pane.display" = "Display";
+"ui51.config.pane.device" = "Device";
+"ui51.config.pane.input" = "Input & Keymap";
+"ui51.config.pane.network" = "Network";
+"ui51.config.pane.plugins" = "Plugins & Safety";
+"ui51.config.pane.advanced" = "Advanced";
+"ui51.config.pane.info" = "App Info";
+"ui51.config.overview.summary" = "Active Configuration";
+"ui51.config.resetTitle" = "Reset App Settings?";
+"ui51.config.resetMessage" = "This resets all per-app settings for %@ back to defaults.";
+
+"ui51.preset.section" = "Scenario Presets";
+"ui51.preset.balanced.title" = "Balanced";
+"ui51.preset.balanced.subtitle" = "1080p · 2.0× · Adaptive · iPad M4";
+"ui51.preset.crisp.title" = "Crisp 120Hz";
+"ui51.preset.crisp.subtitle" = "1440p · 1.5× · 120Hz · iPad M5";
+"ui51.preset.eco.title" = "Eco 30Hz";
+"ui51.preset.eco.subtitle" = "1080p · 1.0× · 30Hz · Cool & Quiet";
+"ui51.preset.phone.title" = "Compact Phone";
+"ui51.preset.phone.subtitle" = "1080p · 2.0× · iPhone 17 Pro Max";
+
+"ui51.budget.title" = "GPU Pixel Budget";
+"ui51.budget.healthy" = "Healthy";
+"ui51.budget.caution" = "High Load";
+"ui51.budget.over" = "Over Limit";
+"ui51.budget.fit" = "Fit to Budget";
+"ui51.budget.readout" = "%.2f / %.2f MP";
+
+"ui51.display.frameRate.title" = "Frame Rate Target";
+"ui51.display.frameRate.help" = "Clamps CADisplayLink and MTKView refresh requests inside the app.";
+"ui51.display.frameRate.adaptive" = "Adaptive (Native)";
+"ui51.display.frameRate.fixed120" = "120 Hz ProMotion";
+"ui51.display.frameRate.fixed60" = "60 Hz Standard";
+"ui51.display.frameRate.fixed30" = "30 Hz Eco / AFK";
+"ui51.display.windowCompat.title" = "Window Compatibility";
+"ui51.display.windowCompat.help" = "Unified replacement for inverted screen metrics and alternate resize fix.";
+"ui51.display.windowCompat.standard" = "Standard";
+"ui51.display.windowCompat.invertedMetrics" = "Inverted Metrics";
+"ui51.display.windowCompat.invertedLegacyResize" = "Inverted + Legacy Resize (Adaptive Off)";
+
+"ui51.device.modernGroup" = "Recommended Apple Silicon iPads";
+"ui51.device.iphoneGroup" = "iPhone Profiles (Compact UI)";
+"ui51.device.legacyBanner" = "Legacy profile (%@) active. Switch to M4/M5 iPad or M1 for best compatibility.";
+"ui51.device.upgradeToM1" = "Switch to M1";
+"ui51.device.layoutTitle" = "Expected App Layout";
+"ui51.device.layout.regular" = "Regular · Multi-column iPad Layout";
+"ui51.device.layout.compact" = "Compact · Single-column iPhone Layout";
+"ui51.device.reportedIOS.title" = "Reported iOS Version";
+"ui51.device.reportedIOS.help" = "Overrides system version exposed via NSProcessInfo, UIDevice, sysctl, and MobileGestalt on macOS 26/27.";
+"ui51.device.reportedIOS.automatic" = "Automatic (Recommended)";
+"ui51.device.reportedIOS.followHost" = "Follow macOS iOS Support Version";
+"ui51.device.reportedIOS.compat18_3" = "iOS 18.3 Compatibility (22D63)";
+
+"ui51.action.launch" = "Launch";
+"ui51.action.launchSafeMode" = "Launch in Safe Mode (One-Shot)";
+"ui51.action.quit" = "Quit";
+"ui51.action.restart" = "Restart to Apply";
+"ui51.action.restartSafeMode" = "Restart in Safe Mode";
+"ui51.action.configure" = "Configure…";
+
+"ui51.restart.bannerTitle" = "Restart required to apply %d change(s)";
+"ui51.restart.badge" = "Restart";
+"ui51.restart.field.iosDeviceModel" = "Device Model";
+"ui51.restart.field.resolution" = "Resolution Mode";
+"ui51.restart.field.windowSize" = "Window Size";
+"ui51.restart.field.aspectRatio" = "Aspect Ratio";
+"ui51.restart.field.customScaler" = "Scaler";
+"ui51.restart.field.windowCompatibility" = "Window Compat";
+"ui51.restart.field.frameRateTarget" = "Frame Rate";
+"ui51.restart.field.reportedIOSVersion" = "iOS Version";
+"ui51.restart.field.notch" = "Notch";
+"ui51.restart.field.bypass" = "Jailbreak Bypass";
+"ui51.restart.field.playChain" = "PlayChain";
+"ui51.restart.field.playChainDebugging" = "PlayChain Debug";
+"ui51.restart.field.metalHUD" = "Metal HUD";
+"ui51.restart.field.injectIntrospection" = "Introspection";
+"ui51.restart.field.rootWorkDir" = "Root WorkDir";
+"ui51.restart.field.hideTitleBar" = "Hide Title Bar";
+"ui51.restart.field.floatingWindow" = "Floating Window";
+"ui51.restart.field.enableNetworkRules" = "Network Rules";
+"ui51.restart.field.blockedURLPatterns" = "Blocked URLs";
+"ui51.restart.field.keymapping" = "Keymapping";
+"ui51.restart.field.disableBuiltinMouse" = "Built-in Mouse";
+"ui51.restart.field.blockSleepSpamming" = "Block usleep";
+"ui51.restart.field.ignoreUnityKeyboardInitializationError" = "Unity Keyboard Fix";
+
+"ui51.library.dropTitle" = "Drop IPA to Install";
+"ui51.library.dropSubtitle" = "PlayCover will unpack, inject PlayTools, sign, and add it to your library.";
+"ui51.library.table.app" = "App";
+"ui51.library.table.version" = "Version";
+"ui51.library.table.device" = "Device";
+"ui51.library.table.pixelLoad" = "Pixel Load";
+"ui51.library.table.status" = "Status";
+"ui51.library.status.ready" = "Ready";
+"ui51.library.status.noPlayTools" = "No PlayTools";
+
+"ui51.inspector.emptyTitle" = "Nothing Selected";
+"ui51.inspector.emptySubtitle" = "Select an installed app or store entry to inspect quick controls and previews.";
+"ui51.inspector.quickControls" = "Quick Toggles";
+"ui51.inspector.defaultKeymap" = "Default Keymap";
+"ui51.inspector.none" = "None";
+"ui51.inspector.previewTitle" = "Window & Display Preview";
+"ui51.inspector.pendingRestart" = "Pending Restart Changes";
+"ui51.inspector.toggle" = "Toggle Inspector";
+
+"ui51.store.downloadInstall" = "Download & Install";
+"ui51.store.installedVersion" = "Installed: %@ · Store: %@";
+
+"ui51.advanced.troubleshooting" = "Troubleshooting & Developer (%d active)";
+"ui51.advanced.troubleshootingZero" = "Troubleshooting & Developer";
+
+"ui51.plugins.safeModeDesc" = "One-shot Safe Mode temporarily skips UserPlugins, Network Rules, Frame Cap, iOS version override, and forces 1.0× scaling without altering your saved settings.";
+
+"ui51.input.newKeymapPlaceholder" = "New keymap name…";
+"ui51.input.create" = "Create";
+"ui51.input.importNamed" = "Import As…";
+
+"ui51.settings.tab.general" = "General";
+"ui51.settings.tab.signing" = "Signing";
+"ui51.settings.general.appearance" = "Appearance & Liquid Glass";
+"ui51.settings.general.glassNote" = "PlayCover 5.1 uses native macOS 26+ Liquid Glass materials and automatically adapts when Reduce Transparency is enabled in System Settings.";
+"ui51.settings.general.menuBarExtra" = "Show PlayCover in Menu Bar";
+
+"ui51.menubar.openWindow" = "Show PlayCover Window";
+"ui51.menubar.importIPA" = "Import IPA…";

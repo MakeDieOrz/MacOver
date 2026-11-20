@@ -8,13 +8,25 @@ import SwiftUI
 
 class Log: ObservableObject {
 
-    static let shared = Log()
+    private weak var alertPresenter: AlertPresenter?
+
+    init(alertPresenter: AlertPresenter? = nil) {
+        self.alertPresenter = alertPresenter
+    }
 
     func error(_ err: Error) {
+        error(err.localizedDescription)
+    }
+
+    func error(_ message: String) {
+        if ProcessInfo.isRunningUnitTests {
+            self.log(message, isError: true)
+            return
+        }
         Task { @MainActor in
             self.dialog(
                 question: NSLocalizedString("alert.error", comment: ""),
-                text: err.localizedDescription,
+                text: message,
                 style: NSAlert.Style.critical)
         }
     }
@@ -24,6 +36,10 @@ class Log: ObservableObject {
     }
 
     func msg(_ msg: String) {
+        if ProcessInfo.isRunningUnitTests {
+            self.log(msg)
+            return
+        }
         Task { @MainActor in
             self.log(msg)
             self.dialog(
@@ -44,13 +60,23 @@ class Log: ObservableObject {
         logdata.append("\n")
     }
 
+    @MainActor
     private func dialog(question: String, text: String, style: NSAlert.Style) {
-        let alert = NSAlert()
-        alert.messageText = question
-        alert.informativeText = text
-        alert.alertStyle = style
-        alert.addButton(withTitle: NSLocalizedString("button.OK", comment: ""))
-        alert.runModal()
+        guard !ProcessInfo.isRunningUnitTests else { return }
+        let mappedStyle: PlayCoverAlertStyle
+        switch style {
+        case .critical:
+            mappedStyle = .critical
+        case .warning:
+            mappedStyle = .warning
+        default:
+            mappedStyle = .informational
+        }
+        alertPresenter?.enqueueNotice(
+            title: question,
+            message: text,
+            style: mappedStyle
+        )
     }
 
     required init() { }

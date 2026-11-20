@@ -1,13 +1,21 @@
 name: Build & Release macOS App
 on:
   workflow_dispatch:
-    tags:
-          - "*"
+    inputs:
+      tag_name:
+        description: "Release tag name"
+        required: false
+        type: string
   push:
     tags:
       - "*"
+
+permissions:
+  contents: write
+
 env:
   CI: true
+
 jobs:
   build:
     runs-on: macos-latest
@@ -15,61 +23,74 @@ jobs:
       GITHUB_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Get the version
         id: tag_version
-        run: echo "TAG_NAME=${GITHUB_REF/refs\/tags\//}" >> $GITHUB_ENV
+        shell: bash
+        run: |
+          RAW_TAG="${{ inputs.tag_name }}"
+          if [[ -z "${RAW_TAG}" && "${GITHUB_REF}" == refs/tags/* ]]; then
+            RAW_TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          if [[ -z "${RAW_TAG}" ]]; then
+            RAW_TAG="$(git describe --tags --always)"
+          fi
+          RAW_TAG="${RAW_TAG//\//-}"
+          echo "TAG_NAME=${RAW_TAG}" >> "$GITHUB_ENV"
 
       - name: Install dependencies
         shell: bash
         run: |
-          brew install swiftlint
-          gem install fastlane
+          command -v swiftlint >/dev/null || brew install swiftlint
           bundle install
-          pip install setuptools
-          npm install https://github.com/PlayCover/create-dmg
+          command -v create-dmg >/dev/null || brew install create-dmg
 
       - name: Fastlane Release
         shell: bash
-        run: fastlane release
+        run: bundle exec fastlane release
         env:
           MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
           MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
-          FASTLANE_XCODEBUILD_SETTINGS_TIMEOUT: 120 # x86 is slooooooow
+          FASTLANE_XCODEBUILD_SETTINGS_TIMEOUT: 120
 
-      - name: Exract API_KEY
+      - name: Extract API_KEY
         shell: bash
-        run: 'echo "$API_KEY" > apikey.json'
+        run: |
+          umask 077
+          printf '%s' "$API_KEY" > apikey.json
         env:
-          API_KEY: ${{secrets.APPLE_API_KEY_JSON}}
+          API_KEY: ${{ secrets.APPLE_API_KEY_JSON }}
 
       - name: Create DMG
         shell: bash
         run: |
-          npx create-dmg ./output/PlayCover.app ./output
-          mv ./output/*.dmg ./output/PlayCover_${{ env.TAG_NAME }}.dmg
+          DMG_PATH="./output/PlayCover_${{ env.TAG_NAME }}.dmg"
+          create-dmg \
+            --volname "PlayCover ${{ env.TAG_NAME }}" \
+            --skip-jenkins \
+            "${DMG_PATH}" \
+            "./output/PlayCover.app" || \
+            hdiutil create -volname "PlayCover ${{ env.TAG_NAME }}" -srcfolder "./output/PlayCover.app" -ov -format UDZO "${DMG_PATH}"
 
       - name: Notarize DMG
-        continue-on-error: true
         shell: bash
-        run: |
-          fastlane notarize_dmg package:output/PlayCover_${{ env.TAG_NAME }}.dmg
-
+        run: bundle exec fastlane notarize_dmg "package:output/PlayCover_${{ env.TAG_NAME }}.dmg"
 
       - name: Clean Up
+        if: always()
         shell: bash
-        run: rm apikey.json
+        run: rm -f apikey.json
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: PlayCover_${{ env.TAG_NAME }}.dmg
           path: output/PlayCover_${{ env.TAG_NAME }}.dmg
 
       - name: Release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           draft: true
           files: |

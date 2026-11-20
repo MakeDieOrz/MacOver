@@ -20,6 +20,34 @@
                ReferencedContainer = "container:PlayCover.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "AA71A06A2F00000500623C15"
+               BuildableName = "PlayCoverMachOTests.xctest"
+               BlueprintName = "PlayCoverMachOTests"
+               ReferencedContainer = "container:PlayCover.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "AA71A06B2F00000500623C15"
+               BuildableName = "PlayCoverCoreTests.xctest"
+               BlueprintName = "PlayCoverCoreTests"
+               ReferencedContainer = "container:PlayCover.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction
@@ -28,6 +56,28 @@
       selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
       shouldUseLaunchSchemeArgsEnv = "YES">
       <Testables>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "AA71A06A2F00000500623C15"
+               BuildableName = "PlayCoverMachOTests.xctest"
+               BlueprintName = "PlayCoverMachOTests"
+               ReferencedContainer = "container:PlayCover.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "AA71A06B2F00000500623C15"
+               BuildableName = "PlayCoverCoreTests.xctest"
+               BlueprintName = "PlayCoverCoreTests"
+               ReferencedContainer = "container:PlayCover.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
    </TestAction>
    <LaunchAction

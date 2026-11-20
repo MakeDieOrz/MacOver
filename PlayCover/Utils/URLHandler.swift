@@ -25,12 +25,14 @@ class URLObservable: ObservableObject {
     @Published var url: String?
     @Published var type: URLTypes?
     @Published var action: URLAction?
-
-    public static var shared = URLObservable()
 }
 
-struct URLHandler {
-    public static var shared = URLHandler()
+final class URLHandler {
+    weak var dependencies: PlayCoverDependencies?
+
+    init(dependencies: PlayCoverDependencies? = nil) {
+        self.dependencies = dependencies
+    }
 
     func processURL(url: URL) {
         guard let urlComponenents = NSURLComponents(url: url, resolvingAgainstBaseURL: false),
@@ -38,14 +40,23 @@ struct URLHandler {
               let params = urlComponenents.queryItems else {
                 // Fall back to old url handler (for files)
                 if url.pathExtension == "ipa" {
-                    Installer.install(ipaUrl: url, export: false, returnCompletion: { _ in
-                    Task { @MainActor in
-                        AppsVM.shared.fetchApps()
-                        NotifyService.shared.notify(
-                            NSLocalizedString("notification.appInstalled", comment: ""),
-                            NSLocalizedString("notification.appInstalled.message", comment: "")
-                        )
-                    }})
+                    let deps = dependencies
+                    Installer.install(
+                        ipaUrl: url,
+                        export: false,
+                        dependencies: deps,
+                        returnCompletion: { finalURL in
+                            Task { @MainActor in
+                                deps?.appsVM.fetchApps()
+                                if finalURL != nil {
+                                    deps?.notifyService.notify(
+                                        NSLocalizedString("notification.appInstalled", comment: ""),
+                                        NSLocalizedString("notification.appInstalled.message", comment: "")
+                                    )
+                                }
+                            }
+                        }
+                    )
                 }
                 return
             }
@@ -72,25 +83,25 @@ struct URLHandler {
         }
 
         if let actionParam = params[0].value {
-            URLObservable.shared.type = .source
+            dependencies?.urlObservable.type = .source
             switch actionParam {
             case "add":
                 // Add source
                 if let url = params[1].value {
-                    URLObservable.shared.url = url
-                    URLObservable.shared.action = .add
+                    dependencies?.urlObservable.url = url
+                    dependencies?.urlObservable.action = .add
                 }
             case "remove":
                 // Remove source
                 if let url = params[1].value {
-                    URLObservable.shared.url = url
-                    URLObservable.shared.action = .remove
+                    dependencies?.urlObservable.url = url
+                    dependencies?.urlObservable.action = .remove
                 }
             case "update":
                 // Update source
                 if let url = params[1].value {
-                    URLObservable.shared.url = url
-                    URLObservable.shared.action = .update
+                    dependencies?.urlObservable.url = url
+                    dependencies?.urlObservable.action = .update
                 }
             default:
                 // Print params to console and break

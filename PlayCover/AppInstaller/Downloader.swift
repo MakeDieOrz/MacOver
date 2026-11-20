@@ -24,65 +24,103 @@ class DownloadApp {
     let url: URL?
     let app: SourceAppsData?
     let warning: String?
+    private weak var dependencies: PlayCoverDependencies?
 
-    init(url: URL?, app: SourceAppsData?, warning: String?) {
+    private var activeDownloadDir: URL?
+
+    init(
+        url: URL?,
+        app: SourceAppsData?,
+        warning: String?,
+        dependencies: PlayCoverDependencies? = nil
+    ) {
         self.url = url
         self.app = app
         self.warning = warning
+        self.dependencies = dependencies
+        self.downloadVM = dependencies?.downloadVM ?? DownloadVM()
+        self.installVM = dependencies?.installVM ?? InstallVM()
     }
 
-    let downloadVM = DownloadVM.shared
-    let installVM = InstallVM.shared
+    let downloadVM: DownloadVM
+    let installVM: InstallVM
     let downloader = DownloadManager.shared
+
+    private func cleanupDownloadDir(_ dir: URL? = nil) {
+        let target = dir ?? activeDownloadDir
+        if let target {
+            FileManager.default.delete(at: target)
+            if target == activeDownloadDir {
+                activeDownloadDir = nil
+            }
+        }
+    }
 
     @MainActor
     func start() {
         if installVM.inProgress {
-            Log.shared.error(PlayCoverError.waitInstallation)
-        } else {
+            PlayCoverDiagnostics.reportError(PlayCoverError.waitInstallation)
+            return
+        }
+        let presenter = dependencies?.alertPresenter ?? AlertPresenter()
+        let installPrefs = dependencies?.installPreferences
+        Task { @MainActor in
             if let app = app, PlayApp.PROHIBITED_APPS.contains(app.bundleID) {
-                let alert = NSAlert()
-                alert.messageText = NSLocalizedString("alert.error", comment: "")
-                alert.informativeText = String(
-                    format: NSLocalizedString("error.appProhibited", comment: ""),
-                    arguments: [app.name]
+                let response = await presenter.present(
+                    PlayCoverAlertRequest(
+                        title: NSLocalizedString("alert.error", comment: ""),
+                        message: String(
+                            format: NSLocalizedString("error.appProhibited", comment: ""),
+                            arguments: [app.name]
+                        ),
+                        style: .warning,
+                        buttons: [
+                            PlayCoverAlertButton(title: NSLocalizedString("Ok", comment: ""), isCancel: true),
+                            PlayCoverAlertButton(title: NSLocalizedString("alert.download.downloadAnyway", comment: ""))
+                        ],
+                        defaultCancelIndex: 0
+                    )
                 )
-                alert.alertStyle = .warning
-                alert.addButton(withTitle: NSLocalizedString("Ok", comment: ""))
-                alert.addButton(withTitle: NSLocalizedString("alert.download.downloadAnyway", comment: ""))
-                if alert.runModal() == .alertFirstButtonReturn {
+                if response.buttonIndex == 0 {
                     return
                 }
             }
 
             if let warningMessage = warning, let app = app {
-                let alert = NSAlert()
-                alert.messageText = NSLocalizedString(warningMessage, comment: "")
-                alert.informativeText = String(
-                    format: NSLocalizedString("alert.install.anyway", comment: ""),
-                    arguments: [app.name]
+                let response = await presenter.present(
+                    PlayCoverAlertRequest(
+                        title: NSLocalizedString(warningMessage, comment: ""),
+                        message: String(
+                            format: NSLocalizedString("alert.install.anyway", comment: ""),
+                            arguments: [app.name]
+                        ),
+                        style: .warning,
+                        buttons: [
+                            PlayCoverAlertButton(title: NSLocalizedString("button.Yes", comment: "")),
+                            PlayCoverAlertButton(title: NSLocalizedString("button.No", comment: ""), isCancel: true)
+                        ],
+                        defaultCancelIndex: 1
+                    )
                 )
-                alert.alertStyle = .warning
-                alert.addButton(withTitle: NSLocalizedString("button.Yes", comment: ""))
-                alert.addButton(withTitle: NSLocalizedString("button.No", comment: ""))
-
-                if alert.runModal() == .alertSecondButtonReturn {
+                if response.buttonIndex == 1 {
                     return
                 }
             }
             if let url = url, let app = app {
                 let ipa = IPA(url: url)
-                Task {
-                    if await ipa.checkOfficialMacOS(app: IPA.Application.store(app)) {
-                        cancel()
+                if await ipa.checkOfficialMacOS(
+                    app: IPA.Application.store(app),
+                    alertPresenter: presenter,
+                    installPreferences: installPrefs
+                ) {
+                    cancel()
+                } else {
+                    if url.isFileURL {
+                        proceedInstall(url, deleteIPA: false)
                     } else {
-                        if url.isFileURL {
-                            proceedInstall(url, deleteIPA: false)
-                        } else {
-                            let (finalURL, urlIsValid) = NetworkVM.urlAccessible(url: url, popup: true)
-                            if urlIsValid, let newWrappedURL = finalURL {
-                                proceedDownload(newWrappedURL)
-                            }
+                        let (finalURL, urlIsValid) = await NetworkVM.isURLAccessible(url: url, popup: true)
+                        if urlIsValid, let newWrappedURL = finalURL {
+                            proceedDownload(newWrappedURL)
                         }
                     }
                 }
@@ -92,62 +130,77 @@ class DownloadApp {
 
     func cancel() {
         downloader.cancelAllDownloads()
+        cleanupDownloadDir()
 
-        downloadVM.next(.canceled, 0.95, 1.0)
-        downloadVM.storeAppData = nil
+        Task { @MainActor in
+            downloadVM.next(.canceled, 0.95, 1.0)
+            downloadVM.storeAppData = nil
+        }
     }
 
     private func proceedDownload(_ finalURL: URL) {
-        self.downloadVM.storeAppData = self.app
-        self.downloadVM.next(.downloading, 0.0, 0.7)
+        Task { @MainActor in
+            self.downloadVM.storeAppData = self.app
+            self.downloadVM.next(.downloading, 0.0, 0.7)
+        }
 
         var tmpDir: URL?
         do {
             tmpDir = try FileManager.default.url(for: .itemReplacementDirectory,
                                                  in: .userDomainMask,
-                                                 appropriateFor: URL(fileURLWithPath: "/Users"),
+                                                 appropriateFor: FileManager.default.temporaryDirectory,
                                                  create: true)
+            activeDownloadDir = tmpDir
 
             if let tmpDir = tmpDir {
                 downloader.addDownload(url: finalURL,
                                        destinationURL: tmpDir,
                                        onProgress: { progress in
-                    // progress is a Float
-                    self.downloadVM.progress = Double(progress)
-                }, onCompletion: { error, fileURL in
-                    self.downloadVM.next(.integrity, 0.7, 0.95)
-
-                    if let error = error {
-                        self.downloadVM.next(.failed, 0.95, 1.0)
-                        self.downloadVM.storeAppData = nil
-                        return Log.shared.error(error)
+                    Task { @MainActor in
+                        self.downloadVM.progress = Double(progress)
                     }
+                }, onCompletion: { error, fileURL in
+                    Task { @MainActor in
+                        self.downloadVM.next(.integrity, 0.7, 0.95)
 
-                    self.verifyChecksum(checksum: self.downloadVM.storeAppData?.checksum, file: fileURL) { completing in
-                        self.downloadVM.next(completing ? .finish : .failed, 0.95, 1.0)
-                        if completing {
+                        if let error = error {
+                            self.downloadVM.next(.failed, 0.95, 1.0)
+                            self.downloadVM.storeAppData = nil
+                            self.cleanupDownloadDir(tmpDir)
+                            PlayCoverDiagnostics.reportError(error)
+                            return
+                        }
+
+                        self.verifyChecksum(checksum: self.downloadVM.storeAppData?.checksum,
+                                            file: fileURL) { completing in
                             Task { @MainActor in
-                                self.proceedInstall(fileURL)
+                                self.downloadVM.next(completing ? .finish : .failed, 0.95, 1.0)
+                                if completing {
+                                    self.proceedInstall(fileURL, downloadDir: tmpDir)
+                                } else {
+                                    self.downloadVM.storeAppData = nil
+                                    self.cleanupDownloadDir(tmpDir)
+                                }
                             }
                         }
                     }
                 })
             }
         } catch {
-            self.downloadVM.next(.failed, 0.95, 1.0)
-
-            if let tmpDir = tmpDir {
-                FileManager.default.delete(at: tmpDir)
+            Task { @MainActor in
+                self.downloadVM.next(.failed, 0.95, 1.0)
+                self.downloadVM.storeAppData = nil
             }
-            Log.shared.error(error)
+            cleanupDownloadDir(tmpDir)
+            PlayCoverDiagnostics.reportError(error)
         }
     }
 
     private func verifyChecksum(checksum: String?, file: URL?, completion: @escaping (Bool) -> Void) {
-        Task {
+        Task.detached(priority: .userInitiated) {
             if let originalSum = checksum, !originalSum.isEmpty, let fileURL = file {
                 if let sha256 = fileURL.sha256, originalSum != sha256 {
-                    checksumAlert(originalSum: originalSum, givenSum: sha256, completion: completion)
+                    self.checksumAlert(originalSum: originalSum, givenSum: sha256, completion: completion)
                     return
                 }
             }
@@ -157,36 +210,48 @@ class DownloadApp {
     }
 
     private func checksumAlert(originalSum: String, givenSum: String, completion: @escaping (Bool) -> Void) {
+        let presenter = dependencies?.alertPresenter ?? AlertPresenter()
         Task { @MainActor in
-            let alert = NSAlert()
-            alert.messageText = NSLocalizedString("playapp.download.differentChecksum", comment: "")
-            alert.informativeText = String(
-                format: NSLocalizedString("playapp.download.differentChecksumDesc", comment: ""),
-                arguments: [originalSum, givenSum]
+            let response = await presenter.present(
+                PlayCoverAlertRequest(
+                    title: NSLocalizedString("playapp.download.differentChecksum", comment: ""),
+                    message: String(
+                        format: NSLocalizedString("playapp.download.differentChecksumDesc", comment: ""),
+                        arguments: [originalSum, givenSum]
+                    ),
+                    style: .warning,
+                    buttons: [
+                        PlayCoverAlertButton(title: NSLocalizedString("button.Proceed", comment: "")),
+                        PlayCoverAlertButton(title: NSLocalizedString("button.Cancel", comment: ""), isCancel: true)
+                    ],
+                    defaultCancelIndex: 1
+                )
             )
-            alert.alertStyle = .warning
-            alert.addButton(withTitle: NSLocalizedString("button.Proceed", comment: ""))
-            alert.addButton(withTitle: NSLocalizedString("button.Cancel", comment: ""))
-
-            completion(alert.runModal() == .alertFirstButtonReturn)
+            completion(response.buttonIndex == 0)
         }
     }
 
-    private func proceedInstall(_ url: URL?, deleteIPA: Bool = true) {
+    private func proceedInstall(_ url: URL?, downloadDir: URL? = nil, deleteIPA: Bool = true) {
         if let url = url {
-            Installer.install(ipaUrl: url, export: false, returnCompletion: { _ in
+            let deps = dependencies
+            Installer.install(ipaUrl: url, export: false, dependencies: deps, returnCompletion: { finalURL in
                 Task { @MainActor in
                     if deleteIPA {
                         FileManager.default.delete(at: url)
+                        self.cleanupDownloadDir(downloadDir)
                     }
-                    AppsVM.shared.fetchApps()
-                    StoreVM.shared.resolveSources()
-                    NotifyService.shared.notify(
-                        NSLocalizedString("notification.appInstalled", comment: ""),
-                        NSLocalizedString("notification.appInstalled.message", comment: ""))
+                    deps?.appsVM.fetchApps()
+                    deps?.storeVM.resolveSources()
+                    if finalURL != nil {
+                        deps?.notifyService.notify(
+                            NSLocalizedString("notification.appInstalled", comment: ""),
+                            NSLocalizedString("notification.appInstalled.message", comment: ""))
+                    }
                     self.downloadVM.storeAppData = nil
                 }
             })
+        } else if deleteIPA {
+            cleanupDownloadDir(downloadDir)
         }
     }
 }

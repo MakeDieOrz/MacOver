@@ -9,30 +9,34 @@ import Foundation
 
 class Installer {
 
-    static func installPlayToolsPopup() -> Bool {
-        let alert = NSAlert()
-        alert.messageText = NSLocalizedString("alert.install.injectPlayToolsQuestion", comment: "")
-        alert.informativeText = NSLocalizedString("alert.install.playToolsInformative", comment: "")
+    @MainActor
+    static func installPlayToolsPopup(
+        alertPresenter: AlertPresenter? = nil,
+        installPreferences: InstallPreferences? = nil
+    ) async -> Bool {
+        let presenter = alertPresenter ?? AlertPresenter()
+        let prefs = installPreferences ?? InstallPreferences()
+        let response = await presenter.present(
+            PlayCoverAlertRequest(
+                title: NSLocalizedString("alert.install.injectPlayToolsQuestion", comment: ""),
+                message: NSLocalizedString("alert.install.playToolsInformative", comment: ""),
+                style: .informational,
+                buttons: [
+                    PlayCoverAlertButton(title: NSLocalizedString("button.Yes", comment: "")),
+                    PlayCoverAlertButton(title: NSLocalizedString("button.No", comment: ""), isCancel: true)
+                ],
+                suppressionTitle: NSLocalizedString("alert.supression", comment: "String"),
+                defaultCancelIndex: 1
+            )
+        )
 
-        alert.alertStyle = .informational
-
-        alert.showsSuppressionButton = true
-        alert.suppressionButton?.toolTip = NSLocalizedString("alert.supression", comment: "String")
-
-        let yes = alert.addButton(withTitle: NSLocalizedString("button.Yes", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("button.No", comment: ""))
-
-        // Set default button to install playtools
-        yes.keyEquivalent = "\r"
-
-        let response = alert.runModal()
-
-        if alert.suppressionButton?.state == .on {
-            InstallPreferences.shared.showInstallPopup = false
-            InstallPreferences.shared.alwaysInstallPlayTools = response == .alertFirstButtonReturn
+        let shouldInstall = response.buttonIndex == 0
+        if response.suppressionChecked {
+            prefs.showInstallPopup = false
+            prefs.alwaysInstallPlayTools = shouldInstall
         }
 
-        return response == .alertFirstButtonReturn
+        return shouldInstall
     }
 
     static private func returnErrorString(error: Error) -> String {
@@ -45,49 +49,77 @@ class Installer {
     }
 
     // swiftlint:disable:next function_body_length
-    static func install(ipaUrl: URL, export: Bool, returnCompletion: @escaping (URL?) -> Void) {
-        // If (the option key is held or the install playtools popup settings is true) and its not an export,
-        //    then show the installer dialog
-        let installPlayTools: Bool
-        let applicationType = InstallPreferences.shared.defaultAppType
+    static func install(
+        ipaUrl: URL,
+        export: Bool,
+        dependencies: PlayCoverDependencies? = nil,
+        returnCompletion: @escaping (URL?) -> Void
+    ) {
+        let installVM = dependencies?.installVM ?? InstallVM()
+        let installPreferences = dependencies?.installPreferences ?? InstallPreferences()
+        let modifierObserver = dependencies?.modifierKeyObserver
+        let alertPresenter = dependencies?.alertPresenter
 
-        if (ModifierKeyObserver.shared.isOptionKeyPressed
-                || InstallPreferences.shared.showInstallPopup) && !export {
-            installPlayTools = installPlayToolsPopup()
-        } else {
-            installPlayTools = InstallPreferences.shared.alwaysInstallPlayTools
-        }
+        Task { @MainActor in
+            // If (the option key is held or the install playtools popup settings is true) and its not an export,
+            //    then show the installer dialog
+            let installPlayTools: Bool
+            let applicationType = installPreferences.defaultAppType
 
-        InstallVM.shared.next(.begin, 0.0, 0.0)
+            if ((modifierObserver?.isOptionKeyPressed ?? false)
+                    || installPreferences.showInstallPopup) && !export {
+                installPlayTools = await installPlayToolsPopup(
+                    alertPresenter: alertPresenter,
+                    installPreferences: installPreferences
+                )
+            } else {
+                installPlayTools = installPreferences.alwaysInstallPlayTools
+            }
 
-        Task(priority: .userInitiated) {
-            let ipa = IPA(url: ipaUrl)
-            defer { ipa.releaseTempDir() }
+            installVM.next(.begin, 0.0, 0.0)
 
-            do {
-                InstallVM.shared.next(.unzip, 0.0, 0.5)
+            Task.detached(priority: .userInitiated) {
+                let ipa = IPA(url: ipaUrl)
+                defer { ipa.releaseTempDir() }
+
+                var createdEntitlementsURL: URL?
+                var createdSettingsURL: URL?
+
+                do {
+                installVM.next(.unzip, 0.0, 0.5)
                 try ipa.allocateTempDir()
 
                 let app = try ipa.unzip()
-                if await ipa.checkOfficialMacOS(app: IPA.Application.base(app)) {
-                    InstallVM.shared.next(.failed, 0.95, 1.0)
+                if await ipa.checkOfficialMacOS(
+                    app: IPA.Application.base(app),
+                    alertPresenter: alertPresenter,
+                    installPreferences: installPreferences
+                ) {
+                    installVM.next(.failed, 0.95, 1.0)
                     returnCompletion(nil)
                     return
                 }
-                InstallVM.shared.next(.library, 0.5, 0.55)
-                try saveEntitlements(app)
+                installVM.next(.library, 0.5, 0.55)
                 let machos = resolveValidMachOs(app)
                 app.validMachOs = machos
 
-                InstallVM.shared.next(.playtools, 0.55, 0.85)
+                installVM.next(.playtools, 0.55, 0.85)
 
                 for macho in machos {
                     if try Macho.isMachoEncrypted(atURL: macho) {
                         throw PlayCoverError.appEncrypted
                     }
+                }
 
-                    if !export {
-                        try Macho.convertMacho(macho)
+                let entitlementsAlreadyExisted = FileManager.default.fileExists(atPath: app.entitlements.path)
+                try saveEntitlements(app)
+                if !entitlementsAlreadyExisted {
+                    createdEntitlementsURL = app.entitlements
+                }
+
+                for macho in machos where !export {
+                    try Macho.convertMacho(macho)
+                    if macho != app.executable {
                         try Shell.signMacho(macho)
                     }
                 }
@@ -95,10 +127,10 @@ class Installer {
                 if export {
                     try PlayTools.injectInIPA(app.executable, payload: app.url)
                 } else if installPlayTools {
-                    try await PlayTools.installInIPA(app.executable)
+                    try await PlayTools.installInIPA(app.executable, appInfo: app.info, signBundle: false)
                 }
 
-                app.info.applicationCategoryType = applicationType
+                app.info.setApplicationCategoryType(applicationType, persist: false)
 
                 if !export {
                     // -rwxr-xr-x
@@ -107,28 +139,50 @@ class Installer {
                 }
 
                 let info = app.info
+                if !export, !info.bundleIdentifier.isEmpty {
+                    let originalMinimumOSVersion = info.minimumOSVersion
+                    let appSettings = AppSettings(info)
+                    if !FileManager.default.fileExists(atPath: appSettings.settingsUrl.path) {
+                        createdSettingsURL = appSettings.settingsUrl
+                    }
+                    appSettings.update { updatedSettings in
+                        updatedSettings.originalBundleName = app.url.lastPathComponent
+                        updatedSettings.originalMinimumOSVersion = originalMinimumOSVersion.isEmpty
+                            ? nil
+                            : originalMinimumOSVersion
+                    }
+                    appSettings.flush()
+                }
                 info.assert(minimumVersion: 11.0)
                 try info.write()
-                InstallVM.shared.next(.wrapper, 0.85, 0.95)
+                installVM.next(.wrapper, 0.85, 0.95)
 
                 var finalURL: URL
 
                 if export {
                     finalURL = try ipa.packIPABack(app: app.url)
+                    try? ipa.removeQuarantine(finalURL)
                 } else {
+                    try? ipa.removeQuarantine(app.url)
                     finalURL = try wrap(app)
-                    let installedApp = PlayApp(appUrl: finalURL)
-
-                    installedApp.sign()
+                    let installedApp = PlayApp(appUrl: finalURL, dependencies: dependencies)
+                    try installedApp.signThrowing()
+                    try? ipa.removeQuarantine(finalURL)
                 }
 
-                try ipa.removeQuarantine(finalURL)
-                InstallVM.shared.next(.finish, 0.95, 1.0)
+                installVM.next(.finish, 0.95, 1.0)
                 returnCompletion(finalURL)
             } catch {
-                Log.shared.error(returnErrorString(error: error))
-                InstallVM.shared.next(.failed, 0.95, 1.0)
+                if let createdEntitlementsURL {
+                    try? FileManager.default.removeItem(at: createdEntitlementsURL)
+                }
+                if let createdSettingsURL {
+                    try? FileManager.default.removeItem(at: createdSettingsURL)
+                }
+                PlayCoverDiagnostics.reportError(returnErrorString(error: error))
+                installVM.next(.failed, 0.95, 1.0)
                 returnCompletion(nil)
+            }
             }
         }
     }
@@ -196,9 +250,12 @@ class Installer {
 
             serialQueue.sync {
                 switch Array(data) {
-                case [202, 254, 186, 190]: resolved.append(url)
-                case [207, 250, 237, 254]: resolved.append(url)
-                default: return
+                case [202, 254, 186, 190], [190, 186, 254, 202],
+                     [202, 254, 186, 191], [191, 186, 254, 202],
+                     [207, 250, 237, 254], [254, 237, 250, 207]:
+                    resolved.append(url)
+                default:
+                    return
                 }
             }
         }
@@ -208,7 +265,26 @@ class Installer {
 
     /// Wrapper for codesign, applies the given entitlements to the application and all of its contents
     static func saveEntitlements(_ baseApp: BaseApp) throws {
-        let toSave = try Entitlements.dumpEntitlements(exec: baseApp.executable)
+        var toSave = try Entitlements.dumpEntitlements(exec: baseApp.executable)
+        let groupKey = "com.apple.security.application-groups"
+        if toSave[groupKey] == nil,
+           FileManager.default.fileExists(atPath: baseApp.entitlements.path),
+           let existing = try? [String: Any].read(baseApp.entitlements),
+           let existingGroups = existing[groupKey] {
+            let hasNonEmptyGroups: Bool
+            if let array = existingGroups as? [String] {
+                hasNonEmptyGroups = !array.isEmpty
+            } else if let str = existingGroups as? String {
+                hasNonEmptyGroups = !str.isEmpty
+            } else if let array = existingGroups as? [Any] {
+                hasNonEmptyGroups = !array.isEmpty
+            } else {
+                hasNonEmptyGroups = false
+            }
+            if hasNonEmptyGroups {
+                toSave[groupKey] = existingGroups
+            }
+        }
         try toSave.store(baseApp.entitlements)
     }
 

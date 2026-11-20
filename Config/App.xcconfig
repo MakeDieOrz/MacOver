@@ -1,0 +1,8 @@
+#include "Base.xcconfig"
+
+// macOS Host / AppKit Bundle Platform Settings
+SDKROOT = macosx
+SUPPORTED_PLATFORMS = macosx
+MACOSX_DEPLOYMENT_TARGET = 26.0
+COMBINE_HIDPI_IMAGES = YES
+LD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/../Frameworks @loader_path/../Frameworks

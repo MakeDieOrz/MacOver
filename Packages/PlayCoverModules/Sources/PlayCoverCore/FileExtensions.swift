@@ -1,0 +1,53 @@
+//
+//  FileExtensions.swift
+//  PlayCover
+//
+
+import AppKit
+import Foundation
+import UniformTypeIdentifiers
+
+public extension FileManager {
+    func delete(at url: URL) {
+        if FileManager.default.fileExists(atPath: url.path) {
+            do {
+                try FileManager.default.removeItem(atPath: url.path)
+            } catch {
+                PlayCoverDiagnostics.reportError(error)
+            }
+        }
+    }
+}
+
+public extension NSOpenPanel {
+    static func selectIPA(completion: @escaping (_ result: Result<URL, Error>) -> Void) {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [UTType(importedAs: "com.apple.itunes.ipa")]
+        panel.canChooseFiles = true
+        panel.begin { result in
+            if result == .OK {
+                if let url = panel.urls.first {
+                    completion(.success(url))
+                }
+            }
+        }
+    }
+
+    static func selectDylib(completion: @escaping (_ result: Result<URL, Error>) -> Void) {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [UTType(filenameExtension: "dylib") ?? .unixExecutable]
+        panel.begin { result in
+            if result == .OK {
+                if let url = panel.urls.first {
+                    completion(.success(url))
+                }
+            }
+        }
+    }
+}

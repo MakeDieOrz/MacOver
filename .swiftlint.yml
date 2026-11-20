@@ -5,6 +5,13 @@ excluded:
   - Carthage
   - Pods
   - .build
+  - DerivedData
+  - PlayTools
+  - Config
+  - Tests
+  - PlayCoverMachOTests
+  - PlayCoverCoreTests
+  - plugins
 
 identifier_name:
   allowed_symbols: ['_']

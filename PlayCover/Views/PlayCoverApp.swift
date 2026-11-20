@@ -5,104 +5,80 @@
 
 import SwiftUI
 
-class AppDelegate: NSObject, NSApplicationDelegate {
-    @AppStorage("ShowLowPowerModeAlert") var showLowPowerModeAlert = true
-
-    func application(_ application: NSApplication, open urls: [URL]) {
-        if let url = urls.first {
-            URLHandler.shared.processURL(url: url)
-        }
-    }
-
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        UpdateScheme.checkForUpdate()
-
-        UserDefaults.standard.register(
-            defaults: ["NSApplicationCrashOnExceptions": true]
-        )
-
-        NotificationCenter.default.addObserver(self,
-                                               selector: #selector(powerStateChanged),
-                                               name: Notification.Name.NSProcessInfoPowerStateDidChange,
-                                               object: nil)
-        if ProcessInfo.processInfo.isLowPowerModeEnabled {
-            powerModal()
-        }
-        URLCache.iconCache.removeAllCachedResponses()
-        // Code that run once on first launch
-        let launchedBefore = UserDefaults.standard.bool(forKey: "launchedBefore")
-        if !launchedBefore {
-            UserDefaults.standard.set(true, forKey: "launchedBefore")
-
-            // Initialize KeyCover with an automatically generated key
-            let keyCoverPassword = KeyCoverPassword.shared.generateVerySecurePassword()
-            KeyCoverPassword.shared.setKeyCoverPassword(keyCoverPassword)
-            KeyCoverPreferences.shared.keyCoverEnabled = .selfGeneratedPassword
-        }
-
-    }
-
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        return true
-    }
-
-    @objc func powerStateChanged(_ notification: Notification) {
-        if ProcessInfo.processInfo.isLowPowerModeEnabled {
-            Task { @MainActor in
-                self.powerModal()
-            }
-        }
-    }
-
-    func powerModal() {
-        if showLowPowerModeAlert {
-            let alert = NSAlert()
-            alert.messageText = NSLocalizedString("alert.power.title", comment: "")
-            alert.informativeText = NSLocalizedString("alert.power.subtitle", comment: "")
-            alert.addButton(withTitle: NSLocalizedString("button.OK", comment: ""))
-            alert.showsSuppressionButton = true
-            alert.alertStyle = .critical
-
-            if alert.runModal() == .alertFirstButtonReturn {
-                showLowPowerModeAlert = alert.suppressionButton?.state == .off
-            }
-        }
-    }
-}
-
 @main
 struct PlayCoverApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject var updaterViewModel = UpdaterViewModel()
-    var storeVM = StoreVM.shared
+    @StateObject private var navState = AppNavigationState()
+    @AppStorage("showMenuBarExtra") private var showMenuBarExtra = true
 
-    @State var isSigningSetupShown = false
+    private var deps: PlayCoverDependencies { appDelegate.dependencies }
 
     var body: some Scene {
-        WindowGroup {
-            MainView(isSigningSetupShown: $isSigningSetupShown)
-                .environmentObject(InstallVM.shared)
-                .environmentObject(DownloadVM.shared)
-                .environmentObject(AppsVM.shared)
-                .environmentObject(storeVM)
-                .environmentObject(AppIntegrity())
-                .onAppear {
-                    NSWindow.allowsAutomaticWindowTabbing = false
-                    SoundDeviceService.shared.prepareSoundDevice()
-                    NotifyService.shared.allowNotify()
-                }
+        WindowGroup(id: "main") {
+            if ProcessInfo.isRunningUnitTests {
+                EmptyView()
+            } else {
+                RootSplitView()
+                    .environmentObject(deps)
+                    .environmentObject(deps.installVM)
+                    .environmentObject(deps.downloadVM)
+                    .environmentObject(deps.appsVM)
+                    .environmentObject(deps.storeVM)
+                    .environmentObject(deps.toastVM)
+                    .environmentObject(deps.appIntegrity)
+                    .environmentObject(deps.alertPresenter)
+                    .environmentObject(deps.startupAlerts)
+                    .environmentObject(deps.keyCoverObservable)
+                    .environmentObject(deps.keyCoverPreferences)
+                    .environmentObject(deps.installPreferences)
+                    .environmentObject(deps.uninstallPreferences)
+                    .environmentObject(deps.urlObservable)
+                    .environmentObject(deps.modifierKeyObserver)
+                    .environmentObject(navState)
+                    .onAppear {
+                        NSWindow.allowsAutomaticWindowTabbing = false
+                        deps.soundDeviceService.prepareSoundDevice()
+                        deps.notifyService.allowNotify()
+                    }
+            }
         }
-        .handlesExternalEvents(matching: ["{same path of URL?}"]) // create new window if doesn't exist
+        .windowToolbarStyle(.unified)
+        .handlesExternalEvents(matching: ["{same path of URL?}"])
         .commands {
-            SidebarCommands()
-            PlayCoverMenuView(isSigningSetupShown: $isSigningSetupShown)
-            PlayCoverHelpMenuView(updaterViewModel: updaterViewModel)
-            PlayCoverViewMenuView()
+            if !ProcessInfo.isRunningUnitTests {
+                SidebarCommands()
+                PlayCoverMenuView(navState: navState, dependencies: deps)
+                PlayCoverHelpMenuView(updaterViewModel: updaterViewModel)
+                PlayCoverViewMenuView(navState: navState, dependencies: deps)
+            }
         }
 
         Settings {
-            PlayCoverSettingsView(updaterViewModel: updaterViewModel)
-                .environmentObject(storeVM)
+            if ProcessInfo.isRunningUnitTests {
+                EmptyView()
+            } else {
+                PlayCoverSettingsView(updaterViewModel: updaterViewModel)
+                    .environmentObject(deps)
+                    .environmentObject(deps.appsVM)
+                    .environmentObject(deps.storeVM)
+                    .environmentObject(deps.keyCoverObservable)
+                    .environmentObject(deps.keyCoverPreferences)
+                    .environmentObject(deps.installPreferences)
+                    .environmentObject(deps.uninstallPreferences)
+                    .environmentObject(deps.urlObservable)
+                    .environmentObject(deps.modifierKeyObserver)
+                    .environmentObject(navState)
+            }
+        }
+
+        MenuBarExtra(
+            "PlayCover",
+            systemImage: "gamecontroller",
+            isInserted: ProcessInfo.isRunningUnitTests ? .constant(false) : $showMenuBarExtra
+        ) {
+            PlayCoverMenuBarExtraContent()
+                .environmentObject(deps.appsVM)
         }
     }
 }

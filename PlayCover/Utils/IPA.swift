@@ -15,6 +15,7 @@ public class IPA {
     }
 
     public func allocateTempDir() throws {
+        releaseTempDir()
         tmpDir = try FileManager.default.url(for: .itemReplacementDirectory,
                                              in: .userDomainMask,
                                              appropriateFor: FileManager.default.temporaryDirectory,
@@ -32,31 +33,54 @@ public class IPA {
     }
 
     public func removeQuarantine(_ execUrl: URL) throws {
-        try Shell.run("/usr/bin/xattr", "-r", "-d", "com.apple.quarantine", execUrl.relativePath)
+        _ = try? Shell.run(print: false, "/usr/bin/xattr", "-cr", execUrl.path)
+        _ = try? Shell.run(print: false, "/usr/bin/xattr", "-r", "-d", "com.apple.quarantine", execUrl.path)
     }
 
     public func unzip() throws -> BaseApp {
-        if let workDir = tmpDir {
-            if try Shell.run("/usr/bin/unzip",
-                             "-oq", url.path, "-d", workDir.path) == "" {
-                return try Installer.fromIPA(detectingAppNameInFolder: workDir.appendingPathComponent("Payload"))
-            } else {
-                throw PlayCoverError.appCorrupted
-            }
-        } else {
+        guard let workDir = tmpDir else {
             throw PlayCoverError.appCorrupted
         }
+        _ = try Shell.run(print: false, "/usr/bin/unzip", "-oq", url.path, "-d", workDir.path)
+        return try Installer.fromIPA(detectingAppNameInFolder: workDir.appendingPathComponent("Payload"))
     }
 
     func packIPABack(app: URL) throws -> URL {
-        let payload = app.deletingPathExtension().deletingLastPathComponent()
+        let payload = app.deletingLastPathComponent()
+        let workDir = payload.deletingLastPathComponent()
         let name = app.deletingPathExtension().lastPathComponent
 
         let newIpa = getDocumentsDirectory()
             .appendingEscapedPathComponent(name)
             .appendingPathExtension("ipa")
 
-        try Shell.run("/usr/bin/zip", "-r", newIpa.path, payload.path)
+        if FileManager.default.fileExists(atPath: newIpa.path) {
+            try FileManager.default.removeItem(at: newIpa)
+        }
+
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
+        process.currentDirectoryURL = workDir
+        process.arguments = ["-r", "-y", newIpa.path, payload.lastPathComponent]
+        process.standardOutput = pipe
+        process.standardError = pipe
+        defer {
+            try? pipe.fileHandleForReading.close()
+            try? pipe.fileHandleForWriting.close()
+        }
+
+        try process.run()
+        let output = try pipe.fileHandleForReading.readToEnd() ?? Data()
+        process.waitUntilExit()
+        if process.terminationStatus != 0 {
+            try? FileManager.default.removeItem(at: newIpa)
+            throw PlayCoverError.shellExecutionFailed(
+                binary: "/usr/bin/zip",
+                status: process.terminationStatus,
+                output: String(data: output, encoding: .utf8) ?? "Failed to pack IPA"
+            )
+        }
 
         return newIpa
     }
@@ -103,7 +127,11 @@ public class IPA {
     }
 
     @MainActor
-    func checkOfficialMacOS(app: Application) async -> Bool {
+    func checkOfficialMacOS(
+        app: Application,
+        alertPresenter: AlertPresenter? = nil,
+        installPreferences: InstallPreferences? = nil
+    ) async -> Bool {
         let bundleID: String
         let appID: Int
         switch app {
@@ -119,34 +147,38 @@ public class IPA {
             appID = Int(stringArray.last ?? "0") ?? 0
         }
         let supportMacOS: Bool = await checkMacOSCompatibility(appID: appID)
-        let showAlert = InstallPreferences.shared.showAppStorePopup
+        let prefs = installPreferences ?? InstallPreferences()
+        let showAlert = prefs.showAppStorePopup
         if showAlert && supportMacOS {
-            let alert = NSAlert()
-            alert.messageText = NSLocalizedString("alert.appstore", comment: "")
-            alert.informativeText = String(
-                format: NSLocalizedString("macos.version", comment: "")
+            let presenter = alertPresenter ?? AlertPresenter()
+            let response = await presenter.present(
+                PlayCoverAlertRequest(
+                    title: NSLocalizedString("alert.appstore", comment: ""),
+                    message: String(format: NSLocalizedString("macos.version", comment: "")),
+                    style: .informational,
+                    buttons: [
+                        PlayCoverAlertButton(title: NSLocalizedString("alert.install.anyway", comment: "")),
+                        PlayCoverAlertButton(title: NSLocalizedString("alert.open.appstore", comment: "")),
+                        PlayCoverAlertButton(title: NSLocalizedString("button.Cancel", comment: ""), isCancel: true)
+                    ],
+                    suppressionTitle: NSLocalizedString("alert.supression", comment: "String"),
+                    defaultCancelIndex: 2
+                )
             )
-            alert.icon = nil
-            alert.showsSuppressionButton = true
-            alert.suppressionButton?.toolTip = NSLocalizedString("alert.supression", comment: "String")
-            alert.alertStyle = .informational
-            alert.addButton(withTitle: NSLocalizedString("alert.install.anyway", comment: ""))
-            alert.addButton(withTitle: NSLocalizedString("alert.open.appstore", comment: ""))
-            alert.addButton(withTitle: NSLocalizedString("button.Cancel", comment: ""))
-            let result = alert.runModal()
-            switch result {
-            case .alertFirstButtonReturn:
-                if let suppressionButton = alert.suppressionButton,
-                   suppressionButton.state == .on {
-                    InstallPreferences.shared.showAppStorePopup = false
+            switch response.buttonIndex {
+            case 0:
+                if response.suppressionChecked {
+                    prefs.showAppStorePopup = false
                 }
                 return false
-            case .alertSecondButtonReturn:
+            case 1:
                 if appID != 0 {
-                    guard let urlApp = URL(string:
-                                            "itms-apps://apps.apple.com/app/id\(appID)")
-                    else {return true}
-                    NSWorkspace.shared.open(urlApp)
+                    guard let urlApp = URL(string: "itms-apps://apps.apple.com/app/id\(appID)") else {
+                        return true
+                    }
+                    await MainActor.run {
+                        NSWorkspace.shared.open(urlApp)
+                    }
                 }
                 return true
             default:

@@ -8,6 +8,9 @@
 import SwiftUI
 
 struct KeyCoverUnlockingPrompt: View {
+    @EnvironmentObject var dependencies: PlayCoverDependencies
+    @EnvironmentObject var keyCoverObserved: KeyCoverObservable
+
     @State private var password = ""
     @State private var passwordError = false
 
@@ -33,7 +36,7 @@ struct KeyCoverUnlockingPrompt: View {
             HStack {
                 Spacer()
                 Button("button.Cancel") {
-                    KeyCoverObservable.shared.isKeyCoverUnlockingPromptShown = false
+                    keyCoverObserved.isKeyCoverUnlockingPromptShown = false
                 }
                 .keyboardShortcut(.cancelAction)
                 Button("button.Unlock") {
@@ -46,13 +49,13 @@ struct KeyCoverUnlockingPrompt: View {
     }
 
     func unlock() {
-        if KeyCoverPassword.shared.validatePassword(password) {
+        if dependencies.keyCoverPassword.validatePassword(password) {
             // if Smart Unlock is enabled, store the masterKey
-            KeyCover.shared.keyCoverPlainTextKey = password
+            dependencies.keyCover.keyCoverPlainTextKey = password
         } else {
             passwordError = true
             return
         }
-        KeyCoverObservable.shared.isKeyCoverUnlockingPromptShown = false
+        keyCoverObserved.isKeyCoverUnlockingPromptShown = false
     }
 }

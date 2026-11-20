@@ -8,21 +8,26 @@
 import Foundation
 
 class StoreVM: ObservableObject, @unchecked Sendable {
-    public static let shared = StoreVM()
     private let plistSource: URL
 
-    private init() {
+    private var isDecoding = false
+
+    init(resolveOnInit: Bool = !ProcessInfo.isRunningUnitTests) {
         plistSource = PlayTools.playCoverContainer
             .appendingPathComponent("Sources")
             .appendingPathExtension("plist")
         sourcesList = []
         if !decode() { encode() }
-        resolveSources()
+        if resolveOnInit {
+            resolveSources()
+        }
     }
 
     @Published var sourcesList: [SourceData] {
         didSet {
-            encode()
+            if !isDecoding {
+                encode()
+            }
         }
     }
     @Published var sourcesData: [SourceJSON] = [] {
@@ -35,8 +40,8 @@ class StoreVM: ObservableObject, @unchecked Sendable {
     private var resolveTask: Task<Void, Never>?
 
     public func getEnabledSources() -> [SourceJSON] {
-        return StoreVM.shared.sourcesData.filter { sourceJSON in
-            return StoreVM.shared.sourcesList.contains { sourceData in
+        return sourcesData.filter { sourceJSON in
+            return sourcesList.contains { sourceData in
                 sourceData.id == sourceJSON.id && sourceData.isEnabled
             }
         }
@@ -123,9 +128,11 @@ class StoreVM: ObservableObject, @unchecked Sendable {
             sourcesData.removeAll()
 
             for index in sourcesList.indices {
+                if Task.isCancelled { return }
                 sourcesList[index].status = .checking
                 let (sourceJson, sourceState) = await getSourceData(sourceLink: sourcesList[index].source,
                                                                     sourceId: sourcesList[index].id)
+                if Task.isCancelled { return }
                 guard sourcesCount == sourcesList.count else { return }
                 sourcesList[index].status = sourceState
                 if sourceState == .valid, let sourceJson {
@@ -151,7 +158,7 @@ class StoreVM: ObservableObject, @unchecked Sendable {
 
         do {
             let data = try encoder.encode(sourcesList)
-            try data.write(to: plistSource)
+            try data.write(to: plistSource, options: .atomic)
             return true
         } catch {
             print("StoreVM: Failed to encode Sources.plist! ", error)
@@ -161,6 +168,8 @@ class StoreVM: ObservableObject, @unchecked Sendable {
 
     //
     @discardableResult private func decode() -> Bool {
+        isDecoding = true
+        defer { isDecoding = false }
         do {
             let data = try Data(contentsOf: plistSource)
             sourcesList = try PropertyListDecoder().decode([SourceData].self, from: data)

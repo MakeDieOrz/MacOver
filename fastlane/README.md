@@ -13,13 +13,23 @@ For _fastlane_ installation instructions, see [Installing _fastlane_](https://do
 
 # Available Actions
 
+All macOS build lanes target `PlayCover.xcworkspace` (`scheme: "PlayCover"`) and embed `PlayCoverHelper` and `PlayTools.framework`.
+
 ### release
 
 ```sh
 [bundle exec] fastlane release
 ```
 
+Builds the `Release` configuration (`Developer ID` export method).
 
+### nightly
+
+```sh
+[bundle exec] fastlane nightly
+```
+
+Builds the `Nightly` configuration (`Developer ID` export method).
 
 ### notarize_app
 
