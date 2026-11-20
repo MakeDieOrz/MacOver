@@ -5,6 +5,8 @@
 //  Created by TheMoonThatRises on 9/12/24.
 //
 
+import Security
+
 struct PlayedAppleDBConstants {
     // https://developer.apple.com/documentation/security/keychain_services/keychain_items/item_class_keys_and_values
     // Synchronizable does not matter.
@@ -64,7 +66,8 @@ struct PlayedAppleDBConstants {
             kSecAttrLabel,
             kSecAttrIsInvisible,
             kSecAttrIsNegative,
-            kSecAttrGeneric
+            kSecAttrGeneric,
+            kSecAttrSynchronizable
         ],
         kSecClassInternetPassword: [
             kSecAttrAccessControl,
@@ -78,17 +81,28 @@ struct PlayedAppleDBConstants {
             kSecAttrLabel,
             kSecAttrIsInvisible,
             kSecAttrIsNegative,
-            kSecAttrGeneric
+            kSecAttrGeneric,
+            kSecAttrSynchronizable
         ],
         kSecClassCertificate: [
+            kSecAttrAccessControl,
+            kSecAttrAccessible,
+            kSecAttrCreationDate,
+            kSecAttrModificationDate,
             kSecAttrCertificateEncoding,
             kSecAttrLabel,
             kSecAttrSubject,
             kSecAttrSubjectKeyID,
-            kSecAttrPublicKeyHash
+            kSecAttrPublicKeyHash,
+            kSecAttrSynchronizable
         ],
         kSecClassKey: [
+            kSecAttrAccessControl,
             kSecAttrAccessible,
+            kSecAttrCreationDate,
+            kSecAttrModificationDate,
+            kSecAttrDescription,
+            kSecAttrComment,
             kSecAttrLabel,
             kSecAttrIsPermanent,
             kSecAttrCanEncrypt,
@@ -97,14 +111,36 @@ struct PlayedAppleDBConstants {
             kSecAttrCanSign,
             kSecAttrCanVerify,
             kSecAttrCanWrap,
-            kSecAttrCanUnwrap
+            kSecAttrCanUnwrap,
+            kSecAttrSynchronizable
         ],
         kSecClassIdentity: [
+            kSecAttrAccessControl,
+            kSecAttrAccessible,
+            kSecAttrCreationDate,
+            kSecAttrModificationDate,
+            kSecAttrDescription,
+            kSecAttrComment,
             kSecAttrCertificateEncoding,
             kSecAttrLabel,
             kSecAttrSubject,
             kSecAttrSubjectKeyID,
-            kSecAttrPublicKeyHash
+            kSecAttrPublicKeyHash,
+            kSecAttrApplicationLabel,
+            kSecAttrApplicationTag,
+            kSecAttrKeyType,
+            kSecAttrKeyClass,
+            kSecAttrKeySizeInBits,
+            kSecAttrEffectiveKeySize,
+            kSecAttrIsPermanent,
+            kSecAttrCanEncrypt,
+            kSecAttrCanDecrypt,
+            kSecAttrCanDerive,
+            kSecAttrCanSign,
+            kSecAttrCanVerify,
+            kSecAttrCanWrap,
+            kSecAttrCanUnwrap,
+            kSecAttrSynchronizable
         ]
     ]
     static let values = [

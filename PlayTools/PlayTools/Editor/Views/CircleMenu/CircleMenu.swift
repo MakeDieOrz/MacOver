@@ -38,90 +38,61 @@ func customize<Type>(_ value: Type, block: (_ object: Type) -> Void) -> Type {
 /**
  *  CircleMenuDelegate
  */
-@objc public protocol CircleMenuDelegate {
+internal protocol CircleMenuDelegate: AnyObject {
+    func circleMenu(_ circleMenu: CircleMenu, willDisplay button: UIButton, atIndex: Int)
+    func circleMenu(_ circleMenu: CircleMenu, buttonWillSelected button: UIButton, atIndex: Int)
+    func circleMenu(_ circleMenu: CircleMenu, buttonDidSelected button: UIButton, atIndex: Int)
+    func menuCollapsed(_ circleMenu: CircleMenu)
+    func menuOpened(_ circleMenu: CircleMenu)
+}
 
-    /**
-     Tells the delegate the circle menu is about to draw a button for a particular index.
-
-     - parameter circleMenu: The circle menu object informing the delegate of this impending event.
-     - parameter button:     A circle menu button object that circle menu is going to use
-                                when drawing the row. Don't change button.tag
-     - parameter atIndex:    An button index.
-     */
-    @objc optional func circleMenu(_ circleMenu: CircleMenu, willDisplay button: UIButton, atIndex: Int)
-
-    /**
-     Tells the delegate that a specified index is about to be selected.
-
-     - parameter circleMenu: A circle menu object informing the delegate about the impending selection.
-     - parameter button:     A selected circle menu button. Don't change button.tag
-     - parameter atIndex:    Selected button index
-     */
-    @objc optional func circleMenu(_ circleMenu: CircleMenu, buttonWillSelected button: UIButton, atIndex: Int)
-
-    /**
-     Tells the delegate that the specified index is now selected.
-
-     - parameter circleMenu: A circle menu object informing the delegate about the new index selection.
-     - parameter button:     A selected circle menu button. Don't change button.tag
-     - parameter atIndex:    Selected button index
-     */
-    @objc optional func circleMenu(_ circleMenu: CircleMenu, buttonDidSelected button: UIButton, atIndex: Int)
-
-    /**
-     Tells the delegate that the menu was collapsed - the cancel action. Fires immediately on button press
-
-     - parameter circleMenu: A circle menu object informing the delegate about the new index selection.
-     */
-    @objc optional func menuCollapsed(_ circleMenu: CircleMenu)
-
-    /**
-     Tells the delegate that the menu was opened. Fires immediately on button press
-
-     - parameter circleMenu: A circle menu object informing the delegate about the new index selection.
-     */
-    @objc optional func menuOpened(_ circleMenu: CircleMenu)
+internal extension CircleMenuDelegate {
+    func circleMenu(_ circleMenu: CircleMenu, willDisplay button: UIButton, atIndex: Int) {}
+    func circleMenu(_ circleMenu: CircleMenu, buttonWillSelected button: UIButton, atIndex: Int) {}
+    func circleMenu(_ circleMenu: CircleMenu, buttonDidSelected button: UIButton, atIndex: Int) {}
+    func menuCollapsed(_ circleMenu: CircleMenu) {}
+    func menuOpened(_ circleMenu: CircleMenu) {}
 }
 
 // MARK: CircleMenu
 
 // swiftlint:disable type_body_length
 /// A Button object with pop ups buttons
-open class CircleMenu: UIButton {
+internal class CircleMenu: UIButton {
 
     // MARK: properties
 
     /// Buttons count
-    @IBInspectable open var buttonsCount: Int = 3
+    internal var buttonsCount: Int = 3
     /// Circle animation duration
-    @IBInspectable open var duration: Double = 2
+    internal var duration: Double = 2
     /// Distance between center button and buttons
-    @IBInspectable open var distance: Float = 100
+    internal var distance: Float = 100
     /// Delay between show buttons
-    @IBInspectable open var showDelay: Double = 0
+    internal var showDelay: Double = 0
     /// Start angle of the circle
-    @IBInspectable open var startAngle: Float = 0
+    internal var startAngle: Float = 0
     /// End angle of the circle
-    @IBInspectable open var endAngle: Float = 360
+    internal var endAngle: Float = 360
 
     // Pop buttons radius, if nil use center button size
-    open var subButtonsRadius: CGFloat?
+    internal var subButtonsRadius: CGFloat?
 
     // Show buttons event
-    open var showButtonsEvent: UIControl.Event = UIControl.Event.touchUpInside {
+    internal var showButtonsEvent: UIControl.Event = UIControl.Event.touchUpInside {
         didSet {
             addActions(newEvent: showButtonsEvent, oldEvent: oldValue)
         }
     }
 
     /// The object that acts as the delegate of the circle menu.
-    @IBOutlet open weak var delegate: AnyObject? // CircleMenuDelegate?
+    internal weak var delegate: CircleMenuDelegate?
 
     var buttons: [UIButton]?
     weak var platform: UIView?
 
-    public var customNormalIconView: UIImageView?
-    public var customSelectedIconView: UIImageView?
+    internal var customNormalIconView: UIImageView?
+    internal var customSelectedIconView: UIImageView?
 
     /**
      Initializes and returns a circle menu object.
@@ -136,12 +107,12 @@ open class CircleMenu: UIButton {
 
      - returns: A newly created circle menu.
      */
-    public init(frame: CGRect,
-                normalIcon: String?,
-                selectedIcon: String?,
-                buttonsCount: Int = 3,
-                duration: Double = 2,
-                distance: Float = 100) {
+    internal init(frame: CGRect,
+                  normalIcon: String?,
+                  selectedIcon: String?,
+                  buttonsCount: Int = 3,
+                  duration: Double = 2,
+                  distance: Float = 100) {
         super.init(frame: frame)
 
         if let icon = normalIcon {
@@ -159,13 +130,14 @@ open class CircleMenu: UIButton {
         commonInit()
     }
 
-    public required init?(coder aDecoder: NSCoder) {
+    internal required init?(coder aDecoder: NSCoder) {
         super.init(coder: aDecoder)
 
         commonInit()
     }
 
     fileprivate func commonInit() {
+        PlaySettings.tagInternalView(self)
         addActions(newEvent: showButtonsEvent)
 
         customNormalIconView = addCustomImageView(state: .normal)
@@ -185,7 +157,7 @@ open class CircleMenu: UIButton {
      - parameter duration:  The duration, in seconds, of the animation.
      - parameter hideDelay: The time to delay, in seconds.
      */
-    open func hideButtons(_ duration: Double, hideDelay: Double = 0) {
+    internal func hideButtons(_ duration: Double, hideDelay: Double = 0) {
         if buttons == nil {
             return
         }
@@ -199,7 +171,7 @@ open class CircleMenu: UIButton {
     /**
      Check is sub buttons showed
      */
-    open func buttonsIsShown() -> Bool {
+    internal func buttonsIsShown() -> Bool {
         guard let buttons = self.buttons else {
             return false
         }
@@ -211,7 +183,7 @@ open class CircleMenu: UIButton {
 
     }
 
-    open override func removeFromSuperview() {
+    override func removeFromSuperview() {
         if self.platform?.superview != nil { self.platform?.removeFromSuperview() }
         super.removeFromSuperview()
     }
@@ -277,6 +249,7 @@ open class CircleMenu: UIButton {
         let platform = customize(UIView(frame: .zero)) {
             $0.backgroundColor = .clear
             $0.translatesAutoresizingMaskIntoConstraints = false
+            PlaySettings.tagInternalView($0)
         }
         superview?.insertSubview(platform, belowSubview: self)
 
@@ -343,8 +316,9 @@ open class CircleMenu: UIButton {
             let platform = createPlatform()
             buttons = createButtons(platform: platform)
             self.platform = platform
-            DispatchQueue.main.asyncAfter(deadline: .now()) {
-                self.delegate?.menuOpened?(self)
+            DispatchQueue.main.asyncAfter(deadline: .now()) { [weak self] in
+                guard let self else { return }
+                self.delegate?.menuOpened(self)
             }
         }
         let isShow = !buttonsIsShown()
@@ -362,7 +336,7 @@ open class CircleMenu: UIButton {
     @objc func buttonHandler(_ sender: CircleMenuButton) {
         guard let platform = self.platform else { return }
 
-        delegate?.circleMenu?(self, buttonWillSelected: sender, atIndex: sender.tag)
+        delegate?.circleMenu(self, buttonWillSelected: sender, atIndex: sender.tag)
 
         let strokeWidth: CGFloat
         if let radius = self.subButtonsRadius {
@@ -392,10 +366,11 @@ open class CircleMenu: UIButton {
         hideCenterButton(duration: 0.3)
         showCenterButton(duration: 0.525, delay: duration)
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: {
-            self.delegate?.circleMenu?(self, buttonDidSelected: sender, atIndex: sender.tag)
-        })
-}
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self, weak sender] in
+            guard let self, let sender else { return }
+            self.delegate?.circleMenu(self, buttonDidSelected: sender, atIndex: sender.tag)
+        }
+    }
 
     // MARK: animations
 
@@ -406,9 +381,9 @@ open class CircleMenu: UIButton {
 
         let step = getArcStep()
         for index in 0 ..< buttonsCount {
-            guard case let button as CircleMenuButton = buttons[index] else { continue }
+            guard index < buttons.count, case let button as CircleMenuButton = buttons[index] else { continue }
             if isShow == true {
-                delegate?.circleMenu?(self, willDisplay: button, atIndex: index)
+                delegate?.circleMenu(self, willDisplay: button, atIndex: index)
                 let angle: Float = startAngle + Float(index) * step
                 button.rotatedZ(angle: angle, animated: false, delay: Double(index) * showDelay)
                 button.showAnimation(distance: distance, duration: duration, delay: Double(index) * showDelay)
@@ -418,9 +393,9 @@ open class CircleMenu: UIButton {
         }
         if isShow == false { // hide buttons and remove
             self.buttons = nil
-            delegate?.menuCollapsed?(self)
-            DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + duration) {
-                if self.platform?.superview != nil { self.platform?.removeFromSuperview() }
+            delegate?.menuCollapsed(self)
+            DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + duration) { [weak self] in
+                if self?.platform?.superview != nil { self?.platform?.removeFromSuperview() }
             }
         }
     }

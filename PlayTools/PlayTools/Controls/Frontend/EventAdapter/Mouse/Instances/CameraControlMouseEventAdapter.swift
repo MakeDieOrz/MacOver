@@ -18,10 +18,12 @@ public class CameraControlMouseEventAdapter: MouseEventAdapter {
     }
 
     public func handleMove(deltaX: CGFloat, deltaY: CGFloat) -> Bool {
-        let sensy = CGFloat(PlaySettings.shared.sensitivity * 0.6)
-        let cgDx = deltaX * sensy,
-            cgDy = -deltaY * sensy
-        return ActionDispatcher.dispatch(key: KeyCodeNames.mouseMove, valueX: cgDx, valueY: cgDy)
+        let delta = PTCoordinateMath.scaledCameraDelta(
+            deltaX: deltaX,
+            deltaY: deltaY,
+            sensitivity: PlaySettings.shared.sensitivity
+        )
+        return ActionDispatcher.dispatch(key: KeyCodeNames.mouseMove, valueX: delta.dx, valueY: delta.dy)
     }
 
     public func handleLeftButton(pressed: Bool) -> Bool {

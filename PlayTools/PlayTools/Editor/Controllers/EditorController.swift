@@ -16,21 +16,24 @@ class EditorController {
     var controls: [ControlElement] = []
     var view: EditorView! {editorWindow?.rootViewController?.view as? EditorView}
 
-    private func initWindow() -> UIWindow {
-        let window = UIWindow(windowScene: screen.windowScene!)
+    private func initWindow() -> UIWindow? {
+        guard let windowScene = screen.windowScene else { return nil }
+        let window = UIWindow(windowScene: windowScene)
         window.rootViewController = EditorViewController(nibName: nil, bundle: nil)
+        PlaySettings.tagInternalView(window)
         return window
     }
 
     private func addControlToView(control: ControlElement) {
+        guard let editorView = view else { return }
         controls.append(control)
-        view.addSubview(control.button)
+        editorView.addSubview(control.button)
         updateFocus(button: control.button)
     }
 
     public func updateFocus(button: Element) {
-        view.setNeedsFocusUpdate()
-        view.updateFocusIfNeeded()
+        view?.setNeedsFocusUpdate()
+        view?.updateFocusIfNeeded()
         for cntrl in controls {
             cntrl.focus(false)
         }
@@ -43,6 +46,7 @@ class EditorController {
 
     public func switchMode() {
         lock.lock()
+        defer { lock.unlock() }
         if editorMode {
             EditorCircleMenu.shared.hide()
             saveButtons()
@@ -57,8 +61,9 @@ class EditorController {
                                                     tableName: "Playtools", value: "Keymap Saved", comment: ""))
         } else {
             previousWindow = screen.keyWindow
-            editorWindow = initWindow()
-            editorWindow?.makeKeyAndVisible()
+            guard let win = initWindow() else { return }
+            editorWindow = win
+            win.makeKeyAndVisible()
             showButtons()
             Toast.showHint(title: NSLocalizedString("hint.keymappingEditor.title",
                                                     tableName: "Playtools", value: "Keymapping Editor", comment: ""),
@@ -68,8 +73,6 @@ class EditorController {
                                         + "Click an empty area to open input menu", comment: "")],
                            notification: NSNotification.Name.playtoolsCursorWillHide)
         }
-//        Toast.showOver(msg: "\(UIApplication.shared.windows.count)")
-        lock.unlock()
     }
 
     var editorMode: Bool { !(editorWindow?.isHidden ?? true)}
@@ -134,7 +137,7 @@ class EditorController {
         }
         keymap.currentKeymap = keymapData
         controls = []
-        view.subviews.forEach { $0.removeFromSuperview() }
+        view?.subviews.forEach { $0.removeFromSuperview() }
     }
 
     public func addJoystick(_ center: CGPoint) {

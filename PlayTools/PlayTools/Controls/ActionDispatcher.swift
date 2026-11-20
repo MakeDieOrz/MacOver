@@ -19,6 +19,7 @@ public enum ActionDispatchPriority: Int {
 
 public class ActionDispatcher {
     static private let keymapVersion = "2.0."
+    static private let lock = NSLock()
     static private var actions = [Action]()
     static private var buttonHandlers: [String: [(Bool) -> Void]] = [:]
 
@@ -30,16 +31,36 @@ public class ActionDispatcher {
             (0..<mappingCountPerPriority).map({_ in ManagedAtomic<AtomicHandler>(.EMPTY)})
         })
     )
+    static private let activePriorityMask = ManagedAtomic<UInt8>(0)
+
+    private static func refreshPriorityMaskLocked() {
+        var mask: UInt8 = 0
+        for p in 0..<priorityCount {
+            if directionPadHandlers[p].contains(where: { !$0.load(ordering: .relaxed).key.isEmpty }) {
+                mask |= UInt8(1 << p)
+            }
+        }
+        activePriorityMask.store(mask, ordering: .releasing)
+    }
 
     static private func clear() {
-        invalidateActions()
+        lock.lock()
+        let existingActions = actions
         actions = []
         buttonHandlers.removeAll(keepingCapacity: true)
-        directionPadHandlers.forEach({ handlers in
-            handlers.forEach({ handler in
+        for handlers in directionPadHandlers {
+            for handler in handlers {
                 handler.store(.EMPTY, ordering: .relaxed)
-            })
-        })
+            }
+        }
+        activePriorityMask.store(0, ordering: .releasing)
+        lock.unlock()
+
+        for action in existingActions {
+            action.invalidate()
+        }
+        Toucher.clearCachedTargets()
+        ThumbstickCursorControl.invalidateAll()
     }
 
     // Backend interfaces
@@ -48,17 +69,25 @@ public class ActionDispatcher {
     static public func build() {
         clear()
 
-        actions.append(FakeMouseAction())
+        let rightLongPress = FakeRightLongPressAction()
+        var newActions: [Action] = [
+            FakeMouseAction(onPressWillBegin: { rightLongPress.finishEarlyOnTouchQueue() }),
+            rightLongPress
+        ]
 
         // current keymap version is 2.0.x.
         // in future, keymap format will be upgraded.
         // PlayTools would maintain limited backwards compatibility.
         // Meanwhile, keymap format upgrade would be rare.
-        if !keymap.currentKeymap.version.hasPrefix(keymapVersion) {
+        let currentMap = keymap.currentKeymap
+        if !currentMap.version.hasPrefix(keymapVersion) {
+            lock.lock()
+            actions.append(contentsOf: newActions)
+            lock.unlock()
             DispatchQueue.main.asyncAfter(
                 deadline: .now() + .seconds(5)) {
                     Toast.showHint(title: "Keymap format too new",
-                       text: ["Current keymap version \(keymap.currentKeymap.version)" +
+                       text: ["Current keymap version \(currentMap.version)" +
                               " is too new and cannot be recognized\n" +
                               "For protection of your data, keymap is not loaded\n" +
                               "Please upgrade PlayCover, " +
@@ -67,26 +96,29 @@ public class ActionDispatcher {
             return
         }
 
-        for button in keymap.currentKeymap.buttonModels {
-            actions.append(ButtonAction(data: button))
+        for button in currentMap.buttonModels {
+            newActions.append(ButtonAction(data: button))
         }
 
-        for draggableButton in keymap.currentKeymap.draggableButtonModels {
-            actions.append(DraggableButtonAction(data: draggableButton))
+        for draggableButton in currentMap.draggableButtonModels {
+            newActions.append(DraggableButtonAction(data: draggableButton))
         }
 
-        for mouse in keymap.currentKeymap.mouseAreaModel {
-            actions.append(CameraAction(data: mouse))
+        for mouse in currentMap.mouseAreaModel {
+            newActions.append(CameraAction(data: mouse))
         }
 
-        for joystick in keymap.currentKeymap.joystickModel {
+        for joystick in currentMap.joystickModel {
             // Left Thumbstick, Right Thumbstick, Mouse
             if JoystickModel.isAnalog(joystick) {
-                actions.append(ContinuousJoystickAction(data: joystick))
+                newActions.append(ContinuousJoystickAction(data: joystick))
             } else { // Keyboard
-                actions.append(JoystickAction(data: joystick))
+                newActions.append(JoystickAction(data: joystick))
             }
         }
+        lock.lock()
+        actions.append(contentsOf: newActions)
+        lock.unlock()
         // `cursorHideNecessary` is used to disable `option` toggle when there is no mouse mapping
         // but in the case this new feature disabled, `option` should always function.
         // this variable is set here to be checked for mouse mapping later.
@@ -97,44 +129,35 @@ public class ActionDispatcher {
 
     static public func register(key: String, handler: @escaping (Bool) -> Void) {
         // this function is called when setting up `button` type of mapping
+        lock.lock()
+        defer { lock.unlock() }
         if buttonHandlers[key] == nil {
             buttonHandlers[key] = []
         }
-        buttonHandlers[key]!.append(handler)
+        buttonHandlers[key]?.append(handler)
     }
 
     static public func register(key: String,
                                 handler: @escaping (CGFloat, CGFloat) -> Void,
                                 priority: ActionDispatchPriority = .DEFAULT) {
-        let atomicHandler = directionPadHandlers[priority.rawValue].first(where: { handler in
-            handler.load(ordering: .relaxed).key == key
-        }) ??
-        directionPadHandlers[priority.rawValue].first(where: { handler in
-            handler.load(ordering: .relaxed).key.isEmpty
-        })
-//        DispatchQueue.main.async {
-//            if screen.keyWindow == nil {
-//                return
-//            }
-//            Toast.showHint(title: "register",
-//               text: ["key: \(key), atomicHandler: \(String(describing: atomicHandler))"])
-//        }
-        atomicHandler?.store(AtomicHandler(key, handler), ordering: .releasing)
+        lock.lock()
+        defer { lock.unlock() }
+        let row = directionPadHandlers[priority.rawValue]
+        let slot = row.first(where: { $0.load(ordering: .relaxed).key == key }) ??
+            row.first(where: { $0.load(ordering: .relaxed).key.isEmpty })
+        slot?.store(AtomicHandler(key, handler), ordering: .releasing)
+        refreshPriorityMaskLocked()
     }
 
     static public func unregister(key: String) {
         // Only draggable can be unregistered
-        let atomicHandler = directionPadHandlers[ActionDispatchPriority.DRAGGABLE.rawValue].first(where: { handler in
-            handler.load(ordering: .relaxed).key == key
-        })
-//        DispatchQueue.main.async {
-//            if screen.keyWindow == nil {
-//                return
-//            }
-//            Toast.showHint(title: "unregister",
-//               text: ["key: \(key), atomicHandler: \(String(describing: atomicHandler))"])
-//        }
-        atomicHandler?.store(.EMPTY, ordering: .releasing)
+        lock.lock()
+        defer { lock.unlock() }
+        let row = directionPadHandlers[ActionDispatchPriority.DRAGGABLE.rawValue]
+        if let slot = row.first(where: { $0.load(ordering: .relaxed).key == key }) {
+            slot.store(.EMPTY, ordering: .releasing)
+            refreshPriorityMaskLocked()
+        }
     }
 
     // Frontend interfaces
@@ -146,7 +169,10 @@ public class ActionDispatcher {
         Would be called during mode switching where target mode shouldn't have any touch remain.
     */
     static public func invalidateActions() {
-        for action in actions {
+        lock.lock()
+        let currentActions = actions
+        lock.unlock()
+        for action in currentActions {
             // This is just a rescue feature, in case any key stuck pressed for any reason
             // Might be called on control mode state transition
             action.invalidate()
@@ -165,52 +191,91 @@ public class ActionDispatcher {
         camera control (becomes random zoom in zoom out)
     */
     static public func invalidateNonButtonActions() {
-        for action in actions
+        lock.lock()
+        let currentActions = actions
+        lock.unlock()
+        for action in currentActions
         where !(action is ButtonAction || action is JoystickAction) {
             action.invalidate()
         }
     }
 
     static public func getDispatchPriority(key: String) -> ActionDispatchPriority? {
-        if let priority = directionPadHandlers.firstIndex(where: { handlers in
-            handlers.contains(where: { handler in
-                handler.load(ordering: .acquiring).key == key
-            })
-        }) {
-//            Toast.showHint(title: "\(key) priority", text: ["\(priority)"])
-            return ActionDispatchPriority(rawValue: priority)
+        let mask = activePriorityMask.load(ordering: .acquiring)
+        if mask != 0 {
+            for priority in 0..<priorityCount where (mask & UInt8(1 << priority)) != 0 {
+                for slot in directionPadHandlers[priority] {
+                    if slot.load(ordering: .acquiring).key == key {
+                        return ActionDispatchPriority(rawValue: priority)
+                    }
+                }
+            }
         }
 
-        if buttonHandlers[key] != nil {
+        lock.lock()
+        let hasButtonHandler = buttonHandlers[key] != nil
+        lock.unlock()
+        if hasButtonHandler {
             return .DEFAULT
         }
         return nil
     }
 
     static public func dispatch(key: String, pressed: Bool) -> Bool {
-        guard let handlers = buttonHandlers[key] else {
+        lock.lock()
+        let handlers = buttonHandlers[key]
+        lock.unlock()
+        guard let handlers, !handlers.isEmpty else {
             return false
         }
-        var mapped = false
-        for handler in handlers {
-            PlayInput.touchQueue.async(qos: .userInteractive, execute: {
+        if handlers.count == 1, let onlyHandler = handlers.first {
+            PlayInput.touchQueue.async(qos: .userInteractive) {
+                onlyHandler(pressed)
+            }
+            return true
+        }
+        PlayInput.touchQueue.async(qos: .userInteractive) {
+            for handler in handlers {
                 handler(pressed)
-            })
-            mapped = true
+            }
         }
         // return value matters. A false value makes a beep sound
-        return mapped
+        return true
+    }
+
+    /// Single-scan combined priority check + dispatch (avoids redundant 24-slot scans on mouse move hot paths).
+    static public func dispatchAtPriority(_ priority: ActionDispatchPriority,
+                                          key: String,
+                                          valueX: CGFloat,
+                                          valueY: CGFloat) -> Bool {
+        let mask = activePriorityMask.load(ordering: .acquiring)
+        guard (mask & UInt8(1 << priority.rawValue)) != 0 else {
+            return false
+        }
+        for slot in directionPadHandlers[priority.rawValue] {
+            let resolved = slot.load(ordering: .acquiring)
+            if resolved.key == key {
+                PlayInput.touchQueue.async(qos: .userInteractive) {
+                    resolved.handle(valueX, valueY)
+                }
+                return true
+            }
+        }
+        return false
     }
 
     static public func dispatch(key: String, valueX: CGFloat, valueY: CGFloat) -> Bool {
-        for priority in 0..<priorityCount {
-            if let handler = directionPadHandlers[priority].first(where: { handler in
-                handler.load(ordering: .acquiring).key == key
-            }) {
-                PlayInput.touchQueue.async(qos: .userInteractive, execute: {
-                    handler.load(ordering: .relaxed).handle(valueX, valueY)
-                })
-                return true
+        let mask = activePriorityMask.load(ordering: .acquiring)
+        guard mask != 0 else { return false }
+        for priority in 0..<priorityCount where (mask & UInt8(1 << priority)) != 0 {
+            for slot in directionPadHandlers[priority] {
+                let resolved = slot.load(ordering: .acquiring)
+                if resolved.key == key {
+                    PlayInput.touchQueue.async(qos: .userInteractive) {
+                        resolved.handle(valueX, valueY)
+                    }
+                    return true
+                }
             }
         }
         return false

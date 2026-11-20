@@ -16,20 +16,22 @@ class EditorCircleMenu: CircleMenuDelegate {
         if menu != nil {
             hide()
         }
-        menu = CircleMenu(
+        guard let window = screen.keyWindow ?? screen.primaryWindow else { return }
+        let createdMenu = CircleMenu(
             frame: CGRect(x: 0, y: 0, width: 50, height: 50),
             normalIcon: "xmark.circle.fill",
             selectedIcon: "xmark.circle.fill",
             buttonsCount: 3,
             duration: 0.25,
             distance: 80)
-        menu?.delegate = self
-        menu?.center = location
-        menu?.backgroundColor = UIColor.gray
-        menu?.layer.cornerRadius = menu!.frame.size.width / 2
-        screen.keyWindow?.addSubview(menu!)
-        menu?.backgroundColor = UIColor.black
-        menu?.onTap()
+        createdMenu.delegate = self
+        createdMenu.center = location
+        createdMenu.layer.cornerRadius = createdMenu.frame.size.width / 2
+        createdMenu.backgroundColor = UIColor.black
+        PlaySettings.tagInternalView(createdMenu)
+        window.addSubview(createdMenu)
+        menu = createdMenu
+        createdMenu.onTap()
     }
 
     public func hide() {
@@ -41,24 +43,27 @@ class EditorCircleMenu: CircleMenuDelegate {
 
     public func hideWithAnimation() {
         if self.menu != nil {
-            PlayCover.delay(0.25) {
-                self.hide()
+            PlayCover.delay(0.25) { [weak self] in
+                self?.hide()
             }
         }
     }
 
     func circleMenu(_: CircleMenu, buttonWillSelected btn: UIButton, atIndex: Int) {
-        let globalPoint = menu!.superview?.convert(menu!.center, to: nil)
+        guard let menu, let globalPoint = menu.superview?.convert(menu.center, to: nil) else {
+            hideWithAnimation()
+            return
+        }
         switch atIndex {
         case 0:
-            EditorController.shared.addButton(globalPoint!)
+            EditorController.shared.addButton(globalPoint)
         case 1:
-            EditorController.shared.addJoystick(globalPoint!)
+            EditorController.shared.addJoystick(globalPoint)
         case 2:
-            EditorController.shared.addMouseArea(globalPoint!)
+            EditorController.shared.addMouseArea(globalPoint)
         default:
             Toast.showHint(title: "item \(atIndex) is not recognizable")
-//            EditorController.shared.addMouseJoystick(globalPoint!)
+//            EditorController.shared.addMouseJoystick(globalPoint)
         }
         hideWithAnimation()
     }

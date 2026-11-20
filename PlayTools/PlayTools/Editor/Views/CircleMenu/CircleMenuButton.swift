@@ -42,6 +42,8 @@ internal class CircleMenuButton: UIButton {
         // hack view for rotate
         let view = UIView(frame: CGRect(x: 0, y: 0, width: bounds.width, height: bounds.height))
         view.backgroundColor = UIColor.clear
+        PlaySettings.tagInternalView(view)
+        PlaySettings.tagInternalView(self)
         view.addSubview(self)
         // ...
 
@@ -64,6 +66,7 @@ internal class CircleMenuButton: UIButton {
             $0.backgroundColor = UIColor.clear
             $0.translatesAutoresizingMaskIntoConstraints = false
             $0.layer.anchorPoint = CGPoint(x: 0.5, y: 1)
+            PlaySettings.tagInternalView($0)
         }
         platform.addSubview(container)
 
@@ -109,7 +112,7 @@ internal class CircleMenuButton: UIButton {
 
     internal func rotatedZ(angle: Float, animated: Bool, duration: Double = 0, delay: Double = 0) {
         guard let container = self.container else {
-            fatalError("contaner don't create")
+            return
         }
 
         let rotateTransform = CATransform3DMakeRotation(CGFloat(angle.degrees), 0, 0, 1)
@@ -134,7 +137,7 @@ internal extension CircleMenuButton {
 
     func showAnimation(distance: Float, duration: Double, delay: Double = 0) {
         guard let heightConstraint = (self.container?.constraints.filter { $0.identifier == "height" })?.first else {
-            fatalError()
+            return
         }
 
         transform = CGAffineTransform(scaleX: 0, y: 0)
@@ -182,7 +185,7 @@ internal extension CircleMenuButton {
     func changeDistance(_ distance: CGFloat, animated _: Bool, duration: Double = 0, delay: Double = 0) {
 
         guard let heightConstraint = (self.container?.constraints.filter { $0.identifier == "height" })?.first else {
-            fatalError()
+            return
         }
 
         heightConstraint.constant = distance

@@ -1,0 +1,30 @@
+---
+Language: ObjC
+BasedOnStyle: LLVM
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 120
+PointerAlignment: Right
+BreakBeforeBraces: Attach
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortBlocksOnASingleLine: Empty
+ObjCSpaceAfterProperty: true
+ObjCSpaceBeforeProtocolList: true
+ObjCBlockIndentWidth: 4
+SortIncludes: Never
+IncludeBlocks: Preserve
+---
+Language: Cpp
+BasedOnStyle: LLVM
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 120
+PointerAlignment: Right
+BreakBeforeBraces: Attach
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortFunctionsOnASingleLine: Inline
+SortIncludes: Never
+...

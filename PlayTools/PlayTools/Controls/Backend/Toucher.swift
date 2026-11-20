@@ -7,14 +7,18 @@ import Foundation
 import UIKit
 
 class Toucher {
-    static weak var keyWindow: UIWindow?
-    static weak var keyView: UIView?
     // For debug only
     static var logEnabled = false
     static var logFilePath =
     NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true)[0] + "/toucher.log"
     static private var logCount = 0
     static var logFile: FileHandle?
+    private static var termObserverInstalled = false
+
+    static func clearCachedTargets() {
+        // Hit-testing now runs asynchronously inside PTFakeMetaTouch's main-runloop source.
+    }
+
     /**
      on invocations with phase "began", an int id is allocated, which can be used later to refer to this touch point.
      on invocations with phase "ended", id is set to nil representing the touch point is no longer valid.
@@ -26,20 +30,40 @@ class Toucher {
             if tid != nil {
                 return
             }
-            tid = -1
-            keyWindow = screen.keyWindow
-            keyView = keyWindow!.hitTest(point, with: nil)
-        } else if tid == nil {
+            let allocatedId = PTFakeMetaTouch.fakeTouchId(-1, at: point, with: phase,
+                                                          in: nil, on: nil)
+            if logEnabled {
+                writeLog(logMessage:
+                    "\(phase.rawValue.description) \(allocatedId.description) \(point.debugDescription)")
+            }
+            guard allocatedId >= 0 else {
+                tid = nil
+                return
+            }
+            tid = allocatedId
+            DebugModel.instance.record(point: point, phase: phase, tid: allocatedId,
+                                       description: actionName + "(" + keyName + ")")
             return
         }
-        var recordId = tid!
-        tid = PTFakeMetaTouch.fakeTouchId(tid!, at: point, with: phase, in: keyWindow, on: keyView)
-        writeLog(logMessage:
-                "\(phase.rawValue.description) \(tid!.description) \(point.debugDescription)")
-        if tid! < 0 {
+
+        guard let activeId = tid, activeId >= 0 else {
+            return
+        }
+        let isTerminal = (phase == .ended || phase == .cancelled)
+
+        let resultId = PTFakeMetaTouch.fakeTouchId(activeId, at: point, with: phase,
+                                                   in: nil, on: nil)
+        if logEnabled {
+            writeLog(logMessage:
+                "\(phase.rawValue.description) \(resultId.description) \(point.debugDescription)")
+        }
+        let recordId: Int
+        if isTerminal || resultId < 0 {
             tid = nil
+            recordId = activeId
         } else {
-            recordId = tid!
+            tid = resultId
+            recordId = resultId
         }
         DebugModel.instance.record(point: point, phase: phase, tid: recordId,
                                    description: actionName + "(" + keyName + ")")
@@ -53,12 +77,16 @@ class Toucher {
             Toast.showHint(title: "logFile creation failed")
             return
         }
-        NotificationCenter.default.addObserver(
-            forName: NSNotification.Name(rawValue: "NSApplicationWillTerminateNotification"),
-            object: nil,
-            queue: OperationQueue.main
-        ) { _ in
-            try? logFile?.close()
+        if !termObserverInstalled {
+            termObserverInstalled = true
+            NotificationCenter.default.addObserver(
+                forName: NSNotification.Name(rawValue: "NSApplicationWillTerminateNotification"),
+                object: nil,
+                queue: OperationQueue.main
+            ) { _ in
+                try? logFile?.close()
+                logFile = nil
+            }
         }
     }
 
@@ -66,8 +94,10 @@ class Toucher {
         if !logEnabled {
             return
         }
-        guard let file = logFile else {
+        if logFile == nil {
             setupLogfile()
+        }
+        guard let file = logFile else {
             return
         }
         let message = "\(DispatchTime.now().rawValue) \(logMessage)\n"
@@ -78,7 +108,7 @@ class Toucher {
         logCount += 1
         // roll over
         if logCount > 60000 {
-            file.seek(toFileOffset: 0)
+            try? file.truncate(atOffset: 0)
             logCount = 0
         }
         file.write(data)

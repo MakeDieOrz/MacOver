@@ -13,6 +13,7 @@
 - (void)setWindow:(UIWindow *)window;
 - (void)setView:(UIView *)view;
 - (void)setIsTap:(BOOL)isTap;
+- (void)setTapCount:(NSUInteger)tapCount;
 - (void)setTimestamp:(NSTimeInterval)timestamp;
 - (void)setPhase:(UITouchPhase)touchPhase;
 - (void)setGestureView:(UIView *)view;

@@ -109,6 +109,7 @@ internal class CircleMenuLoader: UIView {
             $0.backgroundColor = UIColor.black
             $0.layer.cornerRadius = rect.size.width / 2.0
             $0.backgroundColor = color
+            PlaySettings.tagInternalView($0)
         }
         addSubview(roundView)
     }

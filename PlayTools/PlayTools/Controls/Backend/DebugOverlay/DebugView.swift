@@ -57,7 +57,8 @@ class RingView: UIView {
         center = position
         text = description
         let colorMap: [UIColor] = [.green, .red, .brown, .blue, .purple, .cyan, .gray, .darkGray, .black]
-        ringColor = colorMap[phase.rawValue]
+        let idx = phase.rawValue
+        ringColor = (idx >= 0 && idx < colorMap.count) ? colorMap[idx] : .black
     }
 
     override func draw(_ rect: CGRect) {
@@ -83,15 +84,46 @@ class RingView: UIView {
 
 class DebugContainer: UIView {
     static let instance = DebugContainer()
+    private var refreshTimer: Timer?
+
     private init() {
         super.init(frame: CGRect(x: 0, y: 0, width: screen.width, height: screen.height))
+        PlaySettings.tagInternalView(self)
     }
 
     required init?(coder: NSCoder) {
         super.init(coder: coder)
     }
-    // This is called once when the view shows
-    override func draw(_ rect: CGRect) {
+
+    override func didMoveToSuperview() {
+        super.didMoveToSuperview()
+        if superview != nil {
+            startRefreshTimer()
+            refreshTouches()
+        } else {
+            stopRefreshTimer()
+        }
+    }
+
+    private func startRefreshTimer() {
+        guard refreshTimer == nil else { return }
+        let timer = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in
+            self?.refreshTouches()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        refreshTimer = timer
+    }
+
+    private func stopRefreshTimer() {
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+    }
+
+    private func refreshTouches() {
+        guard superview != nil else {
+            stopRefreshTimer()
+            return
+        }
         let data = DebugModel.instance.touches
         while subviews.count < data.count {
             addSubview(RingView(frame: CGRect(x: 100, y: 100, width: 300, height: 300)))
@@ -99,22 +131,10 @@ class DebugContainer: UIView {
         while subviews.count > data.count {
             subviews.last?.removeFromSuperview()
         }
-        var iter = data.makeIterator()
-        for view in subviews {
-            guard let ring = view as? RingView else {
-                continue
-            }
-            guard let point = iter.next() else {
-                continue
-            }
+        for (idx, point) in data.enumerated() where idx < subviews.count {
+            guard let ring = subviews[idx] as? RingView else { continue }
             let description = point.description + ": " + point.phase.name()
             ring.setData(position: point.point, description: description, phase: point.phase)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            if self.superview == nil {
-                return
-            }
-            self.draw(CGRect())
         }
     }
 }
@@ -123,6 +143,7 @@ extension UITouch.Phase {
     public func name() -> String {
         let nameMap = ["Began", "Moved", "Stationary", "Ended", "Cancelled",
                        "regionEntered", "regionMoved", "regionExited"]
-        return nameMap[self.rawValue]
+        let idx = self.rawValue
+        return (idx >= 0 && idx < nameMap.count) ? nameMap[idx] : "Unknown"
     }
 }

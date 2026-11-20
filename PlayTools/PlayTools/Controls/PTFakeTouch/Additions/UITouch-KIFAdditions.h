@@ -13,10 +13,12 @@
 
 @interface UITouch (KIFAdditions)
 
-- (id)initAtPoint:(CGPoint)point inWindow:(UIWindow *)window onView:(UIView*)view;
-- (id)initTouch;
+- (id)pm_kif_initAtPoint:(CGPoint)point inWindow:(UIWindow *)window onView:(UIView*)view __attribute__((objc_method_family(init)));
+- (id)pm_kif_initAtPoint:(CGPoint)point inWindow:(UIWindow *)window onView:(UIView*)view fingerIndex:(uint32_t)fingerIndex __attribute__((objc_method_family(init)));
+- (id)pm_kif_initTouch __attribute__((objc_method_family(init)));
 
-- (void)setLocationInWindow:(CGPoint)location;
-- (void)setPhaseAndUpdateTimestamp:(UITouchPhase)phase;
+- (void)pm_kif_setLocationInWindow:(CGPoint)location;
+- (void)pm_kif_setPhaseAndUpdateTimestamp:(UITouchPhase)phase;
+- (void)pm_kif_setPhaseAndUpdateTimestamp:(UITouchPhase)phase fingerIndex:(uint32_t)fingerIndex;
 
 @end

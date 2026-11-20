@@ -53,22 +53,54 @@ public class ControlMode: Equatable {
             initializeResizableWindowSupport()
         }
 
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.willResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            if PlaySettings.shared.keymapping {
+                ActionDispatcher.invalidateNonButtonActions()
+            }
+        }
+
         ActionDispatcher.build()
+    }
+
+    private static func hasOtherActiveTextInputResponder(excluding endingObject: Any?) -> Bool {
+        let firstResponderSelector = NSSelectorFromString("firstResponder")
+        let endingRef = endingObject as AnyObject?
+        for scene in UIApplication.shared.connectedScenes {
+            guard let ws = scene as? UIWindowScene else { continue }
+            for win in ws.windows where !win.isHidden && win.responds(to: firstResponderSelector) {
+                guard let unmanaged = win.perform(firstResponderSelector),
+                      let responder = unmanaged.takeUnretainedValue() as? UIResponder else {
+                    continue
+                }
+                if responder !== endingRef, responder is UITextInput {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     private func setupTextInputObservers() {
         let centre = NotificationCenter.default
         let main = OperationQueue.main
-        centre.addObserver(forName: UITextField.textDidEndEditingNotification, object: nil, queue: main) { _ in
-            ModeAutomaton.onUITextInputEndEdit()
+        centre.addObserver(forName: UITextField.textDidEndEditingNotification, object: nil, queue: main) { note in
+            if !Self.hasOtherActiveTextInputResponder(excluding: note.object) {
+                ModeAutomaton.onUITextInputEndEdit()
+            }
             Toucher.writeLog(logMessage: "uitextinput end edit")
         }
         centre.addObserver(forName: UITextField.textDidBeginEditingNotification, object: nil, queue: main) { _ in
             ModeAutomaton.onUITextInputBeginEdit()
             Toucher.writeLog(logMessage: "uitextinput begin edit")
         }
-        centre.addObserver(forName: UITextView.textDidEndEditingNotification, object: nil, queue: main) { _ in
-            ModeAutomaton.onUITextInputEndEdit()
+        centre.addObserver(forName: UITextView.textDidEndEditingNotification, object: nil, queue: main) { note in
+            if !Self.hasOtherActiveTextInputResponder(excluding: note.object) {
+                ModeAutomaton.onUITextInputEndEdit()
+            }
             Toucher.writeLog(logMessage: "uitextinput end edit")
         }
         centre.addObserver(forName: UITextView.textDidBeginEditingNotification, object: nil, queue: main) { _ in
@@ -77,59 +109,75 @@ public class ControlMode: Equatable {
         }
     }
 
+    private func configureGameController(_ controller: GCController) {
+        controller.handlerQueue = PlayInput.touchQueue
+        controller.extendedGamepad?.valueChangedHandler = { [weak self] profile, element in
+            self?.controllerAdapter.handleValueChanged(profile, element)
+        }
+    }
+
     private func setupGameController() {
         let centre = NotificationCenter.default
         let main = OperationQueue.main
-        centre.addObserver(forName: NSNotification.Name.GCControllerDidConnect, object: nil, queue: main) { _ in
+        GCController.shouldMonitorBackgroundEvents = true
+        for existing in GCController.controllers() {
+            configureGameController(existing)
+        }
+        if let current = GCController.current {
+            configureGameController(current)
+        }
+        centre.addObserver(forName: NSNotification.Name.GCControllerDidConnect, object: nil, queue: main) { [weak self] note in
             GCController.shouldMonitorBackgroundEvents = true
-            GCController.current?.extendedGamepad?.valueChangedHandler = { profile, element in
-                self.controllerAdapter.handleValueChanged(profile, element)
+            if let connected = note.object as? GCController {
+                self?.configureGameController(connected)
+            } else if let current = GCController.current {
+                self?.configureGameController(current)
             }
         }
     }
 
     private func setupKeyboard() {
-        AKInterface.shared!.setupKeyboard(
-            keyboard: { keycode, pressed, isRepeat, ctrlModified in
-                self.keyboardAdapter.handleKey(
+        AKInterface.shared?.setupKeyboard(
+            keyboard: { [weak self] keycode, pressed, isRepeat, ctrlModified in
+                self?.keyboardAdapter.handleKey(
                     keycode: keycode,
                     pressed: pressed,
                     isRepeat: isRepeat,
                     ctrlModified: ctrlModified
-                )
+                ) ?? false
             },
             swapMode: ModeAutomaton.onOption
         )
     }
 
     private func setupScrollWheel() {
-        AKInterface.shared!.setupScrollWheel({ deltaX, deltaY in
-            self.mouseAdapter.handleScrollWheel(deltaX: deltaX, deltaY: deltaY)
+        AKInterface.shared?.setupScrollWheel({ [weak self] deltaX, deltaY in
+            self?.mouseAdapter.handleScrollWheel(deltaX: deltaX, deltaY: deltaY) ?? false
         })
     }
 
     private func setupMouseButtons() {
-        AKInterface.shared!.setupMouseButton(left: true, right: false, { _, pressed in
-            self.mouseAdapter.handleLeftButton(pressed: pressed)
+        AKInterface.shared?.setupMouseButton(left: true, right: false, { [weak self] _, pressed in
+            self?.mouseAdapter.handleLeftButton(pressed: pressed) ?? false
         })
 
-        AKInterface.shared!.setupMouseButton(left: false, right: false, { id, pressed in
-            self.mouseAdapter.handleOtherButton(id: id, pressed: pressed)
+        AKInterface.shared?.setupMouseButton(left: false, right: false, { [weak self] id, pressed in
+            self?.mouseAdapter.handleOtherButton(id: id, pressed: pressed) ?? false
         })
 
-        AKInterface.shared!.setupMouseButton(left: false, right: true, { id, pressed in
-            self.mouseAdapter.handleOtherButton(id: id, pressed: pressed)
+        AKInterface.shared?.setupMouseButton(left: false, right: true, { [weak self] id, pressed in
+            self?.mouseAdapter.handleOtherButton(id: id, pressed: pressed) ?? false
         })
     }
 
     private func initializeResizableWindowSupport() {
         // Reactivate keymapping once the key window is initialized
         keyWindowObserver = NotificationCenter.default.addObserver(forName: UIWindow.didBecomeKeyNotification,
-            object: nil, queue: .main) { _ in
+            object: nil, queue: .main) { [weak self] _ in
             ActionDispatcher.build()
-            if let observer = self.keyWindowObserver {
+            if let observer = self?.keyWindowObserver {
                 NotificationCenter.default.removeObserver(observer)
-                self.keyWindowObserver = nil
+                self?.keyWindowObserver = nil
             }
         }
         // Reactivate keymapping once the user finishes resizing the window
@@ -140,73 +188,69 @@ public class ControlMode: Equatable {
     }
 
     private func setupMouseMoved(maxPollingRate: Int) {
-        let minMoveInterval =
-            DispatchTimeInterval.milliseconds(1000/maxPollingRate)
-        var lastMoveWhen = DispatchTime.now()
+        var coalescer = PTMouseMoveCoalescer(maxPollingRate: maxPollingRate, deadZone: 0)
         // Repeat the return value of last processed event
         var consumed = true
-        var movement: CGVector = CGVector()
 
-        AKInterface.shared!.setupMouseMoved({deltaX, deltaY in
-            // limit move frequency
-            let now = DispatchTime.now()
-            movement.dy += deltaY
-            movement.dx += deltaX
-            if now < lastMoveWhen.advanced(by: minMoveInterval) {
+        AKInterface.shared?.setupMouseMoved({ [weak self] deltaX, deltaY in
+            let nowNs = DispatchTime.now().uptimeNanoseconds
+            guard let flushed = coalescer.ingest(
+                deltaX: deltaX,
+                deltaY: deltaY,
+                timestampNanoseconds: nowNs
+            ) else {
                 return consumed
             }
-
-            lastMoveWhen = now
-            consumed = self.mouseAdapter.handleMove(deltaX: movement.dx, deltaY: movement.dy)
-            movement.dy = 0
-            movement.dx = 0
+            consumed = self?.mouseAdapter.handleMove(deltaX: flushed.dx, deltaY: flushed.dy) ?? false
             return consumed
         })
     }
 
     public func set(_ mode: ControlModeLiteral) {
+        let previousMode = controlMode
         let wasHidden = mouseAdapter?.cursorHidden() ?? false
         let first = mouseAdapter == nil
         keyboardAdapter = EventAdapters.keyboard(controlMode: mode)
         mouseAdapter = EventAdapters.mouse(controlMode: mode)
         controllerAdapter = EventAdapters.controller(controlMode: mode)
         controlMode = mode
-        if !first {
-//            Toast.showHint(title: "should hide cursor? \(mouseAdapter.cursorHidden())",
-//                       text: ["current state: " + mode])
-        }
-        if mouseAdapter.cursorHidden() != wasHidden && settings.keymapping {
+        let nextHidden = mouseAdapter.cursorHidden()
+
+        let invalidation = PTControlModeTransitionPolicy.invalidation(
+            from: previousMode.rawValue,
+            to: mode.rawValue,
+            wasCursorHidden: wasHidden,
+            nextCursorHidden: nextHidden,
+            isInitial: first,
+            keymappingEnabled: settings.keymapping
+        )
+
+        if nextHidden != wasHidden && settings.keymapping {
             if wasHidden {
-                NotificationCenter.default.post(name: NSNotification.Name.playtoolsCursorWillShow,
-                                                object: nil, userInfo: [:])
+                Toast.internalNotificationCenter.post(name: NSNotification.Name.playtoolsCursorWillShow,
+                                                      object: nil, userInfo: [:])
                 if screen.fullscreen {
                     screen.switchDock(true)
                 }
-
-                if mode == .off || mode == .editor {
-                    ActionDispatcher.invalidateActions()
-                } else {
-                    // In case any touch point failed to release
-                    // (might because of system glitch)
-                    // Work around random zoom in zoom out
-                    ActionDispatcher.invalidateNonButtonActions()
-                }
-
-                AKInterface.shared!.unhideCursor()
+                AKInterface.shared?.unhideCursor()
             } else {
-                NotificationCenter.default.post(name: NSNotification.Name.playtoolsCursorWillHide,
-                                                object: nil, userInfo: [:])
-                AKInterface.shared!.hideCursor()
-
-                // Fix when people hold fake mouse while pressing option
-                // and it becomes random zoom in zoom out
-                ActionDispatcher.invalidateNonButtonActions()
-
+                Toast.internalNotificationCenter.post(name: NSNotification.Name.playtoolsCursorWillHide,
+                                                      object: nil, userInfo: [:])
+                AKInterface.shared?.hideCursor()
                 if screen.fullscreen {
                     screen.switchDock(false)
                 }
             }
             Toucher.writeLog(logMessage: "cursor show switched to \(!wasHidden)")
+        }
+
+        switch invalidation {
+        case .none:
+            break
+        case .nonButtonActions:
+            ActionDispatcher.invalidateNonButtonActions()
+        case .allActions:
+            ActionDispatcher.invalidateActions()
         }
     }
 

@@ -9,10 +9,15 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-@interface NSObject (Swizzle)
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-- (void)swizzleInstanceMethod:(SEL)origSelector withMethod:(SEL)newSelector;
+extern __attribute__((visibility("hidden")))
+void pt_swizzle_instance_method(Class _Nullable cls, SEL origSelector, SEL newSelector);
 
-@end
+#ifdef __cplusplus
+}
+#endif
 
 NS_ASSUME_NONNULL_END

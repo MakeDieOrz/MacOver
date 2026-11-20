@@ -7,4 +7,8 @@
 //
 
 typedef struct __IOHIDEvent * IOHIDEventRef;
+@class UITouch;
+__attribute__((visibility("hidden")))
 IOHIDEventRef kif_IOHIDEventWithTouches(NSArray *touches) CF_RETURNS_RETAINED;
+__attribute__((visibility("hidden")))
+IOHIDEventRef kif_IOHIDEventWithTouch(UITouch *touch, uint32_t fingerIndex) CF_RETURNS_RETAINED;

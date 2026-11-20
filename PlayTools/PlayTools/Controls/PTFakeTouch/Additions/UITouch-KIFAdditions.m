@@ -13,7 +13,12 @@
 
 @implementation UITouch (KIFAdditions)
 
-- (id)initAtPoint:(CGPoint)point inWindow:(UIWindow *)window onView:(UIView*)view;
+- (id)pm_kif_initAtPoint:(CGPoint)point inWindow:(UIWindow *)window onView:(UIView*)view
+{
+    return [self pm_kif_initAtPoint:point inWindow:window onView:view fingerIndex:0];
+}
+
+- (id)pm_kif_initAtPoint:(CGPoint)point inWindow:(UIWindow *)window onView:(UIView*)view fingerIndex:(uint32_t)fingerIndex;
 {
     self = [super init];
     if (self == nil) {
@@ -29,31 +34,45 @@
     
     [self setView:hitTestView];
     [self setPhase:UITouchPhaseBegan];
-    if (![[NSProcessInfo processInfo] isiOSAppOnMac] && ![[NSProcessInfo processInfo] isMacCatalystApp]) {
+    if ([self respondsToSelector:@selector(setTapCount:)]) {
+        [self setTapCount:1];
+    }
+    if ([self respondsToSelector:@selector(_setIsTapToClick:)]) {
         [self _setIsTapToClick:NO];
     } else {
-        [self _setIsFirstTouchForView:YES];
-        [self setIsTap:NO];
+        if ([self respondsToSelector:@selector(_setIsFirstTouchForView:)]) {
+            [self _setIsFirstTouchForView:YES];
+        }
+        if ([self respondsToSelector:@selector(setIsTap:)]) {
+            [self setIsTap:NO];
+        }
     }
     [self setTimestamp: [[NSProcessInfo processInfo] systemUptime]];
     if ([self respondsToSelector:@selector(setGestureView:)]) {
         [self setGestureView:hitTestView];
     }
     
-    [self kif_setHidEvent];
+    [self kif_setHidEventWithFingerIndex:fingerIndex];
     return self;
 }
 
-- (id)initTouch;
+- (id)pm_kif_initTouch;
 {
     //DLog(@"init...touch...");
     self = [super init];
     if (self == nil) {
         return nil;
     }
-    NSArray *scenes = [[[UIApplication sharedApplication] connectedScenes] allObjects];
-    NSArray *windows = [[scenes objectAtIndex:0] windows];
-    UIWindow *window = [windows lastObject];
+    UIWindow *window = nil;
+    for (UIScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
+        if ([scene isKindOfClass:[UIWindowScene class]]) {
+            UIWindowScene *winScene = (UIWindowScene *)scene;
+            if (winScene.windows.count > 0) {
+                window = [winScene.windows lastObject];
+                break;
+            }
+        }
+    }
     CGPoint point = CGPointMake(0, 0);
     [self setWindow:window]; // Wipes out some values.  Needs to be first.
     
@@ -64,33 +83,42 @@
     [self setView:hitTestView];
     [self setPhase:UITouchPhaseEnded];
     //DLog(@"init...touch...setPhase 3");
-    if (![[NSProcessInfo processInfo] isiOSAppOnMac] && ![[NSProcessInfo processInfo] isMacCatalystApp]) {
+    if ([self respondsToSelector:@selector(_setIsTapToClick:)]) {
         [self _setIsTapToClick:NO];
     } else {
-        [self _setIsFirstTouchForView:YES];
-        [self setIsTap:NO];
+        if ([self respondsToSelector:@selector(_setIsFirstTouchForView:)]) {
+            [self _setIsFirstTouchForView:YES];
+        }
+        if ([self respondsToSelector:@selector(setIsTap:)]) {
+            [self setIsTap:NO];
+        }
     }
     [self setTimestamp: [[NSProcessInfo processInfo] systemUptime]];
     if ([self respondsToSelector:@selector(setGestureView:)]) {
         [self setGestureView:hitTestView];
     }
     
-    [self kif_setHidEvent];
+    [self kif_setHidEventWithFingerIndex:0];
     return self;
 }
 
 //
-// setLocationInWindow:
+// pm_kif_setLocationInWindow:
 //
 // Setter to allow access to the _locationInWindow member.
 //
-- (void)setLocationInWindow:(CGPoint)location
+- (void)pm_kif_setLocationInWindow:(CGPoint)location
 {
     [self setTimestamp: [[NSProcessInfo processInfo] systemUptime]];
     [self _setLocationInWindow:location resetPrevious:NO];
 }
 
-- (void)setPhaseAndUpdateTimestamp:(UITouchPhase)phase
+- (void)pm_kif_setPhaseAndUpdateTimestamp:(UITouchPhase)phase
+{
+    [self pm_kif_setPhaseAndUpdateTimestamp:phase fingerIndex:0];
+}
+
+- (void)pm_kif_setPhaseAndUpdateTimestamp:(UITouchPhase)phase fingerIndex:(uint32_t)fingerIndex
 {
     //DLog(@"setPhaseAndUpdateTimestamp : %ld",(long)phase);
     [self setTimestamp: [[NSProcessInfo processInfo] systemUptime]];
@@ -98,13 +126,15 @@
     // Update the IOHIDEvent to match the new phase.
     // Some games validate IOHIDEvent.eventMask against UITouch.phase,
     // so keeping them in sync is critical for fake touch acceptance.
-    [self kif_setHidEvent];
+    [self kif_setHidEventWithFingerIndex:fingerIndex];
 }
 
-- (void)kif_setHidEvent {
-    IOHIDEventRef event = kif_IOHIDEventWithTouches(@[self]);
-    [self _setHidEvent:event];
-    CFRelease(event);
+- (void)kif_setHidEventWithFingerIndex:(uint32_t)fingerIndex {
+    IOHIDEventRef event = kif_IOHIDEventWithTouch(self, fingerIndex);
+    if (event != NULL) {
+        [self _setHidEvent:event];
+        CFRelease(event);
+    }
 }
 
 @end

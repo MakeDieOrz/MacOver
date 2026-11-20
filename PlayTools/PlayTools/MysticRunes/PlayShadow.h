@@ -9,10 +9,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-@interface NSObject (ShadowSwizzle)
+// Swizzling is handled via internal C helpers in PlayShadow.m without adding
+// categories onto NSObject.
 
-- (void)swizzleInstanceMethod:(SEL)origSelector withMethod:(SEL)newSelector;
-+ (void)swizzleClassMethod: (SEL)origSelector withMethod: (SEL)newSelector
-
-@end
 NS_ASSUME_NONNULL_END

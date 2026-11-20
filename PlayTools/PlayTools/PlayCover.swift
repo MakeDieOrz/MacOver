@@ -12,6 +12,13 @@ public class PlayCover: NSObject {
     var menuController: MenuController?
 
     @objc static public func launch() {
+        _ = PTSafeMode.shared.ensureEvaluatedForCurrentProcess()
+
+        if PlaySettings.shared.rootWorkDir {
+            // Change the working directory to / just like iOS
+            FileManager.default.changeCurrentDirectoryPath("/")
+        }
+
         quitWhenClose()
         AKInterface.initialize()
         UserPluginLoader.initialize()
@@ -19,12 +26,16 @@ public class PlayCover: NSObject {
         PlayInput.shared.initialize()
         DiscordIPC.shared.initialize()
 
-        if PlaySettings.shared.rootWorkDir {
-            // Change the working directory to / just like iOS
-            FileManager.default.changeCurrentDirectoryPath("/")
-        }
-
-        if PlaySettings.shared.displayRotation != 0 {
+        let rotation = PlaySettings.shared.displayRotation
+        if rotation != 0 {
+            if AKInterface.shared?.isSequoiaOrNewer == true {
+                let isPortrait = (rotation % 4 == 1 || rotation % 4 == 3)
+                let targetSize = CGSize(
+                    width: PlaySettings.shared.windowSizeWidth,
+                    height: PlaySettings.shared.windowSizeHeight
+                )
+                AKInterface.shared?.setWindowOrientation?(portrait: isPortrait, targetSize: targetSize)
+            }
             DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + 0.5, execute: {
                 let rotateCommand = UIKeyCommand(
                     title: "Keep Rotation Command",
@@ -32,7 +43,7 @@ public class PlayCover: NSObject {
                     action: #selector(UIApplication.rotateView(_:)),
                     input: "",
                     modifierFlags: [],
-                    propertyList: ["rotationIndex": PlaySettings.shared.displayRotation]
+                    propertyList: ["rotationIndex": rotation]
                 )
                 UIApplication.shared.sendAction(
                     #selector(UIApplication.rotateView(_:)),
@@ -92,7 +103,12 @@ public class PlayCover: NSObject {
                 // swiftlint:disable:previous line_length
 //                NotificationCenter.default.post(name: UIApplication.willTerminateNotification,
 //                                                object: UIApplication.shared)
-                DispatchQueue.main.async(execute: AKInterface.shared!.terminateApplication)
+                if let terminate = AKInterface.shared?.terminateApplication {
+                    PTSafeMode.shared.markGracefulTermination()
+                    DispatchQueue.main.async(execute: terminate)
+                } else {
+                    PTSafeMode.shared.markGracefulTermination()
+                }
 
                 // Step 3.5: End BGTask
                 // BGTask typically runs in another process and is tricky to terminate.

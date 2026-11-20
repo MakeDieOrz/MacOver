@@ -22,7 +22,7 @@ public class EditorKeyboardEventAdapter: KeyboardEventAdapter {
     ]
 
     public func handleKey(keycode: UInt16, pressed: Bool, isRepeat: Bool, ctrlModified: Bool) -> Bool {
-        if AKInterface.shared!.cmdPressed || !pressed || isRepeat {
+        if (AKInterface.shared?.cmdPressed ?? false) || !pressed || isRepeat {
             return false
         }
         guard let rawValue = KeyCodeNames.mapNSEventVirtualCodeToGCKeyCodeRawValue[keycode] else {

@@ -12,6 +12,7 @@ class KeyCodeNames {
     public static let scrollWheelScale = "ScrollWheelScale"
     public static let scrollWheelDrag = "ScrollWheelDrag"
     public static let fakeMouse = "FakeMouse"
+    public static let fakeRightLongPress = "FakeRightLongPress"
 
     private static let gcKeyCodeLiteral = [
     -4: "cA",

@@ -20,9 +20,19 @@ class DebugModel {
 
     public var touches: [TouchPoint]
     public var enabled = false
+
+    public func setEnabled(_ isEnabled: Bool) {
+        enabled = isEnabled
+        if !isEnabled {
+            DispatchQueue.main.async {
+                self.touches.removeAll(keepingCapacity: true)
+            }
+        }
+    }
+
     public func record(point: CGPoint, phase: UITouch.Phase, tid: Int, description: String) {
         // If debug screen not enabled, do not record
-        if !enabled {
+        if !enabled || tid < 0 {
             return
         }
         // Run in main thread, because `touches` is not thread safe

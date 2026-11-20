@@ -8,7 +8,7 @@
 
 Pod::Spec.new do |s|
     s.name             = 'PlayTools'
-    s.version          = '1.1.1'
+    s.version          = '5.0.0'
     s.summary          = 'PlayTools from PlayCover'
     s.swift_versions   = '5'
   # This description is used to generate tags and improve search results.
@@ -36,7 +36,7 @@ Pod::Spec.new do |s|
     # }
     s.ios.framework  = 'UIKit', 'IOKit'
     s.exclude_files = "PlayTools/Info.plist"
-    s.public_header_files = 'PlayTools/PlayTools.h.h'
+    s.public_header_files = 'PlayTools/PlayTools.h'
     s.pod_target_xcconfig = { 'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'x86_64' }
     s.user_target_xcconfig = { 'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'x86_64' }
     # s.frameworks = 'Cocoa'

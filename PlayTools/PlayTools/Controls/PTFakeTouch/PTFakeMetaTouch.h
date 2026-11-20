@@ -19,11 +19,16 @@
  *  @param pointId 触屏操作的序列号 sequence number of touch screen operation
  *  @param point   操作的目的位置 target position of the operation
  *  @param phase   操作的类别 type of the operation
- *  @param window  key window in which touch event is to happen
+ *  @param window  key window in which touch event is to happen (nil resolves active window on main loop)
+ *  @param view    target hit view (nil resolves via hitTest on main loop)
  *
  *  @return pointId if this point exists after the operation, -1 if not
  */
 
-+ (NSInteger)fakeTouchId:(NSInteger)pointId AtPoint:(CGPoint)point withTouchPhase:(UITouchPhase)phase inWindow:(UIWindow*)window onView:(UIView*)view;
++ (NSInteger)fakeTouchId:(NSInteger)pointId
+                 AtPoint:(CGPoint)point
+          withTouchPhase:(UITouchPhase)phase
+                inWindow:(UIWindow * _Nullable)window
+                  onView:(UIView * _Nullable)view;
 
 @end

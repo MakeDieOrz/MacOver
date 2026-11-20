@@ -7,8 +7,6 @@
 
 #import <Foundation/Foundation.h>
 #import <GameController/GCController.h>
-#import <objc/runtime.h>
-#import <PlayTools/PlayTools-Swift.h>
 
 __attribute__((visibility("hidden")))
 @interface BackgroundControllerLoader : NSObject
@@ -16,6 +14,10 @@ __attribute__((visibility("hidden")))
 
 @implementation BackgroundControllerLoader
 + (void)load {
-    [GCController setShouldMonitorBackgroundEvents:YES];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if ([GCController respondsToSelector:@selector(setShouldMonitorBackgroundEvents:)]) {
+            [GCController setShouldMonitorBackgroundEvents:YES];
+        }
+    });
 }
 @end

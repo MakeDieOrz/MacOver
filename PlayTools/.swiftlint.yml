@@ -5,6 +5,7 @@ disabled_rules:
 excluded:
   - Carthage
   - Pods
+  - PlayToolsTests
 
 identifier_name:
   allowed_symbols: ['_']

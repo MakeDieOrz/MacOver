@@ -15,18 +15,24 @@ class AKInterface {
     }
 
     private static func loadPlugin() -> Plugin? {
-        // 1. Form the plugin's bundle URL
-        guard let bundleURL = Bundle.main.builtInPlugInsURL?
-                                    .appendingPathComponent("AKInterface")
-                                    .appendingPathExtension("bundle") else { return nil }
+        let candidateURLs: [URL?] = [
+            Bundle.main.builtInPlugInsURL?
+                .appendingPathComponent("AKInterface")
+                .appendingPathExtension("bundle"),
+            Bundle(for: AKInterface.self).builtInPlugInsURL?
+                .appendingPathComponent("AKInterface")
+                .appendingPathExtension("bundle")
+        ]
+        return loadPlugin(from: candidateURLs)
+    }
 
-        // 2. Create a bundle instance with the plugin URL
-        guard let bundle = Bundle(url: bundleURL) else { return nil }
-
-        // 3. Load the bundle and our plugin class
-        guard let pluginClass = bundle.principalClass as? Plugin.Type else { return nil }
-
-        // 4. Create an instance of the plugin class
-        return pluginClass.init()
+    static func loadPlugin(from candidateURLs: [URL?]) -> Plugin? {
+        for case let bundleURL? in candidateURLs {
+            if let bundle = Bundle(url: bundleURL),
+               let pluginClass = bundle.principalClass as? Plugin.Type {
+                return pluginClass.init()
+            }
+        }
+        return nil
     }
 }

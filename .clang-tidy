@@ -1,0 +1,13 @@
+---
+Checks: >
+  -*,
+  bugprone-*,
+  clang-analyzer-*,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-branch-clone,
+  -bugprone-reserved-identifier
+WarningsAsErrors: 'clang-analyzer-*'
+HeaderFilterRegex: '^PlayTools/PlayTools/.*'
+FormatStyle: file
+...

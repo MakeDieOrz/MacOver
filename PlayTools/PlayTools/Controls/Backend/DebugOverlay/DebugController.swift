@@ -16,21 +16,23 @@ class DebugController {
     private var debugView = DebugContainer.instance
 
     public func toggleDebugOverlay() {
-        let window = screen.keyWindow
-        let controller = window!.rootViewController
-        let view = controller!.view
+        guard let window = screen.keyWindow ?? screen.primaryWindow,
+              let view = window.rootViewController?.view else {
+            return
+        }
         if debugView.superview == nil {
-            view!.addSubview(debugView)
-            view!.bringSubviewToFront(debugView)
+            PlaySettings.tagInternalView(debugView)
+            view.addSubview(debugView)
+            view.bringSubviewToFront(debugView)
             debugView.isHidden = false
             debugView.isUserInteractionEnabled = false
             PlayInput.touchQueue.async {
-                DebugModel.instance.enabled = true
+                DebugModel.instance.setEnabled(true)
             }
         } else {
             debugView.removeFromSuperview()
             PlayInput.touchQueue.async {
-                DebugModel.instance.enabled = false
+                DebugModel.instance.setEnabled(false)
             }
         }
     }

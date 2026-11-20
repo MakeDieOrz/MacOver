@@ -13,8 +13,11 @@ protocol Action {
 
 class ButtonAction: Action {
     func invalidate() {
-        Toucher.touchcam(point: point, phase: UITouch.Phase.ended, tid: &id,
-                         actionName: "Button", keyName: keyName)
+        PlayInput.touchQueue.async { [weak self] in
+            guard let self = self else { return }
+            Toucher.touchcam(point: self.point, phase: UITouch.Phase.ended, tid: &self.id,
+                             actionName: "Button", keyName: self.keyName)
+        }
     }
 
     let keyCode: Int
@@ -70,7 +73,7 @@ class DraggableButtonAction: ButtonAction {
                                       handler: self.onMouseMoved,
                                       priority: .DRAGGABLE)
             if !mode.cursorHidden() {
-                AKInterface.shared!.hideCursor()
+                AKInterface.shared?.hideCursor()
             }
         } else {
             Toucher.touchcam(point: releasePoint, phase: UITouch.Phase.ended, tid: &id,
@@ -78,7 +81,7 @@ class DraggableButtonAction: ButtonAction {
             if id == nil {
                 ActionDispatcher.unregister(key: KeyCodeNames.mouseMove)
                 if !mode.cursorHidden() {
-                    AKInterface.shared!.unhideCursor()
+                    AKInterface.shared?.unhideCursor()
                 }
             }
         }
@@ -86,7 +89,15 @@ class DraggableButtonAction: ButtonAction {
 
     override func invalidate() {
         ActionDispatcher.unregister(key: KeyCodeNames.mouseMove)
-        super.invalidate()
+        PlayInput.touchQueue.async { [weak self] in
+            guard let self = self else { return }
+            let hadActiveTouch = self.id != nil
+            Toucher.touchcam(point: self.releasePoint, phase: UITouch.Phase.ended, tid: &self.id,
+                             actionName: "DraggableButton", keyName: self.keyName)
+            if hadActiveTouch && self.id == nil && !mode.cursorHidden() {
+                AKInterface.shared?.unhideCursor()
+            }
+        }
     }
 
     func onMouseMoved(deltaX: CGFloat, deltaY: CGFloat) {
@@ -145,8 +156,8 @@ class ContinuousJoystickAction: Action {
         } else if mode == .FLOATING {
             Toucher.touchcam(point: self.center, phase: UITouch.Phase.began, tid: &id,
                              actionName: "ControllerJoystick", keyName: key)
-            PlayInput.touchQueue.asyncAfter(deadline: .now() + 0.04, qos: .userInitiated) {
-                if self.id == nil {
+            PlayInput.touchQueue.asyncAfter(deadline: .now() + 0.04, qos: .userInitiated) { [weak self] in
+                guard let self = self, self.id != nil else {
                     return
                 }
                 Toucher.touchcam(point: point, phase: UITouch.Phase.moved, tid: &self.id,
@@ -168,8 +179,12 @@ class ContinuousJoystickAction: Action {
     }
 
     func invalidate() {
-        Toucher.touchcam(point: CGPoint(x: 10, y: 10), phase: UITouch.Phase.ended, tid: &id,
-                         actionName: "ControllerJoystick", keyName: key)
+        PlayInput.touchQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.begun = false
+            Toucher.touchcam(point: CGPoint(x: 10, y: 10), phase: UITouch.Phase.ended, tid: &self.id,
+                             actionName: "ControllerJoystick", keyName: self.key)
+        }
     }
 }
 
@@ -189,8 +204,9 @@ class JoystickAction: Action {
         self.mode = mode
         for index in 0..<keys.count {
             let key = keys[index]
-            ActionDispatcher.register(key: KeyCodeNames.keyCodes[key]!,
-                                     handler: self.getPressedHandler(index: index))
+            guard let codeName = KeyCodeNames.keyCodes[key] else { continue }
+            ActionDispatcher.register(key: codeName,
+                                      handler: self.getPressedHandler(index: index))
         }
     }
 
@@ -210,8 +226,13 @@ class JoystickAction: Action {
     }
 
     func invalidate() {
-        Toucher.touchcam(point: center, phase: UITouch.Phase.ended, tid: &id,
-                         actionName: "KeyboardJoystick", keyName: "Keyboard")
+        PlayInput.touchQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.keyPressed = [Bool](repeating: false, count: 4)
+            self.touch = self.center
+            Toucher.touchcam(point: self.center, phase: UITouch.Phase.ended, tid: &self.id,
+                             actionName: "KeyboardJoystick", keyName: "Keyboard")
+        }
     }
 
     func getPressedHandler(index: Int) -> (Bool) -> Void {
@@ -280,8 +301,8 @@ class JoystickAction: Action {
         handleCommon {
             Toucher.touchcam(point: self.center, phase: UITouch.Phase.began, tid: &id,
                              actionName: "KeyboardJoystick", keyName: "Keyboard")
-            PlayInput.touchQueue.asyncAfter(deadline: .now() + 0.04, qos: .userInitiated) {
-                if self.id == nil {
+            PlayInput.touchQueue.asyncAfter(deadline: .now() + 0.04, qos: .userInitiated) { [weak self] in
+                guard let self = self, self.id != nil else {
                     return
                 }
                 Toucher.touchcam(point: self.touch, phase: UITouch.Phase.moved, tid: &self.id,
@@ -349,6 +370,7 @@ class CameraAction: Action {
         swipeMove.invalidate()
         swipeScale1.invalidate()
         swipeScale2.invalidate()
+        CameraAction.swipeDrag.invalidate()
     }
 }
 
@@ -356,18 +378,54 @@ class SwipeAction: Action {
     var location: CGPoint = CGPoint.zero
     private var id: Int?
     let timer = DispatchSource.makeTimerSource(flags: [], queue: PlayInput.touchQueue)
+    private let timerLock: UnsafeMutablePointer<os_unfair_lock_s>
+    private var isTimerSuspended = true
+    private var isCancelled = false
     private let actionName: String, keyName: String
     init(actionName: String, keyName: String) {
         self.actionName = actionName
         self.keyName = keyName
+        self.timerLock = UnsafeMutablePointer<os_unfair_lock_s>.allocate(capacity: 1)
+        self.timerLock.initialize(to: os_unfair_lock_s())
         timer.schedule(deadline: DispatchTime.now() + 1, repeating: 0.1, leeway: DispatchTimeInterval.milliseconds(50))
-        timer.setEventHandler(qos: .userInteractive, handler: self.checkEnded)
+        timer.setEventHandler(qos: .userInteractive) { [weak self] in
+            self?.checkEnded()
+        }
         timer.activate()
         timer.suspend()
     }
 
     deinit {
-        timer.cancel()
+        os_unfair_lock_lock(timerLock)
+        if !isCancelled {
+            isCancelled = true
+            if isTimerSuspended {
+                isTimerSuspended = false
+                timer.resume()
+            }
+            timer.cancel()
+        }
+        os_unfair_lock_unlock(timerLock)
+        timerLock.deinitialize(count: 1)
+        timerLock.deallocate()
+    }
+
+    private func resumeTimerIfNeeded() {
+        os_unfair_lock_lock(timerLock)
+        if !isCancelled && isTimerSuspended {
+            isTimerSuspended = false
+            timer.resume()
+        }
+        os_unfair_lock_unlock(timerLock)
+    }
+
+    private func suspendTimerIfNeeded() {
+        os_unfair_lock_lock(timerLock)
+        if !isCancelled && !isTimerSuspended {
+            isTimerSuspended = true
+            timer.suspend()
+        }
+        os_unfair_lock_unlock(timerLock)
     }
 
     func delay(_ delay: Double, closure: @escaping () -> Void) {
@@ -393,7 +451,10 @@ class SwipeAction: Action {
      }
 
     private func checkXYOutOfWindow(coordX: CGFloat, coordY: CGFloat) -> Bool {
-        return coordX < 0 || coordY < 0 || coordX > screen.width || coordY > screen.height
+        PTCoordinateMath.isPointOutOfBounds(
+            CGPoint(x: coordX, y: coordY),
+            boundsSize: CGSize(width: screen.width, height: screen.height)
+        )
     }
 
     /**
@@ -401,23 +462,11 @@ class SwipeAction: Action {
      */
     private func getVelocityScaler(predictX: CGFloat, predictY: CGFloat,
                                    nowX: CGFloat, nowY: CGFloat) -> CGFloat {
-        var scaler = 1.0
-        if predictX < 0 {
-            let scale =  (0 - nowX) / (predictX - nowX)
-            scaler = min(scaler, scale)
-        } else if predictX > screen.width {
-            let scale =  (screen.width - nowX) / (predictX - nowX)
-            scaler = min(scaler, scale)
-        }
-
-        if predictY < 0 {
-            let scale =  (0 - nowY) / (predictY - nowY)
-            scaler = min(scaler, scale)
-        } else if predictY > screen.height {
-            let scale =  (screen.height - nowY) / (predictY - nowY)
-            scaler = min(scaler, scale)
-        }
-        return scaler
+        PTCoordinateMath.velocityScaler(
+            predicted: CGPoint(x: predictX, y: predictY),
+            current: CGPoint(x: nowX, y: nowY),
+            boundsSize: CGSize(width: screen.width, height: screen.height)
+        )
     }
 
     public func move(from: () -> CGPoint?, deltaX: CGFloat, deltaY: CGFloat) {
@@ -430,7 +479,7 @@ class SwipeAction: Action {
             counter = 0
             Toucher.touchcam(point: location, phase: UITouch.Phase.began, tid: &id,
                              actionName: actionName, keyName: keyName)
-            timer.resume()
+            resumeTimerIfNeeded()
         } else {
             if shouldEdgeReset {
                 doLiftOff()
@@ -460,8 +509,11 @@ class SwipeAction: Action {
         }
         // count touch duration
         counter += 1
-        self.location.x += scaledDeltaX
-        self.location.y -= scaledDeltaY
+        self.location = PTCoordinateMath.applySwipeDelta(
+            self.location,
+            deltaX: scaledDeltaX,
+            deltaY: scaledDeltaY
+        )
         // Check if new location is out of window (position overflows)
         // May fail in some games if point moves out of window
         // If next touch is predicted out of window then this lift off instead
@@ -480,9 +532,9 @@ class SwipeAction: Action {
                          actionName: actionName, keyName: keyName)
         // Touch might somehow fail to end
         if id == nil {
-            timer.suspend()
-            delay(0.02) {
-                self.cooldown = false
+            suspendTimerIfNeeded()
+            delay(0.02) { [weak self] in
+                self?.cooldown = false
             }
             cooldown = true
             shouldEdgeReset = false
@@ -490,28 +542,39 @@ class SwipeAction: Action {
     }
 
     func invalidate() {
-        PlayInput.touchQueue.async(execute: self.doLiftOff)
+        PlayInput.touchQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.doLiftOff()
+            self.suspendTimerIfNeeded()
+        }
     }
 }
 
 class FakeMouseAction: Action {
     var id: Int?
     var pos: CGPoint = CGPoint()
-    public init() {
+    private let onPressWillBegin: (() -> Void)?
+
+    public init(onPressWillBegin: (() -> Void)? = nil) {
+        self.onPressWillBegin = onPressWillBegin
         ActionDispatcher.register(key: KeyCodeNames.fakeMouse, handler: buttonPressHandler)
         ActionDispatcher.register(key: KeyCodeNames.fakeMouse, handler: buttonLiftHandler)
     }
 
     func buttonPressHandler(xValue: CGFloat, yValue: CGFloat) {
+        onPressWillBegin?()
+        if id != nil {
+            Toucher.touchcam(point: pos, phase: UITouch.Phase.cancelled, tid: &id,
+                             actionName: "FakeMouse", keyName: "FakeMouse")
+        }
         pos = CGPoint(x: xValue, y: yValue)
-//        DispatchQueue.main.async {
-//            Toast.showHint(title: "Fake mouse pressed", text: ["\(self.pos)"])
-//        }
         Toucher.touchcam(point: pos, phase: UITouch.Phase.began, tid: &id,
                          actionName: "FakeMouse", keyName: "FakeMouse")
-        ActionDispatcher.register(key: KeyCodeNames.fakeMouse,
-                                  handler: movementHandler,
-                                  priority: .DRAGGABLE)
+        if id != nil {
+            ActionDispatcher.register(key: KeyCodeNames.fakeMouse,
+                                      handler: movementHandler,
+                                      priority: .DRAGGABLE)
+        }
     }
 
     func buttonLiftHandler(pressed: Bool) {
@@ -519,14 +582,10 @@ class FakeMouseAction: Action {
             Toast.showHint(title: "Error", text: ["Fake mouse lift handler received a press event"])
             return
         }
-//        DispatchQueue.main.async {
-//            Toast.showHint(title: " lift Fake mouse", text: ["\(self.pos)"])
-//        }
+        ActionDispatcher.unregister(key: KeyCodeNames.fakeMouse)
+        guard id != nil else { return }
         Toucher.touchcam(point: pos, phase: UITouch.Phase.ended, tid: &id,
                          actionName: "FakeMouse", keyName: "FakeMouse")
-        if id == nil {
-            ActionDispatcher.unregister(key: KeyCodeNames.fakeMouse)
-        }
     }
 
     func movementHandler(xValue: CGFloat, yValue: CGFloat) {
@@ -538,9 +597,106 @@ class FakeMouseAction: Action {
 
     func invalidate() {
         ActionDispatcher.unregister(key: KeyCodeNames.fakeMouse)
-        Toucher.touchcam(point: pos ?? CGPoint(x: 10, y: 10),
-                         phase: UITouch.Phase.ended, tid: &self.id,
-                         actionName: "FakeMouse", keyName: "FakeMouse")
+        PlayInput.touchQueue.async { [weak self] in
+            guard let self = self, self.id != nil else { return }
+            Toucher.touchcam(point: self.pos,
+                             phase: UITouch.Phase.cancelled, tid: &self.id,
+                             actionName: "FakeMouse", keyName: "FakeMouse")
+        }
     }
 
+}
+
+class FakeRightLongPressAction: Action {
+    var id: Int?
+    private var state = PTLongPressStateMachine()
+    private var autoReleaseWorkItem: DispatchWorkItem?
+
+    public init() {
+        ActionDispatcher.register(key: KeyCodeNames.fakeRightLongPress, handler: buttonPressHandler)
+        ActionDispatcher.register(key: KeyCodeNames.fakeRightLongPress, handler: buttonLiftHandler)
+    }
+
+    private func finishTouch(phase: UITouch.Phase) {
+        autoReleaseWorkItem?.cancel()
+        autoReleaseWorkItem = nil
+        ActionDispatcher.unregister(key: KeyCodeNames.fakeRightLongPress)
+        guard id != nil else { return }
+        Toucher.touchcam(point: state.anchorPoint, phase: phase, tid: &id,
+                         actionName: "FakeRightLongPress", keyName: "FakeRightLongPress")
+    }
+
+    func buttonPressHandler(xValue: CGFloat, yValue: CGFloat) {
+        autoReleaseWorkItem?.cancel()
+        autoReleaseWorkItem = nil
+        let point = CGPoint(x: xValue, y: yValue)
+        let previousAnchor = state.anchorPoint
+        let (cancelledPrevious, generation) = state.begin(at: point)
+        if cancelledPrevious && id != nil {
+            Toucher.touchcam(point: previousAnchor, phase: UITouch.Phase.cancelled, tid: &id,
+                             actionName: "FakeRightLongPress", keyName: "FakeRightLongPress")
+        }
+        Toucher.touchcam(point: point, phase: UITouch.Phase.began, tid: &id,
+                         actionName: "FakeRightLongPress", keyName: "FakeRightLongPress")
+        guard id != nil else {
+            _ = state.invalidate()
+            ActionDispatcher.unregister(key: KeyCodeNames.fakeRightLongPress)
+            return
+        }
+
+        ActionDispatcher.register(key: KeyCodeNames.fakeRightLongPress,
+                                  handler: movementHandler,
+                                  priority: .DRAGGABLE)
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            if self.state.onMinimumHoldElapsed(generation: generation) {
+                self.finishTouch(phase: UITouch.Phase.ended)
+            }
+        }
+        autoReleaseWorkItem = workItem
+        PlayInput.touchQueue.asyncAfter(
+            deadline: .now() + .milliseconds(PTLongPressStateMachine.defaultMinimumHoldMilliseconds),
+            execute: workItem
+        )
+    }
+
+    func buttonLiftHandler(pressed: Bool) {
+        guard !pressed else { return }
+        if state.onPhysicalRelease() || id == nil {
+            finishTouch(phase: UITouch.Phase.ended)
+        }
+    }
+
+    func movementHandler(xValue: CGFloat, yValue: CGFloat) {
+        let nextPoint = CGPoint(x: xValue, y: yValue)
+        guard state.allowMove(to: nextPoint) else { return }
+        Toucher.touchcam(point: nextPoint, phase: UITouch.Phase.moved, tid: &id,
+                         actionName: "FakeRightLongPress", keyName: "FakeRightLongPress")
+    }
+
+    /// Completes any active long-press touch cleanly on `PlayInput.touchQueue` before a left-click begins.
+    func finishEarlyOnTouchQueue() {
+        autoReleaseWorkItem?.cancel()
+        autoReleaseWorkItem = nil
+        let endPoint = state.anchorPoint
+        let wasActive = state.finishEarly()
+        ActionDispatcher.unregister(key: KeyCodeNames.fakeRightLongPress)
+        guard wasActive, id != nil else { return }
+        Toucher.touchcam(point: endPoint, phase: UITouch.Phase.ended, tid: &id,
+                         actionName: "FakeRightLongPress", keyName: "FakeRightLongPress")
+    }
+
+    func invalidate() {
+        ActionDispatcher.unregister(key: KeyCodeNames.fakeRightLongPress)
+        PlayInput.touchQueue.async { [weak self] in
+            guard let self else { return }
+            self.autoReleaseWorkItem?.cancel()
+            self.autoReleaseWorkItem = nil
+            let endPoint = self.state.anchorPoint
+            _ = self.state.invalidate()
+            guard self.id != nil else { return }
+            Toucher.touchcam(point: endPoint, phase: UITouch.Phase.cancelled, tid: &self.id,
+                             actionName: "FakeRightLongPress", keyName: "FakeRightLongPress")
+        }
+    }
 }

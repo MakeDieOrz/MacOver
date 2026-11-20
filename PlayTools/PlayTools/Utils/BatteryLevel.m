@@ -6,65 +6,89 @@
 //
 
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 #import <objc/runtime.h>
-#import <PlayTools/PlayTools-Swift.h>
-#import "BatteryLevel.h"
+#import <stdatomic.h>
+#import "../PlayLoader.h"
 
 __attribute__((visibility("hidden")))
 @interface BatteryLevelLoader : NSObject
 @end
 
-@implementation NSObject (SwizzleBattery)
+static _Atomic BOOL s_batteryMonitoringEnabled = NO;
+static void (*s_orig_setBatteryMonitoringEnabled)(id, SEL, BOOL) = NULL;
 
-- (void) swizzleInstanceMethod:(SEL)origSelector withMethod:(SEL)newSelector
-{
-    Class cls = [self class];
-    // If current class doesn't exist selector, then get super
-    Method originalMethod = class_getInstanceMethod(cls, origSelector);
-    Method swizzledMethod = class_getInstanceMethod(cls, newSelector);
-    
-    // Add selector if it doesn't exist, implement append with method
-    if (class_addMethod(cls,
-                        origSelector,
-                        method_getImplementation(swizzledMethod),
-                        method_getTypeEncoding(swizzledMethod)) ) {
-        // Replace class instance method, added if selector not exist
-        // For class cluster, it always adds new selector here
-        class_replaceMethod(cls,
-                            newSelector,
-                            method_getImplementation(originalMethod),
-                            method_getTypeEncoding(originalMethod));
-        
-    } else {
-        // SwizzleMethod maybe belongs to super
-        class_replaceMethod(cls,
-                            newSelector,
-                            class_replaceMethod(cls,
-                                                origSelector,
-                                                method_getImplementation(swizzledMethod),
-                                                method_getTypeEncoding(swizzledMethod)),
-                            method_getTypeEncoding(originalMethod));
+static void pt_battery_setMonitoringEnabled(id self, SEL _cmd, BOOL enabled) {
+    atomic_store_explicit(&s_batteryMonitoringEnabled, enabled, memory_order_relaxed);
+    if (s_orig_setBatteryMonitoringEnabled != NULL) {
+        s_orig_setBatteryMonitoringEnabled(self, _cmd, enabled);
     }
 }
 
-- (bool) pm_return_true {
-    return true;
+static BOOL pt_battery_isMonitoringEnabled(id self, SEL _cmd) {
+    (void)self;
+    (void)_cmd;
+    return atomic_load_explicit(&s_batteryMonitoringEnabled, memory_order_relaxed);
 }
 
-- (float) pm_return_battery_full {
-    return 1.0;
+static float pt_battery_level(id self, SEL _cmd) {
+    (void)self;
+    (void)_cmd;
+    return atomic_load_explicit(&s_batteryMonitoringEnabled, memory_order_relaxed) ? 0.85f : -1.0f;
 }
 
-- (UIDeviceBatteryState) pm_return_fullCharging {
-    return UIDeviceBatteryStateFull;
+static UIDeviceBatteryState pt_battery_state(id self, SEL _cmd) {
+    (void)self;
+    (void)_cmd;
+    return atomic_load_explicit(&s_batteryMonitoringEnabled, memory_order_relaxed)
+        ? UIDeviceBatteryStateUnplugged
+        : UIDeviceBatteryStateUnknown;
 }
-@end
+
+static void pt_battery_replace_method(Class cls, SEL origSel, IMP hookIMP, IMP *outOrigIMP) {
+    if (cls == Nil || origSel == NULL || hookIMP == NULL) {
+        return;
+    }
+    Method origMethod = class_getInstanceMethod(cls, origSel);
+    if (origMethod == NULL) {
+        return;
+    }
+    IMP prev = method_getImplementation(origMethod);
+    if (prev == hookIMP) {
+        return;
+    }
+    IMP replaced = class_replaceMethod(cls, origSel, hookIMP, method_getTypeEncoding(origMethod));
+    IMP actualOrig = replaced ?: prev;
+    pt_register_swizzled_imp((const void *)hookIMP, (const void *)actualOrig);
+    if (outOrigIMP != NULL && *outOrigIMP == NULL) {
+        *outOrigIMP = actualOrig;
+    }
+}
 
 @implementation BatteryLevelLoader
 + (void)load {
-    [[UIDevice currentDevice] setBatteryMonitoringEnabled:YES];
-    [objc_getClass("UIDevice") swizzleInstanceMethod:@selector(isBatteryMonitoringEnabled) withMethod:@selector(pm_return_true)];
-    [objc_getClass("UIDevice") swizzleInstanceMethod:@selector(batteryState) withMethod:@selector(pm_return_fullCharging)];
-    [objc_getClass("UIDevice") swizzleInstanceMethod:@selector(batteryLevel) withMethod:@selector(pm_return_battery_full)];
+    if (!pt_is_bypass_enabled()) {
+        return;
+    }
+    Class uiDeviceCls = objc_getClass("UIDevice");
+    if (uiDeviceCls == Nil) {
+        return;
+    }
+    pt_battery_replace_method(uiDeviceCls,
+                              @selector(setBatteryMonitoringEnabled:),
+                              (IMP)pt_battery_setMonitoringEnabled,
+                              (IMP *)&s_orig_setBatteryMonitoringEnabled);
+    pt_battery_replace_method(uiDeviceCls,
+                              @selector(isBatteryMonitoringEnabled),
+                              (IMP)pt_battery_isMonitoringEnabled,
+                              NULL);
+    pt_battery_replace_method(uiDeviceCls,
+                              @selector(batteryState),
+                              (IMP)pt_battery_state,
+                              NULL);
+    pt_battery_replace_method(uiDeviceCls,
+                              @selector(batteryLevel),
+                              (IMP)pt_battery_level,
+                              NULL);
 }
 @end

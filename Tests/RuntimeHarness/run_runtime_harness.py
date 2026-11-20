@@ -1,0 +1,712 @@
+#!/usr/bin/env python3
+"""Headless Mac Catalyst runtime harness for PlayTools (Phase 4).
+
+Builds a lightweight Mac Catalyst mock target app + plugin bundle, links it
+against PlayTools.framework, and executes isolated OS processes to verify:
+  1. Dylib constructor injection completes without _tlv_bootstrap_error or crashes.
+  2. PluginManifest.json validation, UserPlugin loading, and dynamic anti-detection
+     registration (pt_register_hidden_module / pt_register_hidden_class).
+  3. Safe Mode lifecycle: .launching_in_progress breadcrumb written at launch,
+     cleared automatically after the stability window, and post-mortem Safe Mode
+     activation after an abnormal early exit (< 3s) that blocks user plugins and
+     reverts customScaler to 1.0, followed by clean recovery on the next launch.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import plistlib
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import Optional
+
+
+MOCK_PLUGIN_C = r"""
+#include <dlfcn.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+typedef void (*pt_register_fn_t)(const char *);
+
+__attribute__((constructor))
+static void mock_plugin_init(void) {
+    pt_register_fn_t reg_cls = (pt_register_fn_t)dlsym(RTLD_DEFAULT, "pt_register_hidden_class");
+    if (reg_cls != NULL) {
+        reg_cls("MockHarnessHiddenClass");
+    }
+    const char *marker_path = getenv("HARNESS_PLUGIN_MARKER");
+    if (marker_path != NULL && marker_path[0] != '\0') {
+        FILE *fp = fopen(marker_path, "w");
+        if (fp != NULL) {
+            fputs("loaded\n", fp);
+            fclose(fp);
+        }
+    }
+}
+"""
+
+MOCK_TARGET_M = r"""
+@import Foundation;
+@import QuartzCore;
+@import UIKit;
+@import PlayTools;
+#include <dlfcn.h>
+#include <mach-o/dyld.h>
+#include <objc/runtime.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/sysctl.h>
+#include <unistd.h>
+
+extern bool pt_is_registered_hidden_module(const char *name);
+extern bool pt_is_registered_hidden_class(const char *name);
+
+static NSString *pt_state_dir(void) {
+    NSArray<NSURL *> *caches = [[NSFileManager defaultManager] URLsForDirectory:NSCachesDirectory
+                                                                      inDomains:NSUserDomainMask];
+    NSURL *base = caches.firstObject ?: [NSURL fileURLWithPath:NSTemporaryDirectory()];
+    return [[base URLByAppendingPathComponent:@"io.playcover.PlayTools" isDirectory:YES] path];
+}
+
+int main(int argc, const char *argv[]) {
+    @autoreleasepool {
+        (void)argc;
+        (void)argv;
+
+        const char *simCrash = getenv("HARNESS_SIMULATE_CRASH");
+        if (simCrash != NULL && strcmp(simCrash, "1") == 0) {
+            // Simulate abrupt termination before the 3-second stability window.
+            _exit(134);
+        }
+
+        // Direct Mach-O linked checks verify internal state across Safe Mode & PTRegistration.
+        BOOL safeModeActive = [PTSafeMode isActive];
+        double customScaler = (double)[[PlaySettings shared] customScaler];
+        BOOL inverseScreenValues = [[PlaySettings shared] inverseScreenValues];
+        NSInteger windowFixMethod = [[PlaySettings shared] windowFixMethod];
+        NSInteger targetFrameRateHz = [[PlaySettings shared] targetFrameRateHz];
+        NSString *reportedIOSVersion = (NSString *)[[PlaySettings shared] reportedIOSVersion] ?: @"";
+        BOOL modHidden = pt_is_registered_hidden_module("/App/Frameworks/UserPlugins/MockUserPlugin.dylib");
+        BOOL idHidden = pt_is_registered_hidden_module("io.playcover.harness.mockplugin");
+        BOOL clsHidden = pt_is_registered_hidden_class("MockHarnessHiddenClass");
+
+        NSOperatingSystemVersion osVer = [[NSProcessInfo processInfo] operatingSystemVersion];
+        NSString *osVerString = [[NSProcessInfo processInfo] operatingSystemVersionString] ?: @"";
+        NSString *uiDeviceSysVer = [[UIDevice currentDevice] systemVersion] ?: @"";
+
+        char sysctlProdVer[64] = {0};
+        size_t sysctlProdVerLen = sizeof(sysctlProdVer);
+        if (sysctlbyname("kern.osproductversion", sysctlProdVer, &sysctlProdVerLen, NULL, 0) != 0) {
+            sysctlProdVer[0] = '\0';
+        }
+        char sysctlOSVer[64] = {0};
+        size_t sysctlOSVerLen = sizeof(sysctlOSVer);
+        if (sysctlbyname("kern.osversion", sysctlOSVer, &sysctlOSVerLen, NULL, 0) != 0) {
+            sysctlOSVer[0] = '\0';
+        }
+
+        NSObject *dlTarget = [NSObject new];
+        CADisplayLink *rangeLink = [CADisplayLink displayLinkWithTarget:dlTarget selector:@selector(description)];
+        rangeLink.preferredFrameRateRange = CAFrameRateRangeMake(30.0f, 120.0f, 120.0f);
+        float displayLinkClampedMaxHz = rangeLink.preferredFrameRateRange.maximum;
+        [rangeLink invalidate];
+
+        CADisplayLink *fpsLink = [CADisplayLink displayLinkWithTarget:dlTarget selector:@selector(description)];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        fpsLink.preferredFramesPerSecond = 120;
+        NSInteger displayLinkClampedLegacyFPS = fpsLink.preferredFramesPerSecond;
+#pragma clang diagnostic pop
+        [fpsLink invalidate];
+
+        // Untrusted app reflection checks verify anti-detection hides injected artifacts.
+        void *blockedDlsym = dlsym(RTLD_DEFAULT, "pt_is_registered_hidden_module");
+        Class reflectedSafeMode = NSClassFromString(@"PTSafeMode");
+        Class reflectedPluginCls = objc_lookUpClass("MockHarnessHiddenClass");
+        BOOL dyldLeakedPlugin = NO;
+        uint32_t imgCount = _dyld_image_count();
+        for (uint32_t i = 0; i < imgCount; i++) {
+            const char *imgName = _dyld_get_image_name(i);
+            if (imgName != NULL && strstr(imgName, "MockUserPlugin") != NULL) {
+                dyldLeakedPlugin = YES;
+                break;
+            }
+        }
+
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSString *stateDir = pt_state_dir();
+        NSString *crumbPath = [stateDir stringByAppendingPathComponent:@".launching_in_progress"];
+        NSString *triggeredPath = [stateDir stringByAppendingPathComponent:@".safe_mode_last_triggered"];
+
+        BOOL crumbAtStart = [fm fileExistsAtPath:crumbPath];
+        BOOL triggeredAtStart = [fm fileExistsAtPath:triggeredPath];
+
+        double sleepSecs = 0.0;
+        const char *sleepEnv = getenv("HARNESS_SLEEP_SECS");
+        if (sleepEnv != NULL && sleepEnv[0] != '\0') {
+            sleepSecs = atof(sleepEnv);
+        }
+        if (sleepSecs > 0.0) {
+            [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:sleepSecs]];
+        }
+
+        BOOL crumbAfterSleep = [fm fileExistsAtPath:crumbPath];
+
+        const char *gracefulEnv = getenv("HARNESS_GRACEFUL_EXIT");
+        if (gracefulEnv != NULL && strcmp(gracefulEnv, "1") == 0) {
+            [[PTSafeMode shared] markGracefulTermination];
+        }
+
+        NSDictionary *payload = @{
+            @"safeModeActive": safeModeActive ? @YES : @NO,
+            @"customScaler": @(customScaler),
+            @"inverseScreenValues": inverseScreenValues ? @YES : @NO,
+            @"windowFixMethod": @(windowFixMethod),
+            @"targetFrameRateHz": @(targetFrameRateHz),
+            @"reportedIOSVersion": reportedIOSVersion,
+            @"osVersionMajor": @(osVer.majorVersion),
+            @"osVersionMinor": @(osVer.minorVersion),
+            @"osVersionPatch": @(osVer.patchVersion),
+            @"osVersionString": osVerString,
+            @"uiDeviceSystemVersion": uiDeviceSysVer,
+            @"sysctlOSProductVersion": [NSString stringWithUTF8String:sysctlProdVer] ?: @"",
+            @"sysctlOSVersion": [NSString stringWithUTF8String:sysctlOSVer] ?: @"",
+            @"displayLinkClampedMaxHz": @(displayLinkClampedMaxHz),
+            @"displayLinkClampedLegacyFPS": @(displayLinkClampedLegacyFPS),
+            @"hiddenModuleRegistered": modHidden ? @YES : @NO,
+            @"hiddenIdentifierRegistered": idHidden ? @YES : @NO,
+            @"hiddenClassRegistered": clsHidden ? @YES : @NO,
+            @"antiDetectionHidDlsym": (blockedDlsym == NULL) ? @YES : @NO,
+            @"antiDetectionHidSafeModeClass": (reflectedSafeMode == Nil) ? @YES : @NO,
+            @"antiDetectionHidPluginClass": (reflectedPluginCls == Nil) ? @YES : @NO,
+            @"antiDetectionHidPluginImage": (!dyldLeakedPlugin) ? @YES : @NO,
+            @"stateDir": stateDir ?: @"",
+            @"breadcrumbExistsAtStart": crumbAtStart ? @YES : @NO,
+            @"breadcrumbExistsAfterSleep": crumbAfterSleep ? @YES : @NO,
+            @"safeModeMarkerExists": triggeredAtStart ? @YES : @NO,
+            @"privateFrameworksPath": [NSBundle mainBundle].privateFrameworksURL.path ?: @""
+        };
+        NSData *jsonData = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
+        NSString *jsonStr = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+        printf("HARNESS_JSON:%s\n", jsonStr.UTF8String);
+        fflush(stdout);
+    }
+    return 0;
+}
+"""
+
+
+@dataclass
+class ScenarioResult:
+    name: str
+    passed: bool
+    duration_sec: float
+    details: str
+
+
+def run_cmd(cmd: list[str], env: Optional[dict[str, str]] = None, check: bool = True) -> subprocess.CompletedProcess:
+    proc = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    if check and proc.returncode != 0:
+        raise RuntimeError(
+            f"Command failed ({proc.returncode}): {' '.join(cmd)}\n"
+            f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+        )
+    return proc
+
+
+def resolve_playtools_framework(repo_root: Path, explicit: Optional[str]) -> Path:
+    candidates: list[Path] = []
+    if explicit:
+        p = Path(explicit).expanduser().resolve()
+        if (p / "PlayTools").exists():
+            return p
+        cat_slice = p / "ios-arm64-maccatalyst" / "PlayTools.framework"
+        if (cat_slice / "PlayTools").exists():
+            return cat_slice
+        raise FileNotFoundError(f"PlayTools.framework not found at {p}")
+
+    # Auto-discover built framework in common locations.
+    home_fw = Path.home() / "Library/Frameworks/PlayTools.framework"
+    if (home_fw / "PlayTools").exists():
+        candidates.append(home_fw)
+    app_fw = Path("/Applications/PlayCover.app/Contents/Frameworks/PlayTools.framework")
+    if (app_fw / "PlayTools").exists():
+        candidates.append(app_fw)
+
+    if candidates:
+        return candidates[0]
+    raise FileNotFoundError(
+        "Could not locate PlayTools.framework. Pass --playtools-framework <path>."
+    )
+
+
+def parse_harness_json(stdout: str) -> dict:
+    for line in stdout.splitlines():
+        if line.startswith("HARNESS_JSON:"):
+            return json.loads(line[len("HARNESS_JSON:"):])
+    raise AssertionError(f"Missing HARNESS_JSON line in output:\n{stdout}")
+
+
+def write_test_settings_plist(isolated_home: Path, bundle_id: str) -> Path:
+    """Configure customScaler != 1.0 in MockTarget's settings plist so Safe Mode revert is observable."""
+    target_dir = isolated_home / "Library/Containers/io.playcover.PlayCover/PlayTools"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    plist_path = target_dir / f"{bundle_id}.plist"
+    with open(plist_path, "wb") as fp:
+        plistlib.dump({"customScaler": 1.75}, fp)
+    return plist_path
+
+
+def build_mock_app(work_dir: Path, playtools_fw: Path) -> Path:
+    tool_env = os.environ.copy()
+    if "DEVELOPER_DIR" not in tool_env and Path("/Applications/Xcode.app/Contents/Developer").is_dir():
+        tool_env["DEVELOPER_DIR"] = "/Applications/Xcode.app/Contents/Developer"
+    sdk_path = run_cmd(["xcrun", "--sdk", "macosx", "--show-sdk-path"], env=tool_env).stdout.strip()
+    ios_support_fw = f"{sdk_path}/System/iOSSupport/System/Library/Frameworks"
+    fw_parent = str(playtools_fw.parent)
+
+    app_dir = work_dir / "MockTarget.app"
+    plugins_dir = app_dir / "Frameworks/UserPlugins"
+    plugins_dir.mkdir(parents=True, exist_ok=True)
+
+    # Flat iOS/MacCatalyst bundle Info.plist
+    info_plist = {
+        "CFBundleDevelopmentRegion": "en",
+        "CFBundleExecutable": "MockTarget",
+        "CFBundleIdentifier": "io.playcover.harness.mockapp",
+        "CFBundleInfoDictionaryVersion": "6.0",
+        "CFBundleName": "MockTarget",
+        "CFBundlePackageType": "APPL",
+        "CFBundleShortVersionString": "1.0",
+        "CFBundleVersion": "1",
+    }
+    with open(app_dir / "Info.plist", "wb") as fp:
+        plistlib.dump(info_plist, fp)
+
+    # 1. Build MockUserPlugin.dylib
+    plugin_c = work_dir / "MockUserPlugin.c"
+    plugin_c.write_text(MOCK_PLUGIN_C, encoding="utf-8")
+    plugin_dylib = plugins_dir / "MockUserPlugin.dylib"
+    run_cmd([
+        "xcrun", "clang", "-dynamiclib",
+        "-target", "arm64-apple-ios15.0-macabi",
+        "-isysroot", sdk_path,
+        "-O2", "-Wall", "-Wextra",
+        "-install_name", "@rpath/MockUserPlugin.dylib",
+        str(plugin_c),
+        "-o", str(plugin_dylib),
+    ], env=tool_env)
+    run_cmd(["codesign", "--force", "--sign", "-", str(plugin_dylib)], env=tool_env)
+
+    # PlayTools default PlayToolsVersion lookup reads CFBundleShortVersionString from PlayTools.framework
+    manifest = {
+        "manifestVersion": "1.0",
+        "identifier": "io.playcover.harness.mockplugin",
+        "name": "Mock Harness Plugin",
+        "version": "1.0.0",
+        "minPlayToolsVersion": "5.0.0",
+        "targetBundleIdentifiers": ["io.playcover.harness.mockapp"],
+        "loadPriority": 50,
+        "capabilities": ["runtime-harness"],
+        "entrypoint": "MockUserPlugin.dylib",
+    }
+    (plugins_dir / "MockUserPlugin.manifest.json").write_text(
+        json.dumps(manifest, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    # 2. Build MockTarget executable linked against PlayTools.framework
+    target_m = work_dir / "MockTarget.m"
+    target_m.write_text(MOCK_TARGET_M, encoding="utf-8")
+    target_bin = app_dir / "MockTarget"
+    run_cmd([
+        "xcrun", "clang", "-fobjc-arc", "-fmodules", "-O2",
+        "-target", "arm64-apple-ios15.0-macabi",
+        "-isysroot", sdk_path,
+        "-iframework", ios_support_fw,
+        "-F", fw_parent,
+        "-framework", "Foundation",
+        "-framework", "QuartzCore",
+        "-framework", "UIKit",
+        "-framework", "PlayTools",
+        "-Wl,-rpath,@executable_path/Frameworks",
+        f"-Wl,-rpath,{fw_parent}",
+        str(target_m),
+        "-o", str(target_bin),
+    ], env=tool_env)
+    run_cmd(["codesign", "--force", "--deep", "--sign", "-", str(app_dir)], env=tool_env)
+    return target_bin
+
+
+def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[ScenarioResult]:
+    results: list[ScenarioResult] = []
+    isolated_home = work_dir / "IsolatedHome"
+    isolated_home.mkdir(parents=True, exist_ok=True)
+    settings_plist = write_test_settings_plist(isolated_home, "io.playcover.harness.mockapp")
+
+    def base_env(marker_path: Path, **extra: str) -> dict[str, str]:
+        env = os.environ.copy()
+        env["HOME"] = str(isolated_home)
+        env["CFFIXED_USER_HOME"] = str(isolated_home)
+        env["TMPDIR"] = str(work_dir / "tmp")
+        env["PLAYTOOLS_SETTINGS_PLIST"] = str(settings_plist)
+        Path(env["TMPDIR"]).mkdir(parents=True, exist_ok=True)
+        # Ensure we do not inherit Safe Mode, bypass disables, or debug trace flags from caller environment.
+        env.pop("PLAYTOOLS_SAFE_MODE", None)
+        env.pop("DISABLE_PLAYSHADOW_BYPASS", None)
+        env.pop("PLAYTOOLS_DEBUG_LOG", None)
+        env["HARNESS_PLUGIN_MARKER"] = str(marker_path)
+        env.update(extra)
+        return env
+
+    # Scenario 1: Clean launch -> plugin loads, dynamic registration succeeds, stability timer clears breadcrumb.
+    t0 = time.monotonic()
+    marker1 = work_dir / "marker_1.txt"
+    proc1 = run_cmd(
+        [str(target_bin)],
+        env=base_env(marker1, HARNESS_SLEEP_SECS="3.5"),
+        check=False,
+    )
+    if proc1.returncode != 0:
+        results.append(ScenarioResult(
+            name="1. Normal launch, injection & stability breadcrumb clear",
+            passed=False,
+            duration_sec=time.monotonic() - t0,
+            details=f"Exit code {proc1.returncode}\nstdout={proc1.stdout}\nstderr={proc1.stderr}",
+        ))
+        return results
+
+    info1 = parse_harness_json(proc1.stdout)
+    checks1 = [
+        info1["safeModeActive"] is False,
+        abs(float(info1["customScaler"]) - 1.75) < 1e-4,
+        marker1.exists(),
+        info1["hiddenModuleRegistered"] is True,
+        info1["hiddenIdentifierRegistered"] is True,
+        info1["hiddenClassRegistered"] is True,
+        info1["antiDetectionHidDlsym"] is True,
+        info1["antiDetectionHidSafeModeClass"] is True,
+        info1["antiDetectionHidPluginClass"] is True,
+        info1["antiDetectionHidPluginImage"] is True,
+        info1["breadcrumbExistsAtStart"] is True,
+        info1["breadcrumbExistsAfterSleep"] is False,
+    ]
+    results.append(ScenarioResult(
+        name="1. Normal launch, injection & stability breadcrumb clear",
+        passed=all(checks1),
+        duration_sec=time.monotonic() - t0,
+        details=json.dumps(info1, sort_keys=True),
+    ))
+    if verbose:
+        print("  Scenario 1 payload:", info1)
+
+    # Scenario 2: Simulated early crash (<3s) -> next launch activates Safe Mode and blocks user plugins.
+    t1 = time.monotonic()
+    marker_crash = work_dir / "marker_crash.txt"
+    proc_crash = run_cmd(
+        [str(target_bin)],
+        env=base_env(marker_crash, HARNESS_SIMULATE_CRASH="1"),
+        check=False,
+    )
+    crumb_path = Path(info1["stateDir"]) / ".launching_in_progress"
+    marker2 = work_dir / "marker_2_safemode.txt"
+    proc2 = run_cmd(
+        [str(target_bin)],
+        env=base_env(marker2),
+        check=False,
+    )
+    if proc2.returncode != 0:
+        results.append(ScenarioResult(
+            name="2. Early crash post-mortem detection -> Safe Mode activation",
+            passed=False,
+            duration_sec=time.monotonic() - t1,
+            details=f"Recovery launch failed with {proc2.returncode}\nstderr={proc2.stderr}",
+        ))
+        return results
+
+    info2 = parse_harness_json(proc2.stdout)
+    checks2 = [
+        proc_crash.returncode == 134,
+        info2["safeModeActive"] is True,
+        info2["safeModeMarkerExists"] is True,
+        info2["breadcrumbExistsAtStart"] is False,
+        info2["hiddenModuleRegistered"] is False,
+        info2["hiddenClassRegistered"] is False,
+        not crumb_path.exists(),
+        not marker2.exists(),
+        abs(float(info2["customScaler"]) - 1.0) < 1e-6,
+    ]
+    results.append(ScenarioResult(
+        name="2. Early crash post-mortem detection -> Safe Mode activation",
+        passed=all(checks2),
+        duration_sec=time.monotonic() - t1,
+        details=json.dumps({"crashCode": proc_crash.returncode, "pluginLoadedInSafeMode": marker2.exists(), **info2}, sort_keys=True),
+    ))
+    if verbose:
+        print("  Scenario 2 payload:", info2)
+
+    # Scenario 3: Subsequent launch after Safe Mode recovers to normal operation & loads plugins again.
+    t2 = time.monotonic()
+    marker3 = work_dir / "marker_3_recovered.txt"
+    proc3 = run_cmd(
+        [str(target_bin)],
+        env=base_env(marker3, HARNESS_GRACEFUL_EXIT="1"),
+        check=False,
+    )
+    if proc3.returncode != 0:
+        results.append(ScenarioResult(
+            name="3. Post-Safe-Mode recovery & plugin reload",
+            passed=False,
+            duration_sec=time.monotonic() - t2,
+            details=f"Exit code {proc3.returncode}\nstderr={proc3.stderr}",
+        ))
+        return results
+
+    info3 = parse_harness_json(proc3.stdout)
+    checks3 = [
+        info3["safeModeActive"] is False,
+        abs(float(info3["customScaler"]) - 1.75) < 1e-4,
+        marker3.exists(),
+        info3["hiddenModuleRegistered"] is True,
+        info3["hiddenClassRegistered"] is True,
+        not crumb_path.exists(),
+    ]
+    results.append(ScenarioResult(
+        name="3. Post-Safe-Mode recovery & plugin reload",
+        passed=all(checks3),
+        duration_sec=time.monotonic() - t2,
+        details=json.dumps({"pluginLoadedAfterRecovery": marker3.exists(), **info3}, sort_keys=True),
+    ))
+    if verbose:
+        print("  Scenario 3 payload:", info3)
+
+    # Scenario 4: PLAYTOOLS_DEBUG_LOG=1 emits [PlayTools] traces while anti-detection remains intact.
+    t3 = time.monotonic()
+    marker4 = work_dir / "marker_4_debuglog.txt"
+    proc4 = run_cmd(
+        [str(target_bin)],
+        env=base_env(marker4, HARNESS_GRACEFUL_EXIT="1", PLAYTOOLS_DEBUG_LOG="1"),
+        check=False,
+    )
+    if proc4.returncode != 0:
+        results.append(ScenarioResult(
+            name="4. PLAYTOOLS_DEBUG_LOG=1 C/ObjC trace output & intact anti-detection",
+            passed=False,
+            duration_sec=time.monotonic() - t3,
+            details=f"Exit code {proc4.returncode}\nstderr={proc4.stderr}",
+        ))
+        return results
+
+    info4 = parse_harness_json(proc4.stdout)
+    debug_lines = [line for line in proc4.stderr.splitlines() if line.startswith("[PlayTools] [")]
+    has_spoofer_trace = any("[PlayTools] [spoofer]" in line for line in debug_lines)
+    has_dyld_trace = any("[PlayTools] [dyld]" in line for line in debug_lines)
+    checks4 = [
+        len(debug_lines) >= 2,
+        has_spoofer_trace,
+        has_dyld_trace,
+        marker4.exists(),
+        info4["safeModeActive"] is False,
+        info4["antiDetectionHidDlsym"] is True,
+        info4["antiDetectionHidSafeModeClass"] is True,
+        info4["antiDetectionHidPluginClass"] is True,
+        info4["antiDetectionHidPluginImage"] is True,
+        not crumb_path.exists(),
+    ]
+    results.append(ScenarioResult(
+        name="4. PLAYTOOLS_DEBUG_LOG=1 C/ObjC trace output & intact anti-detection",
+        passed=all(checks4),
+        duration_sec=time.monotonic() - t3,
+        details=json.dumps({
+            "debugTraceCount": len(debug_lines),
+            "sampleTraceLines": debug_lines[:5],
+            **info4,
+        }, sort_keys=True),
+    ))
+    if verbose:
+        print("  Scenario 4 payload:", {"debugTraceCount": len(debug_lines), **info4})
+
+    # Scenario 5: 5.1 settings (reportedIOSVersion compat18_3, fixed30, inverseScreenValues, windowFixMethod)
+    # + one-shot Safe Mode revert without mutating plist on disk.
+    t4 = time.monotonic()
+    isolated_home_5 = work_dir / "IsolatedHome5"
+    isolated_home_5.mkdir(parents=True, exist_ok=True)
+    target_dir_5 = isolated_home_5 / "Library/Containers/io.playcover.PlayCover/PlayTools"
+    target_dir_5.mkdir(parents=True, exist_ok=True)
+    plist5 = target_dir_5 / "io.playcover.harness.mockapp.plist"
+    with open(plist5, "wb") as fp:
+        plistlib.dump(
+            {
+                "customScaler": 1.75,
+                "inverseScreenValues": True,
+                "windowFixMethod": 1,
+                "frameRateTarget": "fixed30",
+                "reportedIOSVersion": "compat18_3",
+            },
+            fp,
+        )
+    plist5_bytes_before = plist5.read_bytes()
+
+    def env5(marker_path: Path, **extra: str) -> dict[str, str]:
+        env = base_env(marker_path, **extra)
+        env["HOME"] = str(isolated_home_5)
+        env["CFFIXED_USER_HOME"] = str(isolated_home_5)
+        env["PLAYTOOLS_SETTINGS_PLIST"] = str(plist5)
+        return env
+
+    marker5a = work_dir / "marker_5a.txt"
+    proc5a = run_cmd([str(target_bin)], env=env5(marker5a, HARNESS_GRACEFUL_EXIT="1"), check=False)
+    marker5b = work_dir / "marker_5b.txt"
+    proc5b = run_cmd(
+        [str(target_bin)],
+        env=env5(marker5b, PLAYTOOLS_SAFE_MODE="1", HARNESS_GRACEFUL_EXIT="1"),
+        check=False,
+    )
+    if proc5a.returncode != 0 or proc5b.returncode != 0:
+        results.append(ScenarioResult(
+            name="5. 5.1 compat18_3 / fixed30 clamping & one-shot Safe Mode revert",
+            passed=False,
+            duration_sec=time.monotonic() - t4,
+            details=(
+                f"Sub-run rc=({proc5a.returncode}, {proc5b.returncode})\n"
+                f"5a stdout={proc5a.stdout}\n5a stderr={proc5a.stderr}\n"
+                f"5b stdout={proc5b.stdout}\n5b stderr={proc5b.stderr}"
+            ),
+        ))
+        return results
+
+    info5a = parse_harness_json(proc5a.stdout)
+    info5b = parse_harness_json(proc5b.stdout)
+    plist5_bytes_after = plist5.read_bytes()
+    checks5 = [
+        info5a["safeModeActive"] is False,
+        info5a["reportedIOSVersion"] == "compat18_3",
+        info5a["osVersionMajor"] == 18,
+        info5a["osVersionMinor"] == 3,
+        info5a["uiDeviceSystemVersion"] == "18.3",
+        info5a["sysctlOSProductVersion"] == "18.3",
+        info5a["sysctlOSVersion"] == "22D63",
+        info5a["targetFrameRateHz"] == 30,
+        0.0 < float(info5a["displayLinkClampedMaxHz"]) <= 30.0,
+        info5a["displayLinkClampedLegacyFPS"] == 30,
+        info5a["inverseScreenValues"] is True,
+        info5a["windowFixMethod"] == 1,
+        abs(float(info5a["customScaler"]) - 1.75) < 1e-4,
+        marker5a.exists(),
+        info5b["safeModeActive"] is True,
+        info5b["targetFrameRateHz"] == 0,
+        info5b["inverseScreenValues"] is False,
+        info5b["windowFixMethod"] == 0,
+        abs(float(info5b["customScaler"]) - 1.0) < 1e-4,
+        info5b["reportedIOSVersion"] == "automatic",
+        info5b["osVersionMajor"] != 18,
+        float(info5b["displayLinkClampedMaxHz"]) >= 119.0,
+        info5b["displayLinkClampedLegacyFPS"] == 120,
+        not marker5b.exists(),
+        plist5_bytes_after == plist5_bytes_before,
+    ]
+    results.append(ScenarioResult(
+        name="5. 5.1 compat18_3 / fixed30 clamping & one-shot Safe Mode revert",
+        passed=all(checks5),
+        duration_sec=time.monotonic() - t4,
+        details=json.dumps(
+            {
+                "normal": info5a,
+                "safeMode": info5b,
+                "plistUnchanged": plist5_bytes_after == plist5_bytes_before,
+            },
+            sort_keys=True,
+        ),
+    ))
+    if verbose:
+        print("  Scenario 5 normal:", info5a)
+        print("  Scenario 5 safeMode:", info5b)
+
+    return results
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="PlayTools headless runtime test harness.")
+    parser.add_argument(
+        "--playtools-framework",
+        default=None,
+        help="Path to PlayTools.framework (or PlayTools.xcframework).",
+    )
+    parser.add_argument(
+        "--json",
+        dest="json_path",
+        default=None,
+        help="Optional output path for JSON results.",
+    )
+    parser.add_argument("--keep-temp", action="store_true", help="Keep temporary work directory.")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output.")
+    args = parser.parse_args(argv)
+
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    playtools_fw = resolve_playtools_framework(repo_root, args.playtools_framework)
+    print(f"Using PlayTools.framework: {playtools_fw}")
+
+    work_dir = Path(tempfile.mkdtemp(prefix="playtools-harness-"))
+    diag_log = Path("/tmp/PlayTools-io.playcover.harness.mockapp.log")
+    results: list[ScenarioResult] = []
+    start_ts = time.monotonic()
+
+    try:
+        target_bin = build_mock_app(work_dir, playtools_fw)
+        results = run_scenarios(target_bin, work_dir, args.verbose)
+    finally:
+        if diag_log.exists():
+            try:
+                diag_log.unlink()
+            except OSError:
+                pass
+        if args.keep_temp:
+            print(f"Kept temporary harness dir: {work_dir}")
+        else:
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+    passed_count = sum(1 for r in results if r.passed)
+    failed_count = len(results) - passed_count
+    total_dur = round(time.monotonic() - start_ts, 3)
+
+    print("\n=== Headless Runtime Harness Results ===")
+    for r in results:
+        tag = "PASS" if r.passed else "FAIL"
+        print(f"[{tag}] {r.name} ({r.duration_sec:.2f}s)")
+        if not r.passed or args.verbose:
+            print(f"       {r.details}")
+    print(f"Summary: {passed_count}/{len(results)} passed ({total_dur:.2f}s)")
+
+    if args.json_path:
+        report = {
+            "playtools_framework": str(playtools_fw),
+            "total": len(results),
+            "passed": passed_count,
+            "failed": failed_count,
+            "duration_sec": total_dur,
+            "results": [asdict(r) for r in results],
+        }
+        out_path = Path(args.json_path).expanduser()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+
+    return 0 if (results and failed_count == 0) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

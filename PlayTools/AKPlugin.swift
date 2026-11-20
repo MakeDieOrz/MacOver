@@ -7,6 +7,7 @@
 
 import AppKit
 import CoreGraphics
+import Darwin
 import Foundation
 
 // Add a lightweight struct so we can decode only the flag we care about
@@ -19,30 +20,64 @@ private struct AKAppSettingsData: Codable {
 }
 
 class AKPlugin: NSObject, Plugin {
+    private var isApplyingProgrammaticGeometry = false
+    private var geometryObservers: [NSObjectProtocol] = []
+
+    private static func isPrimaryHostWindow(_ window: NSWindow) -> Bool {
+        let className = NSStringFromClass(type(of: window))
+        let delegateClassName = window.delegate.map { NSStringFromClass(type(of: $0)) }
+        let hasTitleOrFullScreen = window.styleMask.contains(.titled) || window.styleMask.contains(.fullScreen)
+        return !PTWindowGeometryMath.isAuxiliaryHostWindow(
+            className: className,
+            delegateClassName: delegateClassName,
+            isPanel: window is NSPanel,
+            hasTitleOrFullScreenStyle: hasTitleOrFullScreen,
+            frameSize: window.frame.size
+        )
+    }
+
+    private var activeWindow: NSWindow? {
+        if let key = NSApplication.shared.keyWindow, Self.isPrimaryHostWindow(key) {
+            return key
+        }
+        if let main = NSApplication.shared.mainWindow, Self.isPrimaryHostWindow(main) {
+            return main
+        }
+        if let visiblePrimary = NSApplication.shared.windows.first(where: {
+            $0.isVisible && Self.isPrimaryHostWindow($0)
+        }) {
+            return visiblePrimary
+        }
+        return NSApplication.shared.windows.first(where: { Self.isPrimaryHostWindow($0) })
+    }
+
+    private func configureWindow(_ window: NSWindow) {
+        window.styleMask.insert([.resizable])
+        window.collectionBehavior = [.fullScreenPrimary, .managed, .participatesInCycle]
+        window.isMovable = true
+        window.isMovableByWindowBackground = true
+
+        if self.hideTitleBarSetting {
+            window.styleMask.insert([.fullSizeContentView])
+            window.titlebarAppearsTransparent = true
+            window.titleVisibility = .hidden
+            window.toolbar = nil
+            window.title = ""
+        }
+
+        if self.floatingWindowSetting {
+            window.level = .floating
+        }
+
+        if let aspectRatio = self.aspectRatioSetting {
+            window.contentAspectRatio = aspectRatio
+        }
+    }
+
     required override init() {
         super.init()
-        if let window = NSApplication.shared.windows.first {
-            window.styleMask.insert([.resizable])
-            window.collectionBehavior = [.fullScreenPrimary, .managed, .participatesInCycle]
-            window.isMovable = true
-            window.isMovableByWindowBackground = true
-
-            if self.hideTitleBarSetting == true {
-                window.styleMask.insert([.fullSizeContentView])
-                window.titlebarAppearsTransparent = true
-                window.titleVisibility = .hidden
-                window.toolbar = nil
-                window.title = ""
-            }
-
-            if self.floatingWindowSetting == true {
-                window.level = .floating
-            }
-
-            if let aspectRatio = self.aspectRatioSetting {
-                window.contentAspectRatio = aspectRatio
-            }
-
+        if let window = activeWindow {
+            configureWindow(window)
             NSWindow.allowsAutomaticWindowTabbing = true
         }
 
@@ -50,25 +85,11 @@ class AKPlugin: NSObject, Plugin {
         NotificationCenter.default.addObserver(
             forName: NSWindow.didBecomeKeyNotification,
             object: nil,
-            queue: .main) { notif in
-                guard let win = notif.object as? NSWindow else { return }
-                win.styleMask.insert([.resizable])
-
-                if self.hideTitleBarSetting == true {
-                    win.styleMask.insert([.fullSizeContentView])
-                    win.titlebarAppearsTransparent = true
-                    win.titleVisibility = .hidden
-                    win.toolbar = nil
-                    win.title = ""
-                }
-
-                if self.floatingWindowSetting == true {
-                    win.level = .floating
-                }
-
-                if let aspectRatio = self.aspectRatioSetting {
-                    win.contentAspectRatio = aspectRatio
-                }
+            queue: .main) { [weak self] notif in
+                guard let self,
+                      let win = notif.object as? NSWindow,
+                      Self.isPrimaryHostWindow(win) else { return }
+                self.configureWindow(win)
         }
     }
 
@@ -77,11 +98,11 @@ class AKPlugin: NSObject, Plugin {
     }
 
     var mousePoint: CGPoint {
-        NSApplication.shared.windows.first?.mouseLocationOutsideOfEventStream ?? CGPoint()
+        activeWindow?.mouseLocationOutsideOfEventStream ?? CGPoint()
     }
 
     var windowFrame: CGRect {
-        NSApplication.shared.windows.first?.frame ?? CGRect()
+        activeWindow?.frame ?? CGRect()
     }
 
     var isMainScreenEqualToFirst: Bool {
@@ -89,11 +110,126 @@ class AKPlugin: NSObject, Plugin {
     }
 
     var mainScreenFrame: CGRect {
-        return NSScreen.main!.frame as CGRect
+        return (NSScreen.main ?? NSScreen.screens.first)?.frame ?? CGRect()
     }
 
     var isFullscreen: Bool {
-        NSApplication.shared.windows.first!.styleMask.contains(.fullScreen)
+        activeWindow?.styleMask.contains(.fullScreen) ?? false
+    }
+
+    var isSequoiaOrNewer: Bool {
+        ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 15
+    }
+
+    func setWindowContentSize(_ size: CGSize) {
+        let apply = { [weak self] in
+            guard let self, let window = self.activeWindow else { return }
+            guard !window.styleMask.contains(.fullScreen) else { return }
+            let visibleFrame = (window.screen ?? NSScreen.main ?? NSScreen.screens.first)?.visibleFrame ?? .zero
+            let clamped = PTWindowGeometryMath.clampedContentSize(
+                requested: size,
+                visibleScreenFrame: visibleFrame
+            )
+            guard clamped.width > 0, clamped.height > 0 else { return }
+            let titleHeight = max(0, window.frame.height - window.contentLayoutRect.height)
+            let nextFrame = PTWindowGeometryMath.centeredFrame(
+                forContentSize: clamped,
+                currentFrame: window.frame,
+                visibleScreenFrame: visibleFrame,
+                titleBarHeight: titleHeight
+            )
+            self.isApplyingProgrammaticGeometry = true
+            defer { self.isApplyingProgrammaticGeometry = false }
+            window.setFrame(nextFrame, display: true, animate: false)
+        }
+        if Thread.isMainThread {
+            apply()
+        } else {
+            DispatchQueue.main.async(execute: apply)
+        }
+    }
+
+    func setWindowAspectRatio(_ ratio: CGSize) {
+        let apply = { [weak self] in
+            guard let self, let window = self.activeWindow else { return }
+            guard ratio.width.isFinite, ratio.height.isFinite, ratio.width > 0, ratio.height > 0 else { return }
+            window.contentAspectRatio = NSSize(width: ratio.width, height: ratio.height)
+        }
+        if Thread.isMainThread {
+            apply()
+        } else {
+            DispatchQueue.main.async(execute: apply)
+        }
+    }
+
+    func clearWindowAspectRatio() {
+        let apply = { [weak self] in
+            guard let self, let window = self.activeWindow else { return }
+            window.resizeIncrements = NSSize(width: 1, height: 1)
+        }
+        if Thread.isMainThread {
+            apply()
+        } else {
+            DispatchQueue.main.async(execute: apply)
+        }
+    }
+
+    func setWindowOrientation(portrait: Bool, targetSize: CGSize) {
+        let apply = { [weak self] in
+            guard let self else { return }
+            let fallback = self.activeWindow?.contentLayoutRect.size ?? CGSize(width: 1920, height: 1080)
+            let base = (targetSize.width > 0 && targetSize.height > 0) ? targetSize : fallback
+            let oriented = PTWindowGeometryMath.orientedSize(baseSize: base, portrait: portrait)
+            guard oriented.width > 0, oriented.height > 0 else { return }
+            if self.aspectRatioSetting != nil {
+                self.setWindowAspectRatio(oriented)
+            }
+            self.setWindowContentSize(oriented)
+        }
+        if Thread.isMainThread {
+            apply()
+        } else {
+            DispatchQueue.main.async(execute: apply)
+        }
+    }
+
+    func setupWindowGeometryChanged(_ callback: @escaping (CGRect) -> Void) {
+        let register = { [weak self] in
+            guard let self else { return }
+            for obs in self.geometryObservers {
+                NotificationCenter.default.removeObserver(obs)
+            }
+            self.geometryObservers.removeAll()
+
+            let names: [Notification.Name] = [
+                NSWindow.didResizeNotification,
+                NSWindow.didEndLiveResizeNotification,
+                NSWindow.didChangeBackingPropertiesNotification,
+                NSWindow.didBecomeKeyNotification
+            ]
+            for name in names {
+                let observer = NotificationCenter.default.addObserver(
+                    forName: name,
+                    object: nil,
+                    queue: .main
+                ) { [weak self] notification in
+                    guard let self, !self.isApplyingProgrammaticGeometry else { return }
+                    if let notifiedWin = notification.object as? NSWindow,
+                       !Self.isPrimaryHostWindow(notifiedWin) {
+                        return
+                    }
+                    guard let win = (notification.object as? NSWindow) ?? self.activeWindow,
+                          Self.isPrimaryHostWindow(win) else { return }
+                    callback(win.frame)
+                }
+                self.geometryObservers.append(observer)
+            }
+        }
+        if Thread.isMainThread {
+            register()
+        } else {
+            DispatchQueue.main.async(execute: register)
+        }
     }
 
     var cmdPressed: Bool = false
@@ -117,9 +253,14 @@ class AKPlugin: NSObject, Plugin {
     }
 
     func unhideCursor() {
+        guard cursorHideLevel > 0 else {
+            CGAssociateMouseAndMouseCursorPosition(1)
+            return
+        }
         NSCursor.unhide()
         cursorHideLevel -= 1
         if cursorHideLevel <= 0 {
+            cursorHideLevel = 0
             CGAssociateMouseAndMouseCursorPosition(1)
         }
     }
@@ -243,8 +384,11 @@ class AKPlugin: NSObject, Plugin {
                 }
             }
 
-            // For traffic light buttons when fullscreen
-            if event.window != NSApplication.shared.windows.first! {
+            // Bypass auxiliary panels / IME windows and mismatched host windows
+            if let eventWin = event.window, !Self.isPrimaryHostWindow(eventWin) {
+                return event
+            }
+            if let targetWin = self.activeWindow, let eventWin = event.window, eventWin != targetWin {
                 return event
             }
             if consumed(event.buttonNumber, true) {
@@ -253,8 +397,12 @@ class AKPlugin: NSObject, Plugin {
             return event
         })
         NSEvent.addLocalMonitorForEvents(matching: upType, handler: { event in
+            if let eventWin = event.window, !Self.isPrimaryHostWindow(eventWin) {
+                return event
+            }
             // Always allow releases on the traffic-light buttons to pass through
             if isInTrafficLightArea(event) {
+                _ = consumed(event.buttonNumber, false)
                 return event
             }
             if consumed(event.buttonNumber, false) {
@@ -302,11 +450,78 @@ class AKPlugin: NSObject, Plugin {
         return NSSize(width: width, height: height)
     }
 
+    private static func resolveHostUserRoot() -> String {
+        let rawEnv = getenv("CFFIXED_USER_HOME") ?? getenv("HOME")
+        if let rawEnv, let envStr = String(validatingUTF8: rawEnv), envStr.hasPrefix("/") {
+            var path = envStr
+            if path.hasPrefix("/System/Volumes/Data/") {
+                path.removeFirst("/System/Volumes/Data".count)
+            }
+            if let range = path.range(of: "/Library/Containers/"), range.lowerBound > path.startIndex {
+                return String(path[..<range.lowerBound])
+            }
+            if path.hasPrefix("/Users/") {
+                let afterUsers = path.index(path.startIndex, offsetBy: "/Users/".count)
+                if let slash = path[afterUsers...].firstIndex(of: "/") {
+                    return String(path[..<slash])
+                }
+                if afterUsers < path.endIndex {
+                    return path
+                }
+            }
+        }
+        if let passwdEntry = getpwuid(getuid()), let dirPtr = passwdEntry.pointee.pw_dir {
+            let dir = String(cString: dirPtr)
+            if dir.hasPrefix("/") {
+                return dir
+            }
+        }
+        return FileManager.default.homeDirectoryForCurrentUser.path
+    }
+
+    private static func resolveSettingsURL(bundleIdentifier: String) -> URL {
+        if let overridePtr = getenv("PLAYTOOLS_SETTINGS_PLIST"),
+           let overridePath = String(validatingUTF8: overridePtr),
+           overridePath.hasPrefix("/") {
+            return URL(fileURLWithPath: overridePath)
+        }
+        let settingsDir = URL(fileURLWithPath: resolveHostUserRoot())
+            .appendingPathComponent("Library/Containers/io.playcover.PlayCover")
+            .appendingPathComponent("App Settings")
+        if !bundleIdentifier.isEmpty {
+            let primary = settingsDir.appendingPathComponent("\(bundleIdentifier).plist")
+            if FileManager.default.fileExists(atPath: primary.path) {
+                return primary
+            }
+            if let cfHomePtr = getenv("CFFIXED_USER_HOME"),
+               let cfHome = String(validatingUTF8: cfHomePtr),
+               let marker = cfHome.range(of: "/Library/Containers/") {
+                let tail = cfHome[marker.upperBound...]
+                let cid = tail.prefix(while: { $0 != "/" })
+                if !cid.isEmpty {
+                    let alt = settingsDir.appendingPathComponent("\(cid).plist")
+                    if FileManager.default.fileExists(atPath: alt.path) {
+                        return alt
+                    }
+                }
+            }
+            return primary
+        }
+        if let cfHomePtr = getenv("CFFIXED_USER_HOME"),
+           let cfHome = String(validatingUTF8: cfHomePtr),
+           let marker = cfHome.range(of: "/Library/Containers/") {
+            let tail = cfHome[marker.upperBound...]
+            let cid = tail.prefix(while: { $0 != "/" })
+            if !cid.isEmpty {
+                return settingsDir.appendingPathComponent("\(cid).plist")
+            }
+        }
+        return settingsDir.appendingPathComponent("\(bundleIdentifier).plist")
+    }
+
     fileprivate static var akAppSettingsData: AKAppSettingsData? = {
         let bundleIdentifier = Bundle.main.bundleIdentifier ?? ""
-        let settingsURL = URL(fileURLWithPath: "/Users/\(NSUserName())/Library/Containers/io.playcover.PlayCover")
-            .appendingPathComponent("App Settings")
-            .appendingPathComponent("\(bundleIdentifier).plist")
+        let settingsURL = resolveSettingsURL(bundleIdentifier: bundleIdentifier)
         guard let data = try? Data(contentsOf: settingsURL),
               let decoded = try? PropertyListDecoder().decode(AKAppSettingsData.self, from: data) else {
             return nil

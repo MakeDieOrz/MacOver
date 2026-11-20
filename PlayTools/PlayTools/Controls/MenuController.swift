@@ -25,34 +25,34 @@ class RotateViewController: UIViewController {
 }
 
 extension UIApplication {
-    @objc
+    @objc(pm_menu_switchEditorMode:)
     func switchEditorMode(_ sender: AnyObject) {
         ModeAutomaton.onCmdK()
     }
 
-    @objc
+    @objc(pm_menu_removeElement:)
     func removeElement(_ sender: AnyObject) {
         EditorController.shared.removeControl()
     }
 
-    @objc
+    @objc(pm_menu_upscaleElement:)
     func upscaleElement(_ sender: AnyObject) {
         EditorController.shared.focusedControl?.resize(down: false)
     }
 
-    @objc
+    @objc(pm_menu_downscaleElement:)
     func downscaleElement(_ sender: AnyObject) {
         EditorController.shared.focusedControl?.resize(down: true)
     }
 
     // put a mark in the toucher log, so as to align with tester description
-    @objc
+    @objc(pm_menu_markToucherLog:)
     func markToucherLog(_ sender: AnyObject) {
         Toucher.writeLog(logMessage: "mark")
         Toast.showHint(title: "Log marked")
     }
 
-    @objc
+    @objc(pm_menu_rotateView:)
     func rotateView(_ sender: AnyObject) {
         for scene in connectedScenes {
             guard let windowScene = scene as? UIWindowScene else { continue }
@@ -70,17 +70,17 @@ extension UIApplication {
         })
     }
 
-    @objc
+    @objc(pm_menu_toggleDebugOverlay:)
     func toggleDebugOverlay(_ sender: AnyObject) {
         DebugController.instance.toggleDebugOverlay()
     }
 
-    @objc
+    @objc(pm_menu_hideCursor:)
     func hideCursor(_ sender: AnyObject) {
-        AKInterface.shared!.hideCursorMove()
+        AKInterface.shared?.hideCursorMove()
     }
 
-    @objc
+    @objc(pm_menu_nextKeymap:)
     func nextKeymap(_ sender: AnyObject) {
         let isCmdK = mode == .editor
 
@@ -97,7 +97,7 @@ extension UIApplication {
         }
     }
 
-    @objc
+    @objc(pm_menu_previousKeymap:)
     func previousKeymap(_ sender: AnyObject) {
         let isCmdK = mode == .editor
 
@@ -116,7 +116,7 @@ extension UIApplication {
 }
 
 extension UIViewController {
-    @objc
+    @objc(pm_menu_rotateView:deviceOrientation:)
     func rotateView(_ sender: AnyObject, deviceOrientation: Int) {
         RotateViewController.rotate(deviceOrientation: deviceOrientation)
         RotateViewController.orientationTraverser %= RotateViewController.orientationList.count
@@ -155,7 +155,6 @@ var iconsSelctor = [
     UIImage(systemName: "trash.fill"),
     UIImage(systemName: "square.resize.up"),
     UIImage(systemName: "square.resize.down"),
-    UIImage(systemName: "rectangle.landscape.rotate"),
     UIImage(systemName: "wrench.and.screwdriver"),
     UIImage(systemName: "pointer.arrow.slash"),
     UIImage(systemName: "arrow.down.square"),
@@ -165,7 +164,6 @@ var keymappingSelectors = [#selector(UIApplication.switchEditorMode(_:)),
                            #selector(UIApplication.removeElement(_:)),
                            #selector(UIApplication.upscaleElement(_:)),
                            #selector(UIApplication.downscaleElement(_:)),
-                           #selector(UIApplication.rotateView(_:)),
                            #selector(UIApplication.toggleDebugOverlay(_:)),
                            #selector(UIApplication.hideCursor(_:)),
                            #selector(UIApplication.previousKeymap(_:)),
@@ -206,7 +204,7 @@ class MenuController {
         ]
         let keyCommands = ["L"]
         let selectors = [
-            #selector(UIApplication.markToucherLog)
+            #selector(UIApplication.markToucherLog(_:))
         ]
         let arrowKeyChildrenCommands = zip(keyCommands, menuTitle).map { (command, btn) in
             UIKeyCommand(title: btn,
@@ -288,9 +286,9 @@ class MenuController {
 }
 
 extension UIMenu.Identifier {
-    static var keymappingMenu: UIMenu.Identifier { UIMenu.Identifier("io.playcover.PlayTools.menus.editor") }
-    static var keymappingOptionsMenu: UIMenu.Identifier { UIMenu.Identifier("io.playcover.PlayTools.menus.keymapping") }
-    static var debuggingMenu: UIMenu.Identifier { UIMenu.Identifier("io.playcover.PlayTools.menus.debug") }
-    static var debuggingOptionsMenu: UIMenu.Identifier { UIMenu.Identifier("io.playcover.PlayTools.menus.debugging") }
-    static var rotationOptionsMenu: UIMenu.Identifier { UIMenu.Identifier("io.playcover.PlayTools.menus.rotation") }
+    static var keymappingMenu: UIMenu.Identifier { UIMenu.Identifier("com.apple.menu.application.ext1") }
+    static var keymappingOptionsMenu: UIMenu.Identifier { UIMenu.Identifier("com.apple.menu.application.ext2") }
+    static var debuggingMenu: UIMenu.Identifier { UIMenu.Identifier("com.apple.menu.application.ext3") }
+    static var debuggingOptionsMenu: UIMenu.Identifier { UIMenu.Identifier("com.apple.menu.application.ext4") }
+    static var rotationOptionsMenu: UIMenu.Identifier { UIMenu.Identifier("com.apple.menu.application.ext5") }
 }

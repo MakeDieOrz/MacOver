@@ -7,7 +7,7 @@
 
 import Foundation
 
-@objc(Plugin)
+@objc(PTAKInterfacePlugin)
 public protocol Plugin: NSObjectProtocol {
     init()
 
@@ -31,4 +31,11 @@ public protocol Plugin: NSObjectProtocol {
     func setupScrollWheel(_ onMoved: @escaping (CGFloat, CGFloat) -> Bool)
     func urlForApplicationWithBundleIdentifier(_ value: String) -> URL?
     func setMenuBarVisible(_ value: Bool)
+
+    @objc optional var isSequoiaOrNewer: Bool { get }
+    @objc optional func setWindowContentSize(_ size: CGSize)
+    @objc optional func setWindowAspectRatio(_ ratio: CGSize)
+    @objc optional func clearWindowAspectRatio()
+    @objc optional func setWindowOrientation(portrait: Bool, targetSize: CGSize)
+    @objc optional func setupWindowGeometryChanged(_ callback: @escaping (CGRect) -> Void)
 }

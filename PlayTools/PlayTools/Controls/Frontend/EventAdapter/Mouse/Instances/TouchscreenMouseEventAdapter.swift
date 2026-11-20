@@ -10,46 +10,29 @@ import Foundation
 // Mouse events handler when cursor is free and keyboard mapping is on
 
 public class TouchscreenMouseEventAdapter: MouseEventAdapter {
+    public let isTextInput: Bool
+    private var rightLongPressPending = false
+
+    public init(isTextInput: Bool = false) {
+        self.isTextInput = isTextInput
+    }
 
     static public func cursorPos() -> CGPoint? {
         // IMPROVE: this is expensive (maybe?)
-        var point = AKInterface.shared!.mousePoint
-        let rect = AKInterface.shared!.windowFrame
-        if rect.width < 1 || rect.height < 1 {
-            return nil
-        }
-        if screen.resizable && !screen.fullscreen {
-            // Allow user to resize window by dragging edges
-            let margin = CGFloat(10)
-            if point.x < margin || point.x > rect.width - margin ||
-                point.y < margin || point.y > rect.height - margin {
-                return nil
-            }
-        }
-        let viewRect: CGRect = screen.screenRect
-        let widthRate = viewRect.width / rect.width
-        var rate = viewRect.height / rect.height
-        if widthRate > rate {
-            // Keep aspect ratio
-            rate = widthRate
-        }
-        if screen.fullscreen {
-            // Vertically in center
-            point.y -= (rect.height - viewRect.height / rate)/2
-        }
-        point.y *= rate
-        point.y = viewRect.height - point.y
-        // For traffic light buttons when not fullscreen
-        if point.y < 0 {
-            return nil
-        }
-        // Horizontally in center
-        point.x -= (rect.width - viewRect.width / rate)/2
-        point.x *= rate
-        return point
+        guard let ak = AKInterface.shared else { return nil }
+        return PTCoordinateMath.cursorPosition(
+            mousePoint: ak.mousePoint,
+            windowFrame: ak.windowFrame,
+            viewRect: screen.screenRect,
+            resizable: screen.resizable,
+            fullscreen: screen.fullscreen
+        )
     }
 
     public func handleScrollWheel(deltaX: CGFloat, deltaY: CGFloat) -> Bool {
+        if isTextInput {
+            return false
+        }
         _ = ActionDispatcher.dispatch(key: KeyCodeNames.scrollWheelDrag, valueX: deltaX, valueY: deltaY)
         // I dont know why but this is the logic before the refactor.
         // Might be a mistake but keeping it for now
@@ -57,37 +40,67 @@ public class TouchscreenMouseEventAdapter: MouseEventAdapter {
     }
 
     public func handleMove(deltaX: CGFloat, deltaY: CGFloat) -> Bool {
-        if ActionDispatcher.getDispatchPriority(key: KeyCodeNames.mouseMove) == .DRAGGABLE {
-            // condition meets when draggable button pressed
-            return ActionDispatcher.dispatch(key: KeyCodeNames.mouseMove, valueX: deltaX, valueY: -deltaY)
-        } else if ActionDispatcher.getDispatchPriority(key: KeyCodeNames.fakeMouse) == .DRAGGABLE {
+        if !isTextInput,
+           ActionDispatcher.dispatchAtPriority(.DRAGGABLE, key: KeyCodeNames.mouseMove,
+                                               valueX: deltaX, valueY: -deltaY) {
+            return true
+        }
+        if ActionDispatcher.getDispatchPriority(key: KeyCodeNames.fakeMouse) == .DRAGGABLE {
             // condition meets when mouse pressed and draggable button not pressed
-            // fake mouse handler priority:
-            // default direction pad: press handler
-            // draggable direction pad: move handler
-            // default button: lift handler
-            // kinda hacky but.. IT WORKS!
             guard let pos = TouchscreenMouseEventAdapter.cursorPos() else { return false }
-            return ActionDispatcher.dispatch(key: KeyCodeNames.fakeMouse, valueX: pos.x, valueY: pos.y)
-
+            return ActionDispatcher.dispatchAtPriority(.DRAGGABLE, key: KeyCodeNames.fakeMouse,
+                                                       valueX: pos.x, valueY: pos.y)
+        }
+        if ActionDispatcher.getDispatchPriority(key: KeyCodeNames.fakeRightLongPress) == .DRAGGABLE {
+            guard let pos = TouchscreenMouseEventAdapter.cursorPos() else { return false }
+            return ActionDispatcher.dispatchAtPriority(.DRAGGABLE, key: KeyCodeNames.fakeRightLongPress,
+                                                       valueX: pos.x, valueY: pos.y)
         }
         return false
     }
 
     public func handleLeftButton(pressed: Bool) -> Bool {
+        if !pressed {
+            if ActionDispatcher.getDispatchPriority(key: KeyCodeNames.fakeMouse) == .DRAGGABLE {
+                return ActionDispatcher.dispatch(key: KeyCodeNames.fakeMouse, pressed: false)
+            }
+            guard TouchscreenMouseEventAdapter.cursorPos() != nil else { return false }
+            return ActionDispatcher.dispatch(key: KeyCodeNames.fakeMouse, pressed: false)
+        }
         // It is necessary to calculate pos before pushing to dispatch queue
         // Otherwise, we don't know whether to return false or true
         guard let pos = TouchscreenMouseEventAdapter.cursorPos() else { return false }
-        if pressed {
-            return ActionDispatcher.dispatch(key: KeyCodeNames.fakeMouse, valueX: pos.x, valueY: pos.y)
-        } else {
-            return ActionDispatcher.dispatch(key: KeyCodeNames.fakeMouse, pressed: pressed)
-        }
+        return ActionDispatcher.dispatch(key: KeyCodeNames.fakeMouse, valueX: pos.x, valueY: pos.y)
     }
 
     public func handleOtherButton(id: Int, pressed: Bool) -> Bool {
-        ActionDispatcher.dispatch(key: EditorMouseEventAdapter.getMouseButtonName(id),
-                                  pressed: pressed)
+        let buttonName = EditorMouseEventAdapter.getMouseButtonName(id)
+        if !isTextInput, ActionDispatcher.dispatch(key: buttonName, pressed: pressed) {
+            return true
+        }
+        guard buttonName == KeyCodeNames.rightMouseButton,
+              PlaySettings.shared.rightClickLongPress else {
+            return false
+        }
+        if !pressed {
+            if rightLongPressPending
+                || ActionDispatcher.getDispatchPriority(key: KeyCodeNames.fakeRightLongPress) == .DRAGGABLE {
+                rightLongPressPending = false
+                return ActionDispatcher.dispatch(key: KeyCodeNames.fakeRightLongPress, pressed: false)
+            }
+            return false
+        }
+        guard let pos = TouchscreenMouseEventAdapter.cursorPos() else { return false }
+        if screen.isPointInsideActiveTextInput(pos) {
+            return false
+        }
+        let dispatched = ActionDispatcher.dispatch(
+            key: KeyCodeNames.fakeRightLongPress,
+            valueX: pos.x,
+            valueY: pos.y
+        )
+        rightLongPressPending = dispatched
+        return dispatched
     }
 
     public func cursorHidden() -> Bool {

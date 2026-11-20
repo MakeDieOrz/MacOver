@@ -4,11 +4,23 @@
 //
 
 import Foundation
+import ObjectiveC
 import UIKit
 
 class Toast {
+    public static let internalNotificationCenter = NotificationCenter()
+
+    private static func markInternalView(_ view: UIView) {
+        PlaySettings.tagInternalView(view)
+    }
     public static func showOver(msg: String) {
-        if let parent = screen.keyWindow {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async {
+                showOver(msg: msg)
+            }
+            return
+        }
+        if let parent = screen.keyWindow ?? screen.primaryWindow {
             Toast.show(message: msg, parent: parent)
         }
     }
@@ -66,7 +78,13 @@ class Toast {
 
     public static func showHint(title: String, text: [String] = [], timeout: Double = -3,
                                 notification: NSNotification.Name? = nil) {
-        let parent = screen.keyWindow!
+        if !Thread.isMainThread {
+            DispatchQueue.main.async {
+                showHint(title: title, text: text, timeout: timeout, notification: notification)
+            }
+            return
+        }
+        guard let parent = screen.keyWindow ?? screen.primaryWindow else { return }
 
         // Width and height here serve as an upper limit.
         // Text would fill width first, then wrap, then fill height, then scroll
@@ -86,27 +104,39 @@ class Toast {
         // Disable editing
         messageLabel.isEditable = false
         messageLabel.isSelectable = false
+        markInternalView(messageLabel)
 
         hintView.append(messageLabel)
         parent.addSubview(messageLabel)
 
-        if hintView.count > 4 {
-            hideHint(hint: hintView.first!)
+        if hintView.count > 4, let firstHint = hintView.first {
+            hideHint(hint: firstHint)
         }
         var life = timeout
+        let center = Toast.internalNotificationCenter
+        var token: NSObjectProtocol?
+        let cleanupObserver = {
+            if let existing = token {
+                center.removeObserver(existing)
+                token = nil
+            }
+        }
         if let note = notification {
-            let center = NotificationCenter.default
-            var token: NSObjectProtocol?
-            token = center.addObserver(forName: note, object: nil, queue: OperationQueue.main) { _ in
-                center.removeObserver(token!)
-                hideHint(hint: messageLabel)
+            token = center.addObserver(forName: note, object: nil, queue: OperationQueue.main) { [weak messageLabel] _ in
+                cleanupObserver()
+                if let label = messageLabel {
+                    hideHint(hint: label)
+                }
             }
         } else if life < 0 {
             life = 3
         }
         if life >= 0 {
-            DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + 0.5 + life, qos: .background) {
-                hideHint(hint: messageLabel)
+            DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + 0.5 + life, qos: .background) { [weak messageLabel] in
+                cleanupObserver()
+                if let label = messageLabel {
+                    hideHint(hint: label)
+                }
             }
         }
         for view in hintView {
@@ -116,9 +146,20 @@ class Toast {
         }
     }
 
-    static func syncUserDefaults() -> Float {
+    static func cleanupLegacyUserDefaults() {
         let persistenceKeyname = "playtoolsKeymappingDisabledAt"
-        let lastUse = UserDefaults.standard.float(forKey: persistenceKeyname)
+        let defaults = UserDefaults.standard
+        if let legacyVal = defaults.object(forKey: persistenceKeyname) {
+            if let legacyNum = legacyVal as? NSNumber, PlaySettings.shared.keymappingDisabledAt < 1 {
+                PlaySettings.shared.keymappingDisabledAt = legacyNum.floatValue
+            }
+            defaults.removeObject(forKey: persistenceKeyname)
+        }
+    }
+
+    static func syncKeymappingState() -> Float {
+        cleanupLegacyUserDefaults()
+        let lastUse = PlaySettings.shared.keymappingDisabledAt
         var thisUse = lastUse
         if lastUse < 1 {
             thisUse = 2
@@ -126,17 +167,20 @@ class Toast {
             thisUse = Float(Date.timeIntervalSinceReferenceDate)
         }
         var token2: NSObjectProtocol?
-        let center = NotificationCenter.default
+        let center = Toast.internalNotificationCenter
         token2 = center.addObserver(forName: NSNotification.Name.playtoolsCursorWillShow,
                                     object: nil, queue: OperationQueue.main) { _ in
-            center.removeObserver(token2!)
-            UserDefaults.standard.set(thisUse, forKey: persistenceKeyname)
+            if let t = token2 {
+                center.removeObserver(t)
+                token2 = nil
+            }
+            PlaySettings.shared.keymappingDisabledAt = thisUse
         }
         return lastUse
     }
 
     public static func initialize() {
-        let lastUse = syncUserDefaults()
+        let lastUse = syncKeymappingState()
         if lastUse > Float(Date.now.addingTimeInterval(-86400*14).timeIntervalSinceReferenceDate) {
             return
         }
@@ -152,11 +196,14 @@ class Toast {
                                                 value: "to enable mouse mapping", comment: "")],
                        timeout: 10,
                        notification: NSNotification.Name.playtoolsCursorWillHide)
-        let center = NotificationCenter.default
+        let center = Toast.internalNotificationCenter
         var token: NSObjectProtocol?
         token = center.addObserver(forName: NSNotification.Name.playtoolsCursorWillHide,
                                    object: nil, queue: OperationQueue.main) { _ in
-            center.removeObserver(token!)
+            if let t = token {
+                center.removeObserver(t)
+                token = nil
+            }
             Toast.showHint(title: NSLocalizedString("hint.showCursor.title",
                                                     tableName: "Playtools",
                                                     value: "Cursor locked", comment: ""),
@@ -175,6 +222,7 @@ class Toast {
     // swiftlint:disable:next function_body_length
     private static func show(message: String, parent: UIView) {
         let toastContainer = UIView(frame: CGRect())
+        markInternalView(toastContainer)
         toastContainer.backgroundColor = UIColor.black.withAlphaComponent(0.6)
         toastContainer.alpha = 0.0
         toastContainer.layer.cornerRadius = 25
@@ -184,7 +232,7 @@ class Toast {
         let toastLabel = UILabel(frame: CGRect())
         toastLabel.textColor = UIColor.white
         toastLabel.textAlignment = .center
-        toastLabel.font.withSize(12.0)
+        toastLabel.font = toastLabel.font.withSize(12.0)
         toastLabel.text = message
         toastLabel.clipsToBounds  =  true
         toastLabel.numberOfLines = 0

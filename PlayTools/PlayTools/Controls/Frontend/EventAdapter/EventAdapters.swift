@@ -24,8 +24,10 @@ public class EventAdapters {
 
     static func mouse(controlMode: ControlModeLiteral) -> MouseEventAdapter {
         switch controlMode {
-        case .off, .textInput:
+        case .off:
             return TransparentMouseEventAdapter()
+        case .textInput:
+            return TouchscreenMouseEventAdapter(isTextInput: true)
         case .cameraRotate:
             return CameraControlMouseEventAdapter()
         case .arbitraryClick:
