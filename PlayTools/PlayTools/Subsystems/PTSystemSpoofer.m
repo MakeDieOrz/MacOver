@@ -1515,6 +1515,9 @@ static BOOL pt_handle_sysctl_name(const char *name,
         return NO;
     }
     if (c0 == 'h' && strncmp(name, "hw.", 3) == 0) {
+        if (!pt_is_bypass_enabled() || pt_sysctl_resolve_is_sys(caller, inout_is_sys_caller)) {
+            return NO;
+        }
         const char *sub = name + 3;
         if (strcmp(sub, "machine") == 0 || strcmp(sub, "product") == 0) {
             *out_ret = pt_write_sysctl_string(DEVICE_MODEL, oldp, oldlenp);
@@ -1526,9 +1529,6 @@ static BOOL pt_handle_sysctl_name(const char *name,
             strcmp(sub, "jetsam_properties_product_type") == 0) {
             *out_ret = pt_write_sysctl_string(OEM_ID, oldp, oldlenp);
             return YES;
-        }
-        if (!pt_is_bypass_enabled() || pt_sysctl_resolve_is_sys(caller, inout_is_sys_caller)) {
-            return NO;
         }
         const pt_device_profile_t *profile = pt_get_active_device_profile();
         if (strcmp(sub, "use_kernelmanagerd") == 0) {
@@ -1992,13 +1992,6 @@ static int pt_sysctl(int *name, u_int types, void *buf, size_t *size, void *arg0
     const void *ret_addr = __builtin_return_address(0);
     int is_sys_caller = -1;
     if (name != NULL && types >= 2) {
-        if (name[0] == CTL_HW) {
-            if (name[1] == HW_MACHINE || name[1] == HW_PRODUCT) {
-                return pt_write_sysctl_string(DEVICE_MODEL, buf, size);
-            } else if (name[1] == HW_MODEL || name[1] == HW_TARGET) {
-                return pt_write_sysctl_string(OEM_ID, buf, size);
-            }
-        }
         if (name[0] == CTL_KERN) {
             if (types >= 4 && name[1] == KERN_PROC && name[2] == KERN_PROC_PID &&
                 name[3] != getpid()) {
@@ -2067,6 +2060,18 @@ static int pt_sysctl(int *name, u_int types, void *buf, size_t *size, void *arg0
                 }
             } else if (name[0] == CTL_HW) {
                 switch (name[1]) {
+                    case HW_MACHINE:
+                    case HW_PRODUCT:
+                        if (!pt_sysctl_resolve_is_sys(ret_addr, &is_sys_caller)) {
+                            return pt_write_sysctl_string(DEVICE_MODEL, buf, size);
+                        }
+                        break;
+                    case HW_MODEL:
+                    case HW_TARGET:
+                        if (!pt_sysctl_resolve_is_sys(ret_addr, &is_sys_caller)) {
+                            return pt_write_sysctl_string(OEM_ID, buf, size);
+                        }
+                        break;
                     case HW_NCPU:
                     case HW_AVAILCPU:
                         if (!pt_sysctl_resolve_is_sys(ret_addr, &is_sys_caller)) {
