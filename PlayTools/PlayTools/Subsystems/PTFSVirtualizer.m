@@ -2867,11 +2867,13 @@ static int pt_proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer, int 
     switch (flavor) {
         case PROC_PIDVNODEPATHINFO:
             if ((size_t)ret >= sizeof(struct proc_vnodepathinfo)) {
-                struct proc_vnodepathinfo *vinfo = (struct proc_vnodepathinfo *)buffer;
+                struct proc_vnodepathinfo vinfo;
+                memcpy(&vinfo, buffer, sizeof(vinfo));
                 const char *vh = pt_get_virtual_home_cstr();
                 const char *fb = (vh != NULL) ? vh : "/";
-                pt_sanitize_vnode_vip_path(vinfo->pvi_cdir.vip_path, sizeof(vinfo->pvi_cdir.vip_path), caller, fb);
-                pt_sanitize_vnode_vip_path(vinfo->pvi_rdir.vip_path, sizeof(vinfo->pvi_rdir.vip_path), caller, "/");
+                pt_sanitize_vnode_vip_path(vinfo.pvi_cdir.vip_path, sizeof(vinfo.pvi_cdir.vip_path), caller, fb);
+                pt_sanitize_vnode_vip_path(vinfo.pvi_rdir.vip_path, sizeof(vinfo.pvi_rdir.vip_path), caller, "/");
+                memcpy(buffer, &vinfo, sizeof(vinfo));
             }
             break;
 
@@ -2930,14 +2932,16 @@ static int pt_proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer, int 
 
         case PROC_PIDTHREADPATHINFO:
             if ((size_t)ret >= sizeof(struct proc_threadwithpathinfo)) {
-                struct proc_threadwithpathinfo *tpi = (struct proc_threadwithpathinfo *)buffer;
-                if (pt_is_bypass_enabled() && pt_is_hidden_thread_name(tpi->pt.pth_name)) {
-                    memset(tpi->pt.pth_name, 0, sizeof(tpi->pt.pth_name));
+                struct proc_threadwithpathinfo tpi;
+                memcpy(&tpi, buffer, sizeof(tpi));
+                if (pt_is_bypass_enabled() && pt_is_hidden_thread_name(tpi.pt.pth_name)) {
+                    memset(tpi.pt.pth_name, 0, sizeof(tpi.pt.pth_name));
                 }
-                pt_sanitize_vnode_vip_path(tpi->pvip.vip_path,
-                                           sizeof(tpi->pvip.vip_path),
+                pt_sanitize_vnode_vip_path(tpi.pvip.vip_path,
+                                           sizeof(tpi.pvip.vip_path),
                                            caller,
                                            pt_fallback_system_image_path());
+                memcpy(buffer, &tpi, sizeof(tpi));
             }
             break;
 
@@ -2969,11 +2973,13 @@ static int pt_proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer, int 
         case PROC_PIDREGIONPATHINFO2:
         case PROC_PIDREGIONPATHINFO3:
             if ((size_t)ret >= sizeof(struct proc_regionwithpathinfo)) {
-                struct proc_regionwithpathinfo *rinfo = (struct proc_regionwithpathinfo *)buffer;
-                pt_sanitize_vnode_vip_path(rinfo->prp_vip.vip_path,
-                                           sizeof(rinfo->prp_vip.vip_path),
+                struct proc_regionwithpathinfo rinfo;
+                memcpy(&rinfo, buffer, sizeof(rinfo));
+                pt_sanitize_vnode_vip_path(rinfo.prp_vip.vip_path,
+                                           sizeof(rinfo.prp_vip.vip_path),
                                            caller,
                                            pt_fallback_system_image_path());
+                memcpy(buffer, &rinfo, sizeof(rinfo));
             }
             break;
 
