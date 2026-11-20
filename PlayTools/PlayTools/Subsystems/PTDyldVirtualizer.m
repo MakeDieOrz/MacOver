@@ -1388,6 +1388,83 @@ static char *pt_dlerror(void) {
     return s_tls_dlerror_buf;
 }
 
+static BOOL pt_has_blocked_jailbreak_dlopen_component(const char *path) {
+    if (path == NULL || path[0] == '\0') {
+        return NO;
+    }
+    static const struct {
+        const char *name;
+        size_t len;
+    } s_dir_or_fw_components[] = {
+        { "MobileSubstrate", 15 },
+        { "TweakInject", 11 },
+        { "CydiaSubstrate.framework", 24 },
+        { "ElleKit.framework", 17 },
+        { "libhooker.framework", 19 },
+        { "Substitute.framework", 20 }
+    };
+    static const struct {
+        const char *prefix;
+        size_t len;
+    } s_basename_prefixes[] = {
+        { "MobileSubstrate", 15 },
+        { "CydiaSubstrate", 14 },
+        { "SubstrateInserter", 17 },
+        { "SubstrateBootstrap", 18 },
+        { "TweakInject", 11 },
+        { "ellekit", 7 },
+        { "libellekit", 10 },
+        { "libhooker", 9 },
+        { "libsubstitute", 13 },
+        { "fridagadget", 11 },
+        { "frida", 5 },
+        { "cycript", 7 },
+        { "libcycript", 10 }
+    };
+
+    const char *last_seg = NULL;
+    size_t last_seg_len = 0;
+    const char *p = path;
+    while (*p != '\0') {
+        while (*p == '/') {
+            p++;
+        }
+        if (*p == '\0') {
+            break;
+        }
+        const char *seg_start = p;
+        while (*p != '\0' && *p != '/') {
+            p++;
+        }
+        size_t seg_len = (size_t)(p - seg_start);
+        last_seg = seg_start;
+        last_seg_len = seg_len;
+        for (size_t i = 0; i < sizeof(s_dir_or_fw_components) / sizeof(s_dir_or_fw_components[0]); ++i) {
+            if (seg_len == s_dir_or_fw_components[i].len &&
+                strncasecmp(seg_start, s_dir_or_fw_components[i].name, seg_len) == 0) {
+                return YES;
+            }
+        }
+    }
+
+    if (last_seg != NULL && last_seg_len > 0) {
+        for (size_t i = 0; i < sizeof(s_basename_prefixes) / sizeof(s_basename_prefixes[0]); ++i) {
+            size_t plen = s_basename_prefixes[i].len;
+            if (last_seg_len >= plen &&
+                strncasecmp(last_seg, s_basename_prefixes[i].prefix, plen) == 0) {
+                if (last_seg_len == plen) {
+                    return YES;
+                }
+                char delim = last_seg[plen];
+                if (delim == '.' || delim == '-' || delim == '_') {
+                    return YES;
+                }
+            }
+        }
+    }
+    return NO;
+}
+
 static BOOL pt_should_block_dlopen_path(const char *path, const void *caller) {
     if (path == NULL || !pt_is_bypass_enabled()) {
         return NO;
@@ -1397,15 +1474,7 @@ static BOOL pt_should_block_dlopen_path(const char *path, const void *caller) {
     }
     return (pt_is_hidden_path(path, caller) ||
             pt_is_hidden_dyld_image_name(path) ||
-            strstr(path, "MobileSubstrate") != NULL ||
-            strstr(path, "SubstrateInserter") != NULL ||
-            strstr(path, "SubstrateBootstrap") != NULL ||
-            strstr(path, "TweakInject") != NULL ||
-            strstr(path, "ellekit") != NULL ||
-            strstr(path, "libhooker") != NULL ||
-            strstr(path, "libsubstitute") != NULL ||
-            strstr(path, "frida") != NULL ||
-            strstr(path, "cycript") != NULL);
+            pt_has_blocked_jailbreak_dlopen_component(path));
 }
 
 static BOOL pt_should_block_resolved_dlopen_path(const char *orig_path,

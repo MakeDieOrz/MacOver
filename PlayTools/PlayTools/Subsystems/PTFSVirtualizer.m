@@ -461,6 +461,7 @@ static BOOL pt_is_hidden_normalized_path_cached_caller(const char *norm, const v
                 PT_STR_ENTRY("/Library/TweakInject"),
                 PT_STR_ENTRY("/Library/dpkg"),
                 PT_STR_ENTRY("/Library/Frameworks/CydiaSubstrate.framework"),
+                PT_STR_ENTRY("/Library/Frameworks/ElleKit.framework"),
                 PT_STR_ENTRY("/Library/Frameworks/libhooker.dylib"),
                 PT_STR_ENTRY("/Library/PreferenceBundles/LaunchInSafeMode.bundle"),
                 PT_STR_ENTRY("/private/preboot"),
