@@ -5,6 +5,7 @@
 //  Created by Александр Дорофеев on 24.11.2021.
 //
 
+import Darwin
 import Foundation
 
 class Installer {
@@ -114,6 +115,14 @@ class Installer {
                     createdEntitlementsURL = app.entitlements
                 }
 
+                let backupStagingURL = ipa.tmpDir?.appendingPathComponent("AppBackupsStaging")
+                let hasStagedBackups: Bool
+                if !export, !app.info.bundleIdentifier.isEmpty, let stagingURL = backupStagingURL {
+                    hasStagedBackups = stageAppBackups(for: app, in: stagingURL)
+                } else {
+                    hasStagedBackups = false
+                }
+
                 for macho in machos where !export {
                     try Macho.convertMacho(macho)
                     if macho != app.executable {
@@ -164,6 +173,12 @@ class Installer {
                     finalURL = try wrap(app)
                     let installedApp = PlayApp(appUrl: finalURL, dependencies: dependencies)
                     try installedApp.signThrowing()
+                    if !installedApp.info.bundleIdentifier.isEmpty {
+                        commitAppBackups(
+                            from: hasStagedBackups ? backupStagingURL : nil,
+                            for: installedApp
+                        )
+                    }
                     try? ipa.removeQuarantine(finalURL)
                 }
 
@@ -289,6 +304,69 @@ class Installer {
         let provision = baseApp.url.appendingPathComponent("embedded.mobileprovision")
         if FileManager.default.fileExists(atPath: provision.path) {
             try FileManager.default.removeItem(at: provision)
+        }
+    }
+
+    private static func stageAppBackups(for baseApp: BaseApp, in stagingDir: URL) -> Bool {
+        let fm = FileManager.default
+        var hasArtifact = false
+
+        func ensureStagingDir() -> Bool {
+            if fm.fileExists(atPath: stagingDir.path) {
+                return true
+            }
+            do {
+                try fm.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+                return true
+            } catch {
+                PlayCoverDiagnostics.log("Failed to create AppBackups staging dir: \(error)", isError: true)
+                return false
+            }
+        }
+
+        let provisionURL = baseApp.url.appendingPathComponent("embedded.mobileprovision")
+        var isDir: ObjCBool = false
+        if fm.fileExists(atPath: provisionURL.path, isDirectory: &isDir),
+           !isDir.boolValue,
+           ensureStagingDir() {
+            let stagedProvision = stagingDir.appendingPathComponent("embedded.mobileprovision")
+            do {
+                try fm.copyItem(at: provisionURL, to: stagedProvision)
+                hasArtifact = true
+            } catch {
+                PlayCoverDiagnostics.log("Failed to stage embedded.mobileprovision backup: \(error)", isError: true)
+            }
+        }
+
+        if let ctx = try? Macho.inspectArm64Slice(at: baseApp.executable),
+           !ctx.isFat,
+           ensureStagingDir() {
+            let stagedExec = stagingDir.appendingPathComponent("executable")
+            if Darwin.clonefile(baseApp.executable.path, stagedExec.path, 0) == 0 {
+                try? stagedExec.setBinaryPosixPermissions(0o755)
+                hasArtifact = true
+            }
+        }
+
+        return hasArtifact
+    }
+
+    private static func commitAppBackups(from stagingDir: URL?, for installedApp: PlayApp) {
+        let fm = FileManager.default
+        let targetDir = installedApp.appBackupsDir
+        fm.delete(at: targetDir)
+
+        guard let stagingDir, fm.fileExists(atPath: stagingDir.path) else {
+            return
+        }
+        do {
+            try fm.createDirectory(at: targetDir.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try fm.moveItem(at: stagingDir, to: targetDir)
+        } catch {
+            PlayCoverDiagnostics.log(
+                "Failed to commit AppBackups for \(installedApp.info.bundleIdentifier): \(error)",
+                isError: true
+            )
         }
     }
 

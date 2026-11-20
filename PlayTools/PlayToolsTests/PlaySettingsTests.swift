@@ -397,6 +397,21 @@ final class PlaySettingsTests: XCTestCase {
         XCTAssertEqual(PTFrameRateRangeValues.clampedLegacyFPS(24, maxHz: 60), 24)
         XCTAssertEqual(PTFrameRateRangeValues.clampedLegacyFPS(0, maxHz: 60), 60)
         XCTAssertEqual(PTFrameRateRangeValues.clampedLegacyFPS(120, maxHz: 0), 120)
+
+        for rawVersion in ["compat13_7", "13.7", "ios13_7"] {
+            var compat13Data = AppSettingsData()
+            compat13Data.bundleIdentifier = "com.example.settings.compat13"
+            compat13Data.reportedIOSVersion = rawVersion
+            compat13Data.iosDeviceModel = "iPhone12,5"
+            try encoder.encode(compat13Data).write(to: url)
+            _ = PTSafeMode.shared.evaluateAndBeginLaunch(environment: ["PLAYTOOLS_SAFE_MODE": "0"])
+            let ps13 = PlaySettings(settingsURL: url, bundleIdentifier: "com.example.settings.compat13")
+            XCTAssertEqual(ps13.deviceModel as String, "iPhone12,5")
+            XCTAssertEqual(ps13.oemID as String, "D431AP")
+            XCTAssertEqual(ps13.reportedIOSVersion as String, "compat13_7")
+            _ = PTSafeMode.shared.evaluateAndBeginLaunch(environment: ["PLAYTOOLS_SAFE_MODE": "1"])
+            XCTAssertEqual(ps13.reportedIOSVersion as String, "automatic")
+        }
     }
 
     func testRightClickLongPressDefaultsAndDecodingPersistence() throws {

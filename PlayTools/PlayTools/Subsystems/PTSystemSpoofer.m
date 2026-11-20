@@ -35,6 +35,7 @@ static const pt_device_profile_t s_device_profiles[] = {
     { "iPad14,5",   "J620AP",  "Apple M2",         "Apple M2 GPU",      8, 4, 4, 8ULL << 30, 0xda33d83dU, "RELEASE_ARM64_T8112", "t8112", "iPad Pro (12.9-inch) (6th generation)", "MNXP3", "A2436", YES, 2048, 2732, 2.0 },
     { "iPad16,6",   "J720AP",  "Apple M4",         "Apple M4 GPU",      9, 3, 6, 8ULL << 30, 0x6f5129acU, "RELEASE_ARM64_T8132", "t8132", "iPad Pro 13-inch (M4)",                 "MVX23", "A2925", YES, 2064, 2752, 2.0 },
     { "iPad17,3",   "J820AP",  "Apple M5",         "Apple M5 GPU",      9, 3, 6, 12ULL << 30, 0x1d5a87e8U, "RELEASE_ARM64_T8142", "t8142", "iPad Pro 13-inch (M5)",                 "MD8R4", "A3360", YES, 2064, 2752, 2.0 },
+    { "iPhone12,5", "D431AP",  "Apple A13 Bionic", "Apple A13 GPU",     6, 2, 4, 4ULL << 30, 0x573b5eecU, "RELEASE_ARM64_T8030", "t8030", "iPhone 11 Pro Max",                     "MWHD2", "A2161", NO,  1242, 2688, 3.0 },
     { "iPhone14,3", "D64AP",   "Apple A15 Bionic", "Apple A15 GPU",     6, 2, 4, 6ULL << 30, 0xda33d83dU, "RELEASE_ARM64_T8110", "t8110", "iPhone 13 Pro Max",                     "MLL63", "A2484", NO,  1284, 2778, 3.0 },
     { "iPhone15,3", "D74AP",   "Apple A16 Bionic", "Apple A16 GPU",     6, 2, 4, 6ULL << 30, 0x8765edeaU, "RELEASE_ARM64_T8120", "t8120", "iPhone 14 Pro Max",                     "MQ8N3", "A2651", NO,  1290, 2796, 3.0 },
     { "iPhone16,2", "D84AP",   "Apple A17 Pro",    "Apple A17 Pro GPU", 6, 2, 4, 8ULL << 30, 0xfa33415eU, "RELEASE_ARM64_T8130", "t8130", "iPhone 15 Pro Max",                     "MU683", "A2849", NO,  1290, 2796, 3.0 },
@@ -45,8 +46,8 @@ static const pt_device_profile_t s_device_profiles[] = {
 static _Atomic(const pt_device_profile_t *) s_active_device_profile = &s_device_profiles[2];
 
 static const pt_device_profile_t *pt_device_profile_for_model(const char *model) {
-    static const size_t kDefaultIPadIdx = 2;   // iPad13,8
-    static const size_t kDefaultIPhoneIdx = 9; // iPhone17,2
+    static const size_t kDefaultIPadIdx = 2;    // iPad13,8
+    static const size_t kDefaultIPhoneIdx = 10; // iPhone17,2
     if (model != NULL && model[0] != '\0') {
         size_t count = sizeof(s_device_profiles) / sizeof(s_device_profiles[0]);
         for (size_t i = 0; i < count; i++) {
@@ -1114,11 +1115,19 @@ static CFDataRef pt_create_compatible_cfdata(CFAllocatorRef allocator) {
 }
 
 
+typedef enum {
+    PT_REPORTED_IOS_OVERRIDE_NONE = 0,
+    PT_REPORTED_IOS_OVERRIDE_18_3 = 1,
+    PT_REPORTED_IOS_OVERRIDE_13_7 = 2
+} pt_reported_ios_override_t;
+
 static char s_real_kern_release[64] = "24.3.0";
 static char s_spoofed_kern_version_prefix[256] = "Darwin Kernel Version 24.3.0: Sat Jan 11 02:18:34 PST 2025; root:xnu-11215.82.3~1";
+static char s_compat18_kern_version_prefix[256] = "Darwin Kernel Version 24.3.0: Sat Jan 11 02:18:34 PST 2025; root:xnu-11215.61.2~1";
+static char s_compat13_kern_version_prefix[256] = "Darwin Kernel Version 19.6.0: Mon Jul  6 21:14:08 PDT 2020; root:xnu-6153.121.2~1";
 static char s_spoofed_osversion[64] = "22D63";
 static char s_spoofed_ios_version[32] = "18.3";
-static _Atomic BOOL s_reported_ios_override_active = NO;
+static _Atomic int s_reported_ios_override_mode = PT_REPORTED_IOS_OVERRIDE_NONE;
 static _Atomic BOOL s_reported_ios_override_forced_off = NO;
 static pthread_once_t s_host_kern_once = PTHREAD_ONCE_INIT;
 
@@ -1257,15 +1266,33 @@ static void pt_init_host_kernel_info(void) {
         close(sv_fd);
     }
 
+    pt_synthesize_ios_kernel_version_prefix("24.3.0",
+                                            s_compat18_kern_version_prefix,
+                                            sizeof(s_compat18_kern_version_prefix));
+    pt_synthesize_ios_kernel_version_prefix("19.6.0",
+                                            s_compat13_kern_version_prefix,
+                                            sizeof(s_compat13_kern_version_prefix));
+
     if (!atomic_load_explicit(&s_reported_ios_override_forced_off, memory_order_acquire) &&
         !pt_is_safe_mode_env_active()) {
         int settings_fd = pt_open_early_settings_plist_fd();
         if (settings_fd >= 0) {
             char rep_mode[32] = {0};
             if (pt_read_plist_top_string_from_fd(settings_fd, "reportedIOSVersion", rep_mode, sizeof(rep_mode)) &&
-                strcmp(rep_mode, "compat18_3") == 0 &&
                 !atomic_load_explicit(&s_reported_ios_override_forced_off, memory_order_acquire)) {
-                atomic_store_explicit(&s_reported_ios_override_active, YES, memory_order_release);
+                if (strcasecmp(rep_mode, "compat18_3") == 0 ||
+                    strcmp(rep_mode, "18.3") == 0 ||
+                    strcasecmp(rep_mode, "ios18_3") == 0) {
+                    atomic_store_explicit(&s_reported_ios_override_mode,
+                                          PT_REPORTED_IOS_OVERRIDE_18_3,
+                                          memory_order_release);
+                } else if (strcasecmp(rep_mode, "compat13_7") == 0 ||
+                           strcmp(rep_mode, "13.7") == 0 ||
+                           strcasecmp(rep_mode, "ios13_7") == 0) {
+                    atomic_store_explicit(&s_reported_ios_override_mode,
+                                          PT_REPORTED_IOS_OVERRIDE_13_7,
+                                          memory_order_release);
+                }
             }
             close(settings_fd);
         }
@@ -1276,29 +1303,72 @@ static inline void pt_ensure_host_kernel_info(void) {
     pthread_once(&s_host_kern_once, pt_init_host_kernel_info);
 }
 
+static pt_reported_ios_override_t pt_active_reported_ios_override(void) {
+    if (atomic_load_explicit(&s_reported_ios_override_forced_off, memory_order_acquire)) {
+        return PT_REPORTED_IOS_OVERRIDE_NONE;
+    }
+    int mode = atomic_load_explicit(&s_reported_ios_override_mode, memory_order_acquire);
+    if (mode == PT_REPORTED_IOS_OVERRIDE_18_3) {
+        return PT_REPORTED_IOS_OVERRIDE_18_3;
+    }
+    if (mode == PT_REPORTED_IOS_OVERRIDE_13_7) {
+        return PT_REPORTED_IOS_OVERRIDE_13_7;
+    }
+    return PT_REPORTED_IOS_OVERRIDE_NONE;
+}
+
 __attribute__((visibility("hidden"))) void pt_disable_reported_ios_override_for_safe_mode(void) {
     atomic_store_explicit(&s_reported_ios_override_forced_off, YES, memory_order_release);
-    atomic_store_explicit(&s_reported_ios_override_active, NO, memory_order_release);
+    atomic_store_explicit(&s_reported_ios_override_mode, PT_REPORTED_IOS_OVERRIDE_NONE, memory_order_release);
 }
 
 __attribute__((visibility("hidden"))) const char *pt_get_reported_ios_version_override(const char **out_build) {
     pt_ensure_host_kernel_info();
-    if (atomic_load_explicit(&s_reported_ios_override_forced_off, memory_order_acquire) ||
-        !atomic_load_explicit(&s_reported_ios_override_active, memory_order_acquire)) {
-        if (out_build != NULL) {
-            *out_build = NULL;
-        }
-        return NULL;
+    switch (pt_active_reported_ios_override()) {
+        case PT_REPORTED_IOS_OVERRIDE_18_3:
+            if (out_build != NULL) {
+                *out_build = "22D63";
+            }
+            return "18.3";
+        case PT_REPORTED_IOS_OVERRIDE_13_7:
+            if (out_build != NULL) {
+                *out_build = "17H35";
+            }
+            return "13.7";
+        default:
+            if (out_build != NULL) {
+                *out_build = NULL;
+            }
+            return NULL;
     }
-    if (out_build != NULL) {
-        *out_build = "22D63";
+}
+
+static const char *pt_get_effective_kern_release(void) {
+    pt_ensure_host_kernel_info();
+    switch (pt_active_reported_ios_override()) {
+        case PT_REPORTED_IOS_OVERRIDE_13_7:
+            return "19.6.0";
+        case PT_REPORTED_IOS_OVERRIDE_18_3:
+            return "24.3.0";
+        default:
+            return s_real_kern_release;
     }
-    return "18.3";
 }
 
 static void pt_format_kernel_version(const pt_device_profile_t *profile, char *buf, size_t buf_size) {
     pt_ensure_host_kernel_info();
-    snprintf(buf, buf_size, "%s/%s", s_spoofed_kern_version_prefix, profile->kernel_tag);
+    const char *prefix = s_spoofed_kern_version_prefix;
+    switch (pt_active_reported_ios_override()) {
+        case PT_REPORTED_IOS_OVERRIDE_13_7:
+            prefix = s_compat13_kern_version_prefix;
+            break;
+        case PT_REPORTED_IOS_OVERRIDE_18_3:
+            prefix = s_compat18_kern_version_prefix;
+            break;
+        default:
+            break;
+    }
+    snprintf(buf, buf_size, "%s/%s", prefix, profile->kernel_tag);
 }
 
 // Change the machine output by uname to match expected output on iOS
@@ -1314,7 +1384,7 @@ static int pt_uname(struct utsname *uts) {
         memset(uts, 0, sizeof(*uts));
         strlcpy(uts->sysname, "Darwin", sizeof(uts->sysname));
         strlcpy(uts->nodename, profile->is_ipad ? "iPad" : "iPhone", sizeof(uts->nodename));
-        strlcpy(uts->release, s_real_kern_release, sizeof(uts->release));
+        strlcpy(uts->release, pt_get_effective_kern_release(), sizeof(uts->release));
         pt_format_kernel_version(profile, uts->version, sizeof(uts->version));
         strlcpy(uts->machine, pt_get_model_cstr(), sizeof(uts->machine));
         return 0;
@@ -1549,8 +1619,7 @@ static BOOL pt_handle_sysctl_name(const char *name,
             return YES;
         }
         if (strcmp(sub, "osrelease") == 0) {
-            pt_ensure_host_kernel_info();
-            *out_ret = pt_write_sysctl_string(s_real_kern_release, oldp, oldlenp);
+            *out_ret = pt_write_sysctl_string(pt_get_effective_kern_release(), oldp, oldlenp);
             return YES;
         }
         if (strcmp(sub, "osversion") == 0) {
@@ -1959,8 +2028,7 @@ static int pt_sysctl(int *name, u_int types, void *buf, size_t *size, void *arg0
                         break;
                     case KERN_OSRELEASE:
                         if (!pt_sysctl_resolve_is_sys(ret_addr, &is_sys_caller)) {
-                            pt_ensure_host_kernel_info();
-                            return pt_write_sysctl_string(s_real_kern_release, buf, size);
+                            return pt_write_sysctl_string(pt_get_effective_kern_release(), buf, size);
                         }
                         break;
                     case KERN_OSVERSION:
@@ -3713,13 +3781,53 @@ static CFURLRef pt_CFBundleCopyExecutableURL(CFBundleRef bundle) {
                                              __builtin_return_address(0));
 }
 
+static CFURLRef pt_copy_virtual_mobileprovision_cfurl_if_applicable(CFBundleRef bundle,
+                                                                   CFStringRef resourceName,
+                                                                   CFStringRef resourceType,
+                                                                   CFStringRef subDirName,
+                                                                   const void *caller) CF_RETURNS_RETAINED {
+    if (bundle == NULL || bundle != CFBundleGetMainBundle() || resourceName == NULL) {
+        return NULL;
+    }
+    if (subDirName != NULL && CFStringGetLength(subDirName) > 0) {
+        return NULL;
+    }
+    NSString *nameStr = (__bridge NSString *)resourceName;
+    NSString *typeStr = (__bridge NSString *)resourceType;
+    BOOL matches = NO;
+    if ([nameStr isEqualToString:@"embedded"]) {
+        matches = (typeStr != nil &&
+                   ([typeStr isEqualToString:@"mobileprovision"] ||
+                    [typeStr isEqualToString:@".mobileprovision"]));
+    } else if ([nameStr isEqualToString:@"embedded.mobileprovision"]) {
+        matches = (typeStr == nil || typeStr.length == 0);
+    }
+    if (!matches || !pt_is_bypass_enabled() || pt_is_effective_system_or_playtools_caller(caller)) {
+        return NULL;
+    }
+    if (!pt_has_backup_mobileprovision()) {
+        return NULL;
+    }
+    char vbuf[PATH_MAX];
+    const char *vpath = pt_copy_virtual_mobileprovision_path(vbuf, sizeof(vbuf));
+    if (vpath == NULL || vpath[0] == '\0') {
+        return NULL;
+    }
+    return CFURLCreateFromFileSystemRepresentation(
+        kCFAllocatorDefault, (const UInt8 *)vpath, (CFIndex)strlen(vpath), false);
+}
+
 static CFURLRef pt_CFBundleCopyResourceURL(CFBundleRef bundle,
                                            CFStringRef resourceName,
                                            CFStringRef resourceType,
                                            CFStringRef subDirName) {
-    return pt_sanitize_cfbundle_returned_url(
-        CFBundleCopyResourceURL(bundle, resourceName, resourceType, subDirName),
-        __builtin_return_address(0));
+    const void *caller = __builtin_return_address(0);
+    CFURLRef out = CFBundleCopyResourceURL(bundle, resourceName, resourceType, subDirName);
+    if (out == NULL) {
+        return pt_copy_virtual_mobileprovision_cfurl_if_applicable(
+            bundle, resourceName, resourceType, subDirName, caller);
+    }
+    return pt_sanitize_cfbundle_returned_url(out, caller);
 }
 
 static CFArrayRef pt_CFBundleCopyResourceURLsOfType(CFBundleRef bundle,
@@ -3770,9 +3878,14 @@ static CFURLRef pt_CFBundleCopyResourceURLForLocalization(CFBundleRef bundle,
                                                           CFStringRef resourceType,
                                                           CFStringRef subDirName,
                                                           CFStringRef localizationName) {
-    return pt_sanitize_cfbundle_returned_url(
-        CFBundleCopyResourceURLForLocalization(bundle, resourceName, resourceType, subDirName, localizationName),
-        __builtin_return_address(0));
+    const void *caller = __builtin_return_address(0);
+    CFURLRef out = CFBundleCopyResourceURLForLocalization(
+        bundle, resourceName, resourceType, subDirName, localizationName);
+    if (out == NULL) {
+        return pt_copy_virtual_mobileprovision_cfurl_if_applicable(
+            bundle, resourceName, resourceType, subDirName, caller);
+    }
+    return pt_sanitize_cfbundle_returned_url(out, caller);
 }
 
 static CFArrayRef pt_CFBundleCopyResourceURLsOfTypeForLocalization(CFBundleRef bundle,

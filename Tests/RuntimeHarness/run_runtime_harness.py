@@ -15,6 +15,7 @@ against PlayTools.framework, and executes isolated OS processes to verify:
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import plistlib
@@ -58,13 +59,18 @@ MOCK_TARGET_M = r"""
 @import UIKit;
 @import PlayTools;
 #include <dlfcn.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <mach-o/dyld.h>
+#include <objc/message.h>
 #include <objc/runtime.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/sysctl.h>
+#include <sys/utsname.h>
 #include <unistd.h>
 
 extern bool pt_is_registered_hidden_module(const char *name);
@@ -113,6 +119,139 @@ int main(int argc, const char *argv[]) {
         if (sysctlbyname("kern.osversion", sysctlOSVer, &sysctlOSVerLen, NULL, 0) != 0) {
             sysctlOSVer[0] = '\0';
         }
+        char sysctlOSRelease[64] = {0};
+        size_t sysctlOSReleaseLen = sizeof(sysctlOSRelease);
+        if (sysctlbyname("kern.osrelease", sysctlOSRelease, &sysctlOSReleaseLen, NULL, 0) != 0) {
+            sysctlOSRelease[0] = '\0';
+        }
+        char sysctlVersion[256] = {0};
+        size_t sysctlVersionLen = sizeof(sysctlVersion);
+        if (sysctlbyname("kern.version", sysctlVersion, &sysctlVersionLen, NULL, 0) != 0) {
+            sysctlVersion[0] = '\0';
+        }
+        char sysctlMachine[64] = {0};
+        size_t sysctlMachineLen = sizeof(sysctlMachine);
+        if (sysctlbyname("hw.machine", sysctlMachine, &sysctlMachineLen, NULL, 0) != 0) {
+            sysctlMachine[0] = '\0';
+        }
+
+        struct utsname uts;
+        memset(&uts, 0, sizeof(uts));
+        if (uname(&uts) != 0) {
+            memset(&uts, 0, sizeof(uts));
+        }
+
+        Class appAttestCls = NSClassFromString(@"DCAppAttestService");
+        if (appAttestCls == Nil) {
+            NSArray<NSString *> *dcPaths = @[
+                @"/System/iOSSupport/System/Library/Frameworks/DeviceCheck.framework",
+                @"/System/Library/Frameworks/DeviceCheck.framework"
+            ];
+            for (NSString *dcPath in dcPaths) {
+                NSBundle *dcBundle = [NSBundle bundleWithPath:dcPath];
+                if (dcBundle != nil && [dcBundle load]) {
+                    appAttestCls = NSClassFromString(@"DCAppAttestService");
+                    if (appAttestCls != Nil) {
+                        break;
+                    }
+                }
+            }
+        }
+        BOOL appAttestLoaded = (appAttestCls != Nil);
+        BOOL appAttestSupported = NO;
+        if (appAttestCls != Nil) {
+            id svc = ((id (*)(id, SEL))objc_msgSend)((id)appAttestCls, sel_registerName("sharedService"));
+            if (svc != nil) {
+                appAttestSupported = ((BOOL (*)(id, SEL))objc_msgSend)(svc, sel_registerName("isSupported"));
+            }
+        }
+
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSBundle *mainBundle = [NSBundle mainBundle];
+        NSString *provPath = [mainBundle pathForResource:@"embedded" ofType:@"mobileprovision"] ?: @"";
+        NSString *provURLPath = [mainBundle URLForResource:@"embedded" withExtension:@"mobileprovision"].path ?: @"";
+        CFURLRef cfProvURL = CFBundleCopyResourceURL(CFBundleGetMainBundle(), CFSTR("embedded"), CFSTR("mobileprovision"), NULL);
+        NSString *cfProvURLPath = @"";
+        if (cfProvURL != NULL) {
+            NSURL *bridged = (__bridge_transfer NSURL *)cfProvURL;
+            cfProvURLPath = bridged.path ?: @"";
+        }
+        NSString *probeProv = (provPath.length > 0)
+            ? provPath
+            : [[mainBundle bundlePath] stringByAppendingPathComponent:@"embedded.mobileprovision"];
+        BOOL provFMExists = [fm fileExistsAtPath:probeProv];
+        NSData *provData = [NSData dataWithContentsOfFile:probeProv];
+        NSString *provNSDataText = (provData != nil)
+            ? ([[NSString alloc] initWithData:provData encoding:NSUTF8StringEncoding] ?: @"")
+            : @"";
+        NSError *provStrErr = nil;
+        NSString *provNSStringText = [NSString stringWithContentsOfFile:probeProv
+                                                               encoding:NSUTF8StringEncoding
+                                                                  error:&provStrErr] ?: @"";
+        char provPosixBuf[256] = {0};
+        char provGetPathBuf[PATH_MAX] = {0};
+        int pfd = open(probeProv.UTF8String, O_RDONLY);
+        if (pfd >= 0) {
+            ssize_t pr = read(pfd, provPosixBuf, sizeof(provPosixBuf) - 1);
+            if (pr > 0) {
+                provPosixBuf[pr] = '\0';
+            }
+            if (fcntl(pfd, F_GETPATH, provGetPathBuf) == -1) {
+                provGetPathBuf[0] = '\0';
+            }
+            close(pfd);
+        }
+        char provRealBuf[PATH_MAX] = {0};
+        if (realpath(probeProv.UTF8String, provRealBuf) == NULL) {
+            provRealBuf[0] = '\0';
+        }
+        BOOL provWriteAccessAllowed = (access(probeProv.UTF8String, W_OK) == 0) || [fm isWritableFileAtPath:probeProv];
+
+        NSString *bundleExecPath = mainBundle.executablePath ?: @"";
+        char execPosixBuf[64] = {0};
+        char execGetPathBuf[PATH_MAX] = {0};
+        int efd = (bundleExecPath.length > 0) ? open(bundleExecPath.UTF8String, O_RDONLY) : -1;
+        if (efd >= 0) {
+            ssize_t er = read(efd, execPosixBuf, sizeof(execPosixBuf) - 1);
+            if (er > 0) {
+                execPosixBuf[er] = '\0';
+                for (ssize_t i = 0; i < er; i++) {
+                    unsigned char uc = (unsigned char)execPosixBuf[i];
+                    if (uc < 0x20 || uc > 0x7E) {
+                        execPosixBuf[i] = '?';
+                    }
+                }
+            }
+            if (fcntl(efd, F_GETPATH, execGetPathBuf) == -1) {
+                execGetPathBuf[0] = '\0';
+            }
+            close(efd);
+        }
+
+        BOOL directBackupStatBlocked = NO;
+        BOOL directBackupOpenBlocked = NO;
+        BOOL directBackupFMBlocked = NO;
+        const char *directProbeB64 = getenv("HARNESS_DIRECT_PROBE_B64");
+        if (directProbeB64 != NULL && directProbeB64[0] != '\0') {
+            NSString *b64Str = [NSString stringWithUTF8String:directProbeB64];
+            NSData *decoded = (b64Str != nil) ? [[NSData alloc] initWithBase64EncodedString:b64Str options:0] : nil;
+            NSString *probeStr = (decoded != nil) ? [[NSString alloc] initWithData:decoded encoding:NSUTF8StringEncoding] : nil;
+            const char *directProbe = probeStr.UTF8String;
+            if (directProbe != NULL && directProbe[0] != '\0') {
+                struct stat bst;
+                errno = 0;
+                directBackupStatBlocked = (stat(directProbe, &bst) != 0 && errno == ENOENT);
+                errno = 0;
+                int dfd = open(directProbe, O_RDONLY);
+                if (dfd >= 0) {
+                    close(dfd);
+                    directBackupOpenBlocked = NO;
+                } else {
+                    directBackupOpenBlocked = (errno == ENOENT);
+                }
+                directBackupFMBlocked = ![fm fileExistsAtPath:probeStr];
+            }
+        }
 
         NSObject *dlTarget = [NSObject new];
         CADisplayLink *rangeLink = [CADisplayLink displayLinkWithTarget:dlTarget selector:@selector(description)];
@@ -142,7 +281,6 @@ int main(int argc, const char *argv[]) {
             }
         }
 
-        NSFileManager *fm = [NSFileManager defaultManager];
         NSString *stateDir = pt_state_dir();
         NSString *crumbPath = [stateDir stringByAppendingPathComponent:@".launching_in_progress"];
         NSString *triggeredPath = [stateDir stringByAppendingPathComponent:@".safe_mode_last_triggered"];
@@ -180,6 +318,30 @@ int main(int argc, const char *argv[]) {
             @"uiDeviceSystemVersion": uiDeviceSysVer,
             @"sysctlOSProductVersion": [NSString stringWithUTF8String:sysctlProdVer] ?: @"",
             @"sysctlOSVersion": [NSString stringWithUTF8String:sysctlOSVer] ?: @"",
+            @"sysctlOSRelease": [NSString stringWithUTF8String:sysctlOSRelease] ?: @"",
+            @"sysctlVersion": [NSString stringWithUTF8String:sysctlVersion] ?: @"",
+            @"sysctlMachine": [NSString stringWithUTF8String:sysctlMachine] ?: @"",
+            @"unameRelease": [NSString stringWithUTF8String:uts.release] ?: @"",
+            @"unameVersion": [NSString stringWithUTF8String:uts.version] ?: @"",
+            @"unameMachine": [NSString stringWithUTF8String:uts.machine] ?: @"",
+            @"appAttestLoaded": appAttestLoaded ? @YES : @NO,
+            @"appAttestSupported": appAttestSupported ? @YES : @NO,
+            @"provPath": provPath,
+            @"provURLPath": provURLPath,
+            @"cfProvURLPath": cfProvURLPath,
+            @"provFMExists": provFMExists ? @YES : @NO,
+            @"provNSDataText": provNSDataText,
+            @"provNSStringText": provNSStringText,
+            @"provPosixText": [NSString stringWithUTF8String:provPosixBuf] ?: @"",
+            @"provGetPath": [NSString stringWithUTF8String:provGetPathBuf] ?: @"",
+            @"provRealpath": [NSString stringWithUTF8String:provRealBuf] ?: @"",
+            @"provWriteAccessAllowed": provWriteAccessAllowed ? @YES : @NO,
+            @"execPosixPrefix": [NSString stringWithUTF8String:execPosixBuf] ?: @"",
+            @"execGetPath": [NSString stringWithUTF8String:execGetPathBuf] ?: @"",
+            @"bundleExecutablePath": bundleExecPath,
+            @"directBackupStatBlocked": directBackupStatBlocked ? @YES : @NO,
+            @"directBackupOpenBlocked": directBackupOpenBlocked ? @YES : @NO,
+            @"directBackupFMBlocked": directBackupFMBlocked ? @YES : @NO,
             @"displayLinkClampedMaxHz": @(displayLinkClampedMaxHz),
             @"displayLinkClampedLegacyFPS": @(displayLinkClampedLegacyFPS),
             @"hiddenModuleRegistered": modHidden ? @YES : @NO,
@@ -639,6 +801,220 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
     if verbose:
         print("  Scenario 5 normal:", info5a)
         print("  Scenario 5 safeMode:", info5b)
+
+    # Scenario 6: compat13_7 + iPhone12,5 + aligned Darwin 19.6.0 / xnu-6153 + App Attest isSupported=NO
+    t5 = time.monotonic()
+    isolated_home_6 = work_dir / "IsolatedHome6"
+    isolated_home_6.mkdir(parents=True, exist_ok=True)
+    target_dir_6 = isolated_home_6 / "Library/Containers/app.makedie.MacOver/PlayTools"
+    target_dir_6.mkdir(parents=True, exist_ok=True)
+    plist6 = target_dir_6 / "app.makedie.harness.mockapp.plist"
+    with open(plist6, "wb") as fp:
+        plistlib.dump(
+            {
+                "reportedIOSVersion": "compat13_7",
+                "iosDeviceModel": "iPhone12,5",
+            },
+            fp,
+        )
+    plist6_bytes_before = plist6.read_bytes()
+
+    def env6(marker_path: Path, **extra: str) -> dict[str, str]:
+        env = base_env(marker_path, **extra)
+        env["HOME"] = str(isolated_home_6)
+        env["CFFIXED_USER_HOME"] = str(isolated_home_6)
+        env["PLAYTOOLS_SETTINGS_PLIST"] = str(plist6)
+        return env
+
+    marker6a = work_dir / "marker_6a.txt"
+    proc6a = run_cmd([str(target_bin)], env=env6(marker6a, HARNESS_GRACEFUL_EXIT="1"), check=False)
+    marker6b = work_dir / "marker_6b.txt"
+    proc6b = run_cmd(
+        [str(target_bin)],
+        env=env6(marker6b, PLAYTOOLS_SAFE_MODE="1", HARNESS_GRACEFUL_EXIT="1"),
+        check=False,
+    )
+    if proc6a.returncode != 0 or proc6b.returncode != 0:
+        results.append(ScenarioResult(
+            name="6. compat13_7 / iPhone12,5 / 19.6.0 / App Attest & Safe Mode revert",
+            passed=False,
+            duration_sec=time.monotonic() - t5,
+            details=(
+                f"Sub-run rc=({proc6a.returncode}, {proc6b.returncode})\n"
+                f"6a stdout={proc6a.stdout}\n6a stderr={proc6a.stderr}\n"
+                f"6b stdout={proc6b.stdout}\n6b stderr={proc6b.stderr}"
+            ),
+        ))
+        return results
+
+    info6a = parse_harness_json(proc6a.stdout)
+    info6b = parse_harness_json(proc6b.stdout)
+    plist6_bytes_after = plist6.read_bytes()
+    checks6 = [
+        info6a["safeModeActive"] is False,
+        info6a["reportedIOSVersion"] == "compat13_7",
+        info6a["osVersionMajor"] == 13,
+        info6a["osVersionMinor"] == 7,
+        info6a["uiDeviceSystemVersion"] == "13.7",
+        info6a["sysctlOSProductVersion"] == "13.7",
+        info6a["sysctlOSVersion"] == "17H35",
+        info6a["sysctlOSRelease"] == "19.6.0",
+        info6a["unameRelease"] == "19.6.0",
+        "xnu-6153" in info6a["sysctlVersion"],
+        "xnu-6153" in info6a["unameVersion"],
+        info6a["sysctlMachine"] == "iPhone12,5",
+        info6a["unameMachine"] == "iPhone12,5",
+        (not info6a["appAttestLoaded"]) or (info6a["appAttestSupported"] is False),
+        marker6a.exists(),
+        info6b["safeModeActive"] is True,
+        info6b["reportedIOSVersion"] == "automatic",
+        info6b["osVersionMajor"] != 13,
+        info6b["sysctlOSRelease"] != "19.6.0",
+        info6b["unameRelease"] != "19.6.0",
+        not marker6b.exists(),
+        plist6_bytes_after == plist6_bytes_before,
+    ]
+    results.append(ScenarioResult(
+        name="6. compat13_7 / iPhone12,5 / 19.6.0 / App Attest & Safe Mode revert",
+        passed=all(checks6),
+        duration_sec=time.monotonic() - t5,
+        details=json.dumps(
+            {
+                "normal": info6a,
+                "safeMode": info6b,
+                "plistUnchanged": plist6_bytes_after == plist6_bytes_before,
+            },
+            sort_keys=True,
+        ),
+    ))
+    if verbose:
+        print("  Scenario 6 normal:", info6a)
+        print("  Scenario 6 safeMode:", info6b)
+
+    # Scenario 7: AppBackups read-only virtualization, direct-probe hiding, Safe Mode bypass, absent backup safety
+    t6 = time.monotonic()
+    isolated_home_7 = work_dir / "IsolatedHome7"
+    backup_dir_7 = isolated_home_7 / "Library/Containers/app.makedie.MacOver/AppBackups/app.makedie.harness.mockapp"
+    backup_dir_7.mkdir(parents=True, exist_ok=True)
+    backup_prov_7 = backup_dir_7 / "embedded.mobileprovision"
+    backup_exec_7 = backup_dir_7 / "executable"
+    backup_prov_bytes = b"MOCK_BACKUP_MOBILEPROVISION_101"
+    backup_exec_bytes = b"BACKUP_EXEC_PAYLOAD_101"
+    backup_prov_7.write_bytes(backup_prov_bytes)
+    backup_exec_7.write_bytes(backup_exec_bytes)
+    os.chmod(backup_exec_7, 0o755)
+    plist7 = write_test_settings_plist(isolated_home_7, "app.makedie.harness.mockapp")
+
+    def env7(marker_path: Path, backup_override: Path, **extra: str) -> dict[str, str]:
+        env = base_env(marker_path, **extra)
+        env["HOME"] = str(isolated_home_7)
+        env["CFFIXED_USER_HOME"] = str(isolated_home_7)
+        env["PLAYTOOLS_SETTINGS_PLIST"] = str(plist7)
+        env["PLAYTOOLS_TEST_APP_BACKUPS_DIR"] = str(backup_override)
+        return env
+
+    marker7a = work_dir / "marker_7a.txt"
+    direct_probe_b64 = base64.b64encode(str(backup_prov_7).encode("utf-8")).decode("ascii")
+    proc7a = run_cmd(
+        [str(target_bin)],
+        env=env7(
+            marker7a,
+            backup_dir_7,
+            HARNESS_DIRECT_PROBE_B64=direct_probe_b64,
+            HARNESS_GRACEFUL_EXIT="1",
+        ),
+        check=False,
+    )
+    marker7b = work_dir / "marker_7b.txt"
+    proc7b = run_cmd(
+        [str(target_bin)],
+        env=env7(
+            marker7b,
+            backup_dir_7,
+            PLAYTOOLS_SAFE_MODE="1",
+            HARNESS_GRACEFUL_EXIT="1",
+        ),
+        check=False,
+    )
+    marker7c = work_dir / "marker_7c.txt"
+    proc7c = run_cmd(
+        [str(target_bin)],
+        env=env7(
+            marker7c,
+            isolated_home_7 / "NonExistentBackups",
+            HARNESS_GRACEFUL_EXIT="1",
+        ),
+        check=False,
+    )
+    if proc7a.returncode != 0 or proc7b.returncode != 0 or proc7c.returncode != 0:
+        results.append(ScenarioResult(
+            name="7. AppBackups read-only virtualization & direct-probe hiding",
+            passed=False,
+            duration_sec=time.monotonic() - t6,
+            details=(
+                f"Sub-run rc=({proc7a.returncode}, {proc7b.returncode}, {proc7c.returncode})\n"
+                f"7a stdout={proc7a.stdout}\n7a stderr={proc7a.stderr}\n"
+                f"7b stdout={proc7b.stdout}\n7b stderr={proc7b.stderr}\n"
+                f"7c stdout={proc7c.stdout}\n7c stderr={proc7c.stderr}"
+            ),
+        ))
+        return results
+
+    info7a = parse_harness_json(proc7a.stdout)
+    info7b = parse_harness_json(proc7b.stdout)
+    info7c = parse_harness_json(proc7c.stdout)
+    checks7 = [
+        info7a["safeModeActive"] is False,
+        info7a["provPath"].endswith("/embedded.mobileprovision"),
+        "/var/containers/Bundle/Application/" in info7a["provPath"],
+        info7a["provURLPath"] == info7a["provPath"],
+        info7a["cfProvURLPath"] == info7a["provPath"],
+        info7a["provFMExists"] is True,
+        info7a["provNSDataText"] == "MOCK_BACKUP_MOBILEPROVISION_101",
+        info7a["provNSStringText"] == "MOCK_BACKUP_MOBILEPROVISION_101",
+        info7a["provPosixText"] == "MOCK_BACKUP_MOBILEPROVISION_101",
+        info7a["provGetPath"] == info7a["provPath"],
+        info7a["provRealpath"] == info7a["provPath"],
+        info7a["provWriteAccessAllowed"] is False,
+        info7a["execPosixPrefix"] == "BACKUP_EXEC_PAYLOAD_101",
+        info7a["execGetPath"] == info7a["bundleExecutablePath"],
+        "/var/containers/Bundle/Application/" in info7a["bundleExecutablePath"],
+        info7a["directBackupStatBlocked"] is True,
+        info7a["directBackupOpenBlocked"] is True,
+        info7a["directBackupFMBlocked"] is True,
+        backup_prov_7.read_bytes() == backup_prov_bytes,
+        backup_exec_7.read_bytes() == backup_exec_bytes,
+        info7b["safeModeActive"] is True,
+        info7b["provPath"] == "",
+        info7b["cfProvURLPath"] == "",
+        info7b["provFMExists"] is False,
+        info7b["provPosixText"] == "",
+        info7b["execPosixPrefix"] != "BACKUP_EXEC_PAYLOAD_101",
+        info7c["safeModeActive"] is False,
+        info7c["provPath"] == "",
+        info7c["provURLPath"] == "",
+        info7c["cfProvURLPath"] == "",
+        info7c["provFMExists"] is False,
+        info7c["provPosixText"] == "",
+        info7c["execPosixPrefix"] != "BACKUP_EXEC_PAYLOAD_101",
+    ]
+    results.append(ScenarioResult(
+        name="7. AppBackups read-only virtualization & direct-probe hiding",
+        passed=all(checks7),
+        duration_sec=time.monotonic() - t6,
+        details=json.dumps(
+            {
+                "withBackups": info7a,
+                "safeMode": info7b,
+                "absentBackups": info7c,
+            },
+            sort_keys=True,
+        ),
+    ))
+    if verbose:
+        print("  Scenario 7 withBackups:", info7a)
+        print("  Scenario 7 safeMode:", info7b)
+        print("  Scenario 7 absentBackups:", info7c)
 
     return results
 

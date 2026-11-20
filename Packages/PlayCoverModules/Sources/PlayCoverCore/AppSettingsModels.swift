@@ -123,9 +123,14 @@ public enum ReportedIOSVersionMode: String, Codable, CaseIterable, Equatable, Se
     case automatic
     case followHost
     case compat18_3
+    case compat13_7
 
     public static let compat18_3Version = "18.3"
     public static let compat18_3Build = "22D63"
+    public static let compat18_3KernelRelease = "24.3.0"
+    public static let compat13_7Version = "13.7"
+    public static let compat13_7Build = "17H35"
+    public static let compat13_7KernelRelease = "19.6.0"
 
     public init(rawSetting: String?) {
         let normalized = (rawSetting ?? "")
@@ -136,9 +141,51 @@ public enum ReportedIOSVersionMode: String, Codable, CaseIterable, Equatable, Se
             self = .followHost
         case "compat18_3", "18.3", "ios18_3":
             self = .compat18_3
+        case "compat13_7", "13.7", "ios13_7":
+            self = .compat13_7
         default:
             self = .automatic
         }
+    }
+
+    public static func isMinimumOSVersion(
+        _ raw: String?,
+        higherThan major: Int,
+        minor: Int
+    ) -> Bool {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return false
+        }
+        let parts = trimmed.split(separator: ".", omittingEmptySubsequences: false)
+        guard let first = parts.first, let parsedMajor = Int(first) else {
+            return false
+        }
+        let parsedMinor: Int
+        if parts.count > 1 {
+            guard let second = Int(parts[1]) else {
+                return false
+            }
+            parsedMinor = second
+        } else {
+            parsedMinor = 0
+        }
+        let parsedPatch: Int
+        if parts.count > 2 {
+            guard let third = Int(parts[2]) else {
+                return false
+            }
+            parsedPatch = third
+        } else {
+            parsedPatch = 0
+        }
+        if parsedMajor != major {
+            return parsedMajor > major
+        }
+        if parsedMinor != minor {
+            return parsedMinor > minor
+        }
+        return parsedPatch > 0
     }
 }
 

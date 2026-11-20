@@ -21,9 +21,20 @@ struct ConfigDevicePane: View {
         DeviceProfileOption.isIPhone(currentModel)
     }
 
+    private var isCompat13_7: Bool {
+        settings.settings.reportedIOSVersionMode == .compat13_7
+    }
+
+    private var isCurrentModelInPicker: Bool {
+        let shown = isCompat13_7
+            ? DeviceProfileOption.allModern + DeviceProfileOption.ios13CompatibleModels
+            : DeviceProfileOption.allModern
+        return shown.contains(where: { $0.model == currentModel })
+    }
+
     var body: some View {
         Form {
-            if isLegacy {
+            if isLegacy && !isCompat13_7 {
                 Section {
                     HStack(spacing: 10) {
                         Image(systemName: "exclamationmark.triangle.fill")
@@ -54,7 +65,14 @@ struct ConfigDevicePane: View {
                             Text(option.label).tag(option.model)
                         }
                     }
-                    if !DeviceProfileOption.allModern.contains(where: { $0.model == currentModel }) {
+                    if isCompat13_7 {
+                        Section("device.ios13Group") {
+                            ForEach(DeviceProfileOption.ios13CompatibleModels) { option in
+                                Text(option.label).tag(option.model)
+                            }
+                        }
+                    }
+                    if !isCurrentModelInPicker {
                         Divider()
                         Text(DeviceProfileOption.displayName(for: currentModel)).tag(currentModel)
                     }
@@ -68,12 +86,47 @@ struct ConfigDevicePane: View {
                     Text("device.reportedIOS.automatic").tag(ReportedIOSVersionMode.automatic)
                     Text("device.reportedIOS.followHost").tag(ReportedIOSVersionMode.followHost)
                     Text("device.reportedIOS.compat18_3").tag(ReportedIOSVersionMode.compat18_3)
+                    Text("device.reportedIOS.compat13_7").tag(ReportedIOSVersionMode.compat13_7)
                 }
                 .help("device.reportedIOS.help")
 
                 Text("device.reportedIOS.help")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                if isCompat13_7 {
+                    if let minOS = settings.settings.originalMinimumOSVersion,
+                       ReportedIOSVersionMode.isMinimumOSVersion(minOS, higherThan: 13, minor: 7) {
+                        HStack(spacing: 10) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                            Text(String(
+                                format: NSLocalizedString("device.ios13MinOSWarning", comment: ""),
+                                minOS
+                            ))
+                            .font(.callout)
+                        }
+                    }
+
+                    if !DeviceProfileOption.supportsIOS13(currentModel) {
+                        HStack(spacing: 10) {
+                            Image(systemName: "info.circle.fill")
+                                .foregroundStyle(.orange)
+                            Text(String(
+                                format: NSLocalizedString("device.ios13ModelMismatch", comment: ""),
+                                DeviceProfileOption.displayName(for: currentModel)
+                            ))
+                            .font(.callout)
+                            Spacer()
+                            Button("device.switchToIOS13Model") {
+                                settings.update {
+                                    $0.iosDeviceModel = DeviceProfileOption.recommendedIOS13Model(isIPhone: isIPhone)
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                    }
+                }
 
                 Toggle("Notch", isOn: $settings.settings.notch)
             }

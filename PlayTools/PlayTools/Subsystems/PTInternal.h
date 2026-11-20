@@ -531,6 +531,10 @@ __attribute__((visibility("hidden"))) const char *pt_resolve_virtual_bundle_path
 __attribute__((visibility("hidden"))) BOOL pt_fd_is_sensitive(int fd, const void *caller);
 __attribute__((visibility("hidden"))) pt_fs_path_disposition_t pt_prepare_fs_path_cached_caller(const char *raw_path, const void *caller, char *vbuf, size_t vbuf_size, const char **out_path, int *inout_is_sys_caller);
 __attribute__((visibility("hidden"))) BOOL pt_prepare_fs_path_for_modify(int dirfd, const char *raw_path, const void *caller, char *vbuf, size_t vbuf_size, const char **out_path, int ancestor_errno);
+__attribute__((visibility("hidden"))) void pt_disable_app_backups_for_safe_mode(void);
+__attribute__((visibility("hidden"))) BOOL pt_has_backup_mobileprovision(void);
+__attribute__((visibility("hidden"))) const char *pt_copy_virtual_mobileprovision_path(char *buf, size_t bufsize);
+__attribute__((visibility("hidden"))) const char *pt_lookup_app_backup_redirect_for_caller(const char *raw_path, const void *caller, char *vbuf, size_t vbuf_size, int *inout_is_sys_caller);
 
 // DyldVirtualizer exports
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_class(const char *name);

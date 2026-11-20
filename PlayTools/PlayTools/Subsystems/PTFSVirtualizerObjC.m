@@ -39,11 +39,14 @@ __attribute__((visibility("hidden"))) NSString *ps_strip_iossupport_nsstring(NSS
     return p;
 }
 
-static void ps_prepare_fm_path(NSString *path,
-                               const void *caller,
-                               NSString * __autoreleasing *outResolved,
-                               BOOL *outIsHidden,
-                               BOOL *outIsAncestor) {
+static void ps_prepare_fm_path_mode(NSString *path,
+                                    const void *caller,
+                                    BOOL allowReadOnlyBackup,
+                                    NSString * __autoreleasing *outResolved,
+                                    BOOL *outIsHidden,
+                                    BOOL *outIsAncestor,
+                                    BOOL *outUsedBackup) {
+    if (outUsedBackup) *outUsedBackup = NO;
     if (path == nil || path.length == 0) {
         if (outResolved) *outResolved = path;
         if (outIsHidden) *outIsHidden = NO;
@@ -71,6 +74,22 @@ static void ps_prepare_fm_path(NSString *path,
             }
         }
     }
+    if (allowReadOnlyBackup) {
+        char backupBuf[PATH_MAX];
+        int isSysCaller = -1;
+        const char *backup = pt_lookup_app_backup_redirect_for_caller(
+            active, caller, backupBuf, sizeof(backupBuf), &isSysCaller);
+        if (backup != NULL) {
+            CFStringRef cfBackup = CFStringCreateWithFileSystemRepresentation(kCFAllocatorDefault, backup);
+            if (cfBackup != NULL) {
+                if (outResolved) *outResolved = (__bridge_transfer NSString *)cfBackup;
+                if (outIsHidden) *outIsHidden = NO;
+                if (outIsAncestor) *outIsAncestor = NO;
+                if (outUsedBackup) *outUsedBackup = YES;
+                return;
+            }
+        }
+    }
     BOOL hidden = pt_is_hidden_path(active, caller);
     BOOL ancestor = NO;
     if (!hidden && ps_cstr_may_need_virtual_resolve(active)) {
@@ -79,6 +98,14 @@ static void ps_prepare_fm_path(NSString *path,
     if (outResolved) *outResolved = resolvedStr;
     if (outIsHidden) *outIsHidden = hidden;
     if (outIsAncestor) *outIsAncestor = ancestor;
+}
+
+static void ps_prepare_fm_path(NSString *path,
+                               const void *caller,
+                               NSString * __autoreleasing *outResolved,
+                               BOOL *outIsHidden,
+                               BOOL *outIsAncestor) {
+    ps_prepare_fm_path_mode(path, caller, NO, outResolved, outIsHidden, outIsAncestor, NULL);
 }
 
 __attribute__((visibility("hidden"))) BOOL ps_is_virtual_ancestor_nsstring(NSString *path) {
@@ -1985,20 +2012,26 @@ static id ps_virtual_ancestor_resource_value_for_key(NSString *origPath, NSURLRe
 }
 
 - (BOOL) pm_fileExistsAtPath:(NSString *)path {
-    BOOL hidden = NO, ancestor = NO;
-    ps_prepare_fm_path(path, __builtin_return_address(0), &path, &hidden, &ancestor);
+    BOOL hidden = NO, ancestor = NO, usedBackup = NO;
+    ps_prepare_fm_path_mode(path, __builtin_return_address(0), YES, &path, &hidden, &ancestor, &usedBackup);
     if (hidden) {
         return NO;
     }
     if (ancestor) {
         return YES;
     }
+    if (usedBackup) {
+        pt_enter_internal_scope();
+        BOOL exists = [self pm_fileExistsAtPath:path];
+        pt_leave_internal_scope();
+        return exists;
+    }
     return [self pm_fileExistsAtPath:path];
 }
 
 - (BOOL) pm_fileExistsAtPath:(NSString *)path isDirectory:(BOOL *)isDirectory {
-    BOOL hidden = NO, ancestor = NO;
-    ps_prepare_fm_path(path, __builtin_return_address(0), &path, &hidden, &ancestor);
+    BOOL hidden = NO, ancestor = NO, usedBackup = NO;
+    ps_prepare_fm_path_mode(path, __builtin_return_address(0), YES, &path, &hidden, &ancestor, &usedBackup);
     if (hidden) {
         return NO;
     }
@@ -2008,17 +2041,29 @@ static id ps_virtual_ancestor_resource_value_for_key(NSString *origPath, NSURLRe
         }
         return YES;
     }
+    if (usedBackup) {
+        pt_enter_internal_scope();
+        BOOL exists = [self pm_fileExistsAtPath:path isDirectory:isDirectory];
+        pt_leave_internal_scope();
+        return exists;
+    }
     return [self pm_fileExistsAtPath:path isDirectory:isDirectory];
 }
 
 - (BOOL) pm_isReadableFileAtPath:(NSString *)path {
-    BOOL hidden = NO, ancestor = NO;
-    ps_prepare_fm_path(path, __builtin_return_address(0), &path, &hidden, &ancestor);
+    BOOL hidden = NO, ancestor = NO, usedBackup = NO;
+    ps_prepare_fm_path_mode(path, __builtin_return_address(0), YES, &path, &hidden, &ancestor, &usedBackup);
     if (hidden) {
         return NO;
     }
     if (ancestor) {
         return YES;
+    }
+    if (usedBackup) {
+        pt_enter_internal_scope();
+        BOOL readable = [self pm_isReadableFileAtPath:path];
+        pt_leave_internal_scope();
+        return readable;
     }
     return [self pm_isReadableFileAtPath:path];
 }
@@ -2033,13 +2078,19 @@ static id ps_virtual_ancestor_resource_value_for_key(NSString *origPath, NSURLRe
 }
 
 - (BOOL) pm_isExecutableFileAtPath:(NSString *)path {
-    BOOL hidden = NO, ancestor = NO;
-    ps_prepare_fm_path(path, __builtin_return_address(0), &path, &hidden, &ancestor);
+    BOOL hidden = NO, ancestor = NO, usedBackup = NO;
+    ps_prepare_fm_path_mode(path, __builtin_return_address(0), YES, &path, &hidden, &ancestor, &usedBackup);
     if (hidden) {
         return NO;
     }
     if (ancestor) {
         return YES;
+    }
+    if (usedBackup) {
+        pt_enter_internal_scope();
+        BOOL executable = [self pm_isExecutableFileAtPath:path];
+        pt_leave_internal_scope();
+        return executable;
     }
     return [self pm_isExecutableFileAtPath:path];
 }
@@ -2064,8 +2115,8 @@ static inline void ps_detect_path_virtual_flags(NSString *p1, NSString *p2, BOOL
     const void *caller = __builtin_return_address(0);
     BOOL wasVirtual = NO, usePrivatePrefix = NO;
     ps_detect_path_virtual_flags(path, nil, &wasVirtual, &usePrivatePrefix);
-    BOOL hidden = NO, ancestor = NO;
-    ps_prepare_fm_path(path, caller, &path, &hidden, &ancestor);
+    BOOL hidden = NO, ancestor = NO, usedBackup = NO;
+    ps_prepare_fm_path_mode(path, caller, YES, &path, &hidden, &ancestor, &usedBackup);
     if (hidden) {
         if (error != NULL) {
             *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileReadNoSuchFileError userInfo:nil];
@@ -2079,7 +2130,14 @@ static inline void ps_detect_path_virtual_flags(NSString *p1, NSString *p2, BOOL
         };
     }
     NSError *localErr = nil;
-    NSDictionary<NSFileAttributeKey, id> *attrs = [self pm_attributesOfItemAtPath:path error:(error != NULL ? &localErr : NULL)];
+    NSDictionary<NSFileAttributeKey, id> *attrs = nil;
+    if (usedBackup) {
+        pt_enter_internal_scope();
+        attrs = [self pm_attributesOfItemAtPath:path error:(error != NULL ? &localErr : NULL)];
+        pt_leave_internal_scope();
+    } else {
+        attrs = [self pm_attributesOfItemAtPath:path error:(error != NULL ? &localErr : NULL)];
+    }
     if (attrs == nil) {
         ps_assign_virtualized_nserror(error, localErr, usePrivatePrefix, wasVirtual, caller);
     }
@@ -2087,10 +2145,16 @@ static inline void ps_detect_path_virtual_flags(NSString *p1, NSString *p2, BOOL
 }
 
 - (NSData *) pm_contentsAtPath:(NSString *)path {
-    BOOL hidden = NO, ancestor = NO;
-    ps_prepare_fm_path(path, __builtin_return_address(0), &path, &hidden, &ancestor);
+    BOOL hidden = NO, ancestor = NO, usedBackup = NO;
+    ps_prepare_fm_path_mode(path, __builtin_return_address(0), YES, &path, &hidden, &ancestor, &usedBackup);
     if (hidden) {
         return nil;
+    }
+    if (usedBackup) {
+        pt_enter_internal_scope();
+        NSData *data = [self pm_contentsAtPath:path];
+        pt_leave_internal_scope();
+        return data;
     }
     return [self pm_contentsAtPath:path];
 }
@@ -2122,11 +2186,13 @@ static inline void ps_detect_path_virtual_flags(NSString *p1, NSString *p2, BOOL
 
 static void ps_prepare_file_url_for_io(NSURL *url,
                                        const void *caller,
+                                       BOOL allowReadOnlyBackup,
                                        NSURL * __autoreleasing *outResolvedURL,
                                        BOOL *outIsHidden,
                                        BOOL *outWasVirtual,
-                                       BOOL *outUsePrivate) {
-    BOOL wasVirt = NO, usePriv = NO, hidden = NO;
+                                       BOOL *outUsePrivate,
+                                       BOOL *outUsedBackup) {
+    BOOL wasVirt = NO, usePriv = NO, hidden = NO, usedBackup = NO;
     NSURL *resolved = url;
     if (url != nil && [url isFileURL]) {
         NSString *rawPath = url.path;
@@ -2138,6 +2204,22 @@ static void ps_prepare_file_url_for_io(NSURL *url,
             resolved = ps_resolve_virtual_nsurl(url);
             if (resolved != url && ps_is_hidden_path(ps_strip_iossupport_nsstring(resolved.path), caller)) {
                 hidden = YES;
+            } else if (allowReadOnlyBackup && resolved != nil && [resolved isFileURL]) {
+                char resolvedC[PATH_MAX];
+                if (CFURLGetFileSystemRepresentation((__bridge CFURLRef)resolved, true, (UInt8 *)resolvedC, sizeof(resolvedC))) {
+                    char backupBuf[PATH_MAX];
+                    int isSysCaller = -1;
+                    const char *backup = pt_lookup_app_backup_redirect_for_caller(
+                        resolvedC, caller, backupBuf, sizeof(backupBuf), &isSysCaller);
+                    if (backup != NULL) {
+                        CFURLRef cfBackupURL = CFURLCreateFromFileSystemRepresentation(
+                            kCFAllocatorDefault, (const UInt8 *)backup, (CFIndex)strlen(backup), false);
+                        if (cfBackupURL != NULL) {
+                            resolved = (__bridge_transfer NSURL *)cfBackupURL;
+                            usedBackup = YES;
+                        }
+                    }
+                }
             }
         }
     }
@@ -2145,22 +2227,29 @@ static void ps_prepare_file_url_for_io(NSURL *url,
     if (outIsHidden) *outIsHidden = hidden;
     if (outWasVirtual) *outWasVirtual = wasVirt;
     if (outUsePrivate) *outUsePrivate = usePriv;
+    if (outUsedBackup) *outUsedBackup = usedBackup;
 }
 
 + (NSData *) pm_dataWithContentsOfFile:(NSString *)path {
-    BOOL hidden = NO;
-    ps_prepare_fm_path(path, __builtin_return_address(0), &path, &hidden, NULL);
+    BOOL hidden = NO, usedBackup = NO;
+    ps_prepare_fm_path_mode(path, __builtin_return_address(0), YES, &path, &hidden, NULL, &usedBackup);
     if (hidden) {
         return nil;
+    }
+    if (usedBackup) {
+        pt_enter_internal_scope();
+        NSData *data = [self pm_dataWithContentsOfFile:path];
+        pt_leave_internal_scope();
+        return data;
     }
     return [self pm_dataWithContentsOfFile:path];
 }
 
 + (NSData *) pm_dataWithContentsOfFile:(NSString *)path options:(NSDataReadingOptions)readOptionsMask error:(NSError **)errorPtr {
     const void *caller = __builtin_return_address(0);
-    BOOL wasVirtual = NO, usePrivatePrefix = NO, hidden = NO;
+    BOOL wasVirtual = NO, usePrivatePrefix = NO, hidden = NO, usedBackup = NO;
     ps_detect_path_virtual_flags(path, nil, &wasVirtual, &usePrivatePrefix);
-    ps_prepare_fm_path(path, caller, &path, &hidden, NULL);
+    ps_prepare_fm_path_mode(path, caller, YES, &path, &hidden, NULL, &usedBackup);
     if (hidden) {
         if (errorPtr != NULL) {
             *errorPtr = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileReadNoSuchFileError userInfo:nil];
@@ -2168,7 +2257,14 @@ static void ps_prepare_file_url_for_io(NSURL *url,
         return nil;
     }
     NSError *localErr = nil;
-    NSData *data = [self pm_dataWithContentsOfFile:path options:readOptionsMask error:(errorPtr != NULL ? &localErr : NULL)];
+    NSData *data = nil;
+    if (usedBackup) {
+        pt_enter_internal_scope();
+        data = [self pm_dataWithContentsOfFile:path options:readOptionsMask error:(errorPtr != NULL ? &localErr : NULL)];
+        pt_leave_internal_scope();
+    } else {
+        data = [self pm_dataWithContentsOfFile:path options:readOptionsMask error:(errorPtr != NULL ? &localErr : NULL)];
+    }
     if (data == nil) {
         ps_assign_virtualized_nserror(errorPtr, localErr, usePrivatePrefix, wasVirtual, caller);
     }
@@ -2177,9 +2273,9 @@ static void ps_prepare_file_url_for_io(NSURL *url,
 
 + (NSData *) pm_dataWithContentsOfURL:(NSURL *)url options:(NSDataReadingOptions)readOptionsMask error:(NSError **)errorPtr {
     const void *caller = __builtin_return_address(0);
-    BOOL wasVirtual = NO, usePrivatePrefix = NO, hidden = NO;
+    BOOL wasVirtual = NO, usePrivatePrefix = NO, hidden = NO, usedBackup = NO;
     NSURL *resolvedURL = nil;
-    ps_prepare_file_url_for_io(url, caller, &resolvedURL, &hidden, &wasVirtual, &usePrivatePrefix);
+    ps_prepare_file_url_for_io(url, caller, YES, &resolvedURL, &hidden, &wasVirtual, &usePrivatePrefix, &usedBackup);
     if (hidden) {
         if (errorPtr != NULL) {
             *errorPtr = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileReadNoSuchFileError userInfo:nil];
@@ -2187,7 +2283,14 @@ static void ps_prepare_file_url_for_io(NSURL *url,
         return nil;
     }
     NSError *localErr = nil;
-    NSData *data = [self pm_dataWithContentsOfURL:resolvedURL options:readOptionsMask error:(errorPtr != NULL ? &localErr : NULL)];
+    NSData *data = nil;
+    if (usedBackup) {
+        pt_enter_internal_scope();
+        data = [self pm_dataWithContentsOfURL:resolvedURL options:readOptionsMask error:(errorPtr != NULL ? &localErr : NULL)];
+        pt_leave_internal_scope();
+    } else {
+        data = [self pm_dataWithContentsOfURL:resolvedURL options:readOptionsMask error:(errorPtr != NULL ? &localErr : NULL)];
+    }
     if (data == nil) {
         ps_assign_virtualized_nserror(errorPtr, localErr, usePrivatePrefix, wasVirtual, caller);
     }
@@ -2217,7 +2320,7 @@ static void ps_prepare_file_url_for_io(NSURL *url,
     const void *caller = __builtin_return_address(0);
     BOOL wasVirtual = NO, usePrivatePrefix = NO, hidden = NO;
     NSURL *resolvedURL = nil;
-    ps_prepare_file_url_for_io(url, caller, &resolvedURL, &hidden, &wasVirtual, &usePrivatePrefix);
+    ps_prepare_file_url_for_io(url, caller, NO, &resolvedURL, &hidden, &wasVirtual, &usePrivatePrefix, NULL);
     if (hidden) {
         if (errorPtr != NULL) {
             *errorPtr = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileWriteNoPermissionError userInfo:nil];
@@ -2234,9 +2337,9 @@ static void ps_prepare_file_url_for_io(NSURL *url,
 
 + (NSString *) pm_stringWithContentsOfFile:(NSString *)path encoding:(NSStringEncoding)enc error:(NSError **)error {
     const void *caller = __builtin_return_address(0);
-    BOOL wasVirtual = NO, usePrivatePrefix = NO, hidden = NO;
+    BOOL wasVirtual = NO, usePrivatePrefix = NO, hidden = NO, usedBackup = NO;
     ps_detect_path_virtual_flags(path, nil, &wasVirtual, &usePrivatePrefix);
-    ps_prepare_fm_path(path, caller, &path, &hidden, NULL);
+    ps_prepare_fm_path_mode(path, caller, YES, &path, &hidden, NULL, &usedBackup);
     if (hidden) {
         if (error != NULL) {
             *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileReadNoSuchFileError userInfo:nil];
@@ -2244,7 +2347,14 @@ static void ps_prepare_file_url_for_io(NSURL *url,
         return nil;
     }
     NSError *localErr = nil;
-    NSString *res = [self pm_stringWithContentsOfFile:path encoding:enc error:(error != NULL ? &localErr : NULL)];
+    NSString *res = nil;
+    if (usedBackup) {
+        pt_enter_internal_scope();
+        res = [self pm_stringWithContentsOfFile:path encoding:enc error:(error != NULL ? &localErr : NULL)];
+        pt_leave_internal_scope();
+    } else {
+        res = [self pm_stringWithContentsOfFile:path encoding:enc error:(error != NULL ? &localErr : NULL)];
+    }
     if (res == nil) {
         ps_assign_virtualized_nserror(error, localErr, usePrivatePrefix, wasVirtual, caller);
     }
@@ -2253,9 +2363,9 @@ static void ps_prepare_file_url_for_io(NSURL *url,
 
 + (NSString *) pm_stringWithContentsOfURL:(NSURL *)url encoding:(NSStringEncoding)enc error:(NSError **)error {
     const void *caller = __builtin_return_address(0);
-    BOOL wasVirtual = NO, usePrivatePrefix = NO, hidden = NO;
+    BOOL wasVirtual = NO, usePrivatePrefix = NO, hidden = NO, usedBackup = NO;
     NSURL *resolvedURL = nil;
-    ps_prepare_file_url_for_io(url, caller, &resolvedURL, &hidden, &wasVirtual, &usePrivatePrefix);
+    ps_prepare_file_url_for_io(url, caller, YES, &resolvedURL, &hidden, &wasVirtual, &usePrivatePrefix, &usedBackup);
     if (hidden) {
         if (error != NULL) {
             *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileReadNoSuchFileError userInfo:nil];
@@ -2263,7 +2373,14 @@ static void ps_prepare_file_url_for_io(NSURL *url,
         return nil;
     }
     NSError *localErr = nil;
-    NSString *res = [self pm_stringWithContentsOfURL:resolvedURL encoding:enc error:(error != NULL ? &localErr : NULL)];
+    NSString *res = nil;
+    if (usedBackup) {
+        pt_enter_internal_scope();
+        res = [self pm_stringWithContentsOfURL:resolvedURL encoding:enc error:(error != NULL ? &localErr : NULL)];
+        pt_leave_internal_scope();
+    } else {
+        res = [self pm_stringWithContentsOfURL:resolvedURL encoding:enc error:(error != NULL ? &localErr : NULL)];
+    }
     if (res == nil) {
         ps_assign_virtualized_nserror(error, localErr, usePrivatePrefix, wasVirtual, caller);
     }
@@ -2293,7 +2410,7 @@ static void ps_prepare_file_url_for_io(NSURL *url,
     const void *caller = __builtin_return_address(0);
     BOOL wasVirtual = NO, usePrivatePrefix = NO, hidden = NO;
     NSURL *resolvedURL = nil;
-    ps_prepare_file_url_for_io(url, caller, &resolvedURL, &hidden, &wasVirtual, &usePrivatePrefix);
+    ps_prepare_file_url_for_io(url, caller, NO, &resolvedURL, &hidden, &wasVirtual, &usePrivatePrefix, NULL);
     if (hidden) {
         if (error != NULL) {
             *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileWriteNoPermissionError userInfo:nil];

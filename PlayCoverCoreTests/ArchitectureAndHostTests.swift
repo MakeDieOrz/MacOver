@@ -491,6 +491,12 @@ final class ArchitectureAndHostTests: XCTestCase {
         XCTAssertEqual(roundTripped.frameRateTargetMode, .fixed60)
         XCTAssertEqual(roundTripped.reportedIOSVersionMode, .compat18_3)
 
+        configured.reportedIOSVersion = "compat13_7"
+        let compat13Encoded = try PropertyListEncoder().encode(configured)
+        let compat13Decoded = try PropertyListDecoder().decode(AppSettingsData.self, from: compat13Encoded)
+        XCTAssertEqual(compat13Decoded.reportedIOSVersionMode, .compat13_7)
+        XCTAssertEqual(compat13Decoded.reportedIOSVersion, "compat13_7")
+
         var invalidNormalized = configured
         invalidNormalized.frameRateTarget = "bogus"
         invalidNormalized.reportedIOSVersion = "bogus"
@@ -587,7 +593,14 @@ final class ArchitectureAndHostTests: XCTestCase {
 
         XCTAssertTrue(DeviceProfileOption.isLegacyModel("iPad6,7"))
         XCTAssertTrue(DeviceProfileOption.isLegacyModel("iPad8,6"))
+        XCTAssertTrue(DeviceProfileOption.isLegacyModel("iPhone12,5"))
         XCTAssertFalse(DeviceProfileOption.isLegacyModel("iPad17,3"))
+        XCTAssertTrue(DeviceProfileOption.supportsIOS13("iPad8,6"))
+        XCTAssertTrue(DeviceProfileOption.supportsIOS13("iPhone12,5"))
+        XCTAssertFalse(DeviceProfileOption.supportsIOS13("iPad13,8"))
+        XCTAssertFalse(DeviceProfileOption.supportsIOS13("iPhone17,2"))
+        XCTAssertEqual(DeviceProfileOption.recommendedIOS13Model(isIPhone: false), "iPad8,6")
+        XCTAssertEqual(DeviceProfileOption.recommendedIOS13Model(isIPhone: true), "iPhone12,5")
         XCTAssertTrue(DeviceProfileOption.isIPhone("iPhone18,2"))
         XCTAssertFalse(DeviceProfileOption.isIPhone("iPad17,3"))
     }

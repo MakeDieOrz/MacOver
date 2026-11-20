@@ -23,6 +23,20 @@ public class BaseApp {
             .appendingPathExtension("plist")
     }
 
+    public var appBackupsDir: URL {
+        PlayTools.playCoverContainer
+            .appendingPathComponent("AppBackups")
+            .appendingPathComponent(info.bundleIdentifier)
+    }
+
+    public var provisioningProfileBackup: URL {
+        appBackupsDir.appendingPathComponent("embedded.mobileprovision")
+    }
+
+    public var originalExecutableBackup: URL {
+        appBackupsDir.appendingPathComponent("executable")
+    }
+
     init(appUrl: URL) {
         url = appUrl
         info = AppInfo(contentsOf: url.appendingPathComponent("Info")

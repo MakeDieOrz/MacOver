@@ -144,6 +144,21 @@ final class PlayCoverCoreSPMTests: XCTestCase {
         XCTAssertEqual(ReportedIOSVersionMode(rawSetting: "ios18_3"), .compat18_3)
         XCTAssertEqual(ReportedIOSVersionMode.compat18_3Version, "18.3")
         XCTAssertEqual(ReportedIOSVersionMode.compat18_3Build, "22D63")
+        XCTAssertEqual(ReportedIOSVersionMode.compat18_3KernelRelease, "24.3.0")
+
+        XCTAssertEqual(ReportedIOSVersionMode(rawSetting: "compat13_7"), .compat13_7)
+        XCTAssertEqual(ReportedIOSVersionMode(rawSetting: "13.7"), .compat13_7)
+        XCTAssertEqual(ReportedIOSVersionMode(rawSetting: "ios13_7"), .compat13_7)
+        XCTAssertEqual(ReportedIOSVersionMode.compat13_7Version, "13.7")
+        XCTAssertEqual(ReportedIOSVersionMode.compat13_7Build, "17H35")
+        XCTAssertEqual(ReportedIOSVersionMode.compat13_7KernelRelease, "19.6.0")
+
+        XCTAssertFalse(ReportedIOSVersionMode.isMinimumOSVersion("13.0", higherThan: 13, minor: 7))
+        XCTAssertFalse(ReportedIOSVersionMode.isMinimumOSVersion("13.7", higherThan: 13, minor: 7))
+        XCTAssertTrue(ReportedIOSVersionMode.isMinimumOSVersion("13.7.1", higherThan: 13, minor: 7))
+        XCTAssertTrue(ReportedIOSVersionMode.isMinimumOSVersion("14.0", higherThan: 13, minor: 7))
+        XCTAssertFalse(ReportedIOSVersionMode.isMinimumOSVersion("12.4", higherThan: 13, minor: 7))
+        XCTAssertFalse(ReportedIOSVersionMode.isMinimumOSVersion("", higherThan: 13, minor: 7))
 
         XCTAssertEqual(PlayCoverRestartField.allCases.count, 23)
         XCTAssertTrue(PlayCoverRestartField.allCases.contains(.windowCompatibility))

@@ -100,13 +100,27 @@ struct DeviceProfileOption: Identifiable, Hashable {
 
     static let allModern: [DeviceProfileOption] = modernIPads + modernIPhones
 
+    static let ios13CompatibleModels: [DeviceProfileOption] = [
+        DeviceProfileOption(model: "iPad8,6", label: "iPad Pro 12.9-inch (3rd gen · A12X · 4GB)", isIPhone: false),
+        DeviceProfileOption(model: "iPhone12,5", label: "iPhone 11 Pro Max (A13 · 4GB)", isIPhone: true)
+    ]
+
     private static let legacyModels: [String: String] = [
         "iPad6,7": "iPad Pro 12.9-inch (1st gen · A9X · Legacy)",
-        "iPad8,6": "iPad Pro 12.9-inch (3rd gen · A12X · Legacy)"
+        "iPad8,6": "iPad Pro 12.9-inch (3rd gen · A12X · Legacy)",
+        "iPhone12,5": "iPhone 11 Pro Max (A13 · 4GB · Legacy)"
     ]
 
     static func isLegacyModel(_ model: String) -> Bool {
         legacyModels[model] != nil
+    }
+
+    static func supportsIOS13(_ model: String) -> Bool {
+        ["iPad6,7", "iPad8,6", "iPhone12,5"].contains(model)
+    }
+
+    static func recommendedIOS13Model(isIPhone: Bool) -> String {
+        isIPhone ? "iPhone12,5" : "iPad8,6"
     }
 
     static func isIPhone(_ model: String) -> Bool {

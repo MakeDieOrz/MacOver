@@ -276,6 +276,22 @@ __attribute__((visibility("hidden"))) size_t s_real_data_container_len = 0;
 static _Atomic int s_data_map_state = 0; // 0: uninitialized/retryable, 1: ready
 __attribute__((visibility("hidden"))) BOOL pt_ensure_data_container_map(void);
 
+static _Atomic bool s_app_backups_disabled_for_safe_mode = false;
+static _Atomic bool s_app_backup_ready = false;
+static pthread_once_t s_app_backup_once = PTHREAD_ONCE_INIT;
+static char s_app_backup_dir[PATH_MAX];
+static size_t s_app_backup_dir_len = 0;
+static char s_backup_mobileprovision_path[PATH_MAX];
+static size_t s_backup_mobileprovision_len = 0;
+static BOOL s_has_backup_mobileprovision = NO;
+static char s_backup_executable_path[PATH_MAX];
+static size_t s_backup_executable_len = 0;
+static BOOL s_has_backup_executable = NO;
+static char s_real_main_exec_path[PATH_MAX];
+static size_t s_real_main_exec_len = 0;
+static char s_real_main_exec_rel_path[PATH_MAX];
+static void pt_ensure_app_backup_map(void);
+
 __attribute__((visibility("hidden"))) const char *pt_match_prefix_modulo_private(const char *path, const char *base, size_t base_len) {
     if (path == NULL || base == NULL || base_len == 0) {
         return NULL;
@@ -407,6 +423,20 @@ static BOOL pt_is_hidden_normalized_path_cached_caller(const char *norm, const v
                 }
                 return (*inout_is_sys_caller == 0);
             }
+        }
+        if (!atomic_load_explicit(&s_app_backup_ready, memory_order_acquire) &&
+            strstr(norm, "AppBackups") != NULL &&
+            !pt_is_in_internal_scope() &&
+            atomic_load_explicit(&s_libsystem_ready, memory_order_acquire)) {
+            pt_ensure_app_backup_map();
+        }
+        if (atomic_load_explicit(&s_app_backup_ready, memory_order_acquire) &&
+            s_app_backup_dir_len > 0 &&
+            pt_match_prefix_modulo_private(norm, s_app_backup_dir, s_app_backup_dir_len) != NULL) {
+            if (*inout_is_sys_caller < 0) {
+                *inout_is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
+            }
+            return (*inout_is_sys_caller == 0);
         }
     }
 
@@ -797,6 +827,251 @@ __attribute__((visibility("hidden"))) void pt_ensure_bundle_path_map(void) {
     if (!atomic_load_explicit(&s_bundle_map_ready, memory_order_acquire)) {
         pthread_once(&s_bundle_path_once, pt_init_bundle_path_map);
     }
+}
+
+static void pt_init_app_backup_map(void) {
+    pt_enter_internal_scope();
+    do {
+        pt_ensure_bundle_path_map();
+
+        char raw_dir[PATH_MAX] = {0};
+        const char *test_dir = getenv("PLAYTOOLS_TEST_APP_BACKUPS_DIR");
+        if (test_dir != NULL && test_dir[0] == '/') {
+            strlcpy(raw_dir, test_dir, sizeof(raw_dir));
+        } else {
+            const char *user_root = pt_get_host_user_root_cstr();
+            if (user_root != NULL && user_root[0] == '/') {
+                char bid[256];
+                bid[0] = '\0';
+                if (!pt_read_main_bundle_id_early(bid, sizeof(bid)) || bid[0] == '\0') {
+                    const char *home = getenv("CFFIXED_USER_HOME");
+                    const char *marker = (home != NULL) ? strstr(home, "/Library/Containers/") : NULL;
+                    if (marker != NULL) {
+                        const char *cid_start = marker + 20;
+                        const char *cid_end = strchr(cid_start, '/');
+                        size_t cid_len = (cid_end != NULL) ? (size_t)(cid_end - cid_start) : strlen(cid_start);
+                        if (cid_len > 0 && cid_len < sizeof(bid)) {
+                            memcpy(bid, cid_start, cid_len);
+                            bid[cid_len] = '\0';
+                        }
+                    }
+                }
+                if (bid[0] != '\0') {
+                    int n = snprintf(raw_dir, sizeof(raw_dir),
+                                     "%s/Library/Containers/app.makedie.MacOver/AppBackups/%s",
+                                     user_root, bid);
+                    if (n <= 0 || (size_t)n >= sizeof(raw_dir)) {
+                        raw_dir[0] = '\0';
+                    }
+                }
+            }
+        }
+
+        const char *p = raw_dir;
+        if (strncmp(p, "/System/Volumes/Data/", 21) == 0) {
+            p += 20;
+        }
+        size_t blen = strlen(p);
+        while (blen > 1 && p[blen - 1] == '/') {
+            blen--;
+        }
+        if (blen == 0 || p[0] != '/' || blen >= sizeof(s_app_backup_dir)) {
+            break;
+        }
+        memcpy(s_app_backup_dir, p, blen);
+        s_app_backup_dir[blen] = '\0';
+        s_app_backup_dir_len = blen;
+
+        struct stat st;
+        if (stat(s_app_backup_dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
+            break;
+        }
+
+        char cand[PATH_MAX];
+        int pn = snprintf(cand, sizeof(cand), "%s/embedded.mobileprovision", s_app_backup_dir);
+        if (pn > 0 && (size_t)pn < sizeof(cand) && stat(cand, &st) == 0 && S_ISREG(st.st_mode)) {
+            strlcpy(s_backup_mobileprovision_path, cand, sizeof(s_backup_mobileprovision_path));
+            s_backup_mobileprovision_len = (size_t)pn;
+            s_has_backup_mobileprovision = YES;
+        }
+
+        int en = snprintf(cand, sizeof(cand), "%s/executable", s_app_backup_dir);
+        if (en > 0 && (size_t)en < sizeof(cand) && stat(cand, &st) == 0 && S_ISREG(st.st_mode)) {
+            const char *exec_path = pt_get_main_executable_path();
+            if (exec_path != NULL && exec_path[0] == '/') {
+                if (strncmp(exec_path, "/System/Volumes/Data/", 21) == 0) {
+                    exec_path += 20;
+                }
+                size_t elen = strlen(exec_path);
+                if (elen > 0 && elen < sizeof(s_real_main_exec_path)) {
+                    memcpy(s_real_main_exec_path, exec_path, elen);
+                    s_real_main_exec_path[elen] = '\0';
+                    s_real_main_exec_len = elen;
+
+                    const char *rel = (s_real_app_bundle_len > 0)
+                        ? pt_match_prefix_modulo_private(s_real_main_exec_path,
+                                                         s_real_app_bundle_dir,
+                                                         s_real_app_bundle_len)
+                        : NULL;
+                    if (rel != NULL && rel[0] == '/' && strlen(rel) < sizeof(s_real_main_exec_rel_path)) {
+                        strlcpy(s_real_main_exec_rel_path, rel, sizeof(s_real_main_exec_rel_path));
+                        strlcpy(s_backup_executable_path, cand, sizeof(s_backup_executable_path));
+                        s_backup_executable_len = (size_t)en;
+                        s_has_backup_executable = YES;
+                    } else {
+                        s_real_main_exec_path[0] = '\0';
+                        s_real_main_exec_len = 0;
+                    }
+                }
+            }
+        }
+    } while (0);
+    atomic_store_explicit(&s_app_backup_ready, true, memory_order_release);
+    pt_leave_internal_scope();
+}
+
+static void pt_ensure_app_backup_map(void) {
+    if (!atomic_load_explicit(&s_app_backup_ready, memory_order_acquire) &&
+        !pt_is_in_internal_scope() &&
+        atomic_load_explicit(&s_libsystem_ready, memory_order_acquire)) {
+        pthread_once(&s_app_backup_once, pt_init_app_backup_map);
+    }
+}
+
+__attribute__((visibility("hidden"))) void pt_disable_app_backups_for_safe_mode(void) {
+    atomic_store_explicit(&s_app_backups_disabled_for_safe_mode, true, memory_order_release);
+}
+
+__attribute__((visibility("hidden"))) BOOL pt_has_backup_mobileprovision(void) {
+    if (atomic_load_explicit(&s_app_backups_disabled_for_safe_mode, memory_order_acquire) ||
+        !pt_is_bypass_enabled()) {
+        return NO;
+    }
+    pt_ensure_app_backup_map();
+    return atomic_load_explicit(&s_app_backup_ready, memory_order_acquire) && s_has_backup_mobileprovision;
+}
+
+__attribute__((visibility("hidden")))
+const char *pt_copy_virtual_mobileprovision_path(char *buf, size_t bufsize) {
+    if (buf == NULL || bufsize == 0) {
+        return NULL;
+    }
+    pt_ensure_bundle_path_map();
+    if (!pt_has_backup_mobileprovision() || s_virtual_private_bundle_len == 0) {
+        return NULL;
+    }
+    return pt_join_path_fast(buf, bufsize,
+                             s_virtual_private_bundle_dir,
+                             s_virtual_private_bundle_len,
+                             "/embedded.mobileprovision");
+}
+
+static const char *pt_lookup_app_backup_redirect_unlocked(const char *p, const char *bundle_rel) {
+    if (s_has_backup_mobileprovision && bundle_rel != NULL &&
+        (strcmp(bundle_rel, "/embedded.mobileprovision") == 0 ||
+         strcmp(bundle_rel, "/Contents/embedded.mobileprovision") == 0)) {
+        return s_backup_mobileprovision_path;
+    }
+    if (s_has_backup_executable && s_real_main_exec_len > 0 && p != NULL) {
+        const char *erel = pt_match_prefix_modulo_private(p, s_real_main_exec_path, s_real_main_exec_len);
+        if (erel != NULL && erel[0] == '\0') {
+            return s_backup_executable_path;
+        }
+    }
+    return NULL;
+}
+
+__attribute__((visibility("hidden")))
+const char *pt_lookup_app_backup_redirect_for_caller(const char *raw_path,
+                                                     const void *caller,
+                                                     char *vbuf,
+                                                     size_t vbuf_size,
+                                                     int *inout_is_sys_caller) {
+    if (raw_path == NULL || raw_path[0] != '/' || vbuf == NULL || vbuf_size == 0 ||
+        pt_is_in_internal_scope() ||
+        !pt_is_bypass_enabled() ||
+        atomic_load_explicit(&s_app_backups_disabled_for_safe_mode, memory_order_acquire)) {
+        return NULL;
+    }
+    if (!atomic_load_explicit(&s_bundle_map_ready, memory_order_acquire) || s_real_app_bundle_len == 0) {
+        return NULL;
+    }
+    const char *p = raw_path;
+    if (strncmp(p, "/System/Volumes/Data/", 21) == 0) {
+        p += 20;
+    }
+    const char *rel = pt_match_prefix_modulo_private(p, s_real_app_bundle_dir, s_real_app_bundle_len);
+    if (rel == NULL || rel[0] != '/') {
+        return NULL;
+    }
+    pt_ensure_app_backup_map();
+    if (!atomic_load_explicit(&s_app_backup_ready, memory_order_acquire)) {
+        return NULL;
+    }
+    const char *target = pt_lookup_app_backup_redirect_unlocked(p, rel);
+    if (target == NULL) {
+        return NULL;
+    }
+    int local_sys = (inout_is_sys_caller != NULL) ? *inout_is_sys_caller : -1;
+    if (local_sys < 0) {
+        local_sys = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
+        if (inout_is_sys_caller != NULL) {
+            *inout_is_sys_caller = local_sys;
+        }
+    }
+    if (local_sys == 1) {
+        return NULL;
+    }
+    size_t n = strlcpy(vbuf, target, vbuf_size);
+    return (n < vbuf_size) ? vbuf : NULL;
+}
+
+static BOOL pt_is_active_app_backup_file_path(const char *p) {
+    if (p == NULL || p[0] != '/' ||
+        atomic_load_explicit(&s_app_backups_disabled_for_safe_mode, memory_order_acquire) ||
+        !atomic_load_explicit(&s_app_backup_ready, memory_order_acquire)) {
+        return NO;
+    }
+    if (s_has_backup_mobileprovision && s_backup_mobileprovision_len > 0) {
+        const char *rel = pt_match_prefix_modulo_private(p, s_backup_mobileprovision_path, s_backup_mobileprovision_len);
+        if (rel != NULL && rel[0] == '\0') {
+            return YES;
+        }
+    }
+    if (s_has_backup_executable && s_backup_executable_len > 0) {
+        const char *rel = pt_match_prefix_modulo_private(p, s_backup_executable_path, s_backup_executable_len);
+        if (rel != NULL && rel[0] == '\0') {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static const char *pt_virtualize_app_backup_path(const char *p, char *buf, size_t bufsize, BOOL use_private_prefix) {
+    if (p == NULL || buf == NULL || bufsize == 0 ||
+        atomic_load_explicit(&s_app_backups_disabled_for_safe_mode, memory_order_acquire) ||
+        !atomic_load_explicit(&s_app_backup_ready, memory_order_acquire) ||
+        s_real_app_bundle_len == 0) {
+        return NULL;
+    }
+    const char *prefix = use_private_prefix ? s_virtual_private_bundle_dir : s_virtual_var_bundle_dir;
+    size_t plen = use_private_prefix ? s_virtual_private_bundle_len : s_virtual_var_bundle_len;
+    if (plen == 0) {
+        return NULL;
+    }
+    if (s_has_backup_mobileprovision && s_backup_mobileprovision_len > 0) {
+        const char *rel = pt_match_prefix_modulo_private(p, s_backup_mobileprovision_path, s_backup_mobileprovision_len);
+        if (rel != NULL && rel[0] == '\0') {
+            return pt_join_path_fast(buf, bufsize, prefix, plen, "/embedded.mobileprovision");
+        }
+    }
+    if (s_has_backup_executable && s_backup_executable_len > 0 && s_real_main_exec_rel_path[0] == '/') {
+        const char *rel = pt_match_prefix_modulo_private(p, s_backup_executable_path, s_backup_executable_len);
+        if (rel != NULL && rel[0] == '\0') {
+            return pt_join_path_fast(buf, bufsize, prefix, plen, s_real_main_exec_rel_path);
+        }
+    }
+    return NULL;
 }
 
 static void pt_maybe_init_test_group_root_locked(void) {
@@ -1252,6 +1527,10 @@ const char *pt_virtualize_path_for_app(const char *path, char *buf, size_t bufsi
             return (joined != NULL) ? joined : path;
         }
     }
+    const char *backup_virt = pt_virtualize_app_backup_path(p, buf, bufsize, use_private_prefix);
+    if (backup_virt != NULL) {
+        return backup_virt;
+    }
     const char *group_virt = pt_group_try_virtualize_known_or_root(p, buf, bufsize, use_private_prefix);
     if (group_virt != NULL) {
         return group_virt;
@@ -1270,6 +1549,9 @@ static BOOL pt_is_sensitive_host_fd_path(const char *path, const void *caller) {
     const char *p = path;
     if (strncmp(p, "/System/Volumes/Data/", 21) == 0) {
         p += 20;
+    }
+    if (pt_is_active_app_backup_file_path(p)) {
+        return NO;
     }
     int is_sys_caller = -1;
     if (pt_is_hidden_normalized_path_cached_caller(p, caller, &is_sys_caller)) {
@@ -1706,7 +1988,8 @@ static pt_fs_path_disposition_t pt_prepare_fs_path_abs_cached_caller(const char 
                                                                       char *vbuf,
                                                                       size_t vbuf_size,
                                                                       const char **out_path,
-                                                                      int *inout_is_sys_caller) {
+                                                                      int *inout_is_sys_caller,
+                                                                      BOOL for_readonly) {
     *out_path = cleaned;
     if (cleaned == NULL || cleaned[0] == '\0') {
         return PT_FS_PATH_NORMAL;
@@ -1782,6 +2065,15 @@ static pt_fs_path_disposition_t pt_prepare_fs_path_abs_cached_caller(const char 
         }
     }
 
+    if (for_readonly) {
+        const char *backup = pt_lookup_app_backup_redirect_for_caller(
+            norm, caller, vbuf, vbuf_size, inout_is_sys_caller);
+        if (backup != NULL) {
+            *out_path = backup;
+            return PT_FS_PATH_NORMAL;
+        }
+    }
+
     if (pt_is_nonsensitive_app_or_tmp_path(norm,
                                             s_real_app_bundle_dir,
                                             s_real_app_bundle_len,
@@ -1843,7 +2135,8 @@ static pt_fs_path_disposition_t pt_prepare_fs_path_at_cached_caller(int dirfd,
                                                                      char *vbuf,
                                                                      size_t vbuf_size,
                                                                      const char **out_path,
-                                                                     int *inout_is_sys_caller) {
+                                                                     int *inout_is_sys_caller,
+                                                                     BOOL for_readonly) {
     const char *cleaned = ue_fix_filename(raw_path);
     *out_path = cleaned;
     if (cleaned == NULL || cleaned[0] == '\0' ||
@@ -1895,7 +2188,8 @@ static pt_fs_path_disposition_t pt_prepare_fs_path_at_cached_caller(int dirfd,
                                                                                          vbuf,
                                                                                          vbuf_size,
                                                                                          &resolved_out,
-                                                                                         inout_is_sys_caller);
+                                                                                         inout_is_sys_caller,
+                                                                                         for_readonly);
                     tls_rel_resolve = 0;
                     if (disp != PT_FS_PATH_NORMAL) {
                         if (resolved_out != rel_abs) {
@@ -1912,7 +2206,7 @@ static pt_fs_path_disposition_t pt_prepare_fs_path_at_cached_caller(int dirfd,
             tls_rel_resolve = 0;
         }
     }
-    return pt_prepare_fs_path_abs_cached_caller(cleaned, caller, vbuf, vbuf_size, out_path, inout_is_sys_caller);
+    return pt_prepare_fs_path_abs_cached_caller(cleaned, caller, vbuf, vbuf_size, out_path, inout_is_sys_caller, for_readonly);
 }
 
 __attribute__((visibility("hidden"))) pt_fs_path_disposition_t pt_prepare_fs_path_cached_caller(const char *raw_path,
@@ -1921,7 +2215,35 @@ __attribute__((visibility("hidden"))) pt_fs_path_disposition_t pt_prepare_fs_pat
                                                                          size_t vbuf_size,
                                                                          const char **out_path,
                                                                          int *inout_is_sys_caller) {
-    return pt_prepare_fs_path_at_cached_caller(AT_FDCWD, raw_path, caller, vbuf, vbuf_size, out_path, inout_is_sys_caller);
+    return pt_prepare_fs_path_at_cached_caller(AT_FDCWD, raw_path, caller, vbuf, vbuf_size, out_path, inout_is_sys_caller, NO);
+}
+
+static inline pt_fs_path_disposition_t pt_prepare_fs_path_cached_caller_ro(const char *raw_path,
+                                                                           const void *caller,
+                                                                           char *vbuf,
+                                                                           size_t vbuf_size,
+                                                                           const char **out_path,
+                                                                           int *inout_is_sys_caller) {
+    return pt_prepare_fs_path_at_cached_caller(AT_FDCWD, raw_path, caller, vbuf, vbuf_size, out_path, inout_is_sys_caller, YES);
+}
+
+static inline BOOL pt_open_flags_are_readonly(int oflag) {
+    return ((oflag & O_ACCMODE) == O_RDONLY) &&
+           ((oflag & (O_CREAT | O_TRUNC | O_APPEND | O_EXCL)) == 0);
+}
+
+static inline BOOL pt_fopen_mode_is_readonly(const char *mode) {
+    return mode != NULL && mode[0] == 'r' && strchr(mode, '+') == NULL;
+}
+
+static inline pt_fs_path_disposition_t pt_prepare_fs_path_mode(const char *raw_path,
+                                                                const void *caller,
+                                                                char *vbuf,
+                                                                size_t vbuf_size,
+                                                                const char **out_path,
+                                                                BOOL for_readonly) {
+    int is_sys_caller = -1;
+    return pt_prepare_fs_path_at_cached_caller(AT_FDCWD, raw_path, caller, vbuf, vbuf_size, out_path, &is_sys_caller, for_readonly);
 }
 
 static inline pt_fs_path_disposition_t pt_prepare_fs_path(const char *raw_path,
@@ -1929,8 +2251,26 @@ static inline pt_fs_path_disposition_t pt_prepare_fs_path(const char *raw_path,
                                                           char *vbuf,
                                                           size_t vbuf_size,
                                                           const char **out_path) {
+    return pt_prepare_fs_path_mode(raw_path, caller, vbuf, vbuf_size, out_path, NO);
+}
+
+static inline pt_fs_path_disposition_t pt_prepare_fs_path_ro(const char *raw_path,
+                                                             const void *caller,
+                                                             char *vbuf,
+                                                             size_t vbuf_size,
+                                                             const char **out_path) {
+    return pt_prepare_fs_path_mode(raw_path, caller, vbuf, vbuf_size, out_path, YES);
+}
+
+static inline pt_fs_path_disposition_t pt_prepare_fs_path_at_mode(int dirfd,
+                                                                   const char *raw_path,
+                                                                   const void *caller,
+                                                                   char *vbuf,
+                                                                   size_t vbuf_size,
+                                                                   const char **out_path,
+                                                                   BOOL for_readonly) {
     int is_sys_caller = -1;
-    return pt_prepare_fs_path_at_cached_caller(AT_FDCWD, raw_path, caller, vbuf, vbuf_size, out_path, &is_sys_caller);
+    return pt_prepare_fs_path_at_cached_caller(dirfd, raw_path, caller, vbuf, vbuf_size, out_path, &is_sys_caller, for_readonly);
 }
 
 static inline pt_fs_path_disposition_t pt_prepare_fs_path_at(int dirfd,
@@ -1939,8 +2279,16 @@ static inline pt_fs_path_disposition_t pt_prepare_fs_path_at(int dirfd,
                                                              char *vbuf,
                                                              size_t vbuf_size,
                                                              const char **out_path) {
-    int is_sys_caller = -1;
-    return pt_prepare_fs_path_at_cached_caller(dirfd, raw_path, caller, vbuf, vbuf_size, out_path, &is_sys_caller);
+    return pt_prepare_fs_path_at_mode(dirfd, raw_path, caller, vbuf, vbuf_size, out_path, NO);
+}
+
+static inline pt_fs_path_disposition_t pt_prepare_fs_path_at_ro(int dirfd,
+                                                                const char *raw_path,
+                                                                const void *caller,
+                                                                char *vbuf,
+                                                                size_t vbuf_size,
+                                                                const char **out_path) {
+    return pt_prepare_fs_path_at_mode(dirfd, raw_path, caller, vbuf, vbuf_size, out_path, YES);
 }
 
 static inline BOOL pt_is_hidden_dirent_name(const char *d_name) {
@@ -1986,7 +2334,12 @@ static int pt_stat_virtual_ancestor(struct stat *buf) {
 static int pt_open(char const* restrict filename, int oflag, ... ) {
     char vbuf[PATH_MAX];
     const char *resolved = NULL;
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path(filename, __builtin_return_address(0), vbuf, sizeof(vbuf), &resolved);
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_mode(filename,
+                                                            __builtin_return_address(0),
+                                                            vbuf,
+                                                            sizeof(vbuf),
+                                                            &resolved,
+                                                            pt_open_flags_are_readonly(oflag));
     if (disp == PT_FS_PATH_HIDDEN) {
         PT_DEBUG_TRACE("fs", "hid open path=%s", filename != NULL ? filename : "<null>");
         errno = ENOENT;
@@ -2020,7 +2373,13 @@ static int pt_open(char const* restrict filename, int oflag, ... ) {
 
 static int pt_openat(int fd, const char *path, int oflag, ...) {
     char vbuf[PATH_MAX];
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path_at(fd, path, __builtin_return_address(0), vbuf, sizeof(vbuf), &path);
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_at_mode(fd,
+                                                               path,
+                                                               __builtin_return_address(0),
+                                                               vbuf,
+                                                               sizeof(vbuf),
+                                                               &path,
+                                                               pt_open_flags_are_readonly(oflag));
     if (disp == PT_FS_PATH_HIDDEN) {
         errno = ENOENT;
         return -1;
@@ -2064,7 +2423,12 @@ extern int pt_orig_creat_nocancel(const char *, mode_t) __asm("_creat$NOCANCEL")
 static int pt_open_nocancel(char const* restrict filename, int oflag, ...) {
     char vbuf[PATH_MAX];
     const char *resolved = NULL;
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path(filename, __builtin_return_address(0), vbuf, sizeof(vbuf), &resolved);
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_mode(filename,
+                                                            __builtin_return_address(0),
+                                                            vbuf,
+                                                            sizeof(vbuf),
+                                                            &resolved,
+                                                            pt_open_flags_are_readonly(oflag));
     if (disp == PT_FS_PATH_HIDDEN) {
         errno = ENOENT;
         return -1;
@@ -2085,7 +2449,13 @@ static int pt_open_nocancel(char const* restrict filename, int oflag, ...) {
 
 static int pt_openat_nocancel(int fd, const char *path, int oflag, ...) {
     char vbuf[PATH_MAX];
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path_at(fd, path, __builtin_return_address(0), vbuf, sizeof(vbuf), &path);
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_at_mode(fd,
+                                                               path,
+                                                               __builtin_return_address(0),
+                                                               vbuf,
+                                                               sizeof(vbuf),
+                                                               &path,
+                                                               pt_open_flags_are_readonly(oflag));
     if (disp == PT_FS_PATH_HIDDEN) {
         errno = ENOENT;
         return -1;
@@ -2210,7 +2580,12 @@ extern FILE *pt_orig_fopen_darwin_extsn(const char *, const char *) __asm("_fope
 
 static FILE *pt_fopen(const char *filename, const char *mode) {
     char vbuf[PATH_MAX];
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path(filename, __builtin_return_address(0), vbuf, sizeof(vbuf), &filename);
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_mode(filename,
+                                                            __builtin_return_address(0),
+                                                            vbuf,
+                                                            sizeof(vbuf),
+                                                            &filename,
+                                                            pt_fopen_mode_is_readonly(mode));
     if (disp == PT_FS_PATH_HIDDEN) {
         errno = ENOENT;
         return NULL;
@@ -2224,7 +2599,12 @@ static FILE *pt_fopen(const char *filename, const char *mode) {
 
 static FILE *pt_fopen_darwin_extsn(const char *filename, const char *mode) {
     char vbuf[PATH_MAX];
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path(filename, __builtin_return_address(0), vbuf, sizeof(vbuf), &filename);
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_mode(filename,
+                                                            __builtin_return_address(0),
+                                                            vbuf,
+                                                            sizeof(vbuf),
+                                                            &filename,
+                                                            pt_fopen_mode_is_readonly(mode));
     if (disp == PT_FS_PATH_HIDDEN) {
         errno = ENOENT;
         return NULL;
@@ -2239,7 +2619,12 @@ static FILE *pt_fopen_darwin_extsn(const char *filename, const char *mode) {
 static FILE *pt_freopen(const char *filename, const char *mode, FILE *stream) {
     char vbuf[PATH_MAX];
     if (filename != NULL) {
-        pt_fs_path_disposition_t disp = pt_prepare_fs_path(filename, __builtin_return_address(0), vbuf, sizeof(vbuf), &filename);
+        pt_fs_path_disposition_t disp = pt_prepare_fs_path_mode(filename,
+                                                                __builtin_return_address(0),
+                                                                vbuf,
+                                                                sizeof(vbuf),
+                                                                &filename,
+                                                                pt_fopen_mode_is_readonly(mode));
         if (disp == PT_FS_PATH_HIDDEN) {
             errno = ENOENT;
             return NULL;
@@ -2255,7 +2640,7 @@ static FILE *pt_freopen(const char *filename, const char *mode, FILE *stream) {
 static int pt_stat(char const* restrict path, struct stat* restrict buf) {
     char vbuf[PATH_MAX];
     const char *resolved = NULL;
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path(path, __builtin_return_address(0), vbuf, sizeof(vbuf), &resolved);
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_ro(path, __builtin_return_address(0), vbuf, sizeof(vbuf), &resolved);
     if (disp == PT_FS_PATH_HIDDEN) {
         PT_DEBUG_TRACE("fs", "hid stat path=%s", path != NULL ? path : "<null>");
         errno = ENOENT;
@@ -2278,7 +2663,7 @@ static int pt_stat(char const* restrict path, struct stat* restrict buf) {
 static int pt_lstat(char const* restrict path, struct stat* restrict buf) {
     char vbuf[PATH_MAX];
     const char *resolved = NULL;
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path(path, __builtin_return_address(0), vbuf, sizeof(vbuf), &resolved);
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_ro(path, __builtin_return_address(0), vbuf, sizeof(vbuf), &resolved);
     if (disp == PT_FS_PATH_HIDDEN) {
         errno = ENOENT;
         return -1;
@@ -2291,7 +2676,7 @@ static int pt_lstat(char const* restrict path, struct stat* restrict buf) {
 
 static int pt_fstatat(int fd, const char *path, struct stat *buf, int flag) {
     char vbuf[PATH_MAX];
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path_at(fd, path, __builtin_return_address(0), vbuf, sizeof(vbuf), &path);
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_at_ro(fd, path, __builtin_return_address(0), vbuf, sizeof(vbuf), &path);
     if (disp == PT_FS_PATH_HIDDEN) {
         errno = ENOENT;
         return -1;
@@ -2304,7 +2689,7 @@ static int pt_fstatat(int fd, const char *path, struct stat *buf, int flag) {
 
 static int pt_statx_np(const char *path, struct stat *buf, filesec_t fsec) {
     char vbuf[PATH_MAX];
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path(path, __builtin_return_address(0), vbuf, sizeof(vbuf), &path);
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_ro(path, __builtin_return_address(0), vbuf, sizeof(vbuf), &path);
     if (disp == PT_FS_PATH_HIDDEN) {
         errno = ENOENT;
         return -1;
@@ -2317,7 +2702,7 @@ static int pt_statx_np(const char *path, struct stat *buf, filesec_t fsec) {
 
 static int pt_lstatx_np(const char *path, struct stat *buf, filesec_t fsec) {
     char vbuf[PATH_MAX];
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path(path, __builtin_return_address(0), vbuf, sizeof(vbuf), &path);
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_ro(path, __builtin_return_address(0), vbuf, sizeof(vbuf), &path);
     if (disp == PT_FS_PATH_HIDDEN) {
         errno = ENOENT;
         return -1;
@@ -2330,7 +2715,12 @@ static int pt_lstatx_np(const char *path, struct stat *buf, filesec_t fsec) {
 
 static int pt_access(char const* path, int mode) {
     char vbuf[PATH_MAX];
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path(path, __builtin_return_address(0), vbuf, sizeof(vbuf), &path);
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_mode(path,
+                                                            __builtin_return_address(0),
+                                                            vbuf,
+                                                            sizeof(vbuf),
+                                                            &path,
+                                                            (mode & W_OK) == 0);
     if (disp == PT_FS_PATH_HIDDEN) {
         errno = ENOENT;
         return -1;
@@ -2347,7 +2737,13 @@ static int pt_access(char const* path, int mode) {
 
 static int pt_faccessat(int fd, const char *path, int mode, int flag) {
     char vbuf[PATH_MAX];
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path_at(fd, path, __builtin_return_address(0), vbuf, sizeof(vbuf), &path);
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_at_mode(fd,
+                                                               path,
+                                                               __builtin_return_address(0),
+                                                               vbuf,
+                                                               sizeof(vbuf),
+                                                               &path,
+                                                               (mode & W_OK) == 0);
     if (disp == PT_FS_PATH_HIDDEN) {
         errno = ENOENT;
         return -1;
@@ -2450,7 +2846,7 @@ static char *pt_realpath_common(const char * restrict file_name,
     int is_sys_caller = -1;
     char vbuf[PATH_MAX];
     const char *resolved = NULL;
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path_cached_caller(file_name, caller, vbuf, sizeof(vbuf), &resolved, &is_sys_caller);
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_cached_caller_ro(file_name, caller, vbuf, sizeof(vbuf), &resolved, &is_sys_caller);
     if (disp == PT_FS_PATH_HIDDEN) {
         errno = ENOENT;
         return NULL;

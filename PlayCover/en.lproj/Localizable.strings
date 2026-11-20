@@ -460,6 +460,11 @@
 "device.reportedIOS.automatic" = "Automatic (Recommended)";
 "device.reportedIOS.followHost" = "Follow macOS iOS Support Version";
 "device.reportedIOS.compat18_3" = "iOS 18.3 Compatibility (22D63)";
+"device.reportedIOS.compat13_7" = "iOS 13.7 Compatibility (17H35)";
+"device.ios13Group" = "iOS 13 Era Profiles";
+"device.ios13MinOSWarning" = "This app originally requires iOS %@+. Reporting iOS 13.7 may cause crashes or unexpected behavior.";
+"device.ios13ModelMismatch" = "The selected device (%@) shipped after iOS 13. Switch to an iOS 13 era profile for consistency.";
+"device.switchToIOS13Model" = "Switch to Matching Model";
 
 "action.launch" = "Launch";
 "action.launchSafeMode" = "Launch in Safe Mode (One-Shot)";

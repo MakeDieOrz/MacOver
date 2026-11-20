@@ -253,6 +253,7 @@ __attribute__((visibility("hidden"))) BOOL ps_class_defines_instance_method(Clas
     (void)[PTSafeMode.shared ensureEvaluatedForCurrentProcess];
     if ([PTSafeMode isActive]) {
         pt_disable_reported_ios_override_for_safe_mode();
+        pt_disable_app_backups_for_safe_mode();
     }
     [self debugLogger:@"PlayShadow is now loading"];
     ps_install_network_blocker_hooks();

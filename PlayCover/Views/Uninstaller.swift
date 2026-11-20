@@ -17,6 +17,7 @@ class Uninstaller {
     private static let libraryUrl = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library")
     private static let pruneURLs: [URL] = [
         PlayTools.playCoverContainer.appendingPathComponent("App Settings"),
+        PlayTools.playCoverContainer.appendingPathComponent("AppBackups"),
         PlayTools.playCoverContainer.appendingPathComponent("Entitlements"),
         PlayTools.playCoverContainer.appendingPathComponent("Keymapping"),
         PlayTools.playCoverContainer.appendingPathComponent("PlayChain")
@@ -179,6 +180,7 @@ class Uninstaller {
         }
 
         app.removeAlias()
+        FileManager.default.delete(at: app.appBackupsDir)
         app.deleteApp()
 
         if uninstallNum >= 5 || FileManager.default.fileExists(atPath: PlayApp.bundleIDCacheURL.path) {

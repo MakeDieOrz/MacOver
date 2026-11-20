@@ -552,9 +552,47 @@ static id ps_restored_minimum_os_version(id origVal) {
     return [self pm_ps_objectForInfoDictionaryKey:key];
 }
 
+static BOOL ps_is_embedded_mobileprovision_query(NSString *name, NSString *ext, NSString *subpath) {
+    if (subpath != nil && subpath.length > 0) {
+        return NO;
+    }
+    if ([name isEqualToString:@"embedded"]) {
+        return (ext != nil &&
+                ([ext isEqualToString:@"mobileprovision"] ||
+                 [ext isEqualToString:@".mobileprovision"]));
+    }
+    if ([name isEqualToString:@"embedded.mobileprovision"]) {
+        return (ext == nil || ext.length == 0);
+    }
+    return NO;
+}
+
+static NSString *ps_virtual_mobileprovision_path_if_applicable(NSBundle *bundle,
+                                                               NSString *name,
+                                                               NSString *ext,
+                                                               NSString *subpath,
+                                                               const void *caller) {
+    if (bundle != [NSBundle mainBundle] ||
+        !ps_is_embedded_mobileprovision_query(name, ext, subpath) ||
+        !pt_is_bypass_enabled() ||
+        ps_is_effective_system_or_playtools_caller(caller) ||
+        !pt_has_backup_mobileprovision()) {
+        return nil;
+    }
+    char vbuf[PATH_MAX];
+    const char *vpath = pt_copy_virtual_mobileprovision_path(vbuf, sizeof(vbuf));
+    if (vpath == NULL || vpath[0] == '\0') {
+        return nil;
+    }
+    return [NSString stringWithUTF8String:vpath];
+}
+
 - (NSString *) pm_ps_pathForResource:(NSString *)name ofType:(NSString *)ext {
     const void *caller = __builtin_return_address(0);
     NSString *res = [self pm_ps_pathForResource:name ofType:ext];
+    if (res == nil) {
+        return ps_virtual_mobileprovision_path_if_applicable(self, name, ext, nil, caller);
+    }
     if (ps_is_hidden_path(ps_strip_iossupport_nsstring(res), caller)) {
         return nil;
     }
@@ -564,6 +602,9 @@ static id ps_restored_minimum_os_version(id origVal) {
 - (NSString *) pm_ps_pathForResource:(NSString *)name ofType:(NSString *)ext inDirectory:(NSString *)subpath {
     const void *caller = __builtin_return_address(0);
     NSString *res = [self pm_ps_pathForResource:name ofType:ext inDirectory:subpath];
+    if (res == nil) {
+        return ps_virtual_mobileprovision_path_if_applicable(self, name, ext, subpath, caller);
+    }
     if (ps_is_hidden_path(ps_strip_iossupport_nsstring(res), caller)) {
         return nil;
     }
@@ -573,6 +614,9 @@ static id ps_restored_minimum_os_version(id origVal) {
 - (NSString *) pm_ps_pathForResource:(NSString *)name ofType:(NSString *)ext inDirectory:(NSString *)subpath forLocalization:(NSString *)localizationName {
     const void *caller = __builtin_return_address(0);
     NSString *res = [self pm_ps_pathForResource:name ofType:ext inDirectory:subpath forLocalization:localizationName];
+    if (res == nil) {
+        return ps_virtual_mobileprovision_path_if_applicable(self, name, ext, subpath, caller);
+    }
     if (ps_is_hidden_path(ps_strip_iossupport_nsstring(res), caller)) {
         return nil;
     }
@@ -598,7 +642,11 @@ static id ps_restored_minimum_os_version(id origVal) {
 - (NSURL *) pm_ps_URLForResource:(NSString *)name withExtension:(NSString *)ext {
     const void *caller = __builtin_return_address(0);
     NSURL *res = [self pm_ps_URLForResource:name withExtension:ext];
-    if (res != nil && [res isFileURL] && ps_is_hidden_path(ps_strip_iossupport_nsstring(res.path), caller)) {
+    if (res == nil) {
+        NSString *vpath = ps_virtual_mobileprovision_path_if_applicable(self, name, ext, nil, caller);
+        return (vpath != nil) ? [NSURL fileURLWithPath:vpath isDirectory:NO] : nil;
+    }
+    if ([res isFileURL] && ps_is_hidden_path(ps_strip_iossupport_nsstring(res.path), caller)) {
         return nil;
     }
     return ps_virtualize_bundle_url_for_caller(res, caller);
@@ -607,7 +655,11 @@ static id ps_restored_minimum_os_version(id origVal) {
 - (NSURL *) pm_ps_URLForResource:(NSString *)name withExtension:(NSString *)ext subdirectory:(NSString *)subpath {
     const void *caller = __builtin_return_address(0);
     NSURL *res = [self pm_ps_URLForResource:name withExtension:ext subdirectory:subpath];
-    if (res != nil && [res isFileURL] && ps_is_hidden_path(ps_strip_iossupport_nsstring(res.path), caller)) {
+    if (res == nil) {
+        NSString *vpath = ps_virtual_mobileprovision_path_if_applicable(self, name, ext, subpath, caller);
+        return (vpath != nil) ? [NSURL fileURLWithPath:vpath isDirectory:NO] : nil;
+    }
+    if ([res isFileURL] && ps_is_hidden_path(ps_strip_iossupport_nsstring(res.path), caller)) {
         return nil;
     }
     return ps_virtualize_bundle_url_for_caller(res, caller);
@@ -616,7 +668,11 @@ static id ps_restored_minimum_os_version(id origVal) {
 - (NSURL *) pm_ps_URLForResource:(NSString *)name withExtension:(NSString *)ext subdirectory:(NSString *)subpath localization:(NSString *)localizationName {
     const void *caller = __builtin_return_address(0);
     NSURL *res = [self pm_ps_URLForResource:name withExtension:ext subdirectory:subpath localization:localizationName];
-    if (res != nil && [res isFileURL] && ps_is_hidden_path(ps_strip_iossupport_nsstring(res.path), caller)) {
+    if (res == nil) {
+        NSString *vpath = ps_virtual_mobileprovision_path_if_applicable(self, name, ext, subpath, caller);
+        return (vpath != nil) ? [NSURL fileURLWithPath:vpath isDirectory:NO] : nil;
+    }
+    if ([res isFileURL] && ps_is_hidden_path(ps_strip_iossupport_nsstring(res.path), caller)) {
         return nil;
     }
     return ps_virtualize_bundle_url_for_caller(res, caller);
@@ -884,6 +940,14 @@ static NSMutableDictionary *ps_sanitized_system_version_mutable_dict(NSDictionar
         return NO;
     }
     return [self pm_swift_macCatalystVersionIsAtLeastVersion:version];
+}
+
+- (BOOL) pm_ps_appAttest_isSupported {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return NO;
+    }
+    return [self pm_ps_appAttest_isSupported];
 }
 
 - (NSUInteger) pm_pi_processorCount {
@@ -4743,6 +4807,19 @@ void ps_load_environment_bypass_hooks(void) {
     }];
 }
 
+static void ps_install_app_attest_hooks_if_loaded(void) {
+    Class appAttestCls = objc_getClass("DCAppAttestService");
+    if (appAttestCls != Nil) {
+        static dispatch_once_t appAttestOnce;
+        dispatch_once(&appAttestOnce, ^{
+            SEL isSupportedSel = NSSelectorFromString(@"isSupported");
+            if (ps_class_defines_instance_method(appAttestCls, isSupportedSel)) {
+                ps_swizzle_instance_method(appAttestCls, isSupportedSel, @selector(pm_ps_appAttest_isSupported));
+            }
+        });
+    }
+}
+
 __attribute__((visibility("hidden")))
 void ps_install_dynamic_system_bundle_hooks(void) {
     pt_install_graphics_hooks_if_loaded();
@@ -4750,6 +4827,7 @@ void ps_install_dynamic_system_bundle_hooks(void) {
     ps_install_quicklook_hooks_if_loaded();
     ps_install_audio_session_port_hooks();
     ps_install_avcapture_hooks_if_loaded();
+    ps_install_app_attest_hooks_if_loaded();
 }
 
 

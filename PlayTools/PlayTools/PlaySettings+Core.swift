@@ -138,6 +138,8 @@ public final class PTUnfairLock {
             return "J720AP"
         case "iPad17,3":
             return "J820AP"
+        case "iPhone12,5":
+            return "D431AP"
         case "iPhone14,3":
             return "D64AP"
         case "iPhone15,3":
@@ -365,6 +367,8 @@ public final class PTUnfairLock {
             return "followHost"
         case "compat18_3", "18.3", "ios18_3":
             return "compat18_3"
+        case "compat13_7", "13.7", "ios13_7":
+            return "compat13_7"
         default:
             return "automatic"
         }

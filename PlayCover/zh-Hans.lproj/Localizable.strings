@@ -555,6 +555,11 @@
 "device.reportedIOS.automatic" = "自动（推荐）";
 "device.reportedIOS.followHost" = "跟随宿主 iOSSupportVersion";
 "device.reportedIOS.compat18_3" = "iOS 18.3 兼容回退（22D63）";
+"device.reportedIOS.compat13_7" = "iOS 13.7 兼容回退（17H35）";
+"device.ios13Group" = "iOS 13 时代兼容机型";
+"device.ios13MinOSWarning" = "此应用原包最低要求 iOS %@，报告 iOS 13.7 可能导致崩溃或异常。";
+"device.ios13ModelMismatch" = "当前机型（%@）出厂系统高于 iOS 13，建议搭配同时代机型以保持一致。";
+"device.switchToIOS13Model" = "切换至匹配机型";
 
 "action.launch" = "启动";
 "action.launchSafeMode" = "安全模式单次启动";

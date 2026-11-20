@@ -32,6 +32,7 @@ struct ConfigOverviewPane: View {
         case .automatic: return "device.reportedIOS.automatic"
         case .followHost: return "device.reportedIOS.followHost"
         case .compat18_3: return "device.reportedIOS.compat18_3"
+        case .compat13_7: return "device.reportedIOS.compat13_7"
         }
     }
 
