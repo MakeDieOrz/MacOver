@@ -345,6 +345,14 @@ class Installer {
             if Darwin.clonefile(baseApp.executable.path, stagedExec.path, 0) == 0 {
                 try? stagedExec.setBinaryPosixPermissions(0o755)
                 hasArtifact = true
+            } else {
+                do {
+                    try fm.copyItem(at: baseApp.executable, to: stagedExec)
+                    try? stagedExec.setBinaryPosixPermissions(0o755)
+                    hasArtifact = true
+                } catch {
+                    PlayCoverDiagnostics.log("Failed to stage executable backup: \(error)", isError: true)
+                }
             }
         }
 
@@ -354,15 +362,46 @@ class Installer {
     private static func commitAppBackups(from stagingDir: URL?, for installedApp: PlayApp) {
         let fm = FileManager.default
         let targetDir = installedApp.appBackupsDir
-        fm.delete(at: targetDir)
 
-        guard let stagingDir, fm.fileExists(atPath: stagingDir.path) else {
+        guard let stagingDir,
+              fm.fileExists(atPath: stagingDir.path),
+              let entries = try? fm.contentsOfDirectory(atPath: stagingDir.path),
+              !entries.isEmpty else {
             return
         }
+
+        let parentDir = targetDir.deletingLastPathComponent()
+        let incomingDir = parentDir.appendingPathComponent(
+            ".\(targetDir.lastPathComponent).staging-\(UUID().uuidString)"
+        )
+
         do {
-            try fm.createDirectory(at: targetDir.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try fm.moveItem(at: stagingDir, to: targetDir)
+            try fm.createDirectory(at: parentDir, withIntermediateDirectories: true)
+            try fm.moveItem(at: stagingDir, to: incomingDir)
+
+            if fm.fileExists(atPath: targetDir.path) {
+                if Darwin.renamex_np(incomingDir.path, targetDir.path, UInt32(RENAME_SWAP)) == 0 {
+                    try? fm.removeItem(at: incomingDir)
+                } else {
+                    let previousDir = parentDir.appendingPathComponent(
+                        ".\(targetDir.lastPathComponent).previous-\(UUID().uuidString)"
+                    )
+                    try fm.moveItem(at: targetDir, to: previousDir)
+                    do {
+                        try fm.moveItem(at: incomingDir, to: targetDir)
+                        try? fm.removeItem(at: previousDir)
+                    } catch {
+                        try? fm.moveItem(at: previousDir, to: targetDir)
+                        throw error
+                    }
+                }
+            } else {
+                try fm.moveItem(at: incomingDir, to: targetDir)
+            }
         } catch {
+            if fm.fileExists(atPath: incomingDir.path) {
+                try? fm.removeItem(at: incomingDir)
+            }
             PlayCoverDiagnostics.log(
                 "Failed to commit AppBackups for \(installedApp.info.bundleIdentifier): \(error)",
                 isError: true
