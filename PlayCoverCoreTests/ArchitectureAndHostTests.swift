@@ -609,14 +609,27 @@ final class ArchitectureAndHostTests: XCTestCase {
             $0.reportedIOSVersionMode = .compat13_7
         }
         appSettings.sync()
-        XCTAssertEqual(appSettings.settings.iosDeviceModel, "iPad8,6")
+        XCTAssertTrue(appSettings.flush())
+        XCTAssertEqual(appSettings.settings.iosDeviceModel, "iPad13,8")
+        XCTAssertEqual(appSettings.settings.effectiveIOSDeviceModel, "iPad8,6")
+        let reloadedPad = AppSettings(settingsUrl: settingsURL, info: info, debounceInterval: 0.2)
+        XCTAssertEqual(reloadedPad.settings.iosDeviceModel, "iPad13,8")
+        XCTAssertEqual(reloadedPad.settings.effectiveIOSDeviceModel, "iPad8,6")
+        appSettings.update { $0.reportedIOSVersionMode = .automatic }
+        XCTAssertEqual(appSettings.settings.iosDeviceModel, "iPad13,8")
+        XCTAssertEqual(appSettings.settings.effectiveIOSDeviceModel, "iPad13,8")
 
         appSettings.update {
             $0.iosDeviceModel = "iPhone18,2"
             $0.reportedIOSVersionMode = .compat13_7
         }
         appSettings.sync()
-        XCTAssertEqual(appSettings.settings.iosDeviceModel, "iPhone12,5")
+        XCTAssertTrue(appSettings.flush())
+        XCTAssertEqual(appSettings.settings.iosDeviceModel, "iPhone18,2")
+        XCTAssertEqual(appSettings.settings.effectiveIOSDeviceModel, "iPhone12,5")
+        appSettings.update { $0.reportedIOSVersionMode = .compat18_3 }
+        XCTAssertEqual(appSettings.settings.iosDeviceModel, "iPhone18,2")
+        XCTAssertEqual(appSettings.settings.effectiveIOSDeviceModel, "iPhone18,2")
     }
 
     func testCommitAppBackupsReplacesOrInvalidatesStaleBackups() throws {

@@ -189,9 +189,11 @@ public final class PTUnfairLock {
         self.adaptiveDisplay = decoded.resolution != 0
         self.resizableWindow = decoded.resolution == 6
         let normalizedIOSVersion = Self.normalizedReportedIOSVersion(decoded.reportedIOSVersion)
-        self.configuredDeviceModel = decoded.iosDeviceModel
+        let trimmedModel = decoded.iosDeviceModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let baseDeviceModel = trimmedModel.isEmpty ? "iPad13,8" : trimmedModel
+        self.configuredDeviceModel = baseDeviceModel
         self.coercedDeviceModel = Self.effectiveDeviceModel(
-            decoded.iosDeviceModel,
+            baseDeviceModel,
             reportedIOSVersion: normalizedIOSVersion
         )
         self.playChain = decoded.playChain

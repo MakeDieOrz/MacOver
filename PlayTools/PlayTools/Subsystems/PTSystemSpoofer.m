@@ -17,7 +17,8 @@ static _Thread_local int s_tls_early_device_init = 0;
 __attribute__((visibility("hidden"))) _Atomic int s_playchain_cached = -1;
 __attribute__((visibility("hidden"))) _Atomic int s_playchain_debug_cached = -1;
 __attribute__((visibility("hidden"))) pthread_once_t s_pt_bypass_early_once = PTHREAD_ONCE_INIT;
-static char s_uncoerced_device_model[64] = "iPad13,8";
+static char s_uncoerced_device_model[64] = "";
+static _Atomic BOOL s_has_uncoerced_device_model = NO;
 static char s_early_device_model[64] = "iPad13,8";
 static char s_early_oem_id[64] = "J522AP";
 static char s_final_device_model[64] = "iPad13,8";
@@ -861,13 +862,53 @@ static const pt_device_profile_t *pt_set_cached_device_profile_from_model(const 
 
 static BOOL pt_is_safe_mode_env_active(void);
 
-static BOOL pt_is_compat13_7_mode_cstr(const char *rep_mode) {
-    if (rep_mode == NULL || rep_mode[0] == '\0') {
-        return NO;
+static void pt_copy_trimmed_ascii(const char *src, char *dst, size_t dst_size) {
+    if (dst == NULL || dst_size == 0) {
+        return;
     }
-    return (strcasecmp(rep_mode, "compat13_7") == 0 ||
-            strcmp(rep_mode, "13.7") == 0 ||
-            strcasecmp(rep_mode, "ios13_7") == 0);
+    dst[0] = '\0';
+    if (src == NULL) {
+        return;
+    }
+    while (*src == ' ' || *src == '\t' || *src == '\n' || *src == '\r') {
+        src++;
+    }
+    size_t len = strlen(src);
+    while (len > 0 && (src[len - 1] == ' ' || src[len - 1] == '\t' ||
+                       src[len - 1] == '\n' || src[len - 1] == '\r')) {
+        len--;
+    }
+    if (len == 0) {
+        return;
+    }
+    if (len >= dst_size) {
+        len = dst_size - 1;
+    }
+    memcpy(dst, src, len);
+    dst[len] = '\0';
+}
+
+static int pt_parse_reported_ios_override_mode_cstr(const char *raw_mode) {
+    char trimmed[32];
+    pt_copy_trimmed_ascii(raw_mode, trimmed, sizeof(trimmed));
+    if (trimmed[0] == '\0') {
+        return 0; // PT_REPORTED_IOS_OVERRIDE_NONE
+    }
+    if (strcasecmp(trimmed, "compat18_3") == 0 ||
+        strcmp(trimmed, "18.3") == 0 ||
+        strcasecmp(trimmed, "ios18_3") == 0) {
+        return 1; // PT_REPORTED_IOS_OVERRIDE_18_3
+    }
+    if (strcasecmp(trimmed, "compat13_7") == 0 ||
+        strcmp(trimmed, "13.7") == 0 ||
+        strcasecmp(trimmed, "ios13_7") == 0) {
+        return 2; // PT_REPORTED_IOS_OVERRIDE_13_7
+    }
+    return 0;
+}
+
+static BOOL pt_is_compat13_7_mode_cstr(const char *rep_mode) {
+    return pt_parse_reported_ios_override_mode_cstr(rep_mode) == 2;
 }
 
 static const char *pt_coerce_model_for_compat13_7(const char *model) {
@@ -886,11 +927,15 @@ static const char *pt_coerce_model_for_compat13_7(const char *model) {
 static void pt_init_early_device_info(void) {
     int fd = pt_open_early_settings_plist_fd();
     if (fd >= 0) {
+        char raw_model[64] = {0};
         char parsed_model[64] = {0};
-        BOOL has_model = (pt_read_plist_top_string_from_fd(fd, "iosDeviceModel", parsed_model, sizeof(parsed_model)) &&
-                          parsed_model[0] != '\0');
+        if (pt_read_plist_top_string_from_fd(fd, "iosDeviceModel", raw_model, sizeof(raw_model))) {
+            pt_copy_trimmed_ascii(raw_model, parsed_model, sizeof(parsed_model));
+        }
+        BOOL has_model = (parsed_model[0] != '\0');
         const char *base_model = has_model ? parsed_model : "iPad13,8";
         strlcpy(s_uncoerced_device_model, base_model, sizeof(s_uncoerced_device_model));
+        atomic_store_explicit(&s_has_uncoerced_device_model, YES, memory_order_release);
 
         char rep_mode[32] = {0};
         BOOL is_compat13 = (!atomic_load_explicit(&s_reported_ios_override_forced_off, memory_order_acquire) &&
@@ -904,6 +949,8 @@ static void pt_init_early_device_info(void) {
                 s_early_device_model, sizeof(s_early_device_model),
                 s_early_oem_id, sizeof(s_early_oem_id));
             atomic_store_explicit(&s_active_device_profile, profile, memory_order_release);
+            atomic_store_explicit(&s_active_device_model, profile->model, memory_order_release);
+            atomic_store_explicit(&s_active_oem_id, profile->oem_id, memory_order_release);
         }
         close(fd);
     }
@@ -919,6 +966,8 @@ __attribute__((visibility("hidden"))) void pt_init_device_info(void) {
     strlcpy(s_final_device_model, s_early_device_model, sizeof(s_final_device_model));
     strlcpy(s_final_oem_id, s_early_oem_id, sizeof(s_final_oem_id));
     const pt_device_profile_t *final_profile = pt_device_profile_for_model(s_final_device_model);
+    const char *published_model = final_profile->model;
+    const char *published_oem = final_profile->oem_id;
     BOOL prev_tls = s_tls_initializing_device_info;
     s_tls_initializing_device_info = YES;
     @autoreleasepool {
@@ -926,32 +975,40 @@ __attribute__((visibility("hidden"))) void pt_init_device_info(void) {
         NSString *rawCfg = [ps rawConfiguredDeviceModel];
         const char *rm = [rawCfg UTF8String];
         if (rm != NULL && rm[0] != '\0') {
-            strlcpy(s_uncoerced_device_model, rm, sizeof(s_uncoerced_device_model));
+            pt_copy_trimmed_ascii(rm, s_uncoerced_device_model, sizeof(s_uncoerced_device_model));
+            if (s_uncoerced_device_model[0] != '\0') {
+                atomic_store_explicit(&s_has_uncoerced_device_model, YES, memory_order_release);
+            }
         }
         NSString *model = [ps deviceModel];
         const char *m = [model UTF8String];
         if (m != NULL && m[0] != '\0') {
             const char *eff_m = m;
-            if (atomic_load_explicit(&s_reported_ios_override_forced_off, memory_order_acquire) ||
-                pt_is_safe_mode_env_active()) {
+            if ((atomic_load_explicit(&s_reported_ios_override_forced_off, memory_order_acquire) ||
+                 pt_is_safe_mode_env_active()) &&
+                atomic_load_explicit(&s_has_uncoerced_device_model, memory_order_acquire) &&
+                s_uncoerced_device_model[0] != '\0') {
                 eff_m = s_uncoerced_device_model;
             }
             final_profile = pt_set_cached_device_profile_from_model(
                 eff_m,
                 s_final_device_model, sizeof(s_final_device_model),
                 s_final_oem_id, sizeof(s_final_oem_id));
+            published_model = final_profile->model;
+            published_oem = final_profile->oem_id;
         } else {
             NSString *oem = [ps oemID];
             const char *o = [oem UTF8String];
             if (o != NULL && o[0] != '\0') {
                 strlcpy(s_final_oem_id, o, sizeof(s_final_oem_id));
+                published_oem = s_final_oem_id;
             }
         }
     }
     s_tls_initializing_device_info = prev_tls;
     atomic_store_explicit(&s_active_device_profile, final_profile, memory_order_release);
-    atomic_store_explicit(&s_active_device_model, s_final_device_model, memory_order_release);
-    atomic_store_explicit(&s_active_oem_id, s_final_oem_id, memory_order_release);
+    atomic_store_explicit(&s_active_device_model, published_model, memory_order_release);
+    atomic_store_explicit(&s_active_oem_id, published_oem, memory_order_release);
     atomic_store_explicit(&s_pt_device_info_ready, YES, memory_order_release);
     pt_leave_internal_scope();
 }
@@ -1332,15 +1389,12 @@ static void pt_init_host_kernel_info(void) {
             char rep_mode[32] = {0};
             if (pt_read_plist_top_string_from_fd(settings_fd, "reportedIOSVersion", rep_mode, sizeof(rep_mode)) &&
                 !atomic_load_explicit(&s_reported_ios_override_forced_off, memory_order_acquire)) {
-                if (strcasecmp(rep_mode, "compat18_3") == 0 ||
-                    strcmp(rep_mode, "18.3") == 0 ||
-                    strcasecmp(rep_mode, "ios18_3") == 0) {
+                int parsed_override = pt_parse_reported_ios_override_mode_cstr(rep_mode);
+                if (parsed_override == 1) {
                     atomic_store_explicit(&s_reported_ios_override_mode,
                                           PT_REPORTED_IOS_OVERRIDE_18_3,
                                           memory_order_release);
-                } else if (strcasecmp(rep_mode, "compat13_7") == 0 ||
-                           strcmp(rep_mode, "13.7") == 0 ||
-                           strcasecmp(rep_mode, "ios13_7") == 0) {
+                } else if (parsed_override == 2) {
                     atomic_store_explicit(&s_reported_ios_override_mode,
                                           PT_REPORTED_IOS_OVERRIDE_13_7,
                                           memory_order_release);
@@ -1372,20 +1426,12 @@ static pt_reported_ios_override_t pt_active_reported_ios_override(void) {
 __attribute__((visibility("hidden"))) void pt_disable_reported_ios_override_for_safe_mode(void) {
     atomic_store_explicit(&s_reported_ios_override_forced_off, YES, memory_order_release);
     atomic_store_explicit(&s_reported_ios_override_mode, PT_REPORTED_IOS_OVERRIDE_NONE, memory_order_release);
-    if (s_uncoerced_device_model[0] != '\0') {
+    if (atomic_load_explicit(&s_has_uncoerced_device_model, memory_order_acquire) &&
+        s_uncoerced_device_model[0] != '\0') {
         const pt_device_profile_t *orig_profile = pt_device_profile_for_model(s_uncoerced_device_model);
-        strlcpy(s_early_device_model, orig_profile->model, sizeof(s_early_device_model));
-        strlcpy(s_early_oem_id, orig_profile->oem_id, sizeof(s_early_oem_id));
-        if (atomic_load_explicit(&s_pt_device_info_ready, memory_order_acquire)) {
-            strlcpy(s_final_device_model, orig_profile->model, sizeof(s_final_device_model));
-            strlcpy(s_final_oem_id, orig_profile->oem_id, sizeof(s_final_oem_id));
-            atomic_store_explicit(&s_active_device_model, s_final_device_model, memory_order_release);
-            atomic_store_explicit(&s_active_oem_id, s_final_oem_id, memory_order_release);
-        } else {
-            atomic_store_explicit(&s_active_device_model, s_early_device_model, memory_order_release);
-            atomic_store_explicit(&s_active_oem_id, s_early_oem_id, memory_order_release);
-        }
         atomic_store_explicit(&s_active_device_profile, orig_profile, memory_order_release);
+        atomic_store_explicit(&s_active_device_model, orig_profile->model, memory_order_release);
+        atomic_store_explicit(&s_active_oem_id, orig_profile->oem_id, memory_order_release);
     }
 }
 

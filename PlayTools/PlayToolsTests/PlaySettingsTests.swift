@@ -421,22 +421,27 @@ final class PlaySettingsTests: XCTestCase {
         try encoder.encode(mismatchedPad13).write(to: url)
         _ = PTSafeMode.shared.evaluateAndBeginLaunch(environment: ["PLAYTOOLS_SAFE_MODE": "0"])
         let psPad13 = PlaySettings(settingsURL: url, bundleIdentifier: "com.example.settings.compat13.pad")
+        XCTAssertEqual(psPad13.rawConfiguredDeviceModel as String, "iPad13,8")
         XCTAssertEqual(psPad13.deviceModel as String, "iPad8,6")
         XCTAssertEqual(psPad13.oemID as String, "J320xAP")
         _ = PTSafeMode.shared.evaluateAndBeginLaunch(environment: ["PLAYTOOLS_SAFE_MODE": "1"])
         XCTAssertEqual(psPad13.deviceModel as String, "iPad13,8")
         XCTAssertEqual(psPad13.oemID as String, "J522AP")
 
-        // Modern iPhone + compat13_7 coerces to iPhone12,5
+        // Modern iPhone + compat13_7 (including whitespace) coerces to iPhone12,5 and restores in Safe Mode
         var mismatchedPhone13 = AppSettingsData()
         mismatchedPhone13.bundleIdentifier = "com.example.settings.compat13.phone"
-        mismatchedPhone13.reportedIOSVersion = "compat13_7"
-        mismatchedPhone13.iosDeviceModel = "iPhone17,2"
+        mismatchedPhone13.reportedIOSVersion = " compat13_7\n"
+        mismatchedPhone13.iosDeviceModel = " iPhone17,2 "
         try encoder.encode(mismatchedPhone13).write(to: url)
         _ = PTSafeMode.shared.evaluateAndBeginLaunch(environment: ["PLAYTOOLS_SAFE_MODE": "0"])
         let psPhone13 = PlaySettings(settingsURL: url, bundleIdentifier: "com.example.settings.compat13.phone")
+        XCTAssertEqual(psPhone13.rawConfiguredDeviceModel as String, "iPhone17,2")
         XCTAssertEqual(psPhone13.deviceModel as String, "iPhone12,5")
         XCTAssertEqual(psPhone13.oemID as String, "D431AP")
+        _ = PTSafeMode.shared.evaluateAndBeginLaunch(environment: ["PLAYTOOLS_SAFE_MODE": "1"])
+        XCTAssertEqual(psPhone13.deviceModel as String, "iPhone17,2")
+        XCTAssertEqual(psPhone13.oemID as String, "D94AP")
     }
 
     func testRightClickLongPressDefaultsAndDecodingPersistence() throws {

@@ -184,6 +184,10 @@ struct AppSettingsData: Codable, Equatable {
         set { reportedIOSVersion = newValue.rawValue }
     }
 
+    var effectiveIOSDeviceModel: String {
+        ReportedIOSVersionMode.effectiveDeviceModel(iosDeviceModel, for: reportedIOSVersionMode)
+    }
+
     var pixelBudget: PixelBudget {
         PixelBudget(width: windowWidth, height: windowHeight, scaler: customScaler)
     }
@@ -408,10 +412,6 @@ class AppSettings: ObservableObject {
                 updatedSettings.windowWidth = autoRes.width
                 updatedSettings.windowHeight = autoRes.height
             }
-            updatedSettings.iosDeviceModel = ReportedIOSVersionMode.effectiveDeviceModel(
-                updatedSettings.iosDeviceModel,
-                for: updatedSettings.reportedIOSVersionMode
-            )
         }
     }
 

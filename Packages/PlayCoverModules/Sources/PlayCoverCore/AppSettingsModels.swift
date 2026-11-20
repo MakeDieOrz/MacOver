@@ -134,7 +134,8 @@ public enum ReportedIOSVersionMode: String, Codable, CaseIterable, Equatable, Se
     public static let ios13CompatibleModels: Set<String> = ["iPad6,7", "iPad8,6", "iPhone12,5"]
 
     public static func supportsIOS13(deviceModel: String) -> Bool {
-        ios13CompatibleModels.contains(deviceModel)
+        let normalized = deviceModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ios13CompatibleModels.contains(normalized)
     }
 
     public static func recommendedIOS13Model(isIPhone: Bool) -> String {
@@ -142,14 +143,17 @@ public enum ReportedIOSVersionMode: String, Codable, CaseIterable, Equatable, Se
     }
 
     public static func recommendedIOS13Model(for deviceModel: String) -> String {
-        recommendedIOS13Model(isIPhone: deviceModel.hasPrefix("iPhone"))
+        let normalized = deviceModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return recommendedIOS13Model(isIPhone: normalized.hasPrefix("iPhone"))
     }
 
     public static func effectiveDeviceModel(_ deviceModel: String, for mode: ReportedIOSVersionMode) -> String {
-        guard mode == .compat13_7, !supportsIOS13(deviceModel: deviceModel) else {
-            return deviceModel
+        let normalized = deviceModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = normalized.isEmpty ? deviceModel : normalized
+        guard mode == .compat13_7, !supportsIOS13(deviceModel: base) else {
+            return base
         }
-        return recommendedIOS13Model(for: deviceModel)
+        return recommendedIOS13Model(for: base)
     }
 
     public init(rawSetting: String?) {
