@@ -186,7 +186,6 @@ struct AppSettingsData: Codable, Equatable {
         PixelBudget(width: windowWidth, height: windowHeight, scaler: customScaler)
     }
 
-    // swiftlint:disable:next cyclomatic_complexity
     func restartRequiredChanges(comparedTo snapshot: AppSettingsData) -> [PlayCoverRestartField] {
         var changed: [PlayCoverRestartField] = []
         if iosDeviceModel != snapshot.iosDeviceModel { changed.append(.iosDeviceModel) }

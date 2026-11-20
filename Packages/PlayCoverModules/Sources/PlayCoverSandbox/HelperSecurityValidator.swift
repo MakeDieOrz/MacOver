@@ -112,7 +112,8 @@ public enum HelperSecurityValidator {
         ]
 
         var guestCode: SecCode?
-        guard SecCodeCopyGuestWithAttributes(nil, attributes as CFDictionary, SecCSFlags(), &guestCode) == errSecSuccess,
+        let status = SecCodeCopyGuestWithAttributes(nil, attributes as CFDictionary, SecCSFlags(), &guestCode)
+        guard status == errSecSuccess,
               let code = guestCode else {
             return false
         }

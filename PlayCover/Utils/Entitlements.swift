@@ -227,7 +227,6 @@ class Entitlements {
         return (ordered, lookup)
     }
 
-    // swiftlint:disable:next cyclomatic_complexity function_body_length
     static func composeEntitlements(_ app: PlayApp) throws -> [String: Any] {
         var base = [String: Any]()
         let bundleID = app.info.bundleIdentifier

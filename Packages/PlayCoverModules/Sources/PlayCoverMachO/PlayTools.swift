@@ -3,14 +3,12 @@
 //  PlayCover
 //
 
-// swiftlint:disable file_length
 import Darwin
 import Foundation
 import MachO
 import PlayCoverCore
 
 // This has so many functionality in it that 250 lines is darn near impossible
-// swiftlint:disable:next type_body_length
 public class PlayTools {
     private static let containerBaseURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library")

@@ -56,7 +56,7 @@ final class PlayCoverUISPMTests: XCTestCase {
     }
 
     @MainActor
-    func testStartupAlertCenterSafeModeToastVMAndPreferences() {
+    func testStartupAlertCenterSafeModeToastVMAndPreferences() throws {
         let center = StartupAlertCenter()
         let item = StartupAlertItem.safeModeActivated(
             appName: "Sample",
@@ -82,7 +82,7 @@ final class PlayCoverUISPMTests: XCTestCase {
         XCTAssertFalse(toastVM.hasToast(ofType: .notice))
 
         let suiteName = "PlayCoverUISPMTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         let installPrefs = InstallPreferences(userDefaults: defaults)

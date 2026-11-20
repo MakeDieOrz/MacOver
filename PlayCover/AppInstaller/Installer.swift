@@ -48,7 +48,6 @@ class Installer {
         }
     }
 
-    // swiftlint:disable:next function_body_length
     static func install(
         ipaUrl: URL,
         export: Bool,
@@ -105,10 +104,8 @@ class Installer {
 
                 installVM.next(.playtools, 0.55, 0.85)
 
-                for macho in machos {
-                    if try Macho.isMachoEncrypted(atURL: macho) {
-                        throw PlayCoverError.appEncrypted
-                    }
+                for macho in machos where try Macho.isMachoEncrypted(atURL: macho) {
+                    throw PlayCoverError.appEncrypted
                 }
 
                 let entitlementsAlreadyExisted = FileManager.default.fileExists(atPath: app.entitlements.path)

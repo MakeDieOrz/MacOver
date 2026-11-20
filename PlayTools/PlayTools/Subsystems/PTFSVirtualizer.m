@@ -2804,7 +2804,7 @@ static int pt_proc_pidfdinfo(int pid, int fd, int flavor, void *buffer, int buff
 }
 
 static void pt_sanitize_vnode_vip_path(char *vip_path, size_t cap, const void *caller, const char *fallback) {
-    if (vip_path == NULL || vip_path[0] == '\0' || cap == 0) {
+    if (cap == 0 || vip_path[0] == '\0') {
         return;
     }
     if (pt_is_hidden_dyld_image_name(vip_path) ||

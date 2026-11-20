@@ -3,7 +3,6 @@
 //  PlayCover
 //
 
-// swiftlint:disable file_length
 import Cocoa
 import Combine
 import Darwin
@@ -149,7 +148,6 @@ class PlayApp: BaseApp, ObservableObject, Identifiable, Hashable {
     lazy var container = AppContainer(bundleId: info.bundleIdentifier)
 
     // MARK: - Launch
-    // swiftlint:disable:next function_body_length cyclomatic_complexity
     func launch(safeModeOneShot: Bool = false) async {
         isStarting = true
         defer { isStarting = false }
@@ -210,7 +208,8 @@ class PlayApp: BaseApp, ObservableObject, Identifiable, Hashable {
 
             if try (usesPlayTools && !PlayTools.isInstalled()) {
                 if let installErr = PlayTools.systemInstallFailure() {
-                    PlayCoverDiagnostics.reportError("PlayTools installation failed: \(installErr.localizedDescription)")
+                    let message = "PlayTools installation failed: \(installErr.localizedDescription)"
+                    PlayCoverDiagnostics.reportError(message)
                 } else {
                     PlayCoverDiagnostics.reportError(
                         "PlayTools are not installed! Please move MacOver.app into Applications!"
@@ -353,7 +352,8 @@ extension PlayApp {
                     let breadcrumbURL = self.container.containerUrl
                         .appendingPathComponent("Data/Library/Caches/app.makedie.PlayTools/.launching_in_progress")
                     if elapsed < 3.0 && FileManager.default.fileExists(atPath: breadcrumbURL.path) {
-                        let msg = "\(self.name) exited abnormally within 3 seconds; next launch will automatically use Safe Mode."
+                        let msg = "\(self.name) exited abnormally within 3 seconds; " +
+                            "next launch will automatically use Safe Mode."
                         PlayCoverDiagnostics.log(msg, isError: true)
                         PlayCoverDiagnostics.showToast(
                             toastType: .error,

@@ -3,7 +3,6 @@
 //  PlayCover
 //
 
-// swiftlint:disable file_length type_body_length function_body_length cyclomatic_complexity
 import Darwin
 import Foundation
 import MachO
@@ -11,7 +10,6 @@ import PlayCoverCore
 
 @_silgen_name("_dyld_shared_cache_contains_path")
 private func dyldSharedCacheContainsPath(_ path: UnsafePointer<CChar>) -> Bool
-
 
 public enum MachoCodeSigner {
     public static var verifySignature: (URL) throws -> Void = { url in
@@ -1146,11 +1144,13 @@ public class Macho {
         }, atEnd: true, totalSize: totalSize)
     }
 
-    public static func replaceLastCommand(_ binary: inout Data,
-                                   satisfy isTargetCommand: (Data, Bool) throws -> Bool,
-                                   with getNewCommandData: (Bool) -> Data?,
-                                   atEnd shouldAppend: Bool,
-                                   totalSize: Int? = nil) throws {
+    public static func replaceLastCommand(
+        _ binary: inout Data,
+        satisfy isTargetCommand: (Data, Bool) throws -> Bool,
+        with getNewCommandData: (Bool) -> Data?,
+        atEnd shouldAppend: Bool,
+        totalSize: Int? = nil
+    ) throws {
         if binary.startIndex != 0 {
             binary = Data(binary)
         }

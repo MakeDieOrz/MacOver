@@ -132,7 +132,8 @@ public enum DualTrackPrivilegeEscalator {
         }
         guard status.nvramWritable else {
             throw PlayCoverError.privilegeEscalationFailed(
-                "System Integrity Protection NVRAM protections are active. Disable SIP or NVRAM protection in Recovery OS before configuring AMFI boot-args."
+                "System Integrity Protection NVRAM protections are active. " +
+                "Disable SIP or NVRAM protection in Recovery OS before configuring AMFI boot-args."
             )
         }
 
@@ -213,17 +214,23 @@ public enum DualTrackPrivilegeEscalator {
             }
 
             connection.invalidationHandler = {
-                finish(.failure(PlayCoverError.privilegeEscalationFailed("Privileged helper XPC connection invalidated.")))
+                finish(.failure(PlayCoverError.privilegeEscalationFailed(
+                    "Privileged helper XPC connection invalidated."
+                )))
             }
             connection.interruptionHandler = {
-                finish(.failure(PlayCoverError.privilegeEscalationFailed("Privileged helper XPC connection interrupted.")))
+                finish(.failure(PlayCoverError.privilegeEscalationFailed(
+                    "Privileged helper XPC connection interrupted."
+                )))
             }
             connection.resume()
 
             guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
                 finish(.failure(error))
             }) as? PlayCoverHelperProtocol else {
-                finish(.failure(PlayCoverError.privilegeEscalationFailed("Failed to obtain PlayCoverHelperProtocol proxy.")))
+                finish(.failure(PlayCoverError.privilegeEscalationFailed(
+                    "Failed to obtain PlayCoverHelperProtocol proxy."
+                )))
                 return
             }
 

@@ -1,4 +1,5 @@
 name: Build & Release macOS App
+
 on:
   workflow_dispatch:
     inputs:
@@ -19,13 +20,11 @@ env:
 jobs:
   build:
     runs-on: macos-26
-    env:
-      GITHUB_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Get the version
+      - name: Resolve version tag
         id: tag_version
         shell: bash
         run: |
@@ -39,59 +38,86 @@ jobs:
           RAW_TAG="${RAW_TAG//\//-}"
           echo "TAG_NAME=${RAW_TAG}" >> "$GITHUB_ENV"
 
-      - name: Install dependencies
+      - name: Build MacOver (Release)
         shell: bash
         run: |
-          command -v swiftlint >/dev/null || brew install swiftlint
-          bundle install
-          command -v create-dmg >/dev/null || brew install create-dmg
+          xcodebuild \
+            -workspace PlayCover.xcworkspace \
+            -scheme PlayCover \
+            -configuration Release \
+            -derivedDataPath "${RUNNER_TEMP}/dd-release" \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_STYLE=Manual \
+            clean build
 
-      - name: Fastlane Release
-        shell: bash
-        run: bundle exec fastlane release
-        env:
-          MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
-          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
-          FASTLANE_XCODEBUILD_SETTINGS_TIMEOUT: 120
-
-      - name: Extract API_KEY
+      - name: Ad-hoc sign & verify MacOver.app
         shell: bash
         run: |
-          umask 077
-          printf '%s' "$API_KEY" > apikey.json
-        env:
-          API_KEY: ${{ secrets.APPLE_API_KEY_JSON }}
+          set -euo pipefail
+          STAGE_DIR="${RUNNER_TEMP}/dmg-stage"
+          APP="${STAGE_DIR}/MacOver.app"
+          FW="${APP}/Contents/Frameworks"
 
-      - name: Create DMG
+          rm -rf "${STAGE_DIR}"
+          mkdir -p "${STAGE_DIR}"
+          ditto "${RUNNER_TEMP}/dd-release/Build/Products/Release/MacOver.app" "${APP}"
+          xattr -cr "${APP}"
+
+          codesign --force --sign - "${FW}/PlayTools.framework/PlugIns/AKInterface.bundle"
+          codesign --force --sign - "${FW}/PlayTools.framework"
+
+          if [ -d "${FW}/Sparkle.framework" ]; then
+            [ -e "${FW}/Sparkle.framework/Versions/B/Autoupdate" ] && codesign --force --sign - "${FW}/Sparkle.framework/Versions/B/Autoupdate"
+            [ -d "${FW}/Sparkle.framework/Versions/B/Updater.app" ] && codesign --force --sign - "${FW}/Sparkle.framework/Versions/B/Updater.app"
+            [ -d "${FW}/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc" ] && codesign --force --sign - "${FW}/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc"
+            [ -d "${FW}/Sparkle.framework/Versions/B/XPCServices/Installer.xpc" ] && codesign --force --sign - "${FW}/Sparkle.framework/Versions/B/XPCServices/Installer.xpc"
+            codesign --force --sign - "${FW}/Sparkle.framework"
+          fi
+
+          if [ -f "${APP}/Contents/Library/HelperTools/PlayCoverHelper" ]; then
+            codesign --force --sign - "${APP}/Contents/Library/HelperTools/PlayCoverHelper"
+          fi
+
+          codesign --force --sign - --entitlements PlayCover/PlayCoverRelease.entitlements "${APP}"
+          codesign --verify --deep --strict --verbose=2 "${APP}"
+
+      - name: Create & verify DMG
         shell: bash
         run: |
-          DMG_PATH="./output/MacOver_${{ env.TAG_NAME }}.dmg"
-          create-dmg \
-            --volname "MacOver ${{ env.TAG_NAME }}" \
-            --skip-jenkins \
-            "${DMG_PATH}" \
-            "./output/MacOver.app" || \
-            hdiutil create -volname "MacOver ${{ env.TAG_NAME }}" -srcfolder "./output/MacOver.app" -ov -format UDZO "${DMG_PATH}"
+          set -euo pipefail
+          STAGE_DIR="${RUNNER_TEMP}/dmg-stage"
+          DMG_NAME="MacOver_${{ env.TAG_NAME }}.dmg"
+          DMG_PATH="./output/${DMG_NAME}"
 
-      - name: Notarize DMG
-        shell: bash
-        run: bundle exec fastlane notarize_dmg "package:output/MacOver_${{ env.TAG_NAME }}.dmg"
+          ln -s /Applications "${STAGE_DIR}/Applications"
+          mkdir -p ./output
+          rm -f "${DMG_PATH}" "${DMG_PATH}.sha256"
 
-      - name: Clean Up
-        if: always()
-        shell: bash
-        run: rm -f apikey.json
+          hdiutil create \
+            -volname "MacOver ${{ env.TAG_NAME }}" \
+            -srcfolder "${STAGE_DIR}" \
+            -ov \
+            -format UDZO \
+            "${DMG_PATH}"
+          hdiutil verify "${DMG_PATH}"
+
+          (cd ./output && shasum -a 256 "${DMG_NAME}" > "${DMG_NAME}.sha256")
+          cat "${DMG_PATH}.sha256"
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: MacOver_${{ env.TAG_NAME }}.dmg
-          path: output/MacOver_${{ env.TAG_NAME }}.dmg
+          path: |
+            output/MacOver_${{ env.TAG_NAME }}.dmg
+            output/MacOver_${{ env.TAG_NAME }}.dmg.sha256
 
       - name: Release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           draft: true
           files: |
             output/MacOver_${{ env.TAG_NAME }}.dmg
+            output/MacOver_${{ env.TAG_NAME }}.dmg.sha256

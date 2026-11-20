@@ -5,7 +5,6 @@ on:
     branches:
       - master
       - main
-      - dev
   pull_request:
   workflow_dispatch:
 
@@ -24,7 +23,7 @@ jobs:
           - macos-26
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Inspect toolchain
         run: |
@@ -108,7 +107,7 @@ jobs:
     runs-on: macos-26
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Run PlayTools Clang Static Analyzer
         run: |

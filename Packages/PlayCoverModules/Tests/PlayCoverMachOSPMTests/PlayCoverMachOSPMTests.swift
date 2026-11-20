@@ -112,7 +112,8 @@ final class PlayCoverMachOSPMTests: XCTestCase {
         try PlayTools.syncUserPlugins(from: storeDir, into: targetDir) { signed.append($0.lastPathComponent) }
         XCTAssertEqual(signed, ["Plugin.dylib"])
         XCTAssertTrue(FileManager.default.fileExists(atPath: targetDir.appendingPathComponent("Plugin.dylib").path))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: targetDir.appendingPathComponent("Plugin.manifest.json").path))
+        let manifestTarget = targetDir.appendingPathComponent("Plugin.manifest.json")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: manifestTarget.path))
     }
 
     func testPlayToolsPathIsIsolatedInsideMacOverContainer() {

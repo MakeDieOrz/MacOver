@@ -1,8 +1,7 @@
 name: Build nightly release
+
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "30 19 * * *"
 
 permissions:
   contents: read
@@ -13,62 +12,86 @@ env:
 jobs:
   build:
     runs-on: macos-26
-    env:
-      GITHUB_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install dependencies
-        shell: bash
-        run: |
-          command -v swiftlint >/dev/null || brew install swiftlint
-          bundle install
-          command -v create-dmg >/dev/null || brew install create-dmg
+        uses: actions/checkout@v7
 
       - name: Set build number
         shell: bash
         run: |
           sed -i '' "s/^CURRENT_PROJECT_VERSION = .*/CURRENT_PROJECT_VERSION = ${{ github.run_number }}/" Config/Base.xcconfig
 
-      - name: Fastlane Nightly
-        shell: bash
-        run: bundle exec fastlane nightly
-        env:
-          MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
-          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
-          FASTLANE_XCODEBUILD_SETTINGS_TIMEOUT: 120
-
-      - name: Extract API_KEY
+      - name: Build MacOver (Nightly)
         shell: bash
         run: |
-          umask 077
-          printf '%s' "$API_KEY" > apikey.json
-        env:
-          API_KEY: ${{ secrets.APPLE_API_KEY_JSON }}
+          xcodebuild \
+            -workspace PlayCover.xcworkspace \
+            -scheme PlayCover \
+            -configuration Nightly \
+            -derivedDataPath "${RUNNER_TEMP}/dd-nightly" \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_STYLE=Manual \
+            clean build
 
-      - name: Create DMG
+      - name: Ad-hoc sign & verify MacOver.app
         shell: bash
         run: |
-          DMG_PATH="./output/MacOver_nightly_${{ github.run_number }}.dmg"
-          create-dmg \
-            --volname "MacOver Nightly ${{ github.run_number }}" \
-            --skip-jenkins \
-            "${DMG_PATH}" \
-            "./output/MacOver.app" || \
-            hdiutil create -volname "MacOver Nightly ${{ github.run_number }}" -srcfolder "./output/MacOver.app" -ov -format UDZO "${DMG_PATH}"
+          set -euo pipefail
+          STAGE_DIR="${RUNNER_TEMP}/dmg-stage"
+          APP="${STAGE_DIR}/MacOver.app"
+          FW="${APP}/Contents/Frameworks"
 
-      - name: Notarize DMG
-        shell: bash
-        run: bundle exec fastlane notarize_dmg "package:output/MacOver_nightly_${{ github.run_number }}.dmg"
+          rm -rf "${STAGE_DIR}"
+          mkdir -p "${STAGE_DIR}"
+          ditto "${RUNNER_TEMP}/dd-nightly/Build/Products/Nightly/MacOver.app" "${APP}"
+          xattr -cr "${APP}"
 
-      - name: Clean Up
-        if: always()
+          codesign --force --sign - "${FW}/PlayTools.framework/PlugIns/AKInterface.bundle"
+          codesign --force --sign - "${FW}/PlayTools.framework"
+
+          if [ -d "${FW}/Sparkle.framework" ]; then
+            [ -e "${FW}/Sparkle.framework/Versions/B/Autoupdate" ] && codesign --force --sign - "${FW}/Sparkle.framework/Versions/B/Autoupdate"
+            [ -d "${FW}/Sparkle.framework/Versions/B/Updater.app" ] && codesign --force --sign - "${FW}/Sparkle.framework/Versions/B/Updater.app"
+            [ -d "${FW}/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc" ] && codesign --force --sign - "${FW}/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc"
+            [ -d "${FW}/Sparkle.framework/Versions/B/XPCServices/Installer.xpc" ] && codesign --force --sign - "${FW}/Sparkle.framework/Versions/B/XPCServices/Installer.xpc"
+            codesign --force --sign - "${FW}/Sparkle.framework"
+          fi
+
+          if [ -f "${APP}/Contents/Library/HelperTools/PlayCoverHelper" ]; then
+            codesign --force --sign - "${APP}/Contents/Library/HelperTools/PlayCoverHelper"
+          fi
+
+          codesign --force --sign - --entitlements PlayCover/PlayCoverRelease.entitlements "${APP}"
+          codesign --verify --deep --strict --verbose=2 "${APP}"
+
+      - name: Create & verify DMG
         shell: bash
-        run: rm -f apikey.json
+        run: |
+          set -euo pipefail
+          STAGE_DIR="${RUNNER_TEMP}/dmg-stage"
+          DMG_NAME="MacOver_nightly_${{ github.run_number }}.dmg"
+          DMG_PATH="./output/${DMG_NAME}"
+
+          ln -s /Applications "${STAGE_DIR}/Applications"
+          mkdir -p ./output
+          rm -f "${DMG_PATH}" "${DMG_PATH}.sha256"
+
+          hdiutil create \
+            -volname "MacOver Nightly ${{ github.run_number }}" \
+            -srcfolder "${STAGE_DIR}" \
+            -ov \
+            -format UDZO \
+            "${DMG_PATH}"
+          hdiutil verify "${DMG_PATH}"
+
+          (cd ./output && shasum -a 256 "${DMG_NAME}" > "${DMG_NAME}.sha256")
+          cat "${DMG_PATH}.sha256"
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: MacOver_nightly_${{ github.run_number }}.dmg
-          path: output/MacOver_nightly_${{ github.run_number }}.dmg
+          path: |
+            output/MacOver_nightly_${{ github.run_number }}.dmg
+            output/MacOver_nightly_${{ github.run_number }}.dmg.sha256

@@ -5,7 +5,6 @@
 //  Created by TheMoonThatRises on 9/26/22.
 //
 
-// swiftlint:disable file_length
 import SwiftUI
 
 struct CheckBoxHelper {
@@ -14,7 +13,6 @@ struct CheckBoxHelper {
     var preferenceKeyPath: ReferenceWritableKeyPath<UninstallPreferences, Bool>
 }
 
-// swiftlint:disable:next type_body_length
 class Uninstaller {
     private static let libraryUrl = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library")
     private static let pruneURLs: [URL] = [
@@ -54,7 +52,9 @@ class Uninstaller {
 
     @MainActor
     static func uninstallPopup(_ app: PlayApp, dependencies: PlayCoverDependencies? = nil) async {
-        let prefs = dependencies?.uninstallPreferences ?? app.dependencies?.uninstallPreferences ?? UninstallPreferences()
+        let prefs = dependencies?.uninstallPreferences
+            ?? app.dependencies?.uninstallPreferences
+            ?? UninstallPreferences()
         if prefs.showUninstallPopup {
             let boxmakers: [(ReferenceWritableKeyPath<UninstallPreferences, Bool>, String)] = [
                 (\.removePlayChain, NSLocalizedString("preferences.toggle.removePlayChain", comment: "")),
@@ -111,9 +111,11 @@ class Uninstaller {
                 prefs.showUninstallPopup = false
             }
 
-            await uninstall(app, preferences: prefs, alertPresenter: dependencies?.alertPresenter ?? app.dependencies?.alertPresenter)
+            let alertPresenter = dependencies?.alertPresenter ?? app.dependencies?.alertPresenter
+            await uninstall(app, preferences: prefs, alertPresenter: alertPresenter)
         } else {
-            await uninstall(app, preferences: prefs, alertPresenter: dependencies?.alertPresenter ?? app.dependencies?.alertPresenter)
+            let alertPresenter = dependencies?.alertPresenter ?? app.dependencies?.alertPresenter
+            await uninstall(app, preferences: prefs, alertPresenter: alertPresenter)
         }
     }
 
@@ -251,7 +253,8 @@ class Uninstaller {
 
         if let err = err {
             if isPermissionError(err) {
-                await presentPermissionAlert(err, alertPresenter: dependencies?.alertPresenter ?? app.dependencies?.alertPresenter)
+                let alertPresenter = dependencies?.alertPresenter ?? app.dependencies?.alertPresenter
+                await presentPermissionAlert(err, alertPresenter: alertPresenter)
             } else {
                 PlayCoverDiagnostics.reportError(err)
             }

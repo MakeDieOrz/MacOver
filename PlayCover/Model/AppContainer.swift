@@ -8,7 +8,6 @@
 import Darwin
 import Foundation
 
-// swiftlint:disable:next type_body_length
 struct AppContainer {
 
     static let containersURL = FileManager.default.homeDirectoryForCurrentUser

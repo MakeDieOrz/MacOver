@@ -1670,8 +1670,7 @@ static void *pt_dlsym(void *handle, const char *symbol) {
                 pt_set_synthetic_dlerror("symbol not found");
                 return NULL;
             }
-        }
-        if (symbol[0] == 'M' && symbol[1] == 'G') {
+        } else if (symbol[0] == 'M' && symbol[1] == 'G') {
             if (strcmp(symbol, "MGCopyAnswer") == 0) {
                 return (void *)&pt_MGCopyAnswer;
             }
