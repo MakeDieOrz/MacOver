@@ -84,6 +84,7 @@ class Installer {
 
                 var createdEntitlementsURL: URL?
                 var createdSettingsURL: URL?
+                var wrappedAppBackupsTarget: (dir: URL, bundleID: String)? URL?
 
                 do {
                 installVM.next(.unzip, 0.0, 0.5)
@@ -115,12 +116,15 @@ class Installer {
                     createdEntitlementsURL = app.entitlements
                 }
 
-                let backupStagingURL = ipa.tmpDir?.appendingPathComponent("AppBackupsStaging")
-                let hasStagedBackups: Bool
-                if !export, !app.info.bundleIdentifier.isEmpty, let stagingURL = backupStagingURL {
-                    hasStagedBackups = stageAppBackups(for: app, in: stagingURL)
+                let backupStagingResult: AppBackupStagingResult
+                if !export, !app.info.bundleIdentifier.isEmpty {
+                    if let stagingURL = ipa.tmpDir?.appendingPathComponent("AppBackupsStaging") {
+                        backupStagingResult = stageAppBackups(for: app, in: stagingURL)
+                    } else {
+                        backupStagingResult = .failed
+                    }
                 } else {
-                    hasStagedBackups = false
+                    backupStagingResult = .noneApplicable
                 }
 
                 for macho in machos where !export {
@@ -172,12 +176,13 @@ class Installer {
                     try? ipa.removeQuarantine(app.url)
                     finalURL = try wrap(app)
                     let installedApp = PlayApp(appUrl: finalURL, dependencies: dependencies)
+                    if !installedApp.info.bundleIdentifier.isEmpty {
+                        wrappedAppBackupsTarget = (installedApp.appBackupsDir, installedApp.info.bundleIdentifier)
+                    }
                     try installedApp.signThrowing()
                     if !installedApp.info.bundleIdentifier.isEmpty {
-                        commitAppBackups(
-                            from: hasStagedBackups ? backupStagingURL : nil,
-                            for: installedApp
-                        )
+                        commitAppBackups(backupStagingResult, for: installedApp)
+                        wrappedAppBackupsTarget = nil
                     }
                     try? ipa.removeQuarantine(finalURL)
                 }
@@ -185,6 +190,12 @@ class Installer {
                 installVM.next(.finish, 0.95, 1.0)
                 returnCompletion(finalURL)
             } catch {
+                if let wrappedAppBackupsTarget {
+                    invalidateAppBackups(
+                        at: wrappedAppBackupsTarget.dir,
+                        bundleIdentifier: wrappedAppBackupsTarget.bundleID
+                    )
+                }
                 if let createdEntitlementsURL {
                     try? FileManager.default.removeItem(at: createdEntitlementsURL)
                 }
@@ -307,66 +318,132 @@ class Installer {
         }
     }
 
-    private static func stageAppBackups(for baseApp: BaseApp, in stagingDir: URL) -> Bool {
-        let fm = FileManager.default
-        var hasArtifact = false
+    enum AppBackupStagingResult {
+        case staged(URL)
+        case noneApplicable
+        case failed
+    }
 
-        func ensureStagingDir() -> Bool {
-            if fm.fileExists(atPath: stagingDir.path) {
-                return true
-            }
-            do {
-                try fm.createDirectory(at: stagingDir, withIntermediateDirectories: true)
-                return true
-            } catch {
-                PlayCoverDiagnostics.log("Failed to create AppBackups staging dir: \(error)", isError: true)
-                return false
-            }
+    static func stageAppBackups(for baseApp: BaseApp, in stagingDir: URL) -> AppBackupStagingResult {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: stagingDir.path) {
+            try? fm.removeItem(at: stagingDir)
         }
 
         let provisionURL = baseApp.url.appendingPathComponent("embedded.mobileprovision")
         var isDir: ObjCBool = false
-        if fm.fileExists(atPath: provisionURL.path, isDirectory: &isDir),
-           !isDir.boolValue,
-           ensureStagingDir() {
+        let hasProvision = fm.fileExists(atPath: provisionURL.path, isDirectory: &isDir) && !isDir.boolValue
+
+        let hasThinExecutable: Bool
+        if fm.fileExists(atPath: baseApp.executable.path) {
+            do {
+                let ctx = try Macho.inspectArm64Slice(at: baseApp.executable)
+                hasThinExecutable = !ctx.isFat
+            } catch {
+                PlayCoverDiagnostics.log(
+                    "Failed to inspect executable for AppBackups staging: \(error)",
+                    isError: true
+                )
+                return .failed
+            }
+        } else {
+            hasThinExecutable = false
+        }
+
+        guard hasProvision || hasThinExecutable else {
+            return .noneApplicable
+        }
+
+        do {
+            try fm.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+        } catch {
+            PlayCoverDiagnostics.log("Failed to create AppBackups staging dir: \(error)", isError: true)
+            return .failed
+        }
+
+        if hasProvision {
             let stagedProvision = stagingDir.appendingPathComponent("embedded.mobileprovision")
             do {
                 try fm.copyItem(at: provisionURL, to: stagedProvision)
-                hasArtifact = true
             } catch {
                 PlayCoverDiagnostics.log("Failed to stage embedded.mobileprovision backup: \(error)", isError: true)
+                try? fm.removeItem(at: stagingDir)
+                return .failed
             }
         }
 
-        if let ctx = try? Macho.inspectArm64Slice(at: baseApp.executable),
-           !ctx.isFat,
-           ensureStagingDir() {
+        if hasThinExecutable {
             let stagedExec = stagingDir.appendingPathComponent("executable")
             if Darwin.clonefile(baseApp.executable.path, stagedExec.path, 0) == 0 {
                 try? stagedExec.setBinaryPosixPermissions(0o755)
-                hasArtifact = true
             } else {
                 do {
                     try fm.copyItem(at: baseApp.executable, to: stagedExec)
                     try? stagedExec.setBinaryPosixPermissions(0o755)
-                    hasArtifact = true
                 } catch {
                     PlayCoverDiagnostics.log("Failed to stage executable backup: \(error)", isError: true)
+                    try? fm.removeItem(at: stagingDir)
+                    return .failed
                 }
             }
         }
 
-        return hasArtifact
+        return .staged(stagingDir)
     }
 
-    private static func commitAppBackups(from stagingDir: URL?, for installedApp: PlayApp) {
+    static func invalidateAppBackups(at targetDir: URL, bundleIdentifier: String) {
         let fm = FileManager.default
-        let targetDir = installedApp.appBackupsDir
+        guard fm.fileExists(atPath: targetDir.path) else {
+            return
+        }
+        do {
+            try fm.removeItem(at: targetDir)
+        } catch {
+            let execBackup = targetDir.appendingPathComponent("executable")
+            let provisionBackup = targetDir.appendingPathComponent("embedded.mobileprovision")
+            _ = Darwin.unlink(execBackup.path)
+            _ = Darwin.unlink(provisionBackup.path)
+            let invalidatedDir = targetDir.deletingLastPathComponent().appendingPathComponent(
+                ".\(targetDir.lastPathComponent).invalidated-\(UUID().uuidString)"
+            )
+            if (try? fm.moveItem(at: targetDir, to: invalidatedDir)) != nil {
+                try? fm.removeItem(at: invalidatedDir)
+            }
+            PlayCoverDiagnostics.log(
+                "Failed to remove stale AppBackups for \(bundleIdentifier): \(error)",
+                isError: true
+            )
+        }
+    }
 
-        guard let stagingDir,
-              fm.fileExists(atPath: stagingDir.path),
+    static func commitAppBackups(_ stagingResult: AppBackupStagingResult, for installedApp: BaseApp) {
+        commitAppBackups(
+            stagingResult,
+            to: installedApp.appBackupsDir,
+            bundleIdentifier: installedApp.info.bundleIdentifier
+        )
+    }
+
+    static func commitAppBackups(
+        _ stagingResult: AppBackupStagingResult,
+        to targetDir: URL,
+        bundleIdentifier: String
+    ) {
+        let fm = FileManager.default
+
+        let stagingDir: URL
+        switch stagingResult {
+        case .staged(let url):
+            stagingDir = url
+        case .noneApplicable, .failed:
+            invalidateAppBackups(at: targetDir, bundleIdentifier: bundleIdentifier)
+            return
+        }
+
+        guard fm.fileExists(atPath: stagingDir.path),
               let entries = try? fm.contentsOfDirectory(atPath: stagingDir.path),
               !entries.isEmpty else {
+            invalidateAppBackups(at: targetDir, bundleIdentifier: bundleIdentifier)
             return
         }
 
@@ -391,7 +468,7 @@ class Installer {
                         try fm.moveItem(at: incomingDir, to: targetDir)
                         try? fm.removeItem(at: previousDir)
                     } catch {
-                        try? fm.moveItem(at: previousDir, to: targetDir)
+                        try? fm.removeItem(at: previousDir)
                         throw error
                     }
                 }
@@ -402,8 +479,9 @@ class Installer {
             if fm.fileExists(atPath: incomingDir.path) {
                 try? fm.removeItem(at: incomingDir)
             }
+            invalidateAppBackups(at: targetDir, bundleIdentifier: bundleIdentifier)
             PlayCoverDiagnostics.log(
-                "Failed to commit AppBackups for \(installedApp.info.bundleIdentifier): \(error)",
+                "Failed to commit AppBackups for \(bundleIdentifier): \(error)",
                 isError: true
             )
         }

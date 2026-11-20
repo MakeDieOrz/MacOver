@@ -618,4 +618,32 @@ final class ArchitectureAndHostTests: XCTestCase {
         appSettings.sync()
         XCTAssertEqual(appSettings.settings.iosDeviceModel, "iPhone12,5")
     }
+
+    func testCommitAppBackupsReplacesOrInvalidatesStaleBackups() throws {
+        let dir = try XCTUnwrap(tempDir)
+        let fm = FileManager.default
+        let bundleID = "com.example.appbackups"
+        let targetDir = dir.appendingPathComponent("AppBackups").appendingPathComponent(bundleID)
+        try fm.createDirectory(at: targetDir, withIntermediateDirectories: true)
+        let oldExec = targetDir.appendingPathComponent("executable")
+        try Data("v1-binary".utf8).write(to: oldExec)
+
+        // Replacing with valid staged artifacts swaps in v2
+        let stagingV2 = dir.appendingPathComponent("staging-v2")
+        try fm.createDirectory(at: stagingV2, withIntermediateDirectories: true)
+        try Data("v2-binary".utf8).write(to: stagingV2.appendingPathComponent("executable"))
+        Installer.commitAppBackups(.staged(stagingV2), to: targetDir, bundleIdentifier: bundleID)
+        XCTAssertEqual(try String(contentsOf: oldExec, encoding: .utf8), "v2-binary")
+
+        // Upgrade with no applicable backup artifacts (e.g. Fat binary without mobileprovision)
+        // must remove stale v2 backup so runtime does not serve old binary to v3 app.
+        Installer.commitAppBackups(.noneApplicable, to: targetDir, bundleIdentifier: bundleID)
+        XCTAssertFalse(fm.fileExists(atPath: targetDir.path))
+
+        // Failed or empty staging after app bundle wrap must also invalidate stale backup.
+        try fm.createDirectory(at: targetDir, withIntermediateDirectories: true)
+        try Data("v3-binary".utf8).write(to: oldExec)
+        Installer.commitAppBackups(.failed, to: targetDir, bundleIdentifier: bundleID)
+        XCTAssertFalse(fm.fileExists(atPath: targetDir.path))
+    }
 }
