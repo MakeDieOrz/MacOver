@@ -24,6 +24,7 @@ extern __attribute__((visibility("hidden"))) BOOL pt_is_bypass_enabled(void);
 extern __attribute__((visibility("hidden"))) BOOL pt_is_effective_system_or_playtools_caller(const void *ret_addr);
 extern __attribute__((visibility("hidden"))) void pt_get_spoofed_screen_native_bounds(double *out_portrait_width, double *out_portrait_height, double *out_native_scale);
 extern __attribute__((visibility("hidden"))) double pt_get_device_native_scale(void);
+extern __attribute__((visibility("hidden"))) uint32_t pt_get_device_max_fps(void);
 extern __attribute__((visibility("hidden"))) const char *pt_get_device_model_cstr(void);
 extern __attribute__((visibility("hidden"))) void pt_register_swizzled_imp(const void *hook_imp, const void *orig_imp);
 extern __attribute__((visibility("hidden"))) BOOL pt_is_address_in_playtools(const void *addr);
@@ -348,8 +349,12 @@ static inline BOOL pt_try_get_spoofed_native_bounds_for_caller(id screenOrNil, c
 }
 
 static NSInteger pt_spoofed_max_fps(void) {
+    uint32_t profileFPS = pt_get_device_max_fps();
+    if (profileFPS > 0U) {
+        return (NSInteger)profileFPS;
+    }
     const char *m = pt_get_device_model_cstr();
-    if (m != NULL && strcmp(m, "iPad6,7") == 0) {
+    if (m != NULL && (strcmp(m, "iPad6,7") == 0 || strcmp(m, "iPhone12,5") == 0)) {
         return 60;
     }
     return 120;

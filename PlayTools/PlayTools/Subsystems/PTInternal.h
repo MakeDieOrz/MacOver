@@ -434,6 +434,7 @@ typedef struct {
     uint32_t native_width;
     uint32_t native_height;
     double native_scale;
+    uint32_t max_fps;
 } pt_device_profile_t;
 
 typedef enum {
@@ -495,6 +496,7 @@ __attribute__((visibility("hidden"))) void pt_get_spoofed_screen_native_bounds(d
 __attribute__((visibility("hidden"))) double pt_get_device_native_scale(void);
 __attribute__((visibility("hidden"))) uint32_t pt_get_device_native_width(void);
 __attribute__((visibility("hidden"))) uint32_t pt_get_device_native_height(void);
+__attribute__((visibility("hidden"))) uint32_t pt_get_device_max_fps(void);
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_env_key(const char *name);
 __attribute__((visibility("hidden"))) CFURLRef pt_resolve_cfbundle_input_url(CFURLRef url, const void *caller, BOOL *out_blocked) CF_RETURNS_RETAINED;
 __attribute__((visibility("hidden"))) CFURLRef pt_sanitize_cfbundle_returned_url(CFURLRef CF_CONSUMED url, const void *caller) CF_RETURNS_RETAINED;
