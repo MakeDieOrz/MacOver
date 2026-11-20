@@ -791,10 +791,7 @@ static NSMutableDictionary *ps_sanitized_system_version_mutable_dict(NSDictionar
     id plist = [self pm_propertyListWithData:data options:opt format:format error:error];
     if ([plist isKindOfClass:[NSDictionary class]]) {
         NSDictionary *dict = (NSDictionary *)plist;
-        id prodName = dict[@"ProductName"];
-        BOOL isSysVer = (dict[@"ProductBuildVersion"] != nil &&
-                         (([prodName isKindOfClass:[NSString class]] && [(NSString *)prodName isEqualToString:@"macOS"]) ||
-                          dict[@"iOSSupportVersion"] != nil));
+        BOOL isSysVer = pt_is_system_version_plist_dict(dict);
         BOOL isCodeRes = ([dict[@"files"] isKindOfClass:[NSDictionary class]] ||
                           [dict[@"files2"] isKindOfClass:[NSDictionary class]]);
         if ((isSysVer || isCodeRes) &&
@@ -1026,18 +1023,14 @@ static BOOL ps_get_cached_ios_sysver(NSOperatingSystemVersion *outVer, NSString 
         }
         NSString *buildStr = sysVer[@"ProductBuildVersion"];
         if ([buildStr isKindOfClass:[NSString class]] && buildStr.length > 0) {
-            char rel[64] = {0};
-            size_t relLen = sizeof(rel);
-            int kernMajor = (sysctlbyname("kern.osrelease", rel, &relLen, NULL, 0) == 0) ? atoi(rel) : 0;
-            if (kernMajor >= 24 && buildStr.length >= 3) {
-                unichar c0 = [buildStr characterAtIndex:0];
-                unichar c1 = [buildStr characterAtIndex:1];
-                if (c0 >= '0' && c0 <= '9' && c1 >= '0' && c1 <= '9') {
-                    int bPrefix = (int)(c0 - '0') * 10 + (int)(c1 - '0');
-                    int targetPrefix = kernMajor - 2;
-                    if (bPrefix > targetPrefix) {
-                        buildStr = [NSString stringWithFormat:@"%d%@", targetPrefix, [buildStr substringFromIndex:2]];
-                    }
+            char sanitizedBuild[64] = {0};
+            if (pt_sanitize_ios_build_version_cstr(buildStr.UTF8String,
+                                                   verStr.UTF8String,
+                                                   sanitizedBuild,
+                                                   sizeof(sanitizedBuild))) {
+                NSString *mapped = [NSString stringWithUTF8String:sanitizedBuild];
+                if (mapped.length > 0) {
+                    buildStr = mapped;
                 }
             }
         } else {

@@ -1331,6 +1331,45 @@ static void pt_synthesize_ios_kernel_version_prefix(const char *release_str, cha
              tz_str, cal_year, xnu_maj, xnu_min, xnu_pat);
 }
 
+static BOOL pt_sanitize_ios_build_version_with_kern_major(const char *build_cstr,
+                                                          const char *ios_ver_cstr,
+                                                          int kern_major,
+                                                          char *out_buf,
+                                                          size_t out_size) {
+    if (out_buf == NULL || out_size < 4 || build_cstr == NULL) {
+        return NO;
+    }
+    size_t blen = strlen(build_cstr);
+    if (blen < 3 ||
+        build_cstr[0] < '0' || build_cstr[0] > '9' ||
+        build_cstr[1] < '0' || build_cstr[1] > '9') {
+        strlcpy(out_buf, build_cstr, out_size);
+        return NO;
+    }
+    int b_prefix = (build_cstr[0] - '0') * 10 + (build_cstr[1] - '0');
+    int effective_cap = 0;
+    if (ios_ver_cstr != NULL && ios_ver_cstr[0] >= '0' && ios_ver_cstr[0] <= '9') {
+        int pv_major = atoi(ios_ver_cstr);
+        if (pv_major >= 18 && pv_major <= 25) {
+            effective_cap = pv_major + 4;
+        } else if (pv_major >= 26) {
+            effective_cap = pv_major - 3;
+        }
+    }
+    if (effective_cap <= 0) {
+        effective_cap = (kern_major >= 26) ? (kern_major - 2) : 23;
+    }
+    if (b_prefix >= 24 && b_prefix > effective_cap) {
+        int mapped_prefix = b_prefix - 2;
+        int n = snprintf(out_buf, out_size, "%d%s", mapped_prefix, build_cstr + 2);
+        if (n > 0 && (size_t)n < out_size) {
+            return YES;
+        }
+    }
+    strlcpy(out_buf, build_cstr, out_size);
+    return NO;
+}
+
 static void pt_init_host_kernel_info(void) {
     struct utsname real_uts;
     memset(&real_uts, 0, sizeof(real_uts));
@@ -1343,6 +1382,18 @@ static void pt_init_host_kernel_info(void) {
                                             s_spoofed_kern_version_prefix,
                                             sizeof(s_spoofed_kern_version_prefix));
 
+    BOOL has_ios_ver = NO;
+    int sv_fd = pt_orig_open_nocancel("/System/Library/CoreServices/SystemVersion.plist", O_RDONLY);
+    if (sv_fd >= 0) {
+        char ios_ver[32];
+        if (pt_read_plist_top_string_from_fd(sv_fd, "iOSSupportVersion", ios_ver, sizeof(ios_ver)) &&
+            ios_ver[0] != '\0') {
+            strlcpy(s_spoofed_ios_version, ios_ver, sizeof(s_spoofed_ios_version));
+            has_ios_ver = YES;
+        }
+        close(sv_fd);
+    }
+
     char osv[64] = {0};
     size_t osv_len = sizeof(osv);
     if (sysctlbyname("kern.osversion", osv, &osv_len, NULL, 0) != 0) {
@@ -1350,29 +1401,12 @@ static void pt_init_host_kernel_info(void) {
     }
     int major = atoi(s_real_kern_release);
     if (osv[0] != '\0') {
-        if (major >= 24 &&
-            osv[0] >= '0' && osv[0] <= '9' &&
-            osv[1] >= '0' && osv[1] <= '9') {
-            int b_prefix = (osv[0] - '0') * 10 + (osv[1] - '0');
-            int target_prefix = major - 2;
-            if (b_prefix > target_prefix) {
-                snprintf(s_spoofed_osversion, sizeof(s_spoofed_osversion), "%d%s", target_prefix, osv + 2);
-            } else {
-                strlcpy(s_spoofed_osversion, osv, sizeof(s_spoofed_osversion));
-            }
-        } else {
-            strlcpy(s_spoofed_osversion, osv, sizeof(s_spoofed_osversion));
-        }
-    }
-
-    int sv_fd = pt_orig_open_nocancel("/System/Library/CoreServices/SystemVersion.plist", O_RDONLY);
-    if (sv_fd >= 0) {
-        char ios_ver[32];
-        if (pt_read_plist_top_string_from_fd(sv_fd, "iOSSupportVersion", ios_ver, sizeof(ios_ver)) &&
-            ios_ver[0] != '\0') {
-            strlcpy(s_spoofed_ios_version, ios_ver, sizeof(s_spoofed_ios_version));
-        }
-        close(sv_fd);
+        (void)pt_sanitize_ios_build_version_with_kern_major(
+            osv,
+            has_ios_ver ? s_spoofed_ios_version : NULL,
+            major,
+            s_spoofed_osversion,
+            sizeof(s_spoofed_osversion));
     }
 
     pt_synthesize_ios_kernel_version_prefix("24.3.0",
@@ -2269,6 +2303,41 @@ static int pt_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *
 }
 
 __attribute__((visibility("hidden")))
+BOOL pt_is_system_version_plist_dict(NSDictionary *dict) {
+    if (![dict isKindOfClass:[NSDictionary class]]) {
+        return NO;
+    }
+    if (![dict[@"ProductBuildVersion"] isKindOfClass:[NSString class]] ||
+        dict[@"CFBundleIdentifier"] != nil ||
+        dict[@"CFBundleExecutable"] != nil) {
+        return NO;
+    }
+    if (dict[@"iOSSupportVersion"] != nil) {
+        return YES;
+    }
+    id prodName = dict[@"ProductName"];
+    if ([prodName isKindOfClass:[NSString class]] &&
+        [dict[@"ProductVersion"] isKindOfClass:[NSString class]]) {
+        NSString *pn = (NSString *)prodName;
+        return ([pn isEqualToString:@"macOS"] ||
+                [pn isEqualToString:@"Mac OS X"] ||
+                [pn isEqualToString:@"iPhone OS"] ||
+                [pn isEqualToString:@"iOS"]);
+    }
+    return NO;
+}
+
+__attribute__((visibility("hidden")))
+BOOL pt_sanitize_ios_build_version_cstr(const char *build_cstr,
+                                        const char *ios_ver_cstr,
+                                        char *out_buf,
+                                        size_t out_size) {
+    pt_ensure_host_kernel_info();
+    return pt_sanitize_ios_build_version_with_kern_major(
+        build_cstr, ios_ver_cstr, atoi(s_real_kern_release), out_buf, out_size);
+}
+
+__attribute__((visibility("hidden")))
 void pt_sanitize_system_version_dict(NSMutableDictionary *dict) {
     if (dict == nil) {
         return;
@@ -2292,36 +2361,31 @@ void pt_sanitize_system_version_dict(NSMutableDictionary *dict) {
         return;
     }
     id origProdName = dict[@"ProductName"];
+    BOOL origWasMac = ([origProdName isKindOfClass:[NSString class]] &&
+                       ([(NSString *)origProdName isEqualToString:@"macOS"] ||
+                        [(NSString *)origProdName isEqualToString:@"Mac OS X"]));
     id iosVer = dict[@"iOSSupportVersion"];
-    BOOL hadMacMarkers = (([origProdName isKindOfClass:[NSString class]] &&
-                           [(NSString *)origProdName isEqualToString:@"macOS"]) ||
-                          iosVer != nil);
+    BOOL copiedIOSVer = NO;
     if ([iosVer isKindOfClass:[NSString class]] && [(NSString *)iosVer length] > 0) {
         dict[@"ProductVersion"] = iosVer;
         if (dict[@"ProductUserVisibleVersion"] != nil) {
             dict[@"ProductUserVisibleVersion"] = iosVer;
         }
+        copiedIOSVer = YES;
     }
     [dict removeObjectForKey:@"iOSSupportVersion"];
-    pt_ensure_host_kernel_info();
     id buildVer = dict[@"ProductBuildVersion"];
     if ([buildVer isKindOfClass:[NSString class]] && [(NSString *)buildVer length] >= 3) {
-        NSString *bstr = (NSString *)buildVer;
-        unichar c0 = [bstr characterAtIndex:0];
-        unichar c1 = [bstr characterAtIndex:1];
-        if (c0 >= '0' && c0 <= '9' && c1 >= '0' && c1 <= '9') {
-            int b_prefix = (int)(c0 - '0') * 10 + (int)(c1 - '0');
-            if (hadMacMarkers && b_prefix >= 24) {
-                // macOS 15 (24*) -> iOS 18 (22*), macOS 26 (25*) -> iOS 26 (23*), etc.
-                dict[@"ProductBuildVersion"] = [NSString stringWithFormat:@"%d%@", b_prefix - 2, [bstr substringFromIndex:2]];
-            } else {
-                int major = atoi(s_real_kern_release);
-                if (major >= 24) {
-                    int target_prefix = major - 2;
-                    if (b_prefix > target_prefix) {
-                        dict[@"ProductBuildVersion"] = [NSString stringWithFormat:@"%d%@", target_prefix, [bstr substringFromIndex:2]];
-                    }
-                }
+        id prodVer = (!origWasMac || copiedIOSVer) ? dict[@"ProductVersion"] : nil;
+        const char *iosVerCStr = [prodVer isKindOfClass:[NSString class]] ? [(NSString *)prodVer UTF8String] : NULL;
+        char sanitized[64] = {0};
+        if (pt_sanitize_ios_build_version_cstr([(NSString *)buildVer UTF8String],
+                                               iosVerCStr,
+                                               sanitized,
+                                               sizeof(sanitized))) {
+            NSString *mapped = [NSString stringWithUTF8String:sanitized];
+            if (mapped != nil) {
+                dict[@"ProductBuildVersion"] = mapped;
             }
         }
     }
@@ -2425,10 +2489,7 @@ static CFPropertyListRef pt_CFPropertyListCreateWithData(CFAllocatorRef allocato
     CFPropertyListRef plist = CFPropertyListCreateWithData(allocator, data, options, format, error);
     if (plist != NULL && CFGetTypeID(plist) == CFDictionaryGetTypeID()) {
         NSDictionary *dict = (__bridge NSDictionary *)plist;
-        id prodName = dict[@"ProductName"];
-        BOOL isSysVer = (dict[@"ProductBuildVersion"] != nil &&
-                         (([prodName isKindOfClass:[NSString class]] && [(NSString *)prodName isEqualToString:@"macOS"]) ||
-                          dict[@"iOSSupportVersion"] != nil));
+        BOOL isSysVer = pt_is_system_version_plist_dict(dict);
         BOOL isCodeRes = ([dict[@"files"] isKindOfClass:[NSDictionary class]] ||
                           [dict[@"files2"] isKindOfClass:[NSDictionary class]]);
         BOOL isInfoPlist = (dict[@"CFBundleIdentifier"] != nil || dict[@"CFBundleExecutable"] != nil);

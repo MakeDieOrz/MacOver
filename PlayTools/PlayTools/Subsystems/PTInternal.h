@@ -502,6 +502,8 @@ __attribute__((visibility("hidden"))) CFURLRef pt_resolve_cfbundle_input_url(CFU
 __attribute__((visibility("hidden"))) CFURLRef pt_sanitize_cfbundle_returned_url(CFURLRef CF_CONSUMED url, const void *caller) CF_RETURNS_RETAINED;
 __attribute__((visibility("hidden"))) BOOL pt_info_dict_needs_sanitize(NSDictionary *dict);
 __attribute__((visibility("hidden"))) NSDictionary *pt_build_sanitized_info_dict(NSDictionary *dict);
+__attribute__((visibility("hidden"))) BOOL pt_is_system_version_plist_dict(NSDictionary *dict);
+__attribute__((visibility("hidden"))) BOOL pt_sanitize_ios_build_version_cstr(const char *build_cstr, const char *ios_ver_cstr, char *out_buf, size_t out_size);
 __attribute__((visibility("hidden"))) void pt_sanitize_system_version_dict(NSMutableDictionary *dict);
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_thread_name(const char *name);
 __attribute__((visibility("hidden"))) CFTypeRef pt_MGCopyAnswer(CFStringRef question, CFDictionaryRef options);

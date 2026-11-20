@@ -62,6 +62,8 @@ extern __attribute__((visibility("hidden"))) BOOL pt_get_spoofed_device_is_ipad(
 extern __attribute__((visibility("hidden"))) double pt_get_device_native_scale(void);
 extern __attribute__((visibility("hidden"))) uint32_t pt_get_device_native_width(void);
 extern __attribute__((visibility("hidden"))) uint32_t pt_get_device_native_height(void);
+extern __attribute__((visibility("hidden"))) BOOL pt_is_system_version_plist_dict(NSDictionary *dict);
+extern __attribute__((visibility("hidden"))) BOOL pt_sanitize_ios_build_version_cstr(const char *build_cstr, const char *ios_ver_cstr, char *out_buf, size_t out_size);
 extern __attribute__((visibility("hidden"))) void pt_sanitize_system_version_dict(NSMutableDictionary *dict);
 extern __attribute__((visibility("hidden"))) const char *pt_register_and_virtualize_group_container(const char *real_group_path, char *buf, size_t bufsize, BOOL use_private_prefix);
 extern __attribute__((visibility("hidden"))) void pt_register_swizzled_imp(const void *hook_imp, const void *orig_imp);
