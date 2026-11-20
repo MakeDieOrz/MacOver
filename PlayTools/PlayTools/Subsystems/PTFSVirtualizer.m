@@ -442,7 +442,7 @@ static BOOL pt_is_hidden_normalized_path_cached_caller(const char *norm, const v
 
     if (norm[0] == '/') {
         char c1 = norm[1];
-        if (c1 == 'A' || c1 == 'L' || c1 == 'p' || c1 == 'v' || c1 == 'u' || c1 == 'e' || c1 == '.') {
+        if (c1 == 'A' || c1 == 'L' || c1 == 'p' || c1 == 'v' || c1 == 'u' || c1 == 'e' || c1 == 'c' || c1 == '.') {
             typedef struct {
                 const char *prefix;
                 size_t len;
@@ -451,21 +451,54 @@ static BOOL pt_is_hidden_normalized_path_cached_caller(const char *norm, const v
                 PT_STR_ENTRY("/Applications/MacOver.app"),
                 PT_STR_ENTRY("/Applications/PlayCover.app"),
                 PT_STR_ENTRY("/Applications/Cydia.app"),
+                PT_STR_ENTRY("/Applications/Sileo.app"),
+                PT_STR_ENTRY("/Applications/Zebra.app"),
+                PT_STR_ENTRY("/Applications/TrollStore.app"),
+                PT_STR_ENTRY("/Applications/Dopamine.app"),
+                PT_STR_ENTRY("/Applications/palera1n.app"),
+                PT_STR_ENTRY("/Applications/Filza.app"),
                 PT_STR_ENTRY("/Library/MobileSubstrate"),
+                PT_STR_ENTRY("/Library/TweakInject"),
+                PT_STR_ENTRY("/Library/dpkg"),
+                PT_STR_ENTRY("/Library/Frameworks/CydiaSubstrate.framework"),
+                PT_STR_ENTRY("/Library/Frameworks/libhooker.dylib"),
                 PT_STR_ENTRY("/Library/PreferenceBundles/LaunchInSafeMode.bundle"),
+                PT_STR_ENTRY("/private/preboot"),
+                PT_STR_ENTRY("/private/var/jb"),
                 PT_STR_ENTRY("/private/var/binpack"),
+                PT_STR_ENTRY("/private/var/checkra1n.dmg"),
                 PT_STR_ENTRY("/private/var/lib/apt"),
                 PT_STR_ENTRY("/private/var/lib/cydia"),
+                PT_STR_ENTRY("/private/var/lib/dpkg"),
+                PT_STR_ENTRY("/private/var/lib/undecimus"),
+                PT_STR_ENTRY("/private/var/containers/Bundle/tweaksupport"),
+                PT_STR_ENTRY("/private/var/containers/Bundle/iosbinpack64"),
+                PT_STR_ENTRY("/private/var/mobile/Library/palera1n"),
+                PT_STR_ENTRY("/private/var/mobile/Library/Caches/com.opa334.TrollStore"),
                 PT_STR_ENTRY("/private/var/log/apt"),
                 PT_STR_ENTRY("/private/var/log/syslog"),
                 PT_STR_ENTRY("/private/var/stash"),
                 PT_STR_ENTRY("/private/etc/apt"),
                 PT_STR_ENTRY("/private/etc/ssh"),
+                PT_STR_ENTRY("/var/jb"),
+                PT_STR_ENTRY("/var/binpack"),
+                PT_STR_ENTRY("/var/checkra1n.dmg"),
                 PT_STR_ENTRY("/var/cache/apt"),
                 PT_STR_ENTRY("/var/lib/apt"),
                 PT_STR_ENTRY("/var/lib/cydia"),
+                PT_STR_ENTRY("/var/lib/dpkg"),
+                PT_STR_ENTRY("/var/lib/undecimus"),
+                PT_STR_ENTRY("/var/containers/Bundle/tweaksupport"),
+                PT_STR_ENTRY("/var/containers/Bundle/iosbinpack64"),
+                PT_STR_ENTRY("/var/mobile/Library/palera1n"),
+                PT_STR_ENTRY("/var/mobile/Library/Caches/com.opa334.TrollStore"),
                 PT_STR_ENTRY("/var/log/apt"),
                 PT_STR_ENTRY("/var/log/syslog"),
+                PT_STR_ENTRY("/usr/lib/TweakInject"),
+                PT_STR_ENTRY("/usr/lib/ellekit.dylib"),
+                PT_STR_ENTRY("/usr/lib/libhooker.dylib"),
+                PT_STR_ENTRY("/usr/lib/libsubstitute.dylib"),
+                PT_STR_ENTRY("/usr/lib/substrate"),
                 PT_STR_ENTRY("/usr/sbin/frida-server"),
                 PT_STR_ENTRY("/usr/bin/cycript"),
                 PT_STR_ENTRY("/usr/local/bin/cycript"),
@@ -477,8 +510,13 @@ static BOOL pt_is_hidden_normalized_path_cached_caller(const char *norm, const v
                 PT_STR_ENTRY("/usr/bin/ssh"),
                 PT_STR_ENTRY("/etc/ssh"),
                 PT_STR_ENTRY("/etc/apt"),
+                PT_STR_ENTRY("/cores/binpack"),
                 PT_STR_ENTRY("/.installed_unc0ver"),
-                PT_STR_ENTRY("/.bootstrapped_electra")
+                PT_STR_ENTRY("/.bootstrapped_electra"),
+                PT_STR_ENTRY("/.installed_dopamine"),
+                PT_STR_ENTRY("/.installed_palera1n"),
+                PT_STR_ENTRY("/.palera1n_strapped"),
+                PT_STR_ENTRY("/.procursus_strapped")
             };
             for (size_t i = 0; i < sizeof(always_blocked) / sizeof(always_blocked[0]); ++i) {
                 size_t len = always_blocked[i].len;

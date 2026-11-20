@@ -169,6 +169,10 @@ __attribute__((visibility("hidden"))) NSUUID *ps_hook_device_identifierForVendor
         dispatch_once(&onceToken, ^{
             s_blockedSchemes = [NSSet setWithArray:@[
                 @"apple-magnifier",
+                @"trollstore",
+                @"dopamine",
+                @"palera1n",
+                @"santander",
                 @"cydia",
                 @"sileo",
                 @"zbra",

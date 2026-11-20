@@ -9,11 +9,20 @@ blacklist:
     - /Library/LaunchAgents
     - /Library/LaunchDaemons
     - /Library/MobileSubstrate/MobileSubstrate.dylib
+    - /Library/TweakInject
+    - /Library/Frameworks/CydiaSubstrate.framework
+    - /Library/Frameworks/libhooker.dylib
     - /Library/PreferenceBundles/LaunchInSafeMode.bundle
     - /Library/PrivilegedHelperTools
     - /Applications/MacOver.app
     - /Applications/PlayCover.app
     - /Applications/Cydia.app
+    - /Applications/Sileo.app
+    - /Applications/Zebra.app
+    - /Applications/TrollStore.app
+    - /Applications/Dopamine.app
+    - /Applications/palera1n.app
+    - /Applications/Filza.app
     - /bin/ls
     - /bin/sed
     - /bin/kill
@@ -44,14 +53,24 @@ blacklist:
     - /bin/bash
     - /bin/sh
     - /bin/mv
+    - /private/preboot
+    - /private/var/jb
     - /private/var/binpack
     - /private/var/lib/apt
     - /private/var/select/sh
     - /private/var/stash
+    - /cores/binpack
     - /usr/bin/sshd
+    - /var/jb
+    - /var/binpack
     - /var/cache/apt
     - /var/lib/apt
     - /var/lib/cydia
+    - /var/lib/dpkg
+    - /usr/lib/TweakInject
+    - /usr/lib/ellekit.dylib
+    - /usr/lib/libhooker.dylib
+    - /usr/lib/libsubstitute.dylib
     - /usr/sbin/frida-server
     - /usr/bin/cycript
     - /usr/local/bin/cycript

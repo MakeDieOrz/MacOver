@@ -1401,6 +1401,9 @@ static BOOL pt_should_block_dlopen_path(const char *path, const void *caller) {
             strstr(path, "SubstrateInserter") != NULL ||
             strstr(path, "SubstrateBootstrap") != NULL ||
             strstr(path, "TweakInject") != NULL ||
+            strstr(path, "ellekit") != NULL ||
+            strstr(path, "libhooker") != NULL ||
+            strstr(path, "libsubstitute") != NULL ||
             strstr(path, "frida") != NULL ||
             strstr(path, "cycript") != NULL);
 }
