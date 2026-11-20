@@ -279,35 +279,7 @@ static double pt_get_default_width(void) {
     return [[UIScreen mainScreen] bounds].size.width;
 }
 
-static void pt_get_effective_spoofed_portrait_metrics(id screenOrNil,
-                                                      double *out_pt_w,
-                                                      double *out_pt_h,
-                                                      double *out_px_w,
-                                                      double *out_px_h,
-                                                      double *out_scale) {
-    double s = pt_get_device_native_scale();
-    if (s <= 0.0) {
-        s = 2.0;
-    }
-    // Prefer the active device profile's physical portrait resolution (e.g. 1242x2688 @ 3x
-    // for iPhone12,5; 2048x2732 @ 2x for iPad13,8) for app-facing screen queries under bypass.
-    // System/UIKit/PlayTools callers bypass this helper via caller discrimination so live Mac
-    // window resizing and customScaler backing-framebuffer sizing remain unaffected.
-    double w = 0.0, h = 0.0, spoofS = s;
-    pt_get_spoofed_screen_native_bounds(&w, &h, &spoofS);
-    if (spoofS <= 0.0) {
-        spoofS = s;
-    }
-    if (w > 0.0 && h > 0.0) {
-        double minPx = MIN(w, h);
-        double maxPx = MAX(w, h);
-        if (out_pt_w) *out_pt_w = minPx / spoofS;
-        if (out_pt_h) *out_pt_h = maxPx / spoofS;
-        if (out_px_w) *out_px_w = minPx;
-        if (out_px_h) *out_px_h = maxPx;
-        if (out_scale) *out_scale = spoofS;
-        return;
-    }
+static CGRect pt_resolve_effective_screen_bounds(id screenOrNil) {
     id targetScreen = screenOrNil;
     if (targetScreen != nil && ![targetScreen isKindOfClass:[UIScreen class]]) {
         targetScreen = nil;
@@ -315,37 +287,53 @@ static void pt_get_effective_spoofed_portrait_metrics(id screenOrNil,
     if (targetScreen == nil && [NSThread isMainThread] && s_orig_screen_bounds != NULL) {
         targetScreen = [UIScreen mainScreen];
     }
-    CGRect b = CGRectZero;
     if (s_orig_screen_bounds != NULL) {
         CGRect raw = (targetScreen != nil) ? s_orig_screen_bounds(targetScreen, @selector(bounds)) : CGRectZero;
-        b = s_screenBoundsHooked ? [PlayScreen boundsResizable:raw] : raw;
-    } else if (s_screenBoundsHooked) {
-        b = [PlayScreen boundsResizable:CGRectZero];
+        return s_screenBoundsHooked ? [PlayScreen boundsResizable:raw] : raw;
     }
+    if (s_screenBoundsHooked) {
+        return [PlayScreen boundsResizable:CGRectZero];
+    }
+    return CGRectZero;
+}
+
+static BOOL pt_get_spoofed_portrait_pixel_size(id screenOrNil,
+                                               double *out_px_w,
+                                               double *out_px_h) {
+    double s = pt_get_device_native_scale();
+    if (s <= 0.0) {
+        s = 2.0;
+    }
+    // Prefer the active device profile's physical portrait resolution (e.g. 1242x2688 @ 3x
+    // for iPhone12,5; 2048x2732 @ 2x for iPad13,8) for app-facing pixel queries under bypass.
+    // Logical point coordinate spaces (`UIScreen.bounds` / `fixedCoordinateSpace.bounds`) use
+    // `pt_resolve_effective_screen_bounds` so window layout and touch mapping stay aligned.
+    double w = 0.0, h = 0.0, spoofS = s;
+    pt_get_spoofed_screen_native_bounds(&w, &h, &spoofS);
+    if (w > 0.0 && h > 0.0) {
+        if (out_px_w) *out_px_w = MIN(w, h);
+        if (out_px_h) *out_px_h = MAX(w, h);
+        return YES;
+    }
+    CGRect b = pt_resolve_effective_screen_bounds(screenOrNil);
     if (b.size.width > 1.0 && b.size.height > 1.0) {
         double minPt = MIN((double)b.size.width, (double)b.size.height);
         double maxPt = MAX((double)b.size.width, (double)b.size.height);
-        if (out_pt_w) *out_pt_w = minPt;
-        if (out_pt_h) *out_pt_h = maxPt;
         if (out_px_w) *out_px_w = round(minPt * s);
         if (out_px_h) *out_px_h = round(maxPt * s);
-        if (out_scale) *out_scale = s;
-        return;
+        return YES;
     }
-    if (out_pt_w) *out_pt_w = 0.0;
-    if (out_pt_h) *out_pt_h = 0.0;
     if (out_px_w) *out_px_w = 0.0;
     if (out_px_h) *out_px_h = 0.0;
-    if (out_scale) *out_scale = s;
+    return NO;
 }
 
 static inline BOOL pt_try_get_spoofed_native_bounds_for_caller(id screenOrNil, const void *caller, CGRect *outBounds) {
     if (!pt_is_bypass_enabled() || pt_is_effective_system_or_playtools_caller(caller)) {
         return NO;
     }
-    double ptW = 0.0, ptH = 0.0, pxW = 0.0, pxH = 0.0, s = 0.0;
-    pt_get_effective_spoofed_portrait_metrics(screenOrNil, &ptW, &ptH, &pxW, &pxH, &s);
-    if (pxW > 0.0 && pxH > 0.0) {
+    double pxW = 0.0, pxH = 0.0;
+    if (pt_get_spoofed_portrait_pixel_size(screenOrNil, &pxW, &pxH) && pxW > 0.0 && pxH > 0.0) {
         *outBounds = CGRectMake(0, 0, pxW, pxH);
         return YES;
     }
@@ -401,9 +389,8 @@ static CGSize pt_hook_fbs_mode_size(id self, SEL _cmd) {
 
 static CGSize pt_hook_fbs_mode_pixelSize(id self, SEL _cmd) {
     if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        double ptW = 0.0, ptH = 0.0, pxW = 0.0, pxH = 0.0, s = 0.0;
-        pt_get_effective_spoofed_portrait_metrics(nil, &ptW, &ptH, &pxW, &pxH, &s);
-        if (pxW > 0.0 && pxH > 0.0) {
+        double pxW = 0.0, pxH = 0.0;
+        if (pt_get_spoofed_portrait_pixel_size(nil, &pxW, &pxH) && pxW > 0.0 && pxH > 0.0) {
             return CGSizeMake(pxW, pxH);
         }
     }
@@ -482,9 +469,8 @@ static NSInteger pt_hook_screen_maxFPS(id self, SEL _cmd) {
 
 static CGSize pt_hook_screenmode_size(id self, SEL _cmd) {
     if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        double ptW = 0.0, ptH = 0.0, pxW = 0.0, pxH = 0.0, s = 0.0;
-        pt_get_effective_spoofed_portrait_metrics(nil, &ptW, &ptH, &pxW, &pxH, &s);
-        if (pxW > 0.0 && pxH > 0.0) {
+        double pxW = 0.0, pxH = 0.0;
+        if (pt_get_spoofed_portrait_pixel_size(nil, &pxW, &pxH) && pxW > 0.0 && pxH > 0.0) {
             return CGSizeMake(pxW, pxH);
         }
     }
@@ -576,10 +562,14 @@ static CGRect pt_hook_fixed_coord_bounds(id self, SEL _cmd) {
         if ([self respondsToSelector:scrSel]) {
             scr = ((id (*)(id, SEL))objc_msgSend)(self, scrSel);
         }
-        double ptW = 0.0, ptH = 0.0, pxW = 0.0, pxH = 0.0, s = 0.0;
-        pt_get_effective_spoofed_portrait_metrics(scr, &ptW, &ptH, &pxW, &pxH, &s);
-        if (ptW > 0.0 && ptH > 0.0) {
-            return CGRectMake(0, 0, ptW, ptH);
+        CGRect b = pt_resolve_effective_screen_bounds(scr);
+        if (b.size.width <= 1.0 || b.size.height <= 1.0) {
+            b = s_orig_fixed_coord_bounds ? s_orig_fixed_coord_bounds(self, _cmd) : CGRectZero;
+        }
+        if (b.size.width > 1.0 && b.size.height > 1.0) {
+            double minPt = MIN((double)b.size.width, (double)b.size.height);
+            double maxPt = MAX((double)b.size.width, (double)b.size.height);
+            return CGRectMake(0, 0, minPt, maxPt);
         }
     }
     return s_orig_fixed_coord_bounds ? s_orig_fixed_coord_bounds(self, _cmd) : CGRectZero;
@@ -587,10 +577,9 @@ static CGRect pt_hook_fixed_coord_bounds(id self, SEL _cmd) {
 
 static NSString *pt_hook_screen_description(id self, SEL _cmd) {
     if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        CGRect rawB = s_orig_screen_bounds ? s_orig_screen_bounds(self, @selector(bounds)) : CGRectZero;
-        CGRect b = s_screenBoundsHooked ? [PlayScreen boundsResizable:rawB] : rawB;
-        double ptW = 0.0, ptH = 0.0, pxW = 0.0, pxH = 0.0, s = 0.0;
-        pt_get_effective_spoofed_portrait_metrics(self, &ptW, &ptH, &pxW, &pxH, &s);
+        CGRect b = pt_resolve_effective_screen_bounds(self);
+        double pxW = 0.0, pxH = 0.0;
+        (void)pt_get_spoofed_portrait_pixel_size(self, &pxW, &pxH);
         id cur = s_orig_screen_currentMode ? s_orig_screen_currentMode(self, @selector(currentMode)) : nil;
         return [NSString stringWithFormat:@"<UIScreen: %p; bounds = %@; mode = <UIScreenMode: %p; size = %.6f x %.6f>>",
                 (__bridge void *)self, NSStringFromCGRect(b), (__bridge void *)cur, pxW, pxH];
@@ -648,9 +637,8 @@ static id pt_hook_fbs_disp_hwid(id self, SEL _cmd) {
 
 static CGSize pt_hook_fbs_disp_pixelSize(id self, SEL _cmd) {
     if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        double ptW = 0.0, ptH = 0.0, pxW = 0.0, pxH = 0.0, s = 0.0;
-        pt_get_effective_spoofed_portrait_metrics(nil, &ptW, &ptH, &pxW, &pxH, &s);
-        if (pxW > 0.0 && pxH > 0.0) {
+        double pxW = 0.0, pxH = 0.0;
+        if (pt_get_spoofed_portrait_pixel_size(nil, &pxW, &pxH) && pxW > 0.0 && pxH > 0.0) {
             return CGSizeMake(pxW, pxH);
         }
     }
