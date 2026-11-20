@@ -424,6 +424,7 @@ struct AppSettingsData: Codable, Equatable {
     var inverseScreenValues = false
     var metalHUD = false
     var windowFixMethod = 0
+    /// Deprecated/unused legacy plist key retained for Codable schema compatibility.
     var injectIntrospection = false
     var rootWorkDir = true
     var noKMOnInput = true

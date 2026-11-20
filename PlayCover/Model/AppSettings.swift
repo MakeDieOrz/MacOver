@@ -36,6 +36,8 @@ struct AppSettingsData: Codable, Equatable {
     var inverseScreenValues = false
     var metalHUD = false
     var windowFixMethod = 0
+    /// Deprecated/unused legacy plist key retained for Codable compatibility; actual
+    /// introspection library injection uses `Info.plist` `LSEnvironment` (`PlayApp.introspection`).
     var injectIntrospection = false
     var rootWorkDir = true
     var noKMOnInput = true
@@ -207,7 +209,7 @@ struct AppSettingsData: Codable, Equatable {
         if playChain != snapshot.playChain { changed.append(.playChain) }
         if playChainDebugging != snapshot.playChainDebugging { changed.append(.playChainDebugging) }
         if metalHUD != snapshot.metalHUD { changed.append(.metalHUD) }
-        if injectIntrospection != snapshot.injectIntrospection { changed.append(.injectIntrospection) }
+        // `injectIntrospection` is a deprecated/unused legacy plist field with no runtime consumer.
         if rootWorkDir != snapshot.rootWorkDir { changed.append(.rootWorkDir) }
         if hideTitleBar != snapshot.hideTitleBar { changed.append(.hideTitleBar) }
         if floatingWindow != snapshot.floatingWindow { changed.append(.floatingWindow) }

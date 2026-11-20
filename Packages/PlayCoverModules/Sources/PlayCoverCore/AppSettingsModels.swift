@@ -203,6 +203,8 @@ public enum PlayCoverRestartField: String, CaseIterable, Equatable, Hashable, Se
     case playChain
     case playChainDebugging
     case metalHUD
+    /// Legacy field retained for enum/Codable compatibility; introspection injection uses
+    /// `Info.plist` `LSEnvironment` (`PlayApp.introspection`) rather than `AppSettingsData`.
     case injectIntrospection
     case rootWorkDir
     case hideTitleBar

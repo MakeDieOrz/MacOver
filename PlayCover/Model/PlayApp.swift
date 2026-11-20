@@ -400,10 +400,21 @@ extension PlayApp {
                 var activateObserver: NSObjectProtocol?
                 var deactivateObserver: NSObjectProtocol?
                 var terminateObserver: NSObjectProtocol?
+                var settingsObserver: AnyCancellable?
                 defer {
+                    settingsObserver?.cancel()
                     if let activateObserver { wsCenter.removeObserver(activateObserver) }
                     if let deactivateObserver { wsCenter.removeObserver(deactivateObserver) }
                     if let terminateObserver { wsCenter.removeObserver(terminateObserver) }
+                }
+
+                settingsObserver = self.settings.objectWillChange.sink { [weak self] _ in
+                    guard let self, !runningApp.isTerminated else { return }
+                    if !self.settings.settings.disableTimeout {
+                        self.enableTimeOut()
+                    } else if runningApp.isActive {
+                        self.disableTimeOut()
+                    }
                 }
 
                 await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
@@ -545,6 +556,10 @@ extension PlayApp {
 // MARK: - Management
 extension PlayApp {
     func disableTimeOut() {
+        guard settings.settings.disableTimeout else {
+            enableTimeOut()
+            return
+        }
         assertionLock.lock()
         defer { assertionLock.unlock() }
         if displaySleepAssertionID != nil { return }
