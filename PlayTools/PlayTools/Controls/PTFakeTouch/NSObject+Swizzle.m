@@ -289,6 +289,25 @@ static void pt_get_effective_spoofed_portrait_metrics(id screenOrNil,
     if (s <= 0.0) {
         s = 2.0;
     }
+    // Prefer the active device profile's physical portrait resolution (e.g. 1242x2688 @ 3x
+    // for iPhone12,5; 2048x2732 @ 2x for iPad13,8) for app-facing screen queries under bypass.
+    // System/UIKit/PlayTools callers bypass this helper via caller discrimination so live Mac
+    // window resizing and customScaler backing-framebuffer sizing remain unaffected.
+    double w = 0.0, h = 0.0, spoofS = s;
+    pt_get_spoofed_screen_native_bounds(&w, &h, &spoofS);
+    if (spoofS <= 0.0) {
+        spoofS = s;
+    }
+    if (w > 0.0 && h > 0.0) {
+        double minPx = MIN(w, h);
+        double maxPx = MAX(w, h);
+        if (out_pt_w) *out_pt_w = minPx / spoofS;
+        if (out_pt_h) *out_pt_h = maxPx / spoofS;
+        if (out_px_w) *out_px_w = minPx;
+        if (out_px_h) *out_px_h = maxPx;
+        if (out_scale) *out_scale = spoofS;
+        return;
+    }
     id targetScreen = screenOrNil;
     if (targetScreen != nil && ![targetScreen isKindOfClass:[UIScreen class]]) {
         targetScreen = nil;
@@ -311,21 +330,6 @@ static void pt_get_effective_spoofed_portrait_metrics(id screenOrNil,
         if (out_px_w) *out_px_w = round(minPt * s);
         if (out_px_h) *out_px_h = round(maxPt * s);
         if (out_scale) *out_scale = s;
-        return;
-    }
-    double w = 0.0, h = 0.0, spoofS = s;
-    pt_get_spoofed_screen_native_bounds(&w, &h, &spoofS);
-    if (spoofS <= 0.0) {
-        spoofS = s;
-    }
-    if (w > 0.0 && h > 0.0) {
-        double minPx = MIN(w, h);
-        double maxPx = MAX(w, h);
-        if (out_pt_w) *out_pt_w = minPx / spoofS;
-        if (out_pt_h) *out_pt_h = maxPx / spoofS;
-        if (out_px_w) *out_px_w = minPx;
-        if (out_px_h) *out_px_h = maxPx;
-        if (out_scale) *out_scale = spoofS;
         return;
     }
     if (out_pt_w) *out_pt_w = 0.0;
