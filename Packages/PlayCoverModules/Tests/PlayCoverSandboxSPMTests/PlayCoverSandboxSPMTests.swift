@@ -61,7 +61,7 @@ final class PlayCoverSandboxSPMTests: XCTestCase {
     }
 
     func testHelperSecurityValidatorContainerAndBundleChecks() {
-        XCTAssertTrue(HelperSecurityValidator.validateBundleIdentifier("io.playcover.PlayCover"))
+        XCTAssertTrue(HelperSecurityValidator.validateBundleIdentifier("app.makedie.MacOver"))
         XCTAssertFalse(HelperSecurityValidator.validateBundleIdentifier("../bad"))
         XCTAssertFalse(HelperSecurityValidator.validateBundleIdentifier(""))
 

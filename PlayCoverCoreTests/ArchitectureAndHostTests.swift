@@ -4,13 +4,13 @@ import PlayCoverCore
 import XCTest
 @testable import PlayCover
 
-final class Phase2ArchitectureTests: XCTestCase {
+final class ArchitectureAndHostTests: XCTestCase {
     private var tempDir: URL?
 
     override func setUpWithError() throws {
         try super.setUpWithError()
         let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("PlayCoverPhase2Tests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("MacOverArchitectureTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         tempDir = dir
     }
@@ -51,14 +51,14 @@ final class Phase2ArchitectureTests: XCTestCase {
         }
         let infoURL = dir.appendingPathComponent("Info.plist")
         let plistDict: NSDictionary = [
-            "CFBundleIdentifier": "io.playcover.phase2test",
-            "CFBundleName": "Phase2Test",
-            "CFBundleExecutable": "Phase2Test"
+            "CFBundleIdentifier": "app.makedie.test.architecture",
+            "CFBundleName": "ArchitectureTest",
+            "CFBundleExecutable": "ArchitectureTest"
         ]
         XCTAssertTrue(plistDict.write(to: infoURL, atomically: true))
 
         let info = AppInfo(contentsOf: infoURL)
-        let settingsURL = dir.appendingPathComponent("io.playcover.phase2test.plist")
+        let settingsURL = dir.appendingPathComponent("app.makedie.test.architecture.plist")
         let appSettings = AppSettings(settingsUrl: settingsURL, info: info, debounceInterval: 0.25)
 
         // Rapid mutations (like dragging a slider) must not synchronously write on every update
@@ -137,7 +137,7 @@ final class Phase2ArchitectureTests: XCTestCase {
     }
 
     func testPreferencesStoresUseUserDefaultsAndEmitObjectWillChange() {
-        let suiteName = "io.playcover.Phase2PreferencesTests.\(UUID().uuidString)"
+        let suiteName = "app.makedie.ArchitecturePreferencesTests.\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suiteName) else {
             XCTFail("Failed to allocate isolated UserDefaults suite")
             return
@@ -309,7 +309,7 @@ final class Phase2ArchitectureTests: XCTestCase {
     }
 
     func testHelperSecurityValidatorAndEmbeddedHelperBundle() throws {
-        XCTAssertTrue(HelperSecurityValidator.validateBundleIdentifier("io.playcover.PlayCover"))
+        XCTAssertTrue(HelperSecurityValidator.validateBundleIdentifier("app.makedie.MacOver"))
         XCTAssertTrue(HelperSecurityValidator.validateBundleIdentifier("com.example.app-1_2"))
         XCTAssertFalse(HelperSecurityValidator.validateBundleIdentifier("nodot"))
         XCTAssertFalse(HelperSecurityValidator.validateBundleIdentifier("foo; rm -rf /"))
@@ -317,15 +317,15 @@ final class Phase2ArchitectureTests: XCTestCase {
         XCTAssertFalse(HelperSecurityValidator.validateBundleIdentifier(".leading.dot"))
 
         XCTAssertEqual(
-            HelperSecurityValidator.validateContainerPath("/Users/alice/Library/Containers/io.playcover.PlayCover/Data"),
-            "/Users/alice/Library/Containers/io.playcover.PlayCover/Data"
+            HelperSecurityValidator.validateContainerPath("/Users/alice/Library/Containers/app.makedie.MacOver/Data"),
+            "/Users/alice/Library/Containers/app.makedie.MacOver/Data"
         )
         XCTAssertNil(HelperSecurityValidator.validateContainerPath("/System/Library"))
         XCTAssertNil(HelperSecurityValidator.validateContainerPath("/etc/passwd"))
         XCTAssertNil(HelperSecurityValidator.validateContainerPath("/Users/alice/Library/Containers/../Desktop"))
         XCTAssertNil(HelperSecurityValidator.validateContainerPath(""))
 
-        // Hosted test host (PlayCover.app) must embed Track A helper tool and launchd daemon plist.
+        // Hosted test host (MacOver.app) must embed Track A helper tool and launchd daemon plist.
         let hostBundle = Bundle.main
         XCTAssertTrue(DualTrackPrivilegeEscalator.embeddedHelperDaemonPlistExists(in: hostBundle))
 
@@ -463,7 +463,7 @@ final class Phase2ArchitectureTests: XCTestCase {
         XCTAssertEqual(autoResolved, PlayCoverAlertResponse(buttonIndex: 1, suppressionChecked: false))
     }
 
-    func testAppSettingsData51CompatibilityAndRestartDiff() throws {
+    func testAppSettingsDataCompatibilityAndRestartDiff() throws {
         let legacyPlist = """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -533,7 +533,7 @@ final class Phase2ArchitectureTests: XCTestCase {
         let dir = try XCTUnwrap(tempDir)
         let infoURL = dir.appendingPathComponent("Info.plist")
         let plist: [String: Any] = [
-            "CFBundleIdentifier": "com.example.phase51b",
+            "CFBundleIdentifier": "com.example.configtest",
             "CFBundleExecutable": "Sample",
             "CFBundleShortVersionString": "1.0"
         ]

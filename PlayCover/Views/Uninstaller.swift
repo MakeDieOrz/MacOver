@@ -201,12 +201,12 @@ class Uninstaller {
     @MainActor
     private static func presentPermissionAlert(_ err: Error, alertPresenter: AlertPresenter? = nil) async {
         let message = """
-        macOS 阻止了 PlayCover 访问该应用的沙盒容器目录（\(err.localizedDescription)）。
+        macOS 阻止了 MacOver 访问该应用的沙盒容器目录（\(err.localizedDescription)）。
 
-        这通常是因为 PlayCover 重新编译签名后，macOS 原有的隐私授权记录失效。
-        请在「系统设置 -> 隐私与安全性 -> 完全磁盘访问权限」中勾选（或先关闭再重新开启）PlayCover，\
+        这通常是因为 MacOver 重新编译签名后，macOS 原有的隐私授权记录失效。
+        请在「系统设置 -> 隐私与安全性 -> 完全磁盘访问权限」中勾选（或先关闭再重新开启）MacOver，\
         或在终端执行以下命令重置授权后重试：
-        tccutil reset All io.playcover.PlayCover
+        tccutil reset All app.makedie.MacOver
         """
         let presenter = alertPresenter ?? AlertPresenter()
         let response = await presenter.present(

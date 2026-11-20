@@ -135,7 +135,7 @@ class PlayApp: BaseApp, ObservableObject, Identifiable, Hashable {
     // MARK: - Paths / Singletons
     static let aliasDirectory = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Applications")
-        .appendingPathComponent("PlayCover")
+        .appendingPathComponent("MacOver")
 
     var aliasURL: URL {
         PlayApp.aliasDirectory
@@ -213,7 +213,7 @@ class PlayApp: BaseApp, ObservableObject, Identifiable, Hashable {
                     PlayCoverDiagnostics.reportError("PlayTools installation failed: \(installErr.localizedDescription)")
                 } else {
                     PlayCoverDiagnostics.reportError(
-                        "PlayTools are not installed! Please move PlayCover.app into Applications!"
+                        "PlayTools are not installed! Please move MacOver.app into Applications!"
                     )
                 }
                 return
@@ -351,7 +351,7 @@ extension PlayApp {
 
                     let elapsed = Date().timeIntervalSince(launchDate)
                     let breadcrumbURL = self.container.containerUrl
-                        .appendingPathComponent("Data/Library/Caches/io.playcover.PlayTools/.launching_in_progress")
+                        .appendingPathComponent("Data/Library/Caches/app.makedie.PlayTools/.launching_in_progress")
                     if elapsed < 3.0 && FileManager.default.fileExists(atPath: breadcrumbURL.path) {
                         let msg = "\(self.name) exited abnormally within 3 seconds; next launch will automatically use Safe Mode."
                         PlayCoverDiagnostics.log(msg, isError: true)

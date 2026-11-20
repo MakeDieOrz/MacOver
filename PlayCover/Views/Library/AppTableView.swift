@@ -25,29 +25,29 @@ struct AppTableView: View {
 
     var body: some View {
         Table(sortedApps, selection: $navState.selectedAppID, sortOrder: $sortOrder) {
-            TableColumn("ui51.library.table.app", value: \.sortName) { app in
+            TableColumn("library.table.app", value: \.sortName) { app in
                 TableAppNameCell(app: app)
             }
             .width(min: 180, ideal: 240)
 
-            TableColumn("ui51.library.table.version", value: \.sortVersion) { app in
+            TableColumn("library.table.version", value: \.sortVersion) { app in
                 Text(app.info.bundleVersion)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
             .width(min: 70, ideal: 95)
 
-            TableColumn("ui51.library.table.device", value: \.sortDevice) { app in
+            TableColumn("library.table.device", value: \.sortDevice) { app in
                 TableAppDeviceCell(settings: app.settings)
             }
             .width(min: 140, ideal: 190)
 
-            TableColumn("ui51.library.table.pixelLoad", value: \.sortPixelRatio) { app in
+            TableColumn("library.table.pixelLoad", value: \.sortPixelRatio) { app in
                 TableAppLoadCell(settings: app.settings)
             }
             .width(min: 110, ideal: 140)
 
-            TableColumn("ui51.library.table.status", value: \.sortRunningRank) { app in
+            TableColumn("library.table.status", value: \.sortRunningRank) { app in
                 TableAppStatusCell(app: app)
             }
             .width(min: 90, ideal: 110)
@@ -128,15 +128,15 @@ private struct TableAppStatusCell: View {
     var body: some View {
         Group {
             if app.isRunning {
-                Label("ui51.sidebar.runningBadge", systemImage: "circle.fill")
+                Label("sidebar.runningBadge", systemImage: "circle.fill")
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.green)
             } else if !hasPlayTools {
-                Label("ui51.library.status.noPlayTools", systemImage: "exclamationmark.triangle.fill")
+                Label("library.status.noPlayTools", systemImage: "exclamationmark.triangle.fill")
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.orange)
             } else {
-                Text("ui51.library.status.ready")
+                Text("library.status.ready")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

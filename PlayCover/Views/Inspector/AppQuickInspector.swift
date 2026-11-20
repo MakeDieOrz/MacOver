@@ -73,7 +73,7 @@ struct AppQuickInspector: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     if app.isRunning {
-                        Text("ui51.sidebar.runningBadge")
+                        Text("sidebar.runningBadge")
                             .font(.caption2.weight(.semibold))
                             .foregroundStyle(.green)
                             .padding(.horizontal, 6)
@@ -93,7 +93,7 @@ struct AppQuickInspector: View {
                     Button {
                         Task { await app.terminate() }
                     } label: {
-                        Label("ui51.action.quit", systemImage: "stop.fill")
+                        Label("action.quit", systemImage: "stop.fill")
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
@@ -106,7 +106,7 @@ struct AppQuickInspector: View {
                             }
                         }
                     } label: {
-                        Label("ui51.action.launch", systemImage: "play.fill")
+                        Label("action.launch", systemImage: "play.fill")
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
@@ -114,7 +114,7 @@ struct AppQuickInspector: View {
                 }
 
                 Menu {
-                    Button("ui51.action.launchSafeMode", systemImage: "shield.lefthalf.filled") {
+                    Button("action.launchSafeMode", systemImage: "shield.lefthalf.filled") {
                         Task {
                             if app.isRunning {
                                 await app.restart(safeModeOneShot: true)
@@ -133,7 +133,7 @@ struct AppQuickInspector: View {
             Button {
                 navState.openConfiguration(for: app, pane: .overview)
             } label: {
-                Label("ui51.action.configure", systemImage: "slider.horizontal.3")
+                Label("action.configure", systemImage: "slider.horizontal.3")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)
@@ -146,12 +146,12 @@ struct AppQuickInspector: View {
             Image(systemName: "arrow.clockwise.circle.fill")
                 .foregroundStyle(.orange)
             Text(String(
-                format: NSLocalizedString("ui51.restart.bannerTitle", comment: ""),
+                format: NSLocalizedString("restart.bannerTitle", comment: ""),
                 app.restartRequiredChanges.count
             ))
             .font(.caption)
             Spacer(minLength: 4)
-            Button("ui51.action.restart") {
+            Button("action.restart") {
                 Task { await app.restart() }
             }
             .controlSize(.small)
@@ -164,7 +164,7 @@ struct AppQuickInspector: View {
 
     private var presetsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("ui51.preset.section")
+            Text("preset.section")
                 .font(.subheadline.weight(.medium))
             LazyVGrid(columns: presetColumns, spacing: 8) {
                 ForEach(PlayAppSettingsPreset.allCases) { preset in
@@ -194,7 +194,7 @@ struct AppQuickInspector: View {
 
     private var quickTogglesSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("ui51.inspector.quickControls")
+            Text("inspector.quickControls")
                 .font(.subheadline.weight(.medium))
             Toggle("settings.toggle.km", isOn: $settings.settings.keymapping)
             Toggle("settings.playChain.enable", isOn: $settings.settings.playChain)
@@ -208,14 +208,14 @@ struct AppQuickInspector: View {
 
     private var defaultKeymapSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("ui51.inspector.defaultKeymap")
+            Text("inspector.defaultKeymap")
                 .font(.subheadline.weight(.medium))
             if keymapURLs.isEmpty {
-                Text("ui51.inspector.none")
+                Text("inspector.none")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                Picker("ui51.inspector.defaultKeymap", selection: Binding(
+                Picker("inspector.defaultKeymap", selection: Binding(
                     get: { defaultKeymapURL ?? keymapURLs.first ?? app.keymapping.keymapConfig.defaultKm },
                     set: { nextURL in
                         defaultKeymapURL = nextURL

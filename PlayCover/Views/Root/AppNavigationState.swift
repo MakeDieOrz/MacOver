@@ -24,7 +24,7 @@ enum ConfigPane: String, CaseIterable, Identifiable, Hashable {
 
     var id: String { rawValue }
 
-    var titleKey: String { "ui51.config.pane.\(rawValue)" }
+    var titleKey: String { "config.pane.\(rawValue)" }
 
     var systemImage: String {
         switch self {

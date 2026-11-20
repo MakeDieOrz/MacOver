@@ -99,7 +99,7 @@ struct AppConfigurationView: View {
                     app.settings.flush()
                     navState.closeConfiguration()
                 } label: {
-                    Label("ui51.sidebar.backToLibrary", systemImage: "chevron.left")
+                    Label("sidebar.backToLibrary", systemImage: "chevron.left")
                 }
             }
 
@@ -108,7 +108,7 @@ struct AppConfigurationView: View {
                     Button {
                         Task { await app.terminate() }
                     } label: {
-                        Label("ui51.action.quit", systemImage: "stop.fill")
+                        Label("action.quit", systemImage: "stop.fill")
                     }
                     .tint(.red)
                 } else {
@@ -119,14 +119,14 @@ struct AppConfigurationView: View {
                             }
                         }
                     } label: {
-                        Label("ui51.action.launch", systemImage: "play.fill")
+                        Label("action.launch", systemImage: "play.fill")
                     }
                     .tint(.accentColor)
                     .disabled(app.isStarting)
                 }
 
                 Menu {
-                    Button("ui51.action.launchSafeMode", systemImage: "shield.lefthalf.filled") {
+                    Button("action.launchSafeMode", systemImage: "shield.lefthalf.filled") {
                         Task {
                             if app.isRunning {
                                 await app.restart(safeModeOneShot: true)
@@ -152,7 +152,7 @@ struct AppConfigurationView: View {
                 } label: {
                     Image(systemName: "sidebar.right")
                 }
-                .help("ui51.inspector.toggle")
+                .help("inspector.toggle")
             }
         }
         .task(id: app.url) {
@@ -165,7 +165,7 @@ struct AppConfigurationView: View {
         .onDisappear {
             app.settings.flush()
         }
-        .alert("ui51.config.resetTitle", isPresented: $showResetConfirm) {
+        .alert("config.resetTitle", isPresented: $showResetConfirm) {
             Button("button.Cancel", role: .cancel) {}
             Button("settings.resetSettings", role: .destructive) {
                 app.settings.reset()
@@ -175,7 +175,7 @@ struct AppConfigurationView: View {
                 )
             }
         } message: {
-            Text(String(format: NSLocalizedString("ui51.config.resetMessage", comment: ""), app.name))
+            Text(String(format: NSLocalizedString("config.resetMessage", comment: ""), app.name))
         }
     }
 
@@ -185,7 +185,7 @@ struct AppConfigurationView: View {
                 .foregroundStyle(.orange)
             VStack(alignment: .leading, spacing: 2) {
                 Text(String(
-                    format: NSLocalizedString("ui51.restart.bannerTitle", comment: ""),
+                    format: NSLocalizedString("restart.bannerTitle", comment: ""),
                     app.restartRequiredChanges.count
                 ))
                 .font(.callout.weight(.semibold))
@@ -199,12 +199,12 @@ struct AppConfigurationView: View {
                     .lineLimit(1)
             }
             Spacer()
-            Button("ui51.action.restartSafeMode") {
+            Button("action.restartSafeMode") {
                 Task { await app.restart(safeModeOneShot: true) }
             }
             .buttonStyle(.bordered)
 
-            Button("ui51.action.restart") {
+            Button("action.restart") {
                 Task { await app.restart() }
             }
             .buttonStyle(.borderedProminent)
@@ -222,7 +222,7 @@ struct AppConfigurationView: View {
             Text("settings.noPlayTools")
                 .font(.caption)
             Spacer()
-            Button(NSLocalizedString("ui51.config.pane.plugins", comment: "")) {
+            Button(NSLocalizedString("config.pane.plugins", comment: "")) {
                 navState.activeConfigPane = .plugins
             }
             .controlSize(.small)

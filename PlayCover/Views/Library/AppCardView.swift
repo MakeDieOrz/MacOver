@@ -14,7 +14,7 @@ struct PlayAppContextMenu: View {
     let onClearPlayChain: (PlayApp) -> Void
 
     var body: some View {
-        Button(app.isRunning ? "ui51.action.quit" : "ui51.action.launch",
+        Button(app.isRunning ? "action.quit" : "action.launch",
                systemImage: app.isRunning ? "stop.fill" : "play.fill") {
             Task {
                 if app.isRunning {
@@ -24,7 +24,7 @@ struct PlayAppContextMenu: View {
                 }
             }
         }
-        Button("ui51.action.launchSafeMode", systemImage: "shield.lefthalf.filled") {
+        Button("action.launchSafeMode", systemImage: "shield.lefthalf.filled") {
             Task {
                 if app.isRunning {
                     await app.restart(safeModeOneShot: true)
@@ -91,7 +91,7 @@ struct AppCardView: View {
                     .frame(maxWidth: .infinity)
 
                 if app.isRunning {
-                    Label("ui51.sidebar.runningBadge", systemImage: "circle.fill")
+                    Label("sidebar.runningBadge", systemImage: "circle.fill")
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.green)
                         .padding(.horizontal, 7)
@@ -197,7 +197,7 @@ struct AppCardView: View {
                     .buttonStyle(.glass)
                     .controlSize(.small)
                     .glassEffectID("primary", in: actionNamespace)
-                    .help("ui51.action.quit")
+                    .help("action.quit")
                 } else {
                     Button {
                         Task(priority: .userInitiated) {
@@ -209,7 +209,7 @@ struct AppCardView: View {
                     .buttonStyle(.glassProminent)
                     .controlSize(.small)
                     .glassEffectID("primary", in: actionNamespace)
-                    .help("ui51.action.launch")
+                    .help("action.launch")
                 }
 
                 Button {
@@ -219,7 +219,7 @@ struct AppCardView: View {
                 }
                 .buttonStyle(.glass)
                 .controlSize(.small)
-                .help("ui51.action.configure")
+                .help("action.configure")
             }
         }
         .padding(.bottom, 2)

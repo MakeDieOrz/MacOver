@@ -251,7 +251,7 @@ class AppSettings: ObservableObject {
         didSet { notifyChangedOnMain() }
     }
     private let lock = NSLock()
-    private let ioQueue = DispatchQueue(label: "io.playcover.PlayCover.AppSettings.io", qos: .utility)
+    private let ioQueue = DispatchQueue(label: "app.makedie.MacOver.AppSettings.io", qos: .utility)
     private var pendingSaveWorkItem: DispatchWorkItem?
     private var hasPendingWrite = false
     let debounceInterval: TimeInterval

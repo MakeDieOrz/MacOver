@@ -1163,7 +1163,7 @@ class PlayKeychainDB: NSObject {
         }
         let bundleID = Bundle.main.infoDictionary?["CFBundleIdentifier"] as? String ?? "Shared"
         let path = URL(fileURLWithPath: PlaySettings.resolveHostUserRoot())
-            .appendingPathComponent("Library/Containers/io.playcover.PlayCover")
+            .appendingPathComponent("Library/Containers/app.makedie.MacOver")
             .appendingPathComponent("PlayChain")
             .appendingPathComponent("\(bundleID).db")
             .path

@@ -1,8 +1,8 @@
-# PlayTools (5.0)
+# PlayTools (MacOver 1.0)
 
 **English** · [简体中文](./README.zh-CN.md)
 
-`PlayTools` is the injected Mac Catalyst (`arm64`) runtime framework of [PlayCover](../README.md). In PlayCover 5.0, it builds natively inside `PlayCover.xcworkspace` (no Carthage or external patch diffs required) alongside `AKInterface.bundle` to provide display scaling, input translation, system virtualization, Safe Mode recovery, and extensible user plugins.
+`PlayTools` is the injected Mac Catalyst (`arm64`) runtime framework of [MacOver](../README.md) (derived from `PlayCover/PlayTools@e222ce0` under **AGPL-3.0**). It builds natively inside `PlayCover.xcworkspace` (no Carthage or external patch diffs required) alongside `AKInterface.bundle` to provide display scaling, input translation, system virtualization, Safe Mode recovery, and extensible user plugins.
 
 ## Core Capabilities
 
@@ -60,10 +60,10 @@ To prevent crash loops in misconfigured or incompatible apps:
 
 ## User Plugins (`PTPluginContainer` & `PluginManifest.json`)
 
-PlayCover syncs per-app plugins from:
+MacOver syncs per-app plugins from:
 
 ```text
-~/Library/Containers/io.playcover.PlayCover/PlayTools/UserPlugins/<bundleID>/
+~/Library/Containers/app.makedie.MacOver/PlayTools/UserPlugins/<bundleID>/
 ```
 
 into the wrapped app's `Frameworks/UserPlugins/` directory during installation and launch synchronization (`PlayTools.syncUserPlugins`).
@@ -74,7 +74,7 @@ Each directory-style plugin or paired `<PluginName>.manifest.json` follows the `
 - `identifier`: Reverse-DNS plugin identifier
 - `name`: Display name
 - `version`: Plugin semantic version
-- `minPlayToolsVersion`: Minimum compatible PlayTools version (`5.0.0` or `"0.0.0"`)
+- `minPlayToolsVersion`: Minimum compatible PlayTools version (`"1.0.0"` or `"0.0.0"`)
 - `targetBundleIdentifiers`: Array of allowed bundle IDs (or `["*"]`)
 - `loadPriority`: Integer load order priority (lower loads earlier, default `100`)
 - `capabilities`: Array of declared plugin capability tags
@@ -110,13 +110,13 @@ PlayTools localization files use `PlayTools.strings` to avoid colliding with the
 
 ---
 
-## How to Build & Test (5.0)
+## How to Build & Test
 
-`PlayTools` now builds directly as a **Mac Catalyst (`arm64`)** framework via `PlayCover.xcworkspace` (or standalone via `PlayTools/PlayTools.xcodeproj`). The legacy Carthage workflow and manual `Debug-iphoneos` + `vtool` conversion scripts are no longer used.
+`PlayTools` now builds directly as a **Mac Catalyst (`arm64`)** framework targeting macOS 26.0+ via `PlayCover.xcworkspace` (or standalone via `PlayTools/PlayTools.xcodeproj`). The legacy Carthage workflow and manual `Debug-iphoneos` + `vtool` conversion scripts are no longer used.
 
 ### Full Workspace Build & Install
 
-Building the `PlayCover` scheme in `PlayCover.xcworkspace` automatically builds `PlayTools.framework` and `AKInterface.bundle` and embeds them into `PlayCover.app/Contents/Frameworks/PlayTools.framework`:
+Building the `PlayCover` scheme in `PlayCover.xcworkspace` automatically builds `PlayTools.framework` and `AKInterface.bundle` and embeds them into `MacOver.app/Contents/Frameworks/PlayTools.framework`:
 
 ```sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \

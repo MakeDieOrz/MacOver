@@ -29,12 +29,12 @@ struct ConfigDevicePane: View {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
                         Text(String(
-                            format: NSLocalizedString("ui51.device.legacyBanner", comment: ""),
+                            format: NSLocalizedString("device.legacyBanner", comment: ""),
                             DeviceProfileOption.displayName(for: currentModel)
                         ))
                         .font(.callout)
                         Spacer()
-                        Button("ui51.device.upgradeToM1") {
+                        Button("device.upgradeToM1") {
                             settings.update { $0.iosDeviceModel = "iPad13,8" }
                         }
                         .buttonStyle(.borderedProminent)
@@ -44,12 +44,12 @@ struct ConfigDevicePane: View {
 
             Section {
                 Picker("settings.picker.iosDevice", selection: $settings.settings.iosDeviceModel) {
-                    Section("ui51.device.modernGroup") {
+                    Section("device.modernGroup") {
                         ForEach(DeviceProfileOption.modernIPads) { option in
                             Text(option.label).tag(option.model)
                         }
                     }
-                    Section("ui51.device.iphoneGroup") {
+                    Section("device.iphoneGroup") {
                         ForEach(DeviceProfileOption.modernIPhones) { option in
                             Text(option.label).tag(option.model)
                         }
@@ -64,14 +64,14 @@ struct ConfigDevicePane: View {
             }
 
             Section {
-                Picker("ui51.device.reportedIOS.title", selection: $settings.settings.reportedIOSVersionMode) {
-                    Text("ui51.device.reportedIOS.automatic").tag(ReportedIOSVersionMode.automatic)
-                    Text("ui51.device.reportedIOS.followHost").tag(ReportedIOSVersionMode.followHost)
-                    Text("ui51.device.reportedIOS.compat18_3").tag(ReportedIOSVersionMode.compat18_3)
+                Picker("device.reportedIOS.title", selection: $settings.settings.reportedIOSVersionMode) {
+                    Text("device.reportedIOS.automatic").tag(ReportedIOSVersionMode.automatic)
+                    Text("device.reportedIOS.followHost").tag(ReportedIOSVersionMode.followHost)
+                    Text("device.reportedIOS.compat18_3").tag(ReportedIOSVersionMode.compat18_3)
                 }
-                .help("ui51.device.reportedIOS.help")
+                .help("device.reportedIOS.help")
 
-                Text("ui51.device.reportedIOS.help")
+                Text("device.reportedIOS.help")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -83,15 +83,15 @@ struct ConfigDevicePane: View {
     }
 
     private var layoutComparisonRow: some View {
-        LabeledContent("ui51.device.layoutTitle") {
+        LabeledContent("device.layoutTitle") {
             HStack(spacing: 10) {
                 layoutPill(
-                    titleKey: "ui51.device.layout.regular",
+                    titleKey: "device.layout.regular",
                     icon: "ipad.landscape",
                     isSelected: !isIPhone
                 )
                 layoutPill(
-                    titleKey: "ui51.device.layout.compact",
+                    titleKey: "device.layout.compact",
                     icon: "iphone",
                     isSelected: isIPhone
                 )

@@ -174,21 +174,21 @@ struct ConfigDisplayPane: View {
 
     private var frameRateAndCompatSection: some View {
         Section {
-            Picker("ui51.display.frameRate.title", selection: $settings.settings.frameRateTargetMode) {
-                Text("ui51.display.frameRate.adaptive").tag(FrameRateTarget.adaptive)
-                Text("ui51.display.frameRate.fixed120").tag(FrameRateTarget.fixed120)
-                Text("ui51.display.frameRate.fixed60").tag(FrameRateTarget.fixed60)
-                Text("ui51.display.frameRate.fixed30").tag(FrameRateTarget.fixed30)
+            Picker("display.frameRate.title", selection: $settings.settings.frameRateTargetMode) {
+                Text("display.frameRate.adaptive").tag(FrameRateTarget.adaptive)
+                Text("display.frameRate.fixed120").tag(FrameRateTarget.fixed120)
+                Text("display.frameRate.fixed60").tag(FrameRateTarget.fixed60)
+                Text("display.frameRate.fixed30").tag(FrameRateTarget.fixed30)
             }
-            .help("ui51.display.frameRate.help")
+            .help("display.frameRate.help")
 
-            Picker("ui51.display.windowCompat.title", selection: $settings.settings.windowCompatibility) {
-                Text("ui51.display.windowCompat.standard").tag(WindowCompatibilityMode.standard)
-                Text("ui51.display.windowCompat.invertedMetrics").tag(WindowCompatibilityMode.invertedMetrics)
-                Text("ui51.display.windowCompat.invertedLegacyResize")
+            Picker("display.windowCompat.title", selection: $settings.settings.windowCompatibility) {
+                Text("display.windowCompat.standard").tag(WindowCompatibilityMode.standard)
+                Text("display.windowCompat.invertedMetrics").tag(WindowCompatibilityMode.invertedMetrics)
+                Text("display.windowCompat.invertedLegacyResize")
                     .tag(WindowCompatibilityMode.invertedLegacyResize)
             }
-            .help("ui51.display.windowCompat.help")
+            .help("display.windowCompat.help")
 
             Picker("settings.settings.displayRotation", selection: $settings.settings.displayRotation) {
                 Text("settings.settings.displayRotation.default").tag(0)

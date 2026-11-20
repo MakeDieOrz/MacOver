@@ -1,8 +1,8 @@
-# PlayTools (5.0)
+# PlayTools (MacOver 1.0)
 
 [English](./README.md) · **简体中文**
 
-`PlayTools` 是 [PlayCover](../README.zh-CN.md) 注入至目标应用内的 Mac Catalyst（`arm64`）运行时框架。在 PlayCover 5.0 中，它直接跟随 `PlayCover.xcworkspace` 原生构建（无需 Carthage 或外部补丁），并与 `AKInterface.bundle` 协同工作，提供显示控制、键位映射、系统环境虚拟化、Safe Mode 崩溃恢复及可扩展用户插件支持。
+`PlayTools` 是 [MacOver](../README.zh-CN.md) 注入至目标应用内的 Mac Catalyst（`arm64`）运行时框架（基于 `PlayCover/PlayTools@e222ce0` 衍生，遵循 **AGPL-3.0** 协议）。它直接跟随 `PlayCover.xcworkspace` 原生构建（无需 Carthage 或外部补丁），并与 `AKInterface.bundle` 协同工作，提供显示控制、键位映射、系统环境虚拟化、Safe Mode 崩溃恢复及可扩展用户插件支持。
 
 ## 核心能力
 
@@ -28,7 +28,7 @@
 
 ### 模块化运行时子系统（`PlayTools/PlayTools/Subsystems/`）
 
-5.0 将原本高度耦合的运行时 Hook 拆分为职责清晰的子系统单元：
+PlayTools 将原本高度耦合的运行时 Hook 拆分为职责清晰的子系统单元：
 
 - **`PTFSVirtualizer` / `PTFSVirtualizerObjC`**：沙盒容器路径虚拟化、词法路径归一化与敏感路径隐藏保护。
 - **`PTDyldVirtualizer`**：dyld 动态库映像过滤，拦截 `dlopen`、`dlsym`、`objc_*` 等符号/类探测请求。
@@ -63,7 +63,7 @@
 宿主机在安装及每次启动时会通过 `PlayTools.syncUserPlugins` 将如下目录中的插件同步至目标应用 `Frameworks/UserPlugins/`：
 
 ```text
-~/Library/Containers/io.playcover.PlayCover/PlayTools/UserPlugins/<bundleID>/
+~/Library/Containers/app.makedie.MacOver/PlayTools/UserPlugins/<bundleID>/
 ```
 
 目录型插件或与 dylib 配对的 `<PluginName>.manifest.json` 遵循 `PTPluginManifest` 结构：
@@ -72,7 +72,7 @@
 - `identifier`：插件反向域名标识
 - `name`：插件显示名称
 - `version`：插件版本号
-- `minPlayToolsVersion`：最低兼容的 PlayTools 版本（如 `"5.0.0"` 或 `"0.0.0"`）
+- `minPlayToolsVersion`：最低兼容的 PlayTools 版本（如 `"1.0.0"` 或 `"0.0.0"`）
 - `targetBundleIdentifiers`：允许加载的目标应用 Bundle ID 数组（或 `["*"]`）
 - `loadPriority`：加载优先级整数（数值越小越早加载，默认 `100`）
 - `capabilities`：声明能力标签数组
@@ -108,13 +108,13 @@ PlayTools 的本地化资源文件统一命名为 `PlayTools.strings`，以避�
 
 ---
 
-## 构建、静态分析与测试 (5.0)
+## 构建、静态分析与测试
 
-`PlayTools` 现直接作为 **Mac Catalyst（`arm64`）** 原生目标通过 `PlayCover.xcworkspace` 或 `PlayTools/PlayTools.xcodeproj` 编译；旧版 Carthage 工作流与手动 `Debug-iphoneos` + `vtool` 转换脚本均已废弃。
+`PlayTools` 现直接作为面向 macOS 26.0+ 的 **Mac Catalyst（`arm64`）** 原生目标通过 `PlayCover.xcworkspace` 或 `PlayTools/PlayTools.xcodeproj` 编译；旧版 Carthage 工作流与手动 `Debug-iphoneos` + `vtool` 转换脚本均已废弃。
 
 ### 跟随主工程全量构建
 
-在仓库根目录执行以下命令即可自动编译并内嵌 `PlayTools.framework` 与 `AKInterface.bundle`：
+在仓库根目录执行以下命令即可自动编译并内嵌 `PlayTools.framework` 与 `AKInterface.bundle` 至 `MacOver.app/Contents/Frameworks/PlayTools.framework`：
 
 ```sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \

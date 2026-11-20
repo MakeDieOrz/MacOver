@@ -12,11 +12,11 @@ struct ActivityCenterView: View {
     @EnvironmentObject var dependencies: PlayCoverDependencies
 
     private static let installStages: [(step: InstallStepsNative, key: String)] = [
-        (.unzip, "ui51.activity.stage.unzip"),
-        (.playtools, "ui51.activity.stage.playtools"),
-        (.sign, "ui51.activity.stage.sign"),
-        (.library, "ui51.activity.stage.library"),
-        (.finish, "ui51.activity.stage.finish")
+        (.unzip, "activity.stage.unzip"),
+        (.playtools, "activity.stage.playtools"),
+        (.sign, "activity.stage.sign"),
+        (.library, "activity.stage.library"),
+        (.finish, "activity.stage.finish")
     ]
 
     private var activeStageIndex: Int {
@@ -33,7 +33,7 @@ struct ActivityCenterView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Label("ui51.activity.title", systemImage: "tray.full.fill")
+                Label("activity.title", systemImage: "tray.full.fill")
                     .font(.headline)
                 Spacer()
             }
@@ -42,7 +42,7 @@ struct ActivityCenterView: View {
                 HStack(spacing: 10) {
                     Image(systemName: "checkmark.circle")
                         .foregroundStyle(.secondary)
-                    Text("ui51.activity.noTasks")
+                    Text("activity.noTasks")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }

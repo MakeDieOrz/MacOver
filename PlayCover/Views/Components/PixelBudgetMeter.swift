@@ -21,9 +21,9 @@ struct PixelBudgetMeter: View {
 
     private var levelTitleKey: String {
         switch budget.level {
-        case .ok: return "ui51.budget.healthy"
-        case .caution: return "ui51.budget.caution"
-        case .over: return "ui51.budget.over"
+        case .ok: return "budget.healthy"
+        case .caution: return "budget.caution"
+        case .over: return "budget.over"
         }
     }
 
@@ -43,7 +43,7 @@ struct PixelBudgetMeter: View {
         VStack(alignment: .leading, spacing: compact ? 4 : 6) {
             HStack(spacing: 6) {
                 if !compact {
-                    Text("ui51.budget.title")
+                    Text("budget.title")
                         .font(.subheadline.weight(.medium))
                 }
                 Text(LocalizedStringKey(levelTitleKey))
@@ -51,7 +51,7 @@ struct PixelBudgetMeter: View {
                     .foregroundStyle(tintColor)
                 Spacer()
                 Text(String(
-                    format: NSLocalizedString("ui51.budget.readout", comment: ""),
+                    format: NSLocalizedString("budget.readout", comment: ""),
                     weightedMegapixels,
                     limitMegapixels
                 ))
@@ -68,7 +68,7 @@ struct PixelBudgetMeter: View {
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Button("ui51.budget.fit") {
+                    Button("budget.fit") {
                         onFitToBudget(budget.fittedScaler)
                     }
                     .controlSize(.small)

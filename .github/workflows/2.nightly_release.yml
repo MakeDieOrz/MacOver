@@ -12,7 +12,7 @@ env:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-26
     env:
       GITHUB_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -50,17 +50,17 @@ jobs:
       - name: Create DMG
         shell: bash
         run: |
-          DMG_PATH="./output/PlayCover_nightly_${{ github.run_number }}.dmg"
+          DMG_PATH="./output/MacOver_nightly_${{ github.run_number }}.dmg"
           create-dmg \
-            --volname "PlayCover Nightly ${{ github.run_number }}" \
+            --volname "MacOver Nightly ${{ github.run_number }}" \
             --skip-jenkins \
             "${DMG_PATH}" \
-            "./output/PlayCover.app" || \
-            hdiutil create -volname "PlayCover Nightly ${{ github.run_number }}" -srcfolder "./output/PlayCover.app" -ov -format UDZO "${DMG_PATH}"
+            "./output/MacOver.app" || \
+            hdiutil create -volname "MacOver Nightly ${{ github.run_number }}" -srcfolder "./output/MacOver.app" -ov -format UDZO "${DMG_PATH}"
 
       - name: Notarize DMG
         shell: bash
-        run: bundle exec fastlane notarize_dmg "package:output/PlayCover_nightly_${{ github.run_number }}.dmg"
+        run: bundle exec fastlane notarize_dmg "package:output/MacOver_nightly_${{ github.run_number }}.dmg"
 
       - name: Clean Up
         if: always()
@@ -70,5 +70,5 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PlayCover_nightly_${{ github.run_number }}.dmg
-          path: output/PlayCover_nightly_${{ github.run_number }}.dmg
+          name: MacOver_nightly_${{ github.run_number }}.dmg
+          path: output/MacOver_nightly_${{ github.run_number }}.dmg

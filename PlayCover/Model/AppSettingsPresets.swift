@@ -14,8 +14,8 @@ enum PlayAppSettingsPreset: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    var titleKey: String { "ui51.preset.\(rawValue).title" }
-    var subtitleKey: String { "ui51.preset.\(rawValue).subtitle" }
+    var titleKey: String { "preset.\(rawValue).title" }
+    var subtitleKey: String { "preset.\(rawValue).subtitle" }
 
     var systemImage: String {
         switch self {

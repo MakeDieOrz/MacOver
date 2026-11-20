@@ -57,8 +57,8 @@ struct ConfigPluginsPane: View {
                 }
             }
 
-            Section("ui51.action.launchSafeMode") {
-                Text("ui51.plugins.safeModeDesc")
+            Section("action.launchSafeMode") {
+                Text("plugins.safeModeDesc")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -71,7 +71,7 @@ struct ConfigPluginsPane: View {
                         }
                     }
                 } label: {
-                    Label("ui51.action.launchSafeMode", systemImage: "shield.lefthalf.filled")
+                    Label("action.launchSafeMode", systemImage: "shield.lefthalf.filled")
                 }
             }
 

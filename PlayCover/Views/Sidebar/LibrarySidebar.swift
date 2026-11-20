@@ -21,7 +21,7 @@ struct LibrarySidebar: View {
 
     var body: some View {
         List(selection: $navState.sidebarDestination) {
-            Section("ui51.sidebar.section.library") {
+            Section("sidebar.section.library") {
                 Label("sidebar.appLibrary", systemImage: "square.grid.2x2")
                     .badge(appsVM.apps.count)
                     .tag(SidebarDestination.library)
@@ -31,7 +31,7 @@ struct LibrarySidebar: View {
             }
 
             if !runningApps.isEmpty {
-                Section("ui51.sidebar.section.running") {
+                Section("sidebar.section.running") {
                     ForEach(runningApps) { app in
                         SidebarRunningAppRow(app: app)
                     }
@@ -47,7 +47,7 @@ struct LibrarySidebar: View {
                             .tag(SidebarDestination.storeSource(source.id))
                     }
                 } header: {
-                    Text("ui51.sidebar.section.sources")
+                    Text("sidebar.section.sources")
                 }
             }
         }
@@ -80,7 +80,7 @@ private struct SidebarRunningAppRow: View {
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
-            .help("ui51.sidebar.quit")
+            .help("sidebar.quit")
         }
         .contentShape(Rectangle())
         .onTapGesture {

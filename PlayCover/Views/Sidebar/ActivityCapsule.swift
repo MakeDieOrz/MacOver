@@ -35,7 +35,7 @@ struct ActivityCapsule: View {
             let base = NSLocalizedString(downloadVM.status.rawValue, comment: "")
             return name.isEmpty ? base : "\(base) \(name)"
         }
-        return NSLocalizedString("ui51.activity.idle", comment: "")
+        return NSLocalizedString("activity.idle", comment: "")
     }
 
     var body: some View {
@@ -52,7 +52,7 @@ struct ActivityCapsule: View {
                         .foregroundStyle(.secondary)
                 }
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("ui51.activity.title")
+                    Text("activity.title")
                         .font(.caption.weight(.semibold))
                     Text(activeLabel)
                         .font(.caption2)
@@ -99,27 +99,27 @@ struct SigningStatusCapsule: View {
     private var badgeInfo: SigningBadgeDisplay {
         guard let status else {
             return SigningBadgeDisplay(
-                titleKey: "ui51.signing.capsule.playchain",
+                titleKey: "signing.capsule.playchain",
                 icon: "lock.shield.fill",
                 color: .green
             )
         }
         if status.sipDisabled && status.amfiDisabledInRunningOS {
             return SigningBadgeDisplay(
-                titleKey: "ui51.signing.capsule.native",
+                titleKey: "signing.capsule.native",
                 icon: "checkmark.shield.fill",
                 color: .blue
             )
         }
         if status.sipDisabled && status.amfiDisabledInNVRAM {
             return SigningBadgeDisplay(
-                titleKey: "ui51.signing.capsule.reboot",
+                titleKey: "signing.capsule.reboot",
                 icon: "arrow.triangle.2.circlepath",
                 color: .orange
             )
         }
         return SigningBadgeDisplay(
-            titleKey: "ui51.signing.capsule.playchain",
+            titleKey: "signing.capsule.playchain",
             icon: "lock.shield.fill",
             color: .green
         )

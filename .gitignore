@@ -10,9 +10,10 @@ PlayTools-1.*
 *.swiftsourceinfo
 *.abi.json
 
-# Local plugins (excluded from main repo)
+# Local plugins & audit drafts (excluded from main repo)
 /plugins/
 /Plugins.xcodeproj/
+/AUDIT_AND_PLAN.md
 
 # Prebuilt plugin binaries & C/ObjC intermediates
 *.dylib

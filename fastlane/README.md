@@ -13,7 +13,7 @@ For _fastlane_ installation instructions, see [Installing _fastlane_](https://do
 
 # Available Actions
 
-All macOS build lanes target `PlayCover.xcworkspace` (`scheme: "PlayCover"`) and embed `PlayCoverHelper` and `PlayTools.framework`.
+All macOS build lanes target `PlayCover.xcworkspace` (`scheme: "PlayCover"`) and embed `PlayCoverHelper` and `PlayTools.framework` inside `MacOver.app`.
 
 ### release
 

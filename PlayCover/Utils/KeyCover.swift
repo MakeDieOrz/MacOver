@@ -345,7 +345,7 @@ struct KeyCoverKey {
                 reason = "OpenSSL \(operation) produced an empty output file (exit code \(exitCode))\(stderrSuffix)"
             }
             throw NSError(
-                domain: "io.playcover.KeyCover",
+                domain: "app.makedie.KeyCover",
                 code: Int(exitCode != 0 ? exitCode : -1),
                 userInfo: [NSLocalizedDescriptionKey: reason]
             )
@@ -380,7 +380,7 @@ struct KeyCoverKey {
 }
 
 class KeyCoverPassword {
-    let tag = "io.playcover.masterkey"
+    let tag = "app.makedie.masterkey"
 
     private let preferences: KeyCoverPreferences
     private weak var keyCover: KeyCover?

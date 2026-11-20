@@ -151,7 +151,7 @@ struct StoreLibraryDetailView: View {
                 } label: {
                     Image(systemName: "sidebar.right")
                 }
-                .help("ui51.inspector.toggle")
+                .help("inspector.toggle")
             }
         }
         .sheet(isPresented: $addSourcePresented) {

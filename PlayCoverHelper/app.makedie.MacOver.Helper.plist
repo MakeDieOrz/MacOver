@@ -3,17 +3,17 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>io.playcover.PlayCover.Helper</string>
+	<string>app.makedie.MacOver.Helper</string>
 	<key>BundleProgram</key>
 	<string>Contents/Library/HelperTools/PlayCoverHelper</string>
 	<key>MachServices</key>
 	<dict>
-		<key>io.playcover.PlayCover.Helper</key>
+		<key>app.makedie.MacOver.Helper</key>
 		<true/>
 	</dict>
 	<key>AssociatedBundleIdentifiers</key>
 	<array>
-		<string>io.playcover.PlayCover</string>
+		<string>app.makedie.MacOver</string>
 	</array>
 </dict>
 </plist>

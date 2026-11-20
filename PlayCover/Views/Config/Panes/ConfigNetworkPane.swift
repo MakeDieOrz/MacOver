@@ -53,7 +53,7 @@ struct ConfigNetworkPane: View {
                 Toggle("settings.network.enable", isOn: $settings.settings.enableNetworkRules)
                 Toggle("settings.network.mock200", isOn: $settings.settings.networkBlockMock200)
                     .disabled(!settings.settings.enableNetworkRules)
-                LabeledContent("ui51.config.pane.network") {
+                LabeledContent("config.pane.network") {
                     Text(String(
                         format: NSLocalizedString("settings.network.stats", comment: ""),
                         stats.block,
@@ -239,7 +239,7 @@ struct ConfigNetworkPane: View {
         let patterns = settings.settings.blockedURLPatterns
         panel.begin { response in
             guard response == .OK, let url = panel.url else { return }
-            let header = "# PlayCover Network Rules for \(bundleID)\n"
+            let header = "# MacOver Network Rules for \(bundleID)\n"
             let content = header + patterns.joined(separator: "\n") + "\n"
             try? content.write(to: url, atomically: true, encoding: .utf8)
         }

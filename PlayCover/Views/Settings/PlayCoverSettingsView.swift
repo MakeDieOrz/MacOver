@@ -13,11 +13,11 @@ struct PlayCoverSettingsView: View {
 
     var body: some View {
         TabView {
-            Tab("ui51.settings.tab.general", systemImage: "gearshape") {
+            Tab("settings.tab.general", systemImage: "gearshape") {
                 GeneralSettingsTab()
             }
 
-            Tab("ui51.settings.tab.signing", systemImage: "lock.shield") {
+            Tab("settings.tab.signing", systemImage: "lock.shield") {
                 SigningSettingsTab()
             }
 
@@ -51,11 +51,11 @@ private struct GeneralSettingsTab: View {
 
     var body: some View {
         Form {
-            Section("ui51.settings.general.appearance") {
-                Text("ui51.settings.general.glassNote")
+            Section("settings.general.appearance") {
+                Text("settings.general.glassNote")
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                Toggle("ui51.settings.general.menuBarExtra", isOn: $showMenuBarExtra)
+                Toggle("settings.general.menuBarExtra", isOn: $showMenuBarExtra)
             }
         }
         .formStyle(.grouped)
@@ -68,7 +68,7 @@ private struct SigningSettingsTab: View {
 
     var body: some View {
         Form {
-            Section("ui51.signing.guide.title") {
+            Section("signing.guide.title") {
                 LabeledContent("configSigning.info.SIPHeader") {
                     if let status {
                         Text(status.sipDisabled ? "state.disabled" : "state.enabled")

@@ -42,9 +42,9 @@ struct InspectorRouter: View {
 
     private var emptyInspector: some View {
         ContentUnavailableView {
-            Label("ui51.inspector.emptyTitle", systemImage: "sidebar.right")
+            Label("inspector.emptyTitle", systemImage: "sidebar.right")
         } description: {
-            Text("ui51.inspector.emptySubtitle")
+            Text("inspector.emptySubtitle")
         }
     }
 }

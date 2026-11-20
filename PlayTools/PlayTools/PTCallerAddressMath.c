@@ -167,8 +167,9 @@ static bool pt_rel_has_sensitive_runtime_component(const char *rel) {
         return true;
     }
     return (strstr(rel, "PlayTools.framework") != NULL || strstr(rel, "PlayTools.dylib") != NULL ||
-            strstr(rel, "Playtools.strings") != NULL || strstr(rel, "io.playcover.PlayCover") != NULL ||
-            strstr(rel, "AKInterface.bundle") != NULL || strstr(rel, "UserPlugins") != NULL);
+            strstr(rel, "Playtools.strings") != NULL || strstr(rel, "app.makedie.MacOver") != NULL ||
+            strstr(rel, "io.playcover.PlayCover") != NULL || strstr(rel, "AKInterface.bundle") != NULL ||
+            strstr(rel, "UserPlugins") != NULL);
 }
 
 bool pt_is_nonsensitive_app_or_tmp_path(const char *norm_path, const char *bundle_dir, size_t bundle_len,

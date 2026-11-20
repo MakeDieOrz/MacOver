@@ -73,9 +73,9 @@ struct ConfigAdvancedPane: View {
                     troubleshootingRows
                 } label: {
                     let title = troubleshootingCount > 0
-                        ? String(format: NSLocalizedString("ui51.advanced.troubleshooting", comment: ""),
+                        ? String(format: NSLocalizedString("advanced.troubleshooting", comment: ""),
                                  troubleshootingCount)
-                        : NSLocalizedString("ui51.advanced.troubleshootingZero", comment: "")
+                        : NSLocalizedString("advanced.troubleshootingZero", comment: "")
                     Text(title)
                         .font(.headline)
                 }

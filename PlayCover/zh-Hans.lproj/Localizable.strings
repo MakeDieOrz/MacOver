@@ -20,7 +20,7 @@
 "alert.moveAppToApplications.move" = "移进应用程序文件夹";
 
 /* (No Comment) */
-"alert.restart" = "请重启 PlayCover。";
+"alert.restart" = "请重启 MacOver。";
 
 /* (No Comment) */
 "alert.success" = "成功";
@@ -50,7 +50,7 @@
 "menubar.checkForUpdates" = "检查更新...";
 
 /* (No Comment) */
-"menubar.discord" = "Discord（社区交流平台）";
+"menubar.discord" = "GitHub Issues（问题反馈）";
 
 /* (No Comment) */
 "menubar.documentation" = "使用手册";
@@ -59,13 +59,13 @@
 "menubar.exportToSideloady" = "为 Sideloadly 导出";
 
 /* (No Comment) */
-"menubar.github" = "GitHub（源代码发行网站）";
+"menubar.github" = "GitHub（源代码仓库）";
 
 /* (No Comment) */
 "menubar.log.copy" = "拷贝日志";
 
 /* (No Comment) */
-"menubar.website" = "官网";
+"menubar.website" = "版本发布 (Releases)";
 
 /* (No Comment) */
 "notification.appInstalled" = "应用安装成功！";
@@ -192,13 +192,13 @@
 
 /* (No Comment) */
 "button.Quit" = "退出";
-"error.appProhibited" = "通过 PlayCover 使用这个应用程序很可能会导致帐号被封停！";
+"error.appProhibited" = "通过 MacOver 使用这个应用程序很可能会导致帐号被封停！";
 "settings.title" = "%@ 设定";
 "playapp.exportKmPanel.fieldLabel" = "PlayMap 名称：";
 "sidebar.appLibrary" = "App 库";
 "sidebar.ipaLibrary" = "IPA 资源库";
 "alert.moveAppToApplications.title" = "是否移动至应用程序文件夹？";
-"alert.moveAppToApplications.subtitle" = "PlayCover必须在应用程序文件夹下才能正常运行。点击下方按钮将会自动移动PlayCover至应用程序文件夹。";
+"alert.moveAppToApplications.subtitle" = "MacOver必须在应用程序文件夹下才能正常运行。点击下方按钮将会自动移动MacOver至应用程序文件夹。";
 "error.appEncrypted" = "此应用已被加密！请使用未加密的 ipa 文件。 现已不再支持来自 iMazing 的 ipa！";
 "error.appCorrupted" = "此 ipa 文件是错误的。请尝试使用其他 ipa 文件。";
 "settings.tab.info" = "详细信息";
@@ -234,7 +234,7 @@
 "settings.text.detectedResolution" = "已检测到的分辨率：";
 "playapp.add" = "添加应用";
 "alert.wrongFileType.title" = "错误的文件类型!";
-"alert.wrongFileType.subtitle" = "PlayCover 只可以安装有效的 .ipa 文件。";
+"alert.wrongFileType.subtitle" = "MacOver 只可以安装有效的 .ipa 文件。";
 "playapp.addSource" = "添加来源";
 "ipaLibrary.noSources.title" = "尚未添加 IPA 来源";
 "ipaLibrary.noSources.subtitle" = "您目前没有添加 IPA 来源。点击下面的按钮来添加一个。";
@@ -253,7 +253,7 @@
 "error.waitDownload" = "请等待下载完成!";
 "preferences.button.pruneFiles" = "删除未使用的文件";
 "playapp.progress.failed" = "安装失败";
-"alert.supression" = "你可以在 PlayCover 偏好设置中更改";
+"alert.supression" = "你可以在 MacOver 偏好设置中更改";
 "menubar.clearCache" = "清除缓存";
 "preferences.tab.uninstall" = "卸载";
 "preferences.whenUninstalling" = "在卸载同时:";
@@ -274,7 +274,7 @@
 "settings.removePlayTools" = "移除 PlayTools";
 "settings.info.playTools" = "已安装 PlayTools：";
 "playapp.refreshSources" = "刷新来源";
-"error.appMaliciousProhibited" = "此应用程序在Mac上有恶意行为，使用它会使您的设备处于无法启动的状态，因此它被PlayCover阻止。（正在卸载...)";
+"error.appMaliciousProhibited" = "此应用程序在Mac上有恶意行为，使用它会使您的设备处于无法启动的状态，因此它被MacOver阻止。（正在卸载...)";
 "alert.install.injectPlayToolsQuestion" = "您希望在此应用中注入 PlayTools 吗？";
 "alert.install.playToolsInformative" = "PlayTools 是一个能帮您将键盘按键映射为触屏控制，自定义显示分辨率以及更多的工具，但它有可能使某些应用无法使用";
 "configSigning.info.SIPHeader" = "系统完整性保护";
@@ -469,162 +469,162 @@
 "settings.picker.windowFixMethod.help" = "选择用于修复窗口化显示问题的方式";
 
 
-/* PlayCover 5.1 Liquid Glass UI */
-"ui51.sidebar.section.library" = "资料库";
-"ui51.sidebar.section.running" = "运行中";
-"ui51.sidebar.section.sources" = "IPA 源";
-"ui51.sidebar.backToLibrary" = "应用库";
-"ui51.sidebar.runningBadge" = "运行中";
-"ui51.sidebar.quit" = "退出";
+/* MacOver 1.0 Liquid Glass UI */
+"sidebar.section.library" = "资料库";
+"sidebar.section.running" = "运行中";
+"sidebar.section.sources" = "IPA 源";
+"sidebar.backToLibrary" = "应用库";
+"sidebar.runningBadge" = "运行中";
+"sidebar.quit" = "退出";
 
-"ui51.activity.title" = "活动中心";
-"ui51.activity.idle" = "空闲";
-"ui51.activity.noTasks" = "当前没有进行中的下载或安装任务。";
-"ui51.activity.stage.unzip" = "解压";
-"ui51.activity.stage.library" = "校验";
-"ui51.activity.stage.playtools" = "注入插件";
-"ui51.activity.stage.sign" = "重签名";
-"ui51.activity.stage.finish" = "完成";
+"activity.title" = "活动中心";
+"activity.idle" = "空闲";
+"activity.noTasks" = "当前没有进行中的下载或安装任务。";
+"activity.stage.unzip" = "解压";
+"activity.stage.library" = "校验";
+"activity.stage.playtools" = "注入插件";
+"activity.stage.sign" = "重签名";
+"activity.stage.finish" = "完成";
 
-"ui51.signing.capsule.playchain" = "PlayChain 就绪";
-"ui51.signing.capsule.native" = "原生钥匙串";
-"ui51.signing.capsule.reboot" = "等待重启生效";
-"ui51.signing.guide.title" = "签名与钥匙串模式";
-"ui51.signing.guide.subtitle" = "选择应用在 macOS 上的登录凭据与权限签名方式。";
-"ui51.signing.mode.playchain.title" = "PlayChain 模式";
-"ui51.signing.mode.playchain.badge" = "推荐 · 保持开启 SIP";
-"ui51.signing.mode.playchain.desc" = "单应用独立加密凭据存储，无需关闭系统完整性保护或重启电脑。";
-"ui51.signing.mode.native.title" = "原生 Apple 钥匙串";
-"ui51.signing.mode.native.badge" = "高级 · 三步可逆";
-"ui51.signing.mode.native.desc" = "直接使用系统与 iCloud 钥匙串。需关闭 SIP 并配置 AMFI 启动参数。";
-"ui51.signing.wizard.title" = "3 步可逆原生钥匙串配置（可选）";
-"ui51.signing.wizard.step1" = "1. 在 macOS 恢复模式终端关闭 SIP（`csrutil disable`）并重新进入系统。";
-"ui51.signing.wizard.step2" = "2. 通过 PlayCover Helper 或终端写入 AMFI 启动参数。";
-"ui51.signing.wizard.step3" = "3. 重启一次 Mac 使参数生效；如需恢复默认，请运行 `sudo nvram -d boot-args` 并 `csrutil enable`。";
+"signing.capsule.playchain" = "PlayChain 就绪";
+"signing.capsule.native" = "原生钥匙串";
+"signing.capsule.reboot" = "等待重启生效";
+"signing.guide.title" = "签名与钥匙串模式";
+"signing.guide.subtitle" = "选择应用在 macOS 上的登录凭据与权限签名方式。";
+"signing.mode.playchain.title" = "PlayChain 模式";
+"signing.mode.playchain.badge" = "推荐 · 保持开启 SIP";
+"signing.mode.playchain.desc" = "单应用独立加密凭据存储，无需关闭系统完整性保护或重启电脑。";
+"signing.mode.native.title" = "原生 Apple 钥匙串";
+"signing.mode.native.badge" = "高级 · 三步可逆";
+"signing.mode.native.desc" = "直接使用系统与 iCloud 钥匙串。需关闭 SIP 并配置 AMFI 启动参数。";
+"signing.wizard.title" = "3 步可逆原生钥匙串配置（可选）";
+"signing.wizard.step1" = "1. 在 macOS 恢复模式终端关闭 SIP（`csrutil disable`）并重新进入系统。";
+"signing.wizard.step2" = "2. 通过 MacOver Helper 或终端写入 AMFI 启动参数。";
+"signing.wizard.step3" = "3. 重启一次 Mac 使参数生效；如需恢复默认，请运行 `sudo nvram -d boot-args` 并 `csrutil enable`。";
 
-"ui51.config.pane.overview" = "概览";
-"ui51.config.pane.display" = "显示与帧率";
-"ui51.config.pane.device" = "机型与系统";
-"ui51.config.pane.input" = "输入与键位";
-"ui51.config.pane.network" = "网络规则";
-"ui51.config.pane.plugins" = "插件与安全";
-"ui51.config.pane.advanced" = "高级与排障";
-"ui51.config.pane.info" = "应用信息";
-"ui51.config.overview.summary" = "当前配置摘要";
-"ui51.config.resetTitle" = "确认恢复默认设置？";
-"ui51.config.resetMessage" = "将 %@ 的全部单应用配置恢复为默认值。";
+"config.pane.overview" = "概览";
+"config.pane.display" = "显示与帧率";
+"config.pane.device" = "机型与系统";
+"config.pane.input" = "输入与键位";
+"config.pane.network" = "网络规则";
+"config.pane.plugins" = "插件与安全";
+"config.pane.advanced" = "高级与排障";
+"config.pane.info" = "应用信息";
+"config.overview.summary" = "当前配置摘要";
+"config.resetTitle" = "确认恢复默认设置？";
+"config.resetMessage" = "将 %@ 的全部单应用配置恢复为默认值。";
 
-"ui51.preset.section" = "一键场景预设";
-"ui51.preset.balanced.title" = "均衡日常";
-"ui51.preset.balanced.subtitle" = "1080p · 2.0× · 自适应 · iPad M4";
-"ui51.preset.crisp.title" = "高刷清晰";
-"ui51.preset.crisp.subtitle" = "1440p · 1.5× · 120Hz · iPad M5";
-"ui51.preset.eco.title" = "省电挂机";
-"ui51.preset.eco.subtitle" = "1080p · 1.0× · 30Hz · 低温静音";
-"ui51.preset.phone.title" = "手机紧凑";
-"ui51.preset.phone.subtitle" = "1080p · 2.0× · iPhone 17 Pro Max";
+"preset.section" = "一键场景预设";
+"preset.balanced.title" = "均衡日常";
+"preset.balanced.subtitle" = "1080p · 2.0× · 自适应 · iPad M4";
+"preset.crisp.title" = "高刷清晰";
+"preset.crisp.subtitle" = "1440p · 1.5× · 120Hz · iPad M5";
+"preset.eco.title" = "省电挂机";
+"preset.eco.subtitle" = "1080p · 1.0× · 30Hz · 低温静音";
+"preset.phone.title" = "手机紧凑";
+"preset.phone.subtitle" = "1080p · 2.0× · iPhone 17 Pro Max";
 
-"ui51.budget.title" = "GPU 像素负载预算";
-"ui51.budget.healthy" = "健康";
-"ui51.budget.caution" = "较高负载";
-"ui51.budget.over" = "超出安全阈值";
-"ui51.budget.fit" = "一键适配安全倍率";
-"ui51.budget.readout" = "%.2f / %.2f 百万像素";
+"budget.title" = "GPU 像素负载预算";
+"budget.healthy" = "健康";
+"budget.caution" = "较高负载";
+"budget.over" = "超出安全阈值";
+"budget.fit" = "一键适配安全倍率";
+"budget.readout" = "%.2f / %.2f 百万像素";
 
-"ui51.display.frameRate.title" = "帧率上限目标";
-"ui51.display.frameRate.help" = "动态钳制应用内 CADisplayLink 与 MTKView 的刷新率请求。";
-"ui51.display.frameRate.adaptive" = "自适应（原生）";
-"ui51.display.frameRate.fixed120" = "120 Hz 高刷新率";
-"ui51.display.frameRate.fixed60" = "60 Hz 标准帧率";
-"ui51.display.frameRate.fixed30" = "30 Hz 省电挂机";
-"ui51.display.windowCompat.title" = "窗口兼容模式";
-"ui51.display.windowCompat.help" = "统一封装屏幕度量反转与备用窗口适配方法，避免冲突组合。";
-"ui51.display.windowCompat.standard" = "标准模式";
-"ui51.display.windowCompat.invertedMetrics" = "屏幕度量反转";
-"ui51.display.windowCompat.invertedLegacyResize" = "反转度量 + 旧版窗口适配（自动关闭分辨率调节）";
+"display.frameRate.title" = "帧率上限目标";
+"display.frameRate.help" = "动态钳制应用内 CADisplayLink 与 MTKView 的刷新率请求。";
+"display.frameRate.adaptive" = "自适应（原生）";
+"display.frameRate.fixed120" = "120 Hz 高刷新率";
+"display.frameRate.fixed60" = "60 Hz 标准帧率";
+"display.frameRate.fixed30" = "30 Hz 省电挂机";
+"display.windowCompat.title" = "窗口兼容模式";
+"display.windowCompat.help" = "统一封装屏幕度量反转与备用窗口适配方法，避免冲突组合。";
+"display.windowCompat.standard" = "标准模式";
+"display.windowCompat.invertedMetrics" = "屏幕度量反转";
+"display.windowCompat.invertedLegacyResize" = "反转度量 + 旧版窗口适配（自动关闭分辨率调节）";
 
-"ui51.device.modernGroup" = "推荐 Apple Silicon iPad 机型";
-"ui51.device.iphoneGroup" = "iPhone 机型（紧凑单栏布局）";
-"ui51.device.legacyBanner" = "当前仍在使用旧款机型档位（%@），建议切换至 M1/M4/M5 iPad 以提升兼容性。";
-"ui51.device.upgradeToM1" = "切换至 M1";
-"ui51.device.layoutTitle" = "预期界面形态";
-"ui51.device.layout.regular" = "Regular · 平板多栏宽屏布局";
-"ui51.device.layout.compact" = "Compact · 手机单栏紧凑布局";
-"ui51.device.reportedIOS.title" = "对外报告 iOS 版本";
-"ui51.device.reportedIOS.help" = "在 macOS 26/27 下覆盖进程向应用暴露的 iOS 版本号（NSProcessInfo、UIDevice、sysctl、MobileGestalt）。";
-"ui51.device.reportedIOS.automatic" = "自动（推荐）";
-"ui51.device.reportedIOS.followHost" = "跟随宿主 iOSSupportVersion";
-"ui51.device.reportedIOS.compat18_3" = "iOS 18.3 兼容回退（22D63）";
+"device.modernGroup" = "推荐 Apple Silicon iPad 机型";
+"device.iphoneGroup" = "iPhone 机型（紧凑单栏布局）";
+"device.legacyBanner" = "当前仍在使用旧款机型档位（%@），建议切换至 M1/M4/M5 iPad 以提升兼容性。";
+"device.upgradeToM1" = "切换至 M1";
+"device.layoutTitle" = "预期界面形态";
+"device.layout.regular" = "Regular · 平板多栏宽屏布局";
+"device.layout.compact" = "Compact · 手机单栏紧凑布局";
+"device.reportedIOS.title" = "对外报告 iOS 版本";
+"device.reportedIOS.help" = "在 macOS 26/27 下覆盖进程向应用暴露的 iOS 版本号（NSProcessInfo、UIDevice、sysctl、MobileGestalt）。";
+"device.reportedIOS.automatic" = "自动（推荐）";
+"device.reportedIOS.followHost" = "跟随宿主 iOSSupportVersion";
+"device.reportedIOS.compat18_3" = "iOS 18.3 兼容回退（22D63）";
 
-"ui51.action.launch" = "启动";
-"ui51.action.launchSafeMode" = "安全模式单次启动";
-"ui51.action.quit" = "退出";
-"ui51.action.restart" = "重启使改动生效";
-"ui51.action.restartSafeMode" = "以安全模式重启";
-"ui51.action.configure" = "配置…";
+"action.launch" = "启动";
+"action.launchSafeMode" = "安全模式单次启动";
+"action.quit" = "退出";
+"action.restart" = "重启使改动生效";
+"action.restartSafeMode" = "以安全模式重启";
+"action.configure" = "配置…";
 
-"ui51.restart.bannerTitle" = "有 %d 项改动需要重启应用才能生效";
-"ui51.restart.badge" = "需重启";
-"ui51.restart.field.iosDeviceModel" = "设备机型";
-"ui51.restart.field.resolution" = "分辨率模式";
-"ui51.restart.field.windowSize" = "窗口尺寸";
-"ui51.restart.field.aspectRatio" = "宽高比";
-"ui51.restart.field.customScaler" = "分辨率倍率";
-"ui51.restart.field.windowCompatibility" = "窗口兼容";
-"ui51.restart.field.frameRateTarget" = "帧率上限";
-"ui51.restart.field.reportedIOSVersion" = "iOS 版本";
-"ui51.restart.field.notch" = "刘海适配";
-"ui51.restart.field.bypass" = "环境伪装";
-"ui51.restart.field.playChain" = "PlayChain";
-"ui51.restart.field.playChainDebugging" = "PlayChain 调试";
-"ui51.restart.field.metalHUD" = "Metal HUD";
-"ui51.restart.field.injectIntrospection" = "内省库";
-"ui51.restart.field.rootWorkDir" = "根目录兼容";
-"ui51.restart.field.hideTitleBar" = "隐藏标题栏";
-"ui51.restart.field.floatingWindow" = "悬浮置顶";
-"ui51.restart.field.enableNetworkRules" = "网络规则";
-"ui51.restart.field.blockedURLPatterns" = "拦截列表";
-"ui51.restart.field.keymapping" = "键盘映射";
-"ui51.restart.field.disableBuiltinMouse" = "禁用原生鼠标";
-"ui51.restart.field.blockSleepSpamming" = "限制 usleep";
-"ui51.restart.field.ignoreUnityKeyboardInitializationError" = "Unity 键盘修复";
+"restart.bannerTitle" = "有 %d 项改动需要重启应用才能生效";
+"restart.badge" = "需重启";
+"restart.field.iosDeviceModel" = "设备机型";
+"restart.field.resolution" = "分辨率模式";
+"restart.field.windowSize" = "窗口尺寸";
+"restart.field.aspectRatio" = "宽高比";
+"restart.field.customScaler" = "分辨率倍率";
+"restart.field.windowCompatibility" = "窗口兼容";
+"restart.field.frameRateTarget" = "帧率上限";
+"restart.field.reportedIOSVersion" = "iOS 版本";
+"restart.field.notch" = "刘海适配";
+"restart.field.bypass" = "环境伪装";
+"restart.field.playChain" = "PlayChain";
+"restart.field.playChainDebugging" = "PlayChain 调试";
+"restart.field.metalHUD" = "Metal HUD";
+"restart.field.injectIntrospection" = "内省库";
+"restart.field.rootWorkDir" = "根目录兼容";
+"restart.field.hideTitleBar" = "隐藏标题栏";
+"restart.field.floatingWindow" = "悬浮置顶";
+"restart.field.enableNetworkRules" = "网络规则";
+"restart.field.blockedURLPatterns" = "拦截列表";
+"restart.field.keymapping" = "键盘映射";
+"restart.field.disableBuiltinMouse" = "禁用原生鼠标";
+"restart.field.blockSleepSpamming" = "限制 usleep";
+"restart.field.ignoreUnityKeyboardInitializationError" = "Unity 键盘修复";
 
-"ui51.library.dropTitle" = "拖放 IPA 文件以安装";
-"ui51.library.dropSubtitle" = "PlayCover 将自动解压、注入 PlayTools、签名并加入应用库。";
-"ui51.library.table.app" = "应用";
-"ui51.library.table.version" = "版本";
-"ui51.library.table.device" = "机型";
-"ui51.library.table.pixelLoad" = "像素负载";
-"ui51.library.table.status" = "状态";
-"ui51.library.status.ready" = "就绪";
-"ui51.library.status.noPlayTools" = "未注入";
+"library.dropTitle" = "拖放 IPA 文件以安装";
+"library.dropSubtitle" = "MacOver 将自动解压、注入 PlayTools、签名并加入应用库。";
+"library.table.app" = "应用";
+"library.table.version" = "版本";
+"library.table.device" = "机型";
+"library.table.pixelLoad" = "像素负载";
+"library.table.status" = "状态";
+"library.status.ready" = "就绪";
+"library.status.noPlayTools" = "未注入";
 
-"ui51.inspector.emptyTitle" = "未选中项目";
-"ui51.inspector.emptySubtitle" = "选择一个已安装应用或商店条目，查看快捷开关与实时预览。";
-"ui51.inspector.quickControls" = "常用快捷开关";
-"ui51.inspector.defaultKeymap" = "默认按键映射";
-"ui51.inspector.none" = "无";
-"ui51.inspector.previewTitle" = "显示器与窗口比例尺预览";
-"ui51.inspector.pendingRestart" = "待重启生效变更";
-"ui51.inspector.toggle" = "切换检查器";
+"inspector.emptyTitle" = "未选中项目";
+"inspector.emptySubtitle" = "选择一个已安装应用或商店条目，查看快捷开关与实时预览。";
+"inspector.quickControls" = "常用快捷开关";
+"inspector.defaultKeymap" = "默认按键映射";
+"inspector.none" = "无";
+"inspector.previewTitle" = "显示器与窗口比例尺预览";
+"inspector.pendingRestart" = "待重启生效变更";
+"inspector.toggle" = "切换检查器";
 
-"ui51.store.downloadInstall" = "下载并安装";
-"ui51.store.installedVersion" = "已安装：%@ · 商店：%@";
+"store.downloadInstall" = "下载并安装";
+"store.installedVersion" = "已安装：%@ · 商店：%@";
 
-"ui51.advanced.troubleshooting" = "排障与开发者选项（已开启 %d 项）";
-"ui51.advanced.troubleshootingZero" = "排障与开发者选项";
+"advanced.troubleshooting" = "排障与开发者选项（已开启 %d 项）";
+"advanced.troubleshootingZero" = "排障与开发者选项";
 
-"ui51.plugins.safeModeDesc" = "单次安全模式会临时跳过第三方插件、网络规则、帧率限制、iOS 版本覆盖并将缩放重置为 1.0×，绝不会修改磁盘上已保存的配置文件。";
+"plugins.safeModeDesc" = "单次安全模式会临时跳过第三方插件、网络规则、帧率限制、iOS 版本覆盖并将缩放重置为 1.0×，绝不会修改磁盘上已保存的配置文件。";
 
-"ui51.input.newKeymapPlaceholder" = "新按键方案名称…";
-"ui51.input.create" = "创建";
-"ui51.input.importNamed" = "导入为…";
+"input.newKeymapPlaceholder" = "新按键方案名称…";
+"input.create" = "创建";
+"input.importNamed" = "导入为…";
 
-"ui51.settings.tab.general" = "通用";
-"ui51.settings.tab.signing" = "签名";
-"ui51.settings.general.appearance" = "外观与液态玻璃";
-"ui51.settings.general.glassNote" = "PlayCover 5.1 使用原生 macOS 26+ Liquid Glass 材质，并在系统开启“降低透明度”时自动适配高对比度外观。";
-"ui51.settings.general.menuBarExtra" = "在顶部菜单栏显示 PlayCover 快捷菜单";
+"settings.tab.general" = "通用";
+"settings.tab.signing" = "签名";
+"settings.general.appearance" = "外观与液态玻璃";
+"settings.general.glassNote" = "MacOver 1.0 使用原生 macOS 26+ Liquid Glass 材质，并在系统开启“降低透明度”时自动适配高对比度外观。";
+"settings.general.menuBarExtra" = "在顶部菜单栏显示 MacOver 快捷菜单";
 
-"ui51.menubar.openWindow" = "显示 PlayCover 主窗口";
-"ui51.menubar.importIPA" = "导入 IPA…";
+"menubar.openWindow" = "显示 MacOver 主窗口";
+"menubar.importIPA" = "导入 IPA…";

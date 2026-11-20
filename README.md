@@ -1,33 +1,34 @@
 <div id="top"></div>
 
-‎<h1 align="center">[![Contributors][contributors-shield]][contributors-url]
+<h1 align="center">
+
+[![Contributors][contributors-shield]][contributors-url]
 [![Forks][forks-shield]][forks-url]
 [![Stargazers][stars-shield]][stars-url]
 [![Issues][issues-shield]][issues-url]
-[![GPLv3 License][license-shield]][license-url]
-[![Weblate](https://img.shields.io/weblate/progress/playcover?style=for-the-badge)](https://hosted.weblate.org/projects/playcover/playcover/)
+[![GPLv3 + AGPLv3 License][license-shield]][license-url]
+
 </h1>
-
-
 
 <!-- PROJECT LOGO -->
 <br />
 <div align="center">
-  <a href="https://github.com/PlayCover/PlayCover">
-    <img src="images/logo.png" alt="Logo" width="80" height="80">
+  <a href="https://github.com/MakeDieOrz/MacOver">
+    <img src="images/logo.png" alt="MacOver Logo" width="96" height="96">
   </a>
 
-  <h3 align="center">PlayCover</h3>
+  <h3 align="center">MacOver</h3>
 
   <p align="center">
-    Run iOS apps and games on Apple Silicon Macs with mouse, keyboard and controller support.
+    <em>Fake it till you Mac it.</em><br />
+    Run iOS apps and games natively on Apple Silicon Macs (macOS 26 Tahoe+) with Liquid Glass UI, hardened runtime virtualization, and mouse, keyboard &amp; controller support.
     <br />
     <br />
-    <a href="https://playcover.github.io/PlayBook">Documentation</a>
+    <a href="https://github.com/MakeDieOrz/MacOver/releases">Releases</a>
     ·
-    <a href="https://discord.gg/RNCHsQHr3S">Discord</a>
+    <a href="https://github.com/MakeDieOrz/MacOver/issues">Report Bug / Request Feature</a>
     ·
-    <a href="https://playcover.io/">Website</a>
+    <a href="./PlayTools/README.md">PlayTools Internals</a>
     <br />
     <strong>English</strong>
     ·
@@ -38,57 +39,42 @@
 <!-- ABOUT THE PROJECT -->
 ## About The Project
 
-Welcome to PlayCover 5.0! PlayCover enables you to run iOS apps and games natively on Apple Silicon Macs running macOS 12.0 Monterey through macOS 15 Sequoia (and newer).
+Welcome to **MacOver 1.0.0** — a clean-room architectural continuation and macOS 26 Tahoe makeover derived from [PlayCover](https://github.com/PlayCover/PlayCover) and [PlayTools](https://github.com/PlayCover/PlayTools).
 
-PlayCover works by wrapping iOS binaries as Mac Catalyst apps and injecting `PlayTools`, preserving native ARM64 performance while bridging display scaling, input controls, and mobile runtime APIs.
+MacOver runs iOS binaries directly on Apple Silicon ARM64 hardware via Mac Catalyst and the injected `PlayTools` runtime—preserving native performance without CPU instruction emulation while giving iOS apps a full macOS desktop makeover: Liquid Glass workspace UI, display & ProMotion frame-rate controls, input mapping, network rules, isolated credential storage (`PlayChain`), and hardened runtime virtualization.
 
-PlayCover also allows you to map custom touch controls to keyboard, mouse, trackpad, and game controllers—including WASD movement, camera control, left/right clicks, and individual keymapping—beyond what standard sideloading methods offer.
+### Key Highlights in MacOver 1.0.0
 
-### What's New in PlayCover 5.0
+- **macOS 26 Tahoe Liquid Glass UI**: Redesigned navigation, library cards/table, live inspector preview, scenario presets, and GPU pixel budget meter built natively on macOS 26.0+ materials.
+- **Unified Monorepo & Zero-Patch Native Build**: `MacOver.app` (`PlayCover` scheme), `PlayCoverHelper`, `PlayTools` (`PlayTools.framework` + `AKInterface.bundle`), and `Packages/PlayCoverModules` build natively inside `PlayCover.xcworkspace` without Carthage or external patch diffs.
+- **Zero-Dependency SwiftPM Architecture**: Core logic, Mach-O/PlayTools injection, keymapping, sandbox/helper validation, and async UI primitives live cleanly in `Packages/PlayCoverModules` (`PlayCoverCore`, `PlayCoverMachO`, `PlayCoverKeymapping`, `PlayCoverSandbox`, `PlayCoverUI`).
+- **Isolated Coexistence (`app.makedie.MacOver`)**: Dedicated Bundle ID, container (`~/Library/Containers/app.makedie.MacOver`), KeyCover namespace, and dual-hiding anti-detection so MacOver runs cleanly alongside legacy PlayCover installs.
+- **Structured DI & Dual-Track Privilege Escalation**: Explicit dependency wiring (`PlayCoverDependencies`), non-blocking async SwiftUI alert sheets (`AlertPresenter`), and `SMAppService` privileged XPC `PlayCoverHelper` (`app.makedie.MacOver.Helper`) with AppleScript admin fallback for ad-hoc builds.
+- **Safe Mode, Manifest Plugins & Syscall Tracing**: Automatic early-crash recovery (`PTSafeMode`), `PluginManifest.json`-validated `UserPlugins` with dynamic registration (`PTRegistration`), direct-touch mouse/multi-window routing, pre-migration `PlayedAppleDBBackup`, and `PLAYTOOLS_DEBUG_LOG=1` tracing.
 
-- **Unified Workspace & Zero-Patch Build**: `PlayCover`, `PlayCoverHelper`, `PlayTools` (`PlayTools.framework` + `AKInterface.bundle`), and `Packages/PlayCoverModules` build together natively inside `PlayCover.xcworkspace` without Carthage or external patch diffs.
-- **Modular SwiftPM Architecture**: Pure core, Mach-O/PlayTools injection, keymapping, sandbox/helper security, and UI presentation components live in `Packages/PlayCoverModules` (`PlayCoverCore`, `PlayCoverMachO`, `PlayCoverKeymapping`, `PlayCoverSandbox`, `PlayCoverUI`) with zero external third-party package dependencies.
-- **Structured Dependency Injection & Async UI**: App-wide state is wired explicitly through `PlayCoverDependencies` (removing global `static shared` singletons) paired with non-blocking async SwiftUI alert sheets (`AlertPresenter`).
-- **Dual-Track Privilege Escalation**: Supports a hardened `PlayCoverHelper` privileged XPC daemon (`SMAppService` on macOS 13+ when signed with Developer ID) with automatic AppleScript administrator fallback for local/ad-hoc builds.
-- **Safe Mode, Manifest Plugins & Tracing**: Automatic early-crash recovery (`PTSafeMode`), `PluginManifest.json`-driven `UserPlugins` with dynamic anti-detection registration (`PTRegistration`), macOS 15 Sequoia `AKInterface` window geometry bridging, pre-migration `PlayedAppleDBBackup`, and `PLAYTOOLS_DEBUG_LOG=1` C/ObjC syscall tracing.
+![MacOver Light Showcase](./images/light.png#gh-light-mode-only)
+![MacOver Dark Showcase](./images/dark.png#gh-dark-mode-only)
 
-Localisations are handled in [Weblate](https://hosted.weblate.org/projects/playcover/).
-
-![Fancy logo](./images/dark.png#gh-dark-mode-only)
-![Fancy logo](./images/light.png#gh-light-mode-only)
-
-<p align="right"><a href="#top">⬆️ Back to top️</a></p>
+<p align="right"><a href="#top">⬆️ Back to top</a></p>
 
 <!-- GETTING STARTED -->
 ## Getting Started
 
-Follow the instructions below to get started with PlayCover on Apple Silicon Macs.
-
 ### Prerequisites
 
-- **Apple Silicon Mac** (M-series SoC) running **macOS 12.0 Monterey or newer** (tested on macOS 14 Sonoma and macOS 15 Sequoia). Intel Macs are not supported; explore Bootcamp or emulators instead.
-- **Building from source**: Xcode (Swift 5.9+ toolchain) and Python 3 (optional, for the headless runtime harness).
+- **Apple Silicon Mac** (M-series SoC) running **macOS 26.0 Tahoe or newer**. Intel Macs are not supported.
+- **Building from source**: Xcode (macOS 26 SDK / Swift toolchain) and Python 3 (optional, for the headless runtime harness).
 
 ### Download
 
-You can download stable releases [here](https://github.com/PlayCover/PlayCover/releases), or build from source using the commands below.
+Download prebuilt releases from [GitHub Releases](https://github.com/MakeDieOrz/MacOver/releases), or build from source using the commands below.
 
 ### Documentation
 
-To learn how to set up and use PlayCover, visit the documentation [here](https://playcover.github.io/PlayBook), or see [PlayTools/README.md](./PlayTools/README.md) for runtime hook, plugin, and Safe Mode internals.
+- Runtime hooks, Safe Mode, `PluginManifest.json` user plugins, and `PLAYTOOLS_DEBUG_LOG=1` diagnostics: see [PlayTools/README.md](./PlayTools/README.md) ([简体中文](./PlayTools/README.zh-CN.md)).
+- Host & module overview: see [Documentation.docc/Documentation.md](./Documentation.docc/Documentation.md).
 
-### Homebrew Cask
-We host a [Homebrew](https://brew.sh) tap with the [PlayCover cask](https://github.com/PlayCover/homebrew-playcover/blob/master/Casks/playcover-community.rb). To install from it run:
-
-```sh
-brew install --cask PlayCover/playcover/playcover-community
-```
-
-To uninstall:
-1. Remove PlayCover using `brew uninstall --cask playcover-community`;
-2. Untap `PlayCover/playcover` with `brew untap PlayCover/playcover`.
-
-### Building & Testing from Source (5.0)
+### Building & Testing from Source
 
 Open `PlayCover.xcworkspace` in Xcode, or run the full verification suite from the repository root (if `xcode-select` points to CommandLineTools, keep `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`):
 
@@ -104,7 +90,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
   CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
   test
 
-# 3. Build Release app bundle (embeds PlayCoverHelper & PlayTools.framework)
+# 3. Build Release MacOver.app bundle (embeds PlayCoverHelper & PlayTools.framework)
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
   -workspace PlayCover.xcworkspace \
   -scheme PlayCover \
@@ -117,35 +103,32 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer ./ci/run_static_analysi
 
 # 5. Run live Mac Catalyst runtime harness against built PlayTools.framework
 python3 Tests/RuntimeHarness/run_runtime_harness.py \
-  --playtools-framework <path/to/PlayTools.framework> \
+  --playtools-framework <path/to/MacOver.app/Contents/Frameworks/PlayTools.framework> \
   --verbose
 ```
 
-<p align="right"><a href="#top">⬆️ Back to top️</a></p>
-
-
+<p align="right"><a href="#top">⬆️ Back to top</a></p>
 
 <!-- LICENSE -->
 ## License
 
-Distributed under the GPLv3 License. See `LICENSE` for more information.
+This repository combines two copyleft-compatible components derived from upstream PlayCover:
 
+- **Host Application & Modules (`MacOver`, derived from [`PlayCover/PlayCover`](https://github.com/PlayCover/PlayCover))**: Licensed under the **GNU General Public License v3.0 (GPL-3.0)**. See [LICENSE](./LICENSE).
+- **Injected Runtime (`PlayTools/`, derived from [`PlayCover/PlayTools@e222ce0`](https://github.com/PlayCover/PlayTools))**: Licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**. See [PlayTools/LICENSE](./PlayTools/LICENSE).
 
+Combined binary distributions (such as `MacOver.app`, which embeds `PlayTools.framework`) are distributed under **GPL-3.0 / AGPL-3.0** (subject to AGPL-3.0 §13 and GPL-3.0 §13 terms).
 
-<!-- CONTACT -->
-## Contact
+<!-- ACKNOWLEDGMENTS & UPSTREAM CREDITS -->
+## Upstream Credits & Contact
 
-Lucas Lee - playcover@lucas.icu
+MacOver builds upon the work of the [PlayCover](https://github.com/PlayCover/PlayCover) community:
 
-Depal - depal@playcover.io
+- Lucas Lee - playcover@lucas.icu
+- Depal - depal@playcover.io
+- Thanks to @iVoider for creating PlayCover!
 
-
-
-
-<!-- ACKNOWLEDGMENTS -->
-## Libraries Used
-
-These open source libraries are used in PlayCover 5.0:
+### Libraries Used
 
 * [PTFakeTouch](https://github.com/Ret70/PTFakeTouch)
 * [DownloadManager](https://github.com/shapedbyiris/download-manager)
@@ -155,22 +138,18 @@ These open source libraries are used in PlayCover 5.0:
 * [SwiftSoup](https://github.com/scinfu/SwiftSoup)
 * [Sparkle](https://github.com/sparkle-project/Sparkle)
 * [SwordRPC](https://github.com/spotlightishere/SwordRPC)
-* [inject](https://github.com/paradiseduo/inject) *(original Mach-O injection inspiration; PlayCover 5.0 uses native `PlayCoverMachO`)*
+* [inject](https://github.com/paradiseduo/inject) *(original Mach-O injection inspiration; MacOver uses native `PlayCoverMachO`)*
 
-* Thanks to @iVoider for creating such a great project!
-
-<p align="right"><a href="#top">⬆️ Back to top️</a></p>
-
-
+<p align="right"><a href="#top">⬆️ Back to top</a></p>
 
 <!-- MARKDOWN LINKS & IMAGES -->
-[contributors-shield]: https://img.shields.io/github/contributors/PlayCover/PlayCover.svg?style=for-the-badge
-[contributors-url]: https://github.com/PlayCover/PlayCover/graphs/contributors
-[forks-shield]: https://img.shields.io/github/forks/PlayCover/PlayCover.svg?style=for-the-badge
-[forks-url]: https://github.com/PlayCover/PlayCover/network/members
-[stars-shield]: https://img.shields.io/github/stars/PlayCover/PlayCover.svg?style=for-the-badge
-[stars-url]: https://github.com/PlayCover/PlayCover/stargazers
-[issues-shield]: https://img.shields.io/github/issues/PlayCover/PlayCover.svg?style=for-the-badge
-[issues-url]: https://github.com/PlayCover/PlayCover/issues
-[license-shield]: https://img.shields.io/github/license/PlayCover/PlayCover.svg?style=for-the-badge
-[license-url]: https://github.com/PlayCover/PlayCover/blob/master/LICENSE
+[contributors-shield]: https://img.shields.io/github/contributors/MakeDieOrz/MacOver.svg?style=for-the-badge
+[contributors-url]: https://github.com/MakeDieOrz/MacOver/graphs/contributors
+[forks-shield]: https://img.shields.io/github/forks/MakeDieOrz/MacOver.svg?style=for-the-badge
+[forks-url]: https://github.com/MakeDieOrz/MacOver/network/members
+[stars-shield]: https://img.shields.io/github/stars/MakeDieOrz/MacOver.svg?style=for-the-badge
+[stars-url]: https://github.com/MakeDieOrz/MacOver/stargazers
+[issues-shield]: https://img.shields.io/github/issues/MakeDieOrz/MacOver.svg?style=for-the-badge
+[issues-url]: https://github.com/MakeDieOrz/MacOver/issues
+[license-shield]: https://img.shields.io/github/license/MakeDieOrz/MacOver.svg?style=for-the-badge
+[license-url]: https://github.com/MakeDieOrz/MacOver/blob/master/LICENSE

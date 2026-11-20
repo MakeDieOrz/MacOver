@@ -90,6 +90,24 @@ final class PTCallerAddressMathTests: XCTestCase {
         XCTAssertTrue(cacheable)
 
         XCTAssertEqual(
+            pt_classify_caller_image_path(
+                "/Users/u/Library/Containers/app.makedie.MacOver/Frameworks/PlayTools.framework/PlayTools",
+                &cacheable
+            ),
+            UInt8(PT_CALLER_PLAYTOOLS)
+        )
+        XCTAssertTrue(cacheable)
+
+        XCTAssertEqual(
+            pt_classify_caller_image_path(
+                "/Users/u/Library/Containers/app.makedie.MacOver/Frameworks/PlayTools.framework/PlugIns/AKInterface.bundle/Contents/MacOS/AKInterface",
+                &cacheable
+            ),
+            UInt8(PT_CALLER_PLAYTOOLS)
+        )
+        XCTAssertTrue(cacheable)
+
+        XCTAssertEqual(
             pt_classify_caller_image_path("/Applications/Game.app/Contents/MacOS/Game", &cacheable),
             UInt8(PT_CALLER_APP)
         )

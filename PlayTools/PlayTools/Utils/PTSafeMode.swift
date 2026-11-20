@@ -115,7 +115,7 @@ public enum PTDiagnosticLogger {
     public static func defaultStateDirectory() -> URL {
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
-        return base.appendingPathComponent("io.playcover.PlayTools", isDirectory: true)
+        return base.appendingPathComponent("app.makedie.PlayTools", isDirectory: true)
     }
 
     public var stateDirectoryURL: URL {

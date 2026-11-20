@@ -486,7 +486,7 @@ class AKPlugin: NSObject, Plugin {
             return URL(fileURLWithPath: overridePath)
         }
         let settingsDir = URL(fileURLWithPath: resolveHostUserRoot())
-            .appendingPathComponent("Library/Containers/io.playcover.PlayCover")
+            .appendingPathComponent("Library/Containers/app.makedie.MacOver")
             .appendingPathComponent("App Settings")
         if !bundleIdentifier.isEmpty {
             let primary = settingsDir.appendingPathComponent("\(bundleIdentifier).plist")

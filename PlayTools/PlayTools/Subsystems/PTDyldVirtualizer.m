@@ -57,7 +57,8 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_class(const char *n
             }
             break;
         case 'M':
-            if (PT_HAS_PREFIX_LIT(name, "MediaVolumeLoader")) {
+            if (PT_HAS_PREFIX_LIT(name, "MediaVolumeLoader") ||
+                PT_HAS_PREFIX_LIT(name, "MacOver")) {
                 return YES;
             }
             break;
@@ -110,6 +111,7 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_class(const char *n
         }
         if (strstr(name, "AKInterface") != NULL ||
             strstr(name, "AKPlugin") != NULL ||
+            strstr(name, "MacOver") != NULL ||
             strstr(name, "PTFake") != NULL ||
             strstr(name, "SwordRPC") != NULL) {
             return YES;
@@ -127,6 +129,7 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_protocol_name(const
         PT_HAS_PREFIX_LIT(name, "PTNetwork") ||
         PT_HAS_PREFIX_LIT(name, "PlayTools") ||
         PT_HAS_PREFIX_LIT(name, "PlayCover") ||
+        PT_HAS_PREFIX_LIT(name, "MacOver") ||
         PT_HAS_PREFIX_LIT(name, "PlayShadow") ||
         PT_HAS_PREFIX_LIT(name, "AKInterface")) {
         return YES;
@@ -1247,6 +1250,8 @@ static BOOL pt_dlerror_contains_hidden_token(const char *s) {
         "AKInterface",
         "UserPlugins",
         "PlayCover",
+        "MacOver",
+        "app.makedie",
         "AppKit",
         "UIKitMacHelper",
         "/Users/"

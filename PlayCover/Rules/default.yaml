@@ -1,6 +1,7 @@
 blacklist:
     - /Applications
     - /Developer
+    - /Library/Application Support/MacOver
     - /Library/Application Support/PlayCover
     - /Library/Developer
     - /Library/Extensions
@@ -10,6 +11,7 @@ blacklist:
     - /Library/MobileSubstrate/MobileSubstrate.dylib
     - /Library/PreferenceBundles/LaunchInSafeMode.bundle
     - /Library/PrivilegedHelperTools
+    - /Applications/MacOver.app
     - /Applications/PlayCover.app
     - /Applications/Cydia.app
     - /bin/ls
@@ -77,10 +79,17 @@ blacklist:
     - /usr/local/bin/brew
     - ${HomeDirectory}/Applications
     - ${HomeDirectory}/.ssh
+    - ${HomeDirectory}/Library/Application Support/MacOver
     - ${HomeDirectory}/Library/Application Support/PlayCover
+    - ${HomeDirectory}/Library/Frameworks/PlayTools.framework
+    - ${HomeDirectory}/Library/Caches/app.makedie.MacOver
     - ${HomeDirectory}/Library/Caches/io.playcover.PlayCover
+    - ${HomeDirectory}/Library/Preferences/app.makedie.MacOver.plist
     - ${HomeDirectory}/Library/Preferences/io.playcover.PlayCover.plist
     - ${HomeDirectory}/Library/Saved Application State
+    - ${HomeDirectory}/Library/Containers/app.makedie.MacOver/CACHE
+    - ${HomeDirectory}/Library/Containers/app.makedie.MacOver/VERSION
+    - ${HomeDirectory}/Library/Containers/app.makedie.MacOver/Sources.plist
     - ${HomeDirectory}/Library/Containers/io.playcover.PlayCover/CACHE
     - ${HomeDirectory}/Library/Containers/io.playcover.PlayCover/VERSION
     - ${HomeDirectory}/Library/Containers/io.playcover.PlayCover/Sources.plist
@@ -91,11 +100,11 @@ whitelist:
 allow:
     - (allow user-preference-write (preference-domain ".GlobalPreferences"))
     - (allow user-preference-read (preference-domain ".GlobalPreferences"))
-    - (allow file-read-metadata (literal "${HomeDirectory}/Library/Containers") (literal "${HomeDirectory}/Library/Containers/io.playcover.PlayCover") (literal "${HomeDirectory}/Library/Containers/io.playcover.PlayCover/Applications") (literal "${HomeDirectory}/Library/Containers/io.playcover.PlayCover/App Settings") (literal "${HomeDirectory}/Library/Containers/io.playcover.PlayCover/Entitlements") (literal "${HomeDirectory}/Library/Containers/io.playcover.PlayCover/Keymapping") (literal "${HomeDirectory}/Library/Containers/io.playcover.PlayCover/PlayChain") (literal "${HomeDirectory}/Library/Group Containers"))
-    - (allow file-read* file-read-metadata file-ioctl file-map-executable (subpath "${HomeDirectory}/Library/Containers/io.playcover.PlayCover/Applications/${BundleID}.app"))
-    - (allow file-read* file-read-metadata file-ioctl (literal "${HomeDirectory}/Library/Containers/io.playcover.PlayCover/Entitlements/${BundleID}.plist"))
-    - (allow file* file-read* file-write* file-write-data file-read-metadata file-ioctl (subpath "${HomeDirectory}/Library/Containers/${BundleID}") (prefix "${HomeDirectory}/Library/Containers/io.playcover.PlayCover/App Settings/${BundleID}.plist") (subpath "${HomeDirectory}/Library/Containers/io.playcover.PlayCover/Keymapping/${BundleID}") (prefix "${HomeDirectory}/Library/Containers/io.playcover.PlayCover/PlayChain/${BundleID}.db"))
-    - (allow file-read* file-read-metadata file-ioctl file-map-executable (subpath "${HomeDirectory}/Library/Frameworks/PlayTools.framework"))
+    - (allow file-read-metadata (literal "${HomeDirectory}/Library/Containers") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/Applications") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/Frameworks") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/App Settings") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/Entitlements") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/Keymapping") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/PlayChain") (literal "${HomeDirectory}/Library/Group Containers"))
+    - (allow file-read* file-read-metadata file-ioctl file-map-executable (subpath "${HomeDirectory}/Library/Containers/app.makedie.MacOver/Applications/${BundleID}.app"))
+    - (allow file-read* file-read-metadata file-ioctl (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/Entitlements/${BundleID}.plist"))
+    - (allow file* file-read* file-write* file-write-data file-read-metadata file-ioctl (subpath "${HomeDirectory}/Library/Containers/${BundleID}") (prefix "${HomeDirectory}/Library/Containers/app.makedie.MacOver/App Settings/${BundleID}.plist") (subpath "${HomeDirectory}/Library/Containers/app.makedie.MacOver/Keymapping/${BundleID}") (prefix "${HomeDirectory}/Library/Containers/app.makedie.MacOver/PlayChain/${BundleID}.db"))
+    - (allow file-read* file-read-metadata file-ioctl file-map-executable (subpath "${HomeDirectory}/Library/Containers/app.makedie.MacOver/Frameworks/PlayTools.framework"))
 
 bypass:
     - (allow file-read* file-read-metadata file-ioctl (literal "/Library/Caches/com.apple.iconservices.store"))

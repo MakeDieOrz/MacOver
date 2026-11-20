@@ -16,13 +16,14 @@ class DiscordIPC {
     private var rpc: SwordRPC?
     private var termObserver: NSObjectProtocol?
 
-    private static let defaultAppID = "996108521680678993"
+    private static let defaultAppID = ""
 
     func initialize() {
         let custom = PlaySettings.shared.discordActivity
         guard custom.enable else { return }
 
         let appId = custom.applicationID.isEmpty ? Self.defaultAppID : custom.applicationID
+        guard !appId.isEmpty else { return }
         let details = custom.details
         let state = custom.state
         let image = custom.image
@@ -136,7 +137,7 @@ class DiscordIPC {
             activity.details = details.count == 1 ? "\(details) " : details
         }
 
-        let poweredStr = "Powered by PlayCover"
+        let poweredStr = "Powered by MacOver"
         if state.isEmpty {
             activity.state = poweredStr
         } else {
@@ -145,7 +146,7 @@ class DiscordIPC {
             activity.assets.largeText = poweredStr
         }
 
-        let logo = "https://raw.githubusercontent.com/PlayCover/PlaySite/master/src/assets/square-logo.png"
+        let logo = "https://raw.githubusercontent.com/MakeDieOrz/MacOver/master/images/logo.png"
         if image.isEmpty {
             let bundleID = Bundle.main.infoDictionary?["CFBundleIdentifier"] as? String ?? ""
             if let appImage = await loadImage(bundleID: bundleID) {
@@ -164,8 +165,8 @@ class DiscordIPC {
         activity.timestamps.start = Date()
 
         activity.buttons = [
-            RichPresence.Button(label: "Download PlayCover",
-                                url: "https://github.com/PlayCover/PlayCover/releases")
+            RichPresence.Button(label: "Download MacOver",
+                                url: "https://github.com/MakeDieOrz/MacOver/releases")
         ]
 
         return activity

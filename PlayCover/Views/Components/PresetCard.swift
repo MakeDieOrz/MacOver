@@ -53,7 +53,7 @@ struct PresetCard: View {
 
 struct RestartFieldBadge: View {
     var body: some View {
-        Text("ui51.restart.badge")
+        Text("restart.badge")
             .font(.caption2.weight(.semibold))
             .foregroundStyle(.orange)
             .padding(.horizontal, 6)
@@ -64,6 +64,6 @@ struct RestartFieldBadge: View {
 
 extension PlayCoverRestartField {
     var localizedKey: String {
-        "ui51.restart.field.\(rawValue)"
+        "restart.field.\(rawValue)"
     }
 }

@@ -91,7 +91,7 @@ public final class PTUnfairLock {
         let settingsDir = URL(fileURLWithPath: userRoot)
             .appendingPathComponent("Library")
             .appendingPathComponent("Containers")
-            .appendingPathComponent("io.playcover.PlayCover")
+            .appendingPathComponent("app.makedie.MacOver")
             .appendingPathComponent("App Settings")
         if !bundleIdentifier.isEmpty {
             let primary = settingsDir.appendingPathComponent("\(bundleIdentifier).plist")

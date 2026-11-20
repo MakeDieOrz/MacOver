@@ -26,7 +26,7 @@ struct SigningGuideView: View {
 
             statusSummarySection
 
-            DisclosureGroup("ui51.signing.wizard.title", isExpanded: $showWizard) {
+            DisclosureGroup("signing.wizard.title", isExpanded: $showWizard) {
                 wizardContent
                     .padding(.top, 8)
             }
@@ -58,9 +58,9 @@ struct SigningGuideView: View {
 
     private var headerSection: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("ui51.signing.guide.title")
+            Text("signing.guide.title")
                 .font(.title2.bold())
-            Text("ui51.signing.guide.subtitle")
+            Text("signing.guide.subtitle")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }
@@ -69,17 +69,17 @@ struct SigningGuideView: View {
     private var modeComparisonCards: some View {
         HStack(alignment: .top, spacing: 12) {
             SigningModeCard(
-                titleKey: "ui51.signing.mode.playchain.title",
-                badgeKey: "ui51.signing.mode.playchain.badge",
-                descKey: "ui51.signing.mode.playchain.desc",
+                titleKey: "signing.mode.playchain.title",
+                badgeKey: "signing.mode.playchain.badge",
+                descKey: "signing.mode.playchain.desc",
                 icon: "lock.shield.fill",
                 tint: .green,
                 isActive: sipEnabled || !amfiDisabledInRunningOS
             )
             SigningModeCard(
-                titleKey: "ui51.signing.mode.native.title",
-                badgeKey: "ui51.signing.mode.native.badge",
-                descKey: "ui51.signing.mode.native.desc",
+                titleKey: "signing.mode.native.title",
+                badgeKey: "signing.mode.native.badge",
+                descKey: "signing.mode.native.desc",
                 icon: "key.icloud.fill",
                 tint: .blue,
                 isActive: !sipEnabled && amfiDisabledInRunningOS
@@ -131,9 +131,9 @@ struct SigningGuideView: View {
 
     private var wizardContent: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("ui51.signing.wizard.step1").font(.caption)
-            Text("ui51.signing.wizard.step2").font(.caption)
-            Text("ui51.signing.wizard.step3").font(.caption).foregroundStyle(.secondary)
+            Text("signing.wizard.step1").font(.caption)
+            Text("signing.wizard.step2").font(.caption)
+            Text("signing.wizard.step3").font(.caption).foregroundStyle(.secondary)
 
             HStack(spacing: 10) {
                 Button("configSigning.action.configureAutomatic") {

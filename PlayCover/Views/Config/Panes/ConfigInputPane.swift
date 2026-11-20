@@ -67,7 +67,7 @@ struct ConfigInputPane: View {
 
             Section("playapp.keymap") {
                 HStack(spacing: 8) {
-                    TextField("ui51.input.newKeymapPlaceholder", text: $newKeymapName)
+                    TextField("input.newKeymapPlaceholder", text: $newKeymapName)
                         .textFieldStyle(.roundedBorder)
                         .onSubmit {
                             if newValidation == .valid {
@@ -77,12 +77,12 @@ struct ConfigInputPane: View {
 
                     validationIndicator(for: newValidation)
 
-                    Button("ui51.input.create") {
+                    Button("input.create") {
                         createKeymap()
                     }
                     .disabled(newValidation != .valid)
 
-                    Button("ui51.input.importNamed") {
+                    Button("input.importNamed") {
                         importKeymap()
                     }
                     .disabled(newValidation != .valid)

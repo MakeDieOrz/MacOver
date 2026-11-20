@@ -36,23 +36,23 @@ struct PlayCoverHelpMenuView: Commands {
 
         CommandGroup(replacing: .help) {
             Button("menubar.documentation", systemImage: "document.fill") {
-                if let url = URL(string: "https://docs.playcover.io") {
+                if let url = URL(string: "https://github.com/MakeDieOrz/MacOver#readme") {
                     NSWorkspace.shared.open(url)
                 }
             }
             Divider()
-            Button("menubar.website", systemImage: "network") {
-                if let url = URL(string: "https://playcover.io") {
+            Button("menubar.website", systemImage: "arrow.down.circle") {
+                if let url = URL(string: "https://github.com/MakeDieOrz/MacOver/releases") {
                     NSWorkspace.shared.open(url)
                 }
             }
             Button("menubar.github", systemImage: "arrow.up.right") {
-                if let url = URL(string: "https://github.com/PlayCover/PlayCover/") {
+                if let url = URL(string: "https://github.com/MakeDieOrz/MacOver") {
                     NSWorkspace.shared.open(url)
                 }
             }
-            Button("menubar.discord", systemImage: "arrow.up.right") {
-                if let url = URL(string: "https://discord.com/invite/playcover-871829896492642387") {
+            Button("menubar.discord", systemImage: "exclamationmark.bubble") {
+                if let url = URL(string: "https://github.com/MakeDieOrz/MacOver/issues") {
                     NSWorkspace.shared.open(url)
                 }
             }
@@ -73,7 +73,7 @@ struct PlayCoverViewMenuView: Commands {
     var body: some Commands {
         CommandGroup(replacing: .newItem) {}
         CommandGroup(replacing: .importExport) {
-            Button("ui51.menubar.importIPA", systemImage: "plus.app") {
+            Button("menubar.importIPA", systemImage: "plus.app") {
                 navState.pendingImportIPATrigger = UUID()
             }
             .keyboardShortcut("O", modifiers: .command)
@@ -83,13 +83,13 @@ struct PlayCoverViewMenuView: Commands {
             }
         }
         CommandGroup(after: .sidebar) {
-            Button("ui51.inspector.toggle", systemImage: "sidebar.right") {
+            Button("inspector.toggle", systemImage: "sidebar.right") {
                 navState.showInspector.toggle()
             }
             .keyboardShortcut("I", modifiers: .command)
 
             if navState.configTargetID != nil {
-                Button("ui51.sidebar.backToLibrary", systemImage: "chevron.left") {
+                Button("sidebar.backToLibrary", systemImage: "chevron.left") {
                     navState.closeConfiguration()
                 }
                 .keyboardShortcut("[", modifiers: .command)
@@ -174,16 +174,16 @@ struct PlayCoverMenuBarExtraContent: View {
     }
 
     var body: some View {
-        Button("ui51.menubar.openWindow") {
+        Button("menubar.openWindow") {
             NSApp.activate(ignoringOtherApps: true)
             openWindow(id: "main")
         }
 
         if !runningApps.isEmpty {
             Divider()
-            Section("ui51.sidebar.section.running") {
+            Section("sidebar.section.running") {
                 ForEach(runningApps) { app in
-                    Button("\(app.name) — \(NSLocalizedString("ui51.action.quit", comment: ""))") {
+                    Button("\(app.name) — \(NSLocalizedString("action.quit", comment: ""))") {
                         Task { await app.terminate() }
                     }
                 }
@@ -194,7 +194,7 @@ struct PlayCoverMenuBarExtraContent: View {
             Divider()
             ForEach(appsVM.apps.prefix(8)) { app in
                 Menu(app.name) {
-                    Button(app.isRunning ? "ui51.action.quit" : "ui51.action.launch") {
+                    Button(app.isRunning ? "action.quit" : "action.launch") {
                         Task {
                             if app.isRunning {
                                 await app.terminate()
@@ -203,7 +203,7 @@ struct PlayCoverMenuBarExtraContent: View {
                             }
                         }
                     }
-                    Button("ui51.action.launchSafeMode") {
+                    Button("action.launchSafeMode") {
                         Task {
                             if app.isRunning {
                                 await app.restart(safeModeOneShot: true)

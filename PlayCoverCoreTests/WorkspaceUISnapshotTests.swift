@@ -43,8 +43,8 @@ private struct DemoContext {
 }
 
 @MainActor
-final class PhaseBUIRealSnapshotTests: XCTestCase {
-    private static let suiteName = "io.playcover.PlayCoverCoreTests.PhaseBUISnapshots"
+final class WorkspaceUISnapshotTests: XCTestCase {
+    private static let suiteName = "app.makedie.MacOverCoreTests.WorkspaceUISnapshots"
 
     private var tempDir: URL?
     private var createdBundleIDs: [String] = []
@@ -57,7 +57,7 @@ final class PhaseBUIRealSnapshotTests: XCTestCase {
         savedLayoutRaw = UserDefaults.standard.string(forKey: "AppLibraryLayoutMode")
         savedLegacyList = UserDefaults.standard.object(forKey: "AppLibraryView")
         let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("PlayCoverPhaseBUISnapshots-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("MacOverWorkspaceUISnapshots-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         tempDir = dir
         let defaults = UserDefaults(suiteName: Self.suiteName)
@@ -132,7 +132,7 @@ final class PhaseBUIRealSnapshotTests: XCTestCase {
         )
         context.deps.downloadVM.storeAppData = SourceAppsData(
             bundleID: context.starlight.info.bundleIdentifier,
-            name: context.starlight.name, version: "5.1.0", itunesLookup: "", link: "", checksum: nil
+            name: context.starlight.name, version: "1.0.0", itunesLookup: "", link: "", checksum: nil
         )
         context.deps.downloadVM.next(.downloading, 0.0, 0.7)
         context.deps.downloadVM.updateProgress(0.64)
@@ -153,7 +153,7 @@ final class PhaseBUIRealSnapshotTests: XCTestCase {
         captureWindow(
             withDependencies(settingsRoot, context: context),
             spec: CaptureSpec(
-                name: "10_settings_window", windowTitle: "PlayCover 设置",
+                name: "10_settings_window", windowTitle: "MacOver 设置",
                 size: NSSize(width: 680, height: 420), appearance: .aqua, toolbarStyle: .preference, delay: 0.7
             )
         )
@@ -235,19 +235,19 @@ private enum SnapshotSupport {
     static func demoSpecs() -> [DemoAppSpec] {
         [
             DemoAppSpec(
-                slug: "starlight", displayName: "Starlight Odyssey", bundleID: "io.playcover.uitest.starlight",
-                version: "5.1.0", symbol: "sparkles", startColor: .systemIndigo, endColor: .systemCyan
+                slug: "starlight", displayName: "Starlight Odyssey", bundleID: "app.makedie.uitest.starlight",
+                version: "1.0.0", symbol: "sparkles", startColor: .systemIndigo, endColor: .systemCyan
             ),
             DemoAppSpec(
-                slug: "chrono", displayName: "Chrono Arena", bundleID: "io.playcover.uitest.chrono",
+                slug: "chrono", displayName: "Chrono Arena", bundleID: "app.makedie.uitest.chrono",
                 version: "2.4.1", symbol: "gamecontroller.fill", startColor: .systemOrange, endColor: .systemPink
             ),
             DemoAppSpec(
-                slug: "aether", displayName: "Aether Tactics", bundleID: "io.playcover.uitest.aether",
+                slug: "aether", displayName: "Aether Tactics", bundleID: "app.makedie.uitest.aether",
                 version: "3.0.2", symbol: "bolt.shield.fill", startColor: .systemTeal, endColor: .systemBlue
             ),
             DemoAppSpec(
-                slug: "retro", displayName: "Retro Runner", bundleID: "io.playcover.uitest.retro",
+                slug: "retro", displayName: "Retro Runner", bundleID: "app.makedie.uitest.retro",
                 version: "1.8.0", symbol: "arcade.stick.console.fill", startColor: .systemPurple, endColor: .systemRed
             )
         ]
@@ -363,7 +363,7 @@ private enum SnapshotSupport {
             bitmapDataPlanes: nil, pixelsWide: 256, pixelsHigh: 256, bitsPerSample: 8, samplesPerPixel: 4,
             hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
         ), let graphicsContext = NSGraphicsContext(bitmapImageRep: bitmap) else {
-            throw NSError(domain: "PhaseBUIRealSnapshotTests", code: 1)
+            throw NSError(domain: "WorkspaceUISnapshotTests", code: 1)
         }
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = graphicsContext

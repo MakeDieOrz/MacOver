@@ -86,7 +86,7 @@ struct AppLibraryDetailView: View {
                     Image(systemName: "slider.horizontal.3")
                 }
                 .disabled(selectedApp == nil)
-                .help("ui51.action.configure")
+                .help("action.configure")
             }
 
             ToolbarSpacer(.fixed, placement: .primaryAction)
@@ -107,7 +107,7 @@ struct AppLibraryDetailView: View {
                 } label: {
                     Image(systemName: "sidebar.right")
                 }
-                .help("ui51.inspector.toggle")
+                .help("inspector.toggle")
             }
         }
         .alert("alert.app.preferences", isPresented: Binding(

@@ -92,7 +92,7 @@ final class PlaySettingsTests: XCTestCase {
         unsetenv("PLAYTOOLS_SETTINGS_PLIST")
         let fakeUserRoot = dir.appendingPathComponent("userroot", isDirectory: true)
         let appSettingsDir = fakeUserRoot
-            .appendingPathComponent("Library/Containers/io.playcover.PlayCover/App Settings", isDirectory: true)
+            .appendingPathComponent("Library/Containers/app.makedie.MacOver/App Settings", isDirectory: true)
         try FileManager.default.createDirectory(at: appSettingsDir, withIntermediateDirectories: true)
 
         let containerPath = fakeUserRoot
@@ -154,7 +154,7 @@ final class PlaySettingsTests: XCTestCase {
         let dir = try XCTUnwrap(tempDir)
         let fakeUserRoot = dir.appendingPathComponent("root", isDirectory: true)
         let appSettingsDir = fakeUserRoot
-            .appendingPathComponent("Library/Containers/io.playcover.PlayCover/App Settings", isDirectory: true)
+            .appendingPathComponent("Library/Containers/app.makedie.MacOver/App Settings", isDirectory: true)
         try FileManager.default.createDirectory(at: appSettingsDir, withIntermediateDirectories: true)
 
         // Relative PLAYTOOLS_SETTINGS_PLIST must be ignored
@@ -331,12 +331,12 @@ final class PlaySettingsTests: XCTestCase {
         XCTAssertEqual(ps.customScaler, 2.5)
     }
 
-    func testFrameRateRangeClampingAndSafeModeOverrides51() throws {
+    func testFrameRateRangeClampingAndSafeModeOverrides() throws {
         let dir = try XCTUnwrap(tempDir)
-        let url = dir.appendingPathComponent("com.phase51.test.plist")
+        let url = dir.appendingPathComponent("com.example.settings.test.plist")
 
         var data = AppSettingsData()
-        data.bundleIdentifier = "com.phase51.test"
+        data.bundleIdentifier = "com.example.settings.test"
         data.customScaler = 1.75
         data.inverseScreenValues = true
         data.windowFixMethod = 1
@@ -355,7 +355,7 @@ final class PlaySettingsTests: XCTestCase {
             }
         }
 
-        let ps = PlaySettings(settingsURL: url, bundleIdentifier: "com.phase51.test")
+        let ps = PlaySettings(settingsURL: url, bundleIdentifier: "com.example.settings.test")
         XCTAssertFalse(PTSafeMode.isActive)
         XCTAssertTrue(ps.inverseScreenValues)
         XCTAssertEqual(ps.windowFixMethod, 1)

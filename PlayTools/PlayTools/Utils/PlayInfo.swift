@@ -8,7 +8,7 @@ import Foundation
 class PlayInfo: NSObject {
     static var isLauncherInstalled: Bool {
         return AKInterface.shared?
-            .urlForApplicationWithBundleIdentifier("io.playcover.PlayCover") != nil
+            .urlForApplicationWithBundleIdentifier("app.makedie.MacOver") != nil
     }
 
     @objc static var isUnrealEngine: Bool {

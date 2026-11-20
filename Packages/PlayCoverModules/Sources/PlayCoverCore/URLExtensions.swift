@@ -102,7 +102,7 @@ public extension URL {
         }
 
         let queue = OperationQueue()
-        queue.name = "io.playcover.PlayCover.URLExtension"
+        queue.name = "app.makedie.MacOver.URLExtension"
         queue.qualityOfService = .userInitiated
         queue.maxConcurrentOperationCount = 15
 

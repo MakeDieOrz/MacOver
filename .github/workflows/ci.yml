@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches:
+      - master
       - main
       - dev
   pull_request:
@@ -58,7 +59,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             clean build
 
-          PLAYTOOLS_BIN="${RUNNER_TEMP}/dd-release/Build/Products/Release/PlayCover.app/Contents/Frameworks/PlayTools.framework/Versions/A/PlayTools"
+          PLAYTOOLS_BIN="${RUNNER_TEMP}/dd-release/Build/Products/Release/MacOver.app/Contents/Frameworks/PlayTools.framework/Versions/A/PlayTools"
           python3 - "${PLAYTOOLS_BIN}" <<'PY'
           import re
           import subprocess
@@ -74,9 +75,9 @@ jobs:
           print(f"Verified __DATA,__interpose size={hex(size)} ({size // 16} entries)")
           PY
 
-          PLAYCOVER_BIN="${RUNNER_TEMP}/dd-release/Build/Products/Release/PlayCover.app/Contents/MacOS/PlayCover"
-          HELPER_BIN="${RUNNER_TEMP}/dd-release/Build/Products/Release/PlayCover.app/Contents/Library/HelperTools/PlayCoverHelper"
-          HELPER_PLIST="${RUNNER_TEMP}/dd-release/Build/Products/Release/PlayCover.app/Contents/Library/LaunchDaemons/io.playcover.PlayCover.Helper.plist"
+          PLAYCOVER_BIN="${RUNNER_TEMP}/dd-release/Build/Products/Release/MacOver.app/Contents/MacOS/MacOver"
+          HELPER_BIN="${RUNNER_TEMP}/dd-release/Build/Products/Release/MacOver.app/Contents/Library/HelperTools/PlayCoverHelper"
+          HELPER_PLIST="${RUNNER_TEMP}/dd-release/Build/Products/Release/MacOver.app/Contents/Library/LaunchDaemons/app.makedie.MacOver.Helper.plist"
           test -x "${HELPER_BIN}"
           plutil -lint "${HELPER_PLIST}"
           xcrun vtool -show-build "${PLAYCOVER_BIN}" | grep -q "minos 26.0"
@@ -99,7 +100,7 @@ jobs:
         run: |
           chmod +x Tests/RuntimeHarness/run_runtime_harness.py
           python3 Tests/RuntimeHarness/run_runtime_harness.py \
-            --playtools-framework "${RUNNER_TEMP}/dd-release/Build/Products/Release/PlayCover.app/Contents/Frameworks/PlayTools.framework" \
+            --playtools-framework "${RUNNER_TEMP}/dd-release/Build/Products/Release/MacOver.app/Contents/Frameworks/PlayTools.framework" \
             --verbose
 
   static-analysis:

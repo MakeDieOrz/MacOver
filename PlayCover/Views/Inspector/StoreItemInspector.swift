@@ -129,7 +129,7 @@ struct StoreItemInspector: View {
                 Button {
                     triggerDownload()
                 } label: {
-                    Label("ui51.store.downloadInstall", systemImage: "arrow.down.circle.fill")
+                    Label("store.downloadInstall", systemImage: "arrow.down.circle.fill")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.glassProminent)
@@ -147,7 +147,7 @@ struct StoreItemInspector: View {
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(comparison.tint)
             Text(String(
-                format: NSLocalizedString("ui51.store.installedVersion", comment: ""),
+                format: NSLocalizedString("store.installedVersion", comment: ""),
                 installedVersion,
                 app.version
             ))

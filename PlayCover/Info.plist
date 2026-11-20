@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>PlayCover</string>
+	<string>MacOver</string>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>
@@ -77,13 +77,11 @@
 	<key>LSMinimumSystemVersion</key>
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
 	<key>NSHumanReadableCopyright</key>
-	<string>Copyright © PlayCover Community Edition</string>
+	<string>Copyright © MacOver Contributors (derived from PlayCover Community Edition)</string>
 	<key>NSSystemAdministrationUsageDescription</key>
-	<string>PlayCover needs to read files to save apps</string>
+	<string>MacOver needs to read files to save apps</string>
 	<key>SUFeedURL</key>
-	<string>https://raw.githubusercontent.com/PlayCover/PlayCover/update/appcast.xml</string>
-	<key>SUPublicEDKey</key>
-	<string>YzgQIwegeMGJxhosWRn/1IyEeEe385xcKE3cXeewlK0=</string>
+	<string>https://raw.githubusercontent.com/MakeDieOrz/MacOver/update/appcast.xml</string>
 	<key>UTExportedTypeDeclarations</key>
 	<array>
 		<dict>
@@ -96,7 +94,7 @@
 			<key>UTTypeIcons</key>
 			<dict/>
 			<key>UTTypeIdentifier</key>
-			<string>io.playcover.PlayCover-playmap</string>
+			<string>app.makedie.MacOver-playmap</string>
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>

@@ -74,7 +74,7 @@ static NSString *pt_state_dir(void) {
     NSArray<NSURL *> *caches = [[NSFileManager defaultManager] URLsForDirectory:NSCachesDirectory
                                                                       inDomains:NSUserDomainMask];
     NSURL *base = caches.firstObject ?: [NSURL fileURLWithPath:NSTemporaryDirectory()];
-    return [[base URLByAppendingPathComponent:@"io.playcover.PlayTools" isDirectory:YES] path];
+    return [[base URLByAppendingPathComponent:@"app.makedie.PlayTools" isDirectory:YES] path];
 }
 
 int main(int argc, const char *argv[]) {
@@ -96,7 +96,7 @@ int main(int argc, const char *argv[]) {
         NSInteger targetFrameRateHz = [[PlaySettings shared] targetFrameRateHz];
         NSString *reportedIOSVersion = (NSString *)[[PlaySettings shared] reportedIOSVersion] ?: @"";
         BOOL modHidden = pt_is_registered_hidden_module("/App/Frameworks/UserPlugins/MockUserPlugin.dylib");
-        BOOL idHidden = pt_is_registered_hidden_module("io.playcover.harness.mockplugin");
+        BOOL idHidden = pt_is_registered_hidden_module("app.makedie.harness.mockplugin");
         BOOL clsHidden = pt_is_registered_hidden_class("MockHarnessHiddenClass");
 
         NSOperatingSystemVersion osVer = [[NSProcessInfo processInfo] operatingSystemVersion];
@@ -240,11 +240,14 @@ def resolve_playtools_framework(repo_root: Path, explicit: Optional[str]) -> Pat
             return cat_slice
         raise FileNotFoundError(f"PlayTools.framework not found at {p}")
 
-    # Auto-discover built framework in common locations.
-    home_fw = Path.home() / "Library/Frameworks/PlayTools.framework"
-    if (home_fw / "PlayTools").exists():
-        candidates.append(home_fw)
-    app_fw = Path("/Applications/PlayCover.app/Contents/Frameworks/PlayTools.framework")
+    # Auto-discover built framework in MacOver locations.
+    macover_fw = (
+        Path.home()
+        / "Library/Containers/app.makedie.MacOver/Frameworks/PlayTools.framework"
+    )
+    if (macover_fw / "PlayTools").exists():
+        candidates.append(macover_fw)
+    app_fw = Path("/Applications/MacOver.app/Contents/Frameworks/PlayTools.framework")
     if (app_fw / "PlayTools").exists():
         candidates.append(app_fw)
 
@@ -264,7 +267,7 @@ def parse_harness_json(stdout: str) -> dict:
 
 def write_test_settings_plist(isolated_home: Path, bundle_id: str) -> Path:
     """Configure customScaler != 1.0 in MockTarget's settings plist so Safe Mode revert is observable."""
-    target_dir = isolated_home / "Library/Containers/io.playcover.PlayCover/PlayTools"
+    target_dir = isolated_home / "Library/Containers/app.makedie.MacOver/PlayTools"
     target_dir.mkdir(parents=True, exist_ok=True)
     plist_path = target_dir / f"{bundle_id}.plist"
     with open(plist_path, "wb") as fp:
@@ -288,7 +291,7 @@ def build_mock_app(work_dir: Path, playtools_fw: Path) -> Path:
     info_plist = {
         "CFBundleDevelopmentRegion": "en",
         "CFBundleExecutable": "MockTarget",
-        "CFBundleIdentifier": "io.playcover.harness.mockapp",
+        "CFBundleIdentifier": "app.makedie.harness.mockapp",
         "CFBundleInfoDictionaryVersion": "6.0",
         "CFBundleName": "MockTarget",
         "CFBundlePackageType": "APPL",
@@ -316,11 +319,11 @@ def build_mock_app(work_dir: Path, playtools_fw: Path) -> Path:
     # PlayTools default PlayToolsVersion lookup reads CFBundleShortVersionString from PlayTools.framework
     manifest = {
         "manifestVersion": "1.0",
-        "identifier": "io.playcover.harness.mockplugin",
+        "identifier": "app.makedie.harness.mockplugin",
         "name": "Mock Harness Plugin",
         "version": "1.0.0",
-        "minPlayToolsVersion": "5.0.0",
-        "targetBundleIdentifiers": ["io.playcover.harness.mockapp"],
+        "minPlayToolsVersion": "1.0.0",
+        "targetBundleIdentifiers": ["app.makedie.harness.mockapp"],
         "loadPriority": 50,
         "capabilities": ["runtime-harness"],
         "entrypoint": "MockUserPlugin.dylib",
@@ -357,7 +360,7 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
     results: list[ScenarioResult] = []
     isolated_home = work_dir / "IsolatedHome"
     isolated_home.mkdir(parents=True, exist_ok=True)
-    settings_plist = write_test_settings_plist(isolated_home, "io.playcover.harness.mockapp")
+    settings_plist = write_test_settings_plist(isolated_home, "app.makedie.harness.mockapp")
 
     def base_env(marker_path: Path, **extra: str) -> dict[str, str]:
         env = os.environ.copy()
@@ -541,14 +544,14 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
     if verbose:
         print("  Scenario 4 payload:", {"debugTraceCount": len(debug_lines), **info4})
 
-    # Scenario 5: 5.1 settings (reportedIOSVersion compat18_3, fixed30, inverseScreenValues, windowFixMethod)
+    # Scenario 5: runtime settings (reportedIOSVersion compat18_3, fixed30, inverseScreenValues, windowFixMethod)
     # + one-shot Safe Mode revert without mutating plist on disk.
     t4 = time.monotonic()
     isolated_home_5 = work_dir / "IsolatedHome5"
     isolated_home_5.mkdir(parents=True, exist_ok=True)
-    target_dir_5 = isolated_home_5 / "Library/Containers/io.playcover.PlayCover/PlayTools"
+    target_dir_5 = isolated_home_5 / "Library/Containers/app.makedie.MacOver/PlayTools"
     target_dir_5.mkdir(parents=True, exist_ok=True)
-    plist5 = target_dir_5 / "io.playcover.harness.mockapp.plist"
+    plist5 = target_dir_5 / "app.makedie.harness.mockapp.plist"
     with open(plist5, "wb") as fp:
         plistlib.dump(
             {
@@ -579,7 +582,7 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
     )
     if proc5a.returncode != 0 or proc5b.returncode != 0:
         results.append(ScenarioResult(
-            name="5. 5.1 compat18_3 / fixed30 clamping & one-shot Safe Mode revert",
+            name="5. compat18_3 / fixed30 clamping & one-shot Safe Mode revert",
             passed=False,
             duration_sec=time.monotonic() - t4,
             details=(
@@ -621,7 +624,7 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         plist5_bytes_after == plist5_bytes_before,
     ]
     results.append(ScenarioResult(
-        name="5. 5.1 compat18_3 / fixed30 clamping & one-shot Safe Mode revert",
+        name="5. compat18_3 / fixed30 clamping & one-shot Safe Mode revert",
         passed=all(checks5),
         duration_sec=time.monotonic() - t4,
         details=json.dumps(
@@ -662,7 +665,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     print(f"Using PlayTools.framework: {playtools_fw}")
 
     work_dir = Path(tempfile.mkdtemp(prefix="playtools-harness-"))
-    diag_log = Path("/tmp/PlayTools-io.playcover.harness.mockapp.log")
+    diag_log = Path("/tmp/PlayTools-app.makedie.harness.mockapp.log")
     results: list[ScenarioResult] = []
     start_ts = time.monotonic()
 

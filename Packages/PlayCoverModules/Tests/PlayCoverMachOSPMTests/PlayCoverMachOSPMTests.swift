@@ -75,9 +75,12 @@ final class PlayCoverMachOSPMTests: XCTestCase {
         XCTAssertTrue(try Macho.isMachoValidArch(binURL))
         XCTAssertFalse(try Macho.isMachoEncrypted(atURL: binURL))
 
+        let mockPath =
+            "/Users/test/Library/Containers/app.makedie.MacOver/" +
+            "Frameworks/PlayTools.framework/PlayTools"
         let inspected = try Macho.inspectBinary(
             atURL: binURL,
-            playToolsPath: "/Users/test/Library/Frameworks/PlayTools.framework/PlayTools"
+            playToolsPath: mockPath
         )
         XCTAssertFalse(inspected.hasPlayTools)
         XCTAssertTrue(inspected.isCatalyst)
@@ -110,5 +113,13 @@ final class PlayCoverMachOSPMTests: XCTestCase {
         XCTAssertEqual(signed, ["Plugin.dylib"])
         XCTAssertTrue(FileManager.default.fileExists(atPath: targetDir.appendingPathComponent("Plugin.dylib").path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: targetDir.appendingPathComponent("Plugin.manifest.json").path))
+    }
+
+    func testPlayToolsPathIsIsolatedInsideMacOverContainer() {
+        let path = PlayTools.playToolsPath.path
+        let expectedSuffix =
+            "/Library/Containers/app.makedie.MacOver/Frameworks/PlayTools.framework/PlayTools"
+        XCTAssertTrue(path.hasSuffix(expectedSuffix))
+        XCTAssertFalse(path.hasSuffix("/Library/Frameworks/PlayTools.framework/PlayTools"))
     }
 }

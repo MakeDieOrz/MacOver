@@ -30,17 +30,17 @@ struct ConfigLivePreview: View {
 
     private var frameRateLabelKey: String {
         switch settings.settings.frameRateTargetMode {
-        case .adaptive: return "ui51.display.frameRate.adaptive"
-        case .fixed120: return "ui51.display.frameRate.fixed120"
-        case .fixed60: return "ui51.display.frameRate.fixed60"
-        case .fixed30: return "ui51.display.frameRate.fixed30"
+        case .adaptive: return "display.frameRate.adaptive"
+        case .fixed120: return "display.frameRate.fixed120"
+        case .fixed60: return "display.frameRate.fixed60"
+        case .fixed30: return "display.frameRate.fixed30"
         }
     }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("ui51.inspector.previewTitle")
+                Text("inspector.previewTitle")
                     .font(.subheadline.weight(.medium))
 
                 windowSchematic
@@ -51,11 +51,11 @@ struct ConfigLivePreview: View {
                         Text("\(data.windowWidth)×\(data.windowHeight) @ \(String(format: "%.1f×", data.customScaler))")
                             .font(.caption.monospacedDigit())
                     }
-                    LabeledContent("ui51.display.frameRate.title") {
+                    LabeledContent("display.frameRate.title") {
                         Text(LocalizedStringKey(frameRateLabelKey))
                             .font(.caption)
                     }
-                    LabeledContent("ui51.device.layoutTitle") {
+                    LabeledContent("device.layoutTitle") {
                         let isPhone = DeviceProfileOption.isIPhone(data.iosDeviceModel)
                         Text(isPhone ? "Compact (iPhone)" : "Regular (iPad)")
                             .font(.caption)
@@ -114,7 +114,7 @@ struct ConfigLivePreview: View {
 
     private var pendingRestartSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("ui51.inspector.pendingRestart")
+            Text("inspector.pendingRestart")
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(.orange)
 
@@ -131,7 +131,7 @@ struct ConfigLivePreview: View {
             Button {
                 Task { await app.restart() }
             } label: {
-                Label("ui51.action.restart", systemImage: "arrow.clockwise")
+                Label("action.restart", systemImage: "arrow.clockwise")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)

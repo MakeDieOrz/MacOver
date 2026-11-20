@@ -1,17 +1,17 @@
-# ``PlayCover``
+# ``MacOver``
 
-Run iOS apps and games natively on Apple Silicon Macs (macOS 12.0 through macOS 15 Sequoia and newer) with keyboard, mouse, trackpad, and controller mapping.
+Run iOS apps and games natively on Apple Silicon Macs (macOS 26.0 Tahoe and newer) with Liquid Glass UI, keyboard, mouse, trackpad, and controller mapping.
 
 ## Overview
 
-PlayCover 5.0 unifies the macOS host application, privileged helper tool, modular SwiftPM packages, and the Mac Catalyst `PlayTools` runtime inside `PlayCover.xcworkspace`.
+MacOver 1.0 unifies `MacOver.app` (`app.makedie.MacOver`), `PlayCoverHelper` (`app.makedie.MacOver.Helper`), modular SwiftPM packages, and the Mac Catalyst `PlayTools` runtime (`app.makedie.PlayTools`) inside `PlayCover.xcworkspace`.
 
-### PlayCover 5.0 Workspace Layout
+### MacOver 1.0 Workspace Layout
 
 - **`Packages/PlayCoverModules`**: Zero-dependency SwiftPM workspace packages (`PlayCoverCore`, `PlayCoverMachO`, `PlayCoverKeymapping`, `PlayCoverSandbox`, `PlayCoverUI`) with standalone offline test targets.
-- **`PlayCover`**: macOS SwiftUI host app wired through `PlayCoverDependencies` and async SwiftUI sheet prompts (`AlertPresenter`).
-- **`PlayCoverHelper`**: Privileged XPC LaunchDaemon tool (`io.playcover.PlayCover.Helper`) paired with `DualTrackPrivilegeEscalator` AppleScript fallback for ad-hoc/local builds.
-- **`PlayTools`**: Modular Mac Catalyst runtime (`Subsystems/`), `AKInterface.bundle` Sequoia window bridge, `PTSafeMode` early-crash recovery, `PluginManifest.json`-driven `UserPlugins`, `PlayedAppleDBBackup`, and `PLAYTOOLS_DEBUG_LOG=1` syscall tracing.
+- **`MacOver.app` (`PlayCover` target)**: macOS SwiftUI host app wired through `PlayCoverDependencies` and async SwiftUI sheet prompts (`AlertPresenter`).
+- **`PlayCoverHelper`**: Privileged XPC LaunchDaemon tool (`app.makedie.MacOver.Helper`) paired with `DualTrackPrivilegeEscalator` AppleScript fallback for ad-hoc/local builds.
+- **`PlayTools`**: Modular Mac Catalyst runtime (`Subsystems/`), `AKInterface.bundle` AppKit window bridge, `PTSafeMode` early-crash recovery, `PluginManifest.json`-driven `UserPlugins`, `PlayedAppleDBBackup`, and `PLAYTOOLS_DEBUG_LOG=1` syscall tracing.
 
 ### Quick Verification Commands
 

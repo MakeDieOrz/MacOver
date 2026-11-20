@@ -822,7 +822,7 @@ __attribute__((visibility("hidden"))) int pt_open_early_settings_plist_fd(void) 
         char bid[256];
         if (pt_read_main_bundle_id_early(bid, sizeof(bid)) && bid[0] != '\0') {
             snprintf(plist_path, sizeof(plist_path),
-                     "%s/Library/Containers/io.playcover.PlayCover/App Settings/%s.plist",
+                     "%s/Library/Containers/app.makedie.MacOver/App Settings/%s.plist",
                      user_root, bid);
             fd = pt_orig_open_nocancel(plist_path, O_RDONLY);
         }
@@ -835,7 +835,7 @@ __attribute__((visibility("hidden"))) int pt_open_early_settings_plist_fd(void) 
                 size_t cid_len = (cid_end != NULL) ? (size_t)(cid_end - cid_start) : strlen(cid_start);
                 if (cid_len > 0 && cid_len < 256) {
                     snprintf(plist_path, sizeof(plist_path),
-                             "%s/Library/Containers/io.playcover.PlayCover/App Settings/%.*s.plist",
+                             "%s/Library/Containers/app.makedie.MacOver/App Settings/%.*s.plist",
                              user_root, (int)cid_len, cid_start);
                     fd = pt_orig_open_nocancel(plist_path, O_RDONLY);
                 }
@@ -1680,6 +1680,8 @@ static inline BOOL pt_is_hidden_env_value(const char *val) {
     return (strstr(val, "/Users/") != NULL ||
             strcasestr(val, "PlayTools") != NULL ||
             strcasestr(val, "PlayCover") != NULL ||
+            strcasestr(val, "MacOver") != NULL ||
+            strcasestr(val, "app.makedie") != NULL ||
             strcasestr(val, "AKInterface") != NULL);
 }
 
@@ -2872,6 +2874,7 @@ BOOL pt_is_hidden_env_key(const char *name) {
     }
     if (strncmp(name, "XPC_", 4) == 0 ||
         strcasestr(name, "playcover") != NULL ||
+        strcasestr(name, "macover") != NULL ||
         strcasestr(name, "playtools") != NULL) {
         return YES;
     }
@@ -3503,6 +3506,8 @@ static BOOL pt_is_hidden_bundle_identifier(CFStringRef bundleID) {
         [bid isEqualToString:@"com.apple.Carbon"] ||
         [bid rangeOfString:@"PlayTools" options:NSCaseInsensitiveSearch].location != NSNotFound ||
         [bid rangeOfString:@"PlayCover" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+        [bid rangeOfString:@"MacOver" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+        [bid rangeOfString:@"app.makedie" options:NSCaseInsensitiveSearch].location != NSNotFound ||
         [bid rangeOfString:@"AKInterface" options:NSCaseInsensitiveSearch].location != NSNotFound) {
         return YES;
     }
@@ -4195,6 +4200,7 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_thread_name(const char *
         strcasestr(name, "SwordRPC") != NULL ||
         strcasestr(name, "PlayTools") != NULL ||
         strcasestr(name, "PlayCover") != NULL ||
+        strcasestr(name, "MacOver") != NULL ||
         strcasestr(name, "PlayChain") != NULL ||
         strcasestr(name, "PlaySettings") != NULL ||
         strcasestr(name, "PlayShadow") != NULL ||

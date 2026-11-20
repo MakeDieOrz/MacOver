@@ -89,7 +89,7 @@ class Keymapping {
 
     init() {
         baseKeymapURL = URL(fileURLWithPath: PlaySettings.resolveHostUserRoot())
-            .appendingPathComponent("Library/Containers/io.playcover.PlayCover")
+            .appendingPathComponent("Library/Containers/app.makedie.MacOver")
             .appendingPathComponent("Keymapping")
             .appendingPathComponent(bundleIdentifier)
 

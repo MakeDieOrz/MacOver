@@ -12,13 +12,22 @@ import PlayCoverCore
 // This has so many functionality in it that 250 lines is darn near impossible
 // swiftlint:disable:next type_body_length
 public class PlayTools {
-    private static let frameworksURL = FileManager.default.homeDirectoryForCurrentUser
+    private static let containerBaseURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library")
+        .appendingPathComponent("Containers")
+        .appendingPathComponent("app.makedie.MacOver")
+    private static let frameworksURL = containerBaseURL
         .appendingPathComponent("Frameworks")
     private static let playToolsFramework = frameworksURL
         .appendingPathComponent("PlayTools")
         .appendingPathExtension("framework")
     public static let playToolsPath = playToolsFramework
+        .appendingPathComponent("PlayTools")
+    private static let legacyPlayToolsPath = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library")
+        .appendingPathComponent("Frameworks")
+        .appendingPathComponent("PlayTools")
+        .appendingPathExtension("framework")
         .appendingPathComponent("PlayTools")
     private static let akInterfacePath = playToolsFramework
         .appendingPathComponent("PlugIns")
@@ -31,10 +40,7 @@ public class PlayTools {
         .appendingPathExtension("framework")
 
     public static var playCoverContainer: URL {
-        let playCoverPath = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library")
-            .appendingPathComponent("Containers")
-            .appendingPathComponent("io.playcover.PlayCover")
+        let playCoverPath = containerBaseURL
         if !FileManager.default.fileExists(atPath: playCoverPath.path) {
             do {
                 try FileManager.default.createDirectory(at: playCoverPath,
@@ -117,7 +123,7 @@ public class PlayTools {
 
         guard fm.fileExists(atPath: bundledPlayToolsFramework.path) else {
             throw PlayCoverError.playToolsError(
-                "Bundled PlayTools.framework not found inside PlayCover.app."
+                "Bundled PlayTools.framework not found inside MacOver.app."
             )
         }
 
@@ -226,6 +232,13 @@ public class PlayTools {
 
     public static func installInIPA(_ exec: URL, appInfo: AppInfo? = nil, signBundle: Bool = true) async throws {
         await waitForSystemInstall()
+        _ = try Macho.removeLoadCommand(
+            at: exec,
+            dylibPaths: [
+                legacyPlayToolsPath.path,
+                legacyPlayToolsPath.esc
+            ]
+        )
         try Macho.injectLoadCommand(
             at: exec,
             cmdType: UInt32(LC_LOAD_DYLIB),
@@ -405,6 +418,8 @@ public class PlayTools {
                 dylibPaths: [
                     playToolsPath.path,
                     playToolsPath.esc,
+                    legacyPlayToolsPath.path,
+                    legacyPlayToolsPath.esc,
                     "@executable_path/Frameworks/PlayTools.dylib"
                 ]
             )

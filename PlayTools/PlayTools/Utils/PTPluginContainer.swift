@@ -173,7 +173,7 @@ public final class PTPluginContainer {
     }
 
     public static func defaultPlayToolsVersion() -> String {
-        (Bundle(for: PTPluginContainer.self).infoDictionary?["CFBundleShortVersionString"] as? String) ?? "5.1.0"
+        (Bundle(for: PTPluginContainer.self).infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.0"
     }
 
     public static func defaultUserPluginsDirectory() -> URL? {

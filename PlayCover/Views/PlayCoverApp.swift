@@ -73,8 +73,8 @@ struct PlayCoverApp: App {
         }
 
         MenuBarExtra(
-            "PlayCover",
-            systemImage: "gamecontroller",
+            "MacOver",
+            systemImage: "ipad.landscape",
             isInserted: ProcessInfo.isRunningUnitTests ? .constant(false) : $showMenuBarExtra
         ) {
             PlayCoverMenuBarExtraContent()

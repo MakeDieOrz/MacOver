@@ -26,7 +26,7 @@ static NSDictionary *pt_get_fallback_entitlements_dict(void) {
         }
         char ent_path[PATH_MAX];
         int n = snprintf(ent_path, sizeof(ent_path),
-                         "%s/Library/Containers/io.playcover.PlayCover/Entitlements/%s.plist",
+                         "%s/Library/Containers/app.makedie.MacOver/Entitlements/%s.plist",
                          user_root, bid);
         if (n <= 0 || (size_t)n >= sizeof(ent_path)) {
             return;
@@ -189,14 +189,22 @@ static CFStringRef pt_SecTaskCopySigningIdentifier(SecTaskRef task, CFErrorRef *
     if (pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         BOOL bad = (ident == NULL);
-        if (!bad && [(__bridge NSString *)ident rangeOfString:@"PlayCover" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+        if (!bad &&
+            ([(__bridge NSString *)ident rangeOfString:@"PlayCover" options:NSCaseInsensitiveSearch].location !=
+                 NSNotFound ||
+             [(__bridge NSString *)ident rangeOfString:@"MacOver" options:NSCaseInsensitiveSearch].location !=
+                 NSNotFound ||
+             [(__bridge NSString *)ident rangeOfString:@"app.makedie" options:NSCaseInsensitiveSearch].location !=
+                 NSNotFound)) {
             bad = YES;
         }
         if (bad) {
             char bid[256];
             bid[0] = '\0';
             NSString *mainBid = [[NSBundle mainBundle] bundleIdentifier];
-            if (mainBid.length > 0 && [mainBid rangeOfString:@"PlayCover" options:NSCaseInsensitiveSearch].location == NSNotFound) {
+            if (mainBid.length > 0 &&
+                [mainBid rangeOfString:@"PlayCover" options:NSCaseInsensitiveSearch].location == NSNotFound &&
+                [mainBid rangeOfString:@"MacOver" options:NSCaseInsensitiveSearch].location == NSNotFound) {
                 strlcpy(bid, [mainBid UTF8String], sizeof(bid));
             } else {
                 (void)pt_read_main_bundle_id_early(bid, sizeof(bid));
@@ -358,10 +366,16 @@ static OSStatus pt_SecCodeCopySigningInformation(SecStaticCodeRef code, SecCSFla
             }
             id identObj = clean[@"identifier"];
             if ([identObj isKindOfClass:[NSString class]] &&
-                [(NSString *)identObj rangeOfString:@"PlayCover" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                ([(NSString *)identObj rangeOfString:@"PlayCover" options:NSCaseInsensitiveSearch].location !=
+                     NSNotFound ||
+                 [(NSString *)identObj rangeOfString:@"MacOver" options:NSCaseInsensitiveSearch].location !=
+                     NSNotFound ||
+                 [(NSString *)identObj rangeOfString:@"app.makedie" options:NSCaseInsensitiveSearch].location !=
+                     NSNotFound)) {
                 NSString *mainBid = [[NSBundle mainBundle] bundleIdentifier];
                 if (mainBid.length > 0 &&
-                    [mainBid rangeOfString:@"PlayCover" options:NSCaseInsensitiveSearch].location == NSNotFound) {
+                    [mainBid rangeOfString:@"PlayCover" options:NSCaseInsensitiveSearch].location == NSNotFound &&
+                    [mainBid rangeOfString:@"MacOver" options:NSCaseInsensitiveSearch].location == NSNotFound) {
                     clean[@"identifier"] = mainBid;
                 }
             }
@@ -804,6 +818,8 @@ static int pt_sandbox_check_impl(BOOL use_audit_token,
         (filter == 2 || filter == 3 || filter == 6 || filter == 9 || filter == 12)) {
         const char *sarg = (const char *)arg1;
         if (strcasestr(sarg, "playcover") != NULL ||
+            strcasestr(sarg, "macover") != NULL ||
+            strcasestr(sarg, "app.makedie") != NULL ||
             strcasestr(sarg, "playtools") != NULL ||
             strcasestr(sarg, "akinterface") != NULL) {
             return 1;

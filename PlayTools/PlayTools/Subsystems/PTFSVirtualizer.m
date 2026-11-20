@@ -321,6 +321,11 @@ static inline BOOL pt_rel_subpath_has_hidden_plugin_component(const char *rel) {
                     return YES;
                 }
                 break;
+            case 'a':
+                if (strncmp(q, "app.makedie.MacOver", 19) == 0) {
+                    return YES;
+                }
+                break;
             case 'A':
                 if (strncmp(q, "AKInterface.bundle", 18) == 0) {
                     return YES;
@@ -413,6 +418,7 @@ static BOOL pt_is_hidden_normalized_path_cached_caller(const char *norm, const v
                 size_t len;
             } pt_prefix_entry_t;
             static const pt_prefix_entry_t always_blocked[] = {
+                PT_STR_ENTRY("/Applications/MacOver.app"),
                 PT_STR_ENTRY("/Applications/PlayCover.app"),
                 PT_STR_ENTRY("/Applications/Cydia.app"),
                 PT_STR_ENTRY("/Library/MobileSubstrate"),
@@ -521,6 +527,13 @@ static BOOL pt_is_hidden_normalized_path_cached_caller(const char *norm, const v
                 case 'i':
                     if (strncmp(q, "io.playcover.PlayCover", 22) == 0) {
                         if (strstr(norm, "/io.playcover.PlayCover/Applications/") == NULL) {
+                            is_candidate = YES;
+                        }
+                    }
+                    break;
+                case 'a':
+                    if (strncmp(q, "app.makedie.MacOver", 19) == 0) {
+                        if (strstr(norm, "/app.makedie.MacOver/Applications/") == NULL) {
                             is_candidate = YES;
                         }
                     }
@@ -1265,7 +1278,10 @@ static BOOL pt_is_sensitive_host_fd_path(const char *path, const void *caller) {
     if (pt_is_hidden_dyld_image_name(p)) {
         return YES;
     }
-    if (strncmp(p, "/Library/Application Support/PlayCover", 38) == 0 ||
+    if (strncmp(p, "/Library/Application Support/MacOver", 36) == 0 ||
+        strncmp(p, "/Library/Application Support/PlayCover", 38) == 0 ||
+        strstr(p, "/Library/Containers/app.makedie.") != NULL ||
+        strstr(p, "/Library/Preferences/app.makedie.") != NULL ||
         strstr(p, "/Library/Containers/io.playcover.") != NULL ||
         strstr(p, "/Library/Preferences/io.playcover.") != NULL) {
         return YES;
@@ -1940,7 +1956,9 @@ static inline BOOL pt_is_hidden_dirent_name(const char *d_name) {
          strstr(d_name, "io.playcover.PlayCover") != NULL)) {
         return YES;
     }
-    if (strstr(d_name, "AKInterface") != NULL ||
+    if (strstr(d_name, "app.makedie.MacOver") != NULL ||
+        strstr(d_name, "MacOver.app") != NULL ||
+        strstr(d_name, "AKInterface") != NULL ||
         strstr(d_name, "UserPlugins") != NULL ||
         pt_is_registered_hidden_module(d_name)) {
         return YES;

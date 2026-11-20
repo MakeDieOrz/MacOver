@@ -101,8 +101,8 @@
 		AA72A0322F00001000623C15 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA72A0312F00001000623C15 /* AppDelegate.swift */; };
 		AA72A0382F00001000623C15 /* PlayCoverDependencies.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA72A0372F00001000623C15 /* PlayCoverDependencies.swift */; };
 		AA72A0342F00001000623C15 /* ModuleExports.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA72A0332F00001000623C15 /* ModuleExports.swift */; };
-		AA72A0362F00001000623C15 /* Phase2ArchitectureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA72A0352F00001000623C15 /* Phase2ArchitectureTests.swift */; };
-		AA5130022F00003000623C15 /* PhaseBUIRealSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5130012F00003000623C15 /* PhaseBUIRealSnapshotTests.swift */; };
+		AA72A0362F00001000623C15 /* ArchitectureAndHostTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA72A0352F00001000623C15 /* ArchitectureAndHostTests.swift */; };
+		AA5130022F00003000623C15 /* WorkspaceUISnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5130012F00003000623C15 /* WorkspaceUISnapshotTests.swift */; };
 		AA72B0012F00002000623C15 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA72B0102F00002000623C15 /* main.swift */; };
 		AA72B0022F00002000623C15 /* PlayCoverHelperService.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA72B0112F00002000623C15 /* PlayCoverHelperService.swift */; };
 		AA72B0032F00002000623C15 /* PlayCoverCore in Frameworks */ = {isa = PBXBuildFile; productRef = AA72B0212F00002000623C15 /* PlayCoverCore */; };
@@ -190,7 +190,7 @@
 		6ED6379C28DAAAC100B506FA /* IPASourceSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPASourceSettings.swift; sourceTree = "<group>"; };
 		6EE8264F28E8AB2B003935BC /* DownloadVM.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadVM.swift; sourceTree = "<group>"; };
 		81C2786C28D4A5A300E208D7 /* pt-br */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "pt-br"; path = "pt-br.lproj/Localizable.strings"; sourceTree = "<group>"; };
-		8783CFF726B8C52D00171041 /* PlayCover.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PlayCover.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		8783CFF726B8C52D00171041 /* MacOver.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MacOver.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		8783CFFA26B8C52D00171041 /* PlayCoverApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayCoverApp.swift; sourceTree = "<group>"; };
 		8783CFFE26B8C52E00171041 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		8783D00126B8C52E00171041 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
@@ -271,11 +271,11 @@
 		AA72A0312F00001000623C15 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		AA72A0372F00001000623C15 /* PlayCoverDependencies.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayCoverDependencies.swift; sourceTree = "<group>"; };
 		AA72A0332F00001000623C15 /* ModuleExports.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleExports.swift; sourceTree = "<group>"; };
-		AA72A0352F00001000623C15 /* Phase2ArchitectureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Phase2ArchitectureTests.swift; sourceTree = "<group>"; };
-		AA5130012F00003000623C15 /* PhaseBUIRealSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhaseBUIRealSnapshotTests.swift; sourceTree = "<group>"; };
+		AA72A0352F00001000623C15 /* ArchitectureAndHostTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchitectureAndHostTests.swift; sourceTree = "<group>"; };
+		AA5130012F00003000623C15 /* WorkspaceUISnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceUISnapshotTests.swift; sourceTree = "<group>"; };
 		AA72B0102F00002000623C15 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		AA72B0112F00002000623C15 /* PlayCoverHelperService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayCoverHelperService.swift; sourceTree = "<group>"; };
-		AA72B0122F00002000623C15 /* io.playcover.PlayCover.Helper.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = io.playcover.PlayCover.Helper.plist; sourceTree = "<group>"; };
+		AA72B0122F00002000623C15 /* app.makedie.MacOver.Helper.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = app.makedie.MacOver.Helper.plist; sourceTree = "<group>"; };
 		AA72B0132F00002000623C15 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		AA72B0142F00002000623C15 /* PlayCoverHelper */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = PlayCoverHelper; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -567,8 +567,8 @@
 				AA71A05A2F00000500623C15 /* PlayRulesTests.swift */,
 				AA71A05C2F00000500623C15 /* NetworkRuleParserTests.swift */,
 				AA71A0742F00000500623C15 /* LaunchGuardsTests.swift */,
-				AA72A0352F00001000623C15 /* Phase2ArchitectureTests.swift */,
-				AA5130012F00003000623C15 /* PhaseBUIRealSnapshotTests.swift */,
+				AA72A0352F00001000623C15 /* ArchitectureAndHostTests.swift */,
+				AA5130012F00003000623C15 /* WorkspaceUISnapshotTests.swift */,
 			);
 			path = PlayCoverCoreTests;
 			sourceTree = "<group>";
@@ -594,7 +594,7 @@
 		8783CFF826B8C52D00171041 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				8783CFF726B8C52D00171041 /* PlayCover.app */,
+				8783CFF726B8C52D00171041 /* MacOver.app */,
 				AA72B0142F00002000623C15 /* PlayCoverHelper */,
 				AA71A0522F00000500623C15 /* PlayCoverMachOTests.xctest */,
 				AA71A0532F00000500623C15 /* PlayCoverCoreTests.xctest */,
@@ -657,7 +657,7 @@
 			children = (
 				AA72B0102F00002000623C15 /* main.swift */,
 				AA72B0112F00002000623C15 /* PlayCoverHelperService.swift */,
-				AA72B0122F00002000623C15 /* io.playcover.PlayCover.Helper.plist */,
+				AA72B0122F00002000623C15 /* app.makedie.MacOver.Helper.plist */,
 				AA72B0132F00002000623C15 /* Info.plist */,
 			);
 			path = PlayCoverHelper;
@@ -699,7 +699,7 @@
 				AA72A0152F00001000623C15 /* PlayCoverUI */,
 			);
 			productName = PlayCover;
-			productReference = 8783CFF726B8C52D00171041 /* PlayCover.app */;
+			productReference = 8783CFF726B8C52D00171041 /* MacOver.app */;
 			productType = "com.apple.product-type.application";
 		};
 		AA71A06A2F00000500623C15 /* PlayCoverMachOTests */ = {
@@ -1044,19 +1044,19 @@
 			);
 			inputPaths = (
 				"$(BUILT_PRODUCTS_DIR)/PlayCoverHelper",
-				"$(SRCROOT)/PlayCoverHelper/io.playcover.PlayCover.Helper.plist",
+				"$(SRCROOT)/PlayCoverHelper/app.makedie.MacOver.Helper.plist",
 			);
 			name = "Embed Privileged Helper";
 			outputFileListPaths = (
 			);
 			outputPaths = (
 				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Library/HelperTools/PlayCoverHelper",
-				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Library/LaunchDaemons/io.playcover.PlayCover.Helper.plist",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Library/LaunchDaemons/app.makedie.MacOver.Helper.plist",
 				"$(DERIVED_FILE_DIR)/embed_helper.stamp",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/zsh;
-			shellScript = "set -euo pipefail\n\nSRC_BIN=\"${BUILT_PRODUCTS_DIR}/PlayCoverHelper\"\nSRC_PLIST=\"${SRCROOT}/PlayCoverHelper/io.playcover.PlayCover.Helper.plist\"\nDST_TOOLS_DIR=\"${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Library/HelperTools\"\nDST_DAEMONS_DIR=\"${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Library/LaunchDaemons\"\nDST_BIN=\"${DST_TOOLS_DIR}/PlayCoverHelper\"\nDST_PLIST=\"${DST_DAEMONS_DIR}/io.playcover.PlayCover.Helper.plist\"\n\nif [ ! -f \"${SRC_BIN}\" ]; then\n  echo \"error: PlayCoverHelper binary missing at ${SRC_BIN}\" >&2\n  exit 1\nfi\nif [ ! -f \"${SRC_PLIST}\" ]; then\n  echo \"error: Helper launchd plist missing at ${SRC_PLIST}\" >&2\n  exit 1\nfi\n\nmkdir -p \"${DST_TOOLS_DIR}\" \"${DST_DAEMONS_DIR}\" \"${DERIVED_FILE_DIR}\"\nditto \"${SRC_BIN}\" \"${DST_BIN}\"\nchmod 755 \"${DST_BIN}\"\nditto \"${SRC_PLIST}\" \"${DST_PLIST}\"\nchmod 644 \"${DST_PLIST}\"\n\ntouch \"${DST_BIN}\" \"${DST_PLIST}\" \"${DERIVED_FILE_DIR}/embed_helper.stamp\"\n";
+			shellScript = "set -euo pipefail\n\nSRC_BIN=\"${BUILT_PRODUCTS_DIR}/PlayCoverHelper\"\nSRC_PLIST=\"${SRCROOT}/PlayCoverHelper/app.makedie.MacOver.Helper.plist\"\nDST_TOOLS_DIR=\"${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Library/HelperTools\"\nDST_DAEMONS_DIR=\"${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Library/LaunchDaemons\"\nDST_BIN=\"${DST_TOOLS_DIR}/PlayCoverHelper\"\nDST_PLIST=\"${DST_DAEMONS_DIR}/app.makedie.MacOver.Helper.plist\"\n\nif [ ! -f \"${SRC_BIN}\" ]; then\n  echo \"error: PlayCoverHelper binary missing at ${SRC_BIN}\" >&2\n  exit 1\nfi\nif [ ! -f \"${SRC_PLIST}\" ]; then\n  echo \"error: Helper launchd plist missing at ${SRC_PLIST}\" >&2\n  exit 1\nfi\n\nmkdir -p \"${DST_TOOLS_DIR}\" \"${DST_DAEMONS_DIR}\" \"${DERIVED_FILE_DIR}\"\nditto \"${SRC_BIN}\" \"${DST_BIN}\"\nchmod 755 \"${DST_BIN}\"\nditto \"${SRC_PLIST}\" \"${DST_PLIST}\"\nchmod 644 \"${DST_PLIST}\"\n\ntouch \"${DST_BIN}\" \"${DST_PLIST}\" \"${DERIVED_FILE_DIR}/embed_helper.stamp\"\n";
 		};
 		AAC28F222899A05B005057FB /* Codesign sparkle */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -1178,8 +1178,8 @@
 				AA71A05B2F00000500623C15 /* PlayRulesTests.swift in Sources */,
 				AA71A05D2F00000500623C15 /* NetworkRuleParserTests.swift in Sources */,
 				AA71A0752F00000500623C15 /* LaunchGuardsTests.swift in Sources */,
-				AA72A0362F00001000623C15 /* Phase2ArchitectureTests.swift in Sources */,
-				AA5130022F00003000623C15 /* PhaseBUIRealSnapshotTests.swift in Sources */,
+				AA72A0362F00001000623C15 /* ArchitectureAndHostTests.swift in Sources */,
+				AA5130022F00003000623C15 /* WorkspaceUISnapshotTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1265,14 +1265,14 @@
 				CODE_SIGN_IDENTITY = "Developer ID Application";
 				CODE_SIGN_STYLE = Manual;
 				DEVELOPMENT_ASSET_PATHS = "PlayCover/Preview\\ Content";
-				DEVELOPMENT_TEAM = 792V9HMJW3;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				INFOPLIST_FILE = PlayCover/Info.plist;
 				OTHER_LDFLAGS = "-ObjC";
-				PRODUCT_BUNDLE_IDENTIFIER = io.playcover.PlayCover;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				PROVISIONING_PROFILE_SPECIFIER = "match Direct io.playcover.PlayCover macos";
+				PRODUCT_BUNDLE_IDENTIFIER = app.makedie.MacOver;
+				PRODUCT_MODULE_NAME = PlayCover;
+				PRODUCT_NAME = MacOver;
+				PROVISIONING_PROFILE_SPECIFIER = "match Direct app.makedie.MacOver macos";
 				SWIFT_OBJC_BRIDGING_HEADER = "./PlayCover/PlayCover-Bridging-Header.h";
 				"SWIFT_OBJC_BRIDGING_HEADER[arch=*]" = "./PlayCover/PlayCover-Bridging-Header.h";
 				SYSTEM_FRAMEWORK_SEARCH_PATHS = "$(SYSTEM_LIBRARY_DIR)/PrivateFrameworks";
@@ -1298,14 +1298,14 @@
 				CODE_SIGN_IDENTITY = "Developer ID Application";
 				CODE_SIGN_STYLE = Manual;
 				DEVELOPMENT_ASSET_PATHS = "PlayCover/Preview\\ Content";
-				DEVELOPMENT_TEAM = 792V9HMJW3;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				INFOPLIST_FILE = PlayCover/Info.plist;
 				OTHER_LDFLAGS = "-ObjC";
-				PRODUCT_BUNDLE_IDENTIFIER = io.playcover.PlayCover;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				PROVISIONING_PROFILE_SPECIFIER = "match Direct io.playcover.PlayCover macos";
+				PRODUCT_BUNDLE_IDENTIFIER = app.makedie.MacOver;
+				PRODUCT_MODULE_NAME = PlayCover;
+				PRODUCT_NAME = MacOver;
+				PROVISIONING_PROFILE_SPECIFIER = "match Direct app.makedie.MacOver macos";
 				SWIFT_OBJC_BRIDGING_HEADER = "./PlayCover/PlayCover-Bridging-Header.h";
 				"SWIFT_OBJC_BRIDGING_HEADER[arch=*]" = "./PlayCover/PlayCover-Bridging-Header.h";
 				SYSTEM_FRAMEWORK_SEARCH_PATHS = "$(SYSTEM_LIBRARY_DIR)/PrivateFrameworks";
@@ -1331,13 +1331,13 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_ASSET_PATHS = "PlayCover/Preview\\ Content";
-				DEVELOPMENT_TEAM = 792V9HMJW3;
 				ENABLE_HARDENED_RUNTIME = NO;
 				ENABLE_PREVIEWS = YES;
 				INFOPLIST_FILE = PlayCover/Info.plist;
 				OTHER_LDFLAGS = "-ObjC";
-				PRODUCT_BUNDLE_IDENTIFIER = io.playcover.PlayCover;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = app.makedie.MacOver;
+				PRODUCT_MODULE_NAME = PlayCover;
+				PRODUCT_NAME = MacOver;
 				SWIFT_OBJC_BRIDGING_HEADER = "./PlayCover/PlayCover-Bridging-Header.h";
 				"SWIFT_OBJC_BRIDGING_HEADER[arch=*]" = "./PlayCover/PlayCover-Bridging-Header.h";
 				SYSTEM_FRAMEWORK_SEARCH_PATHS = "$(SYSTEM_LIBRARY_DIR)/PrivateFrameworks";
@@ -1350,13 +1350,12 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = 792V9HMJW3;
 				ENABLE_HARDENED_RUNTIME = NO;
 				GENERATE_INFOPLIST_FILE = YES;
-				PRODUCT_BUNDLE_IDENTIFIER = io.playcover.PlayCoverMachOTests;
+				PRODUCT_BUNDLE_IDENTIFIER = app.makedie.MacOverMachOTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/PlayCover.app/Contents/MacOS/PlayCover";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MacOver.app/Contents/MacOS/MacOver";
 			};
 			name = Debug;
 		};
@@ -1366,13 +1365,12 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = 792V9HMJW3;
 				ENABLE_HARDENED_RUNTIME = NO;
 				GENERATE_INFOPLIST_FILE = YES;
-				PRODUCT_BUNDLE_IDENTIFIER = io.playcover.PlayCoverMachOTests;
+				PRODUCT_BUNDLE_IDENTIFIER = app.makedie.MacOverMachOTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/PlayCover.app/Contents/MacOS/PlayCover";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MacOver.app/Contents/MacOS/MacOver";
 			};
 			name = Release;
 		};
@@ -1382,13 +1380,12 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = 792V9HMJW3;
 				ENABLE_HARDENED_RUNTIME = NO;
 				GENERATE_INFOPLIST_FILE = YES;
-				PRODUCT_BUNDLE_IDENTIFIER = io.playcover.PlayCoverMachOTests;
+				PRODUCT_BUNDLE_IDENTIFIER = app.makedie.MacOverMachOTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/PlayCover.app/Contents/MacOS/PlayCover";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MacOver.app/Contents/MacOS/MacOver";
 			};
 			name = Nightly;
 		};
@@ -1398,13 +1395,12 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = 792V9HMJW3;
 				ENABLE_HARDENED_RUNTIME = NO;
 				GENERATE_INFOPLIST_FILE = YES;
-				PRODUCT_BUNDLE_IDENTIFIER = io.playcover.PlayCoverCoreTests;
+				PRODUCT_BUNDLE_IDENTIFIER = app.makedie.MacOverCoreTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/PlayCover.app/Contents/MacOS/PlayCover";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MacOver.app/Contents/MacOS/MacOver";
 			};
 			name = Debug;
 		};
@@ -1414,13 +1410,12 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = 792V9HMJW3;
 				ENABLE_HARDENED_RUNTIME = NO;
 				GENERATE_INFOPLIST_FILE = YES;
-				PRODUCT_BUNDLE_IDENTIFIER = io.playcover.PlayCoverCoreTests;
+				PRODUCT_BUNDLE_IDENTIFIER = app.makedie.MacOverCoreTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/PlayCover.app/Contents/MacOS/PlayCover";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MacOver.app/Contents/MacOS/MacOver";
 			};
 			name = Release;
 		};
@@ -1430,13 +1425,12 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = 792V9HMJW3;
 				ENABLE_HARDENED_RUNTIME = NO;
 				GENERATE_INFOPLIST_FILE = YES;
-				PRODUCT_BUNDLE_IDENTIFIER = io.playcover.PlayCoverCoreTests;
+				PRODUCT_BUNDLE_IDENTIFIER = app.makedie.MacOverCoreTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/PlayCover.app/Contents/MacOS/PlayCover";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MacOver.app/Contents/MacOS/MacOver";
 			};
 			name = Nightly;
 		};
@@ -1447,10 +1441,9 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CREATE_INFOPLIST_SECTION_IN_BINARY = YES;
-				DEVELOPMENT_TEAM = 792V9HMJW3;
 				ENABLE_HARDENED_RUNTIME = NO;
 				INFOPLIST_FILE = PlayCoverHelper/Info.plist;
-				PRODUCT_BUNDLE_IDENTIFIER = io.playcover.PlayCover.Helper;
+				PRODUCT_BUNDLE_IDENTIFIER = app.makedie.MacOver.Helper;
 				PRODUCT_NAME = PlayCoverHelper;
 				SKIP_INSTALL = YES;
 			};
@@ -1463,10 +1456,9 @@
 				CODE_SIGN_IDENTITY = "Developer ID Application";
 				CODE_SIGN_STYLE = Manual;
 				CREATE_INFOPLIST_SECTION_IN_BINARY = YES;
-				DEVELOPMENT_TEAM = 792V9HMJW3;
 				ENABLE_HARDENED_RUNTIME = YES;
 				INFOPLIST_FILE = PlayCoverHelper/Info.plist;
-				PRODUCT_BUNDLE_IDENTIFIER = io.playcover.PlayCover.Helper;
+				PRODUCT_BUNDLE_IDENTIFIER = app.makedie.MacOver.Helper;
 				PRODUCT_NAME = PlayCoverHelper;
 				SKIP_INSTALL = YES;
 			};
@@ -1479,10 +1471,9 @@
 				CODE_SIGN_IDENTITY = "Developer ID Application";
 				CODE_SIGN_STYLE = Manual;
 				CREATE_INFOPLIST_SECTION_IN_BINARY = YES;
-				DEVELOPMENT_TEAM = 792V9HMJW3;
 				ENABLE_HARDENED_RUNTIME = YES;
 				INFOPLIST_FILE = PlayCoverHelper/Info.plist;
-				PRODUCT_BUNDLE_IDENTIFIER = io.playcover.PlayCover.Helper;
+				PRODUCT_BUNDLE_IDENTIFIER = app.makedie.MacOver.Helper;
 				PRODUCT_NAME = PlayCoverHelper;
 				SKIP_INSTALL = YES;
 			};

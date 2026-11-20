@@ -18,7 +18,7 @@ env:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-26
     env:
       GITHUB_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -65,17 +65,17 @@ jobs:
       - name: Create DMG
         shell: bash
         run: |
-          DMG_PATH="./output/PlayCover_${{ env.TAG_NAME }}.dmg"
+          DMG_PATH="./output/MacOver_${{ env.TAG_NAME }}.dmg"
           create-dmg \
-            --volname "PlayCover ${{ env.TAG_NAME }}" \
+            --volname "MacOver ${{ env.TAG_NAME }}" \
             --skip-jenkins \
             "${DMG_PATH}" \
-            "./output/PlayCover.app" || \
-            hdiutil create -volname "PlayCover ${{ env.TAG_NAME }}" -srcfolder "./output/PlayCover.app" -ov -format UDZO "${DMG_PATH}"
+            "./output/MacOver.app" || \
+            hdiutil create -volname "MacOver ${{ env.TAG_NAME }}" -srcfolder "./output/MacOver.app" -ov -format UDZO "${DMG_PATH}"
 
       - name: Notarize DMG
         shell: bash
-        run: bundle exec fastlane notarize_dmg "package:output/PlayCover_${{ env.TAG_NAME }}.dmg"
+        run: bundle exec fastlane notarize_dmg "package:output/MacOver_${{ env.TAG_NAME }}.dmg"
 
       - name: Clean Up
         if: always()
@@ -85,8 +85,8 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PlayCover_${{ env.TAG_NAME }}.dmg
-          path: output/PlayCover_${{ env.TAG_NAME }}.dmg
+          name: MacOver_${{ env.TAG_NAME }}.dmg
+          path: output/MacOver_${{ env.TAG_NAME }}.dmg
 
       - name: Release
         if: startsWith(github.ref, 'refs/tags/')
@@ -94,4 +94,4 @@ jobs:
         with:
           draft: true
           files: |
-            output/PlayCover_${{ env.TAG_NAME }}.dmg
+            output/MacOver_${{ env.TAG_NAME }}.dmg

@@ -20,26 +20,26 @@ struct ConfigOverviewPane: View {
 
     private var frameRateKey: String {
         switch settings.settings.frameRateTargetMode {
-        case .adaptive: return "ui51.display.frameRate.adaptive"
-        case .fixed120: return "ui51.display.frameRate.fixed120"
-        case .fixed60: return "ui51.display.frameRate.fixed60"
-        case .fixed30: return "ui51.display.frameRate.fixed30"
+        case .adaptive: return "display.frameRate.adaptive"
+        case .fixed120: return "display.frameRate.fixed120"
+        case .fixed60: return "display.frameRate.fixed60"
+        case .fixed30: return "display.frameRate.fixed30"
         }
     }
 
     private var reportedIOSKey: String {
         switch settings.settings.reportedIOSVersionMode {
-        case .automatic: return "ui51.device.reportedIOS.automatic"
-        case .followHost: return "ui51.device.reportedIOS.followHost"
-        case .compat18_3: return "ui51.device.reportedIOS.compat18_3"
+        case .automatic: return "device.reportedIOS.automatic"
+        case .followHost: return "device.reportedIOS.followHost"
+        case .compat18_3: return "device.reportedIOS.compat18_3"
         }
     }
 
     private var windowCompatKey: String {
         switch settings.settings.windowCompatibility {
-        case .standard: return "ui51.display.windowCompat.standard"
-        case .invertedMetrics: return "ui51.display.windowCompat.invertedMetrics"
-        case .invertedLegacyResize: return "ui51.display.windowCompat.invertedLegacyResize"
+        case .standard: return "display.windowCompat.standard"
+        case .invertedMetrics: return "display.windowCompat.invertedMetrics"
+        case .invertedLegacyResize: return "display.windowCompat.invertedLegacyResize"
         }
     }
 
@@ -49,7 +49,7 @@ struct ConfigOverviewPane: View {
                 heroBanner
             }
 
-            Section("ui51.preset.section") {
+            Section("preset.section") {
                 LazyVGrid(columns: presetColumns, spacing: 10) {
                     ForEach(PlayAppSettingsPreset.allCases) { preset in
                         PresetCard(
@@ -65,7 +65,7 @@ struct ConfigOverviewPane: View {
             }
             .disabled(!hasPlayTools)
 
-            Section("ui51.config.overview.summary") {
+            Section("config.overview.summary") {
                 let data = settings.settings
                 LabeledContent("settings.picker.iosDevice") {
                     Text(DeviceProfileOption.displayName(for: data.iosDeviceModel))
@@ -76,15 +76,15 @@ struct ConfigOverviewPane: View {
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
-                LabeledContent("ui51.display.frameRate.title") {
+                LabeledContent("display.frameRate.title") {
                     Text(LocalizedStringKey(frameRateKey))
                         .foregroundStyle(.secondary)
                 }
-                LabeledContent("ui51.device.reportedIOS.title") {
+                LabeledContent("device.reportedIOS.title") {
                     Text(LocalizedStringKey(reportedIOSKey))
                         .foregroundStyle(.secondary)
                 }
-                LabeledContent("ui51.display.windowCompat.title") {
+                LabeledContent("display.windowCompat.title") {
                     Text(LocalizedStringKey(windowCompatKey))
                         .foregroundStyle(.secondary)
                 }
@@ -101,7 +101,7 @@ struct ConfigOverviewPane: View {
                             }
                         }
                     } label: {
-                        Label("ui51.action.launchSafeMode", systemImage: "shield.lefthalf.filled")
+                        Label("action.launchSafeMode", systemImage: "shield.lefthalf.filled")
                     }
 
                     Button("playapp.openCache") {
@@ -119,7 +119,7 @@ struct ConfigOverviewPane: View {
         }
         .formStyle(.grouped)
         .scrollEdgeEffectStyle(.soft, for: .top)
-        .alert("ui51.config.resetTitle", isPresented: $showResetConfirm) {
+        .alert("config.resetTitle", isPresented: $showResetConfirm) {
             Button("button.Cancel", role: .cancel) {}
             Button("settings.resetSettings", role: .destructive) {
                 app.settings.reset()
@@ -129,7 +129,7 @@ struct ConfigOverviewPane: View {
                 )
             }
         } message: {
-            Text(String(format: NSLocalizedString("ui51.config.resetMessage", comment: ""), app.name))
+            Text(String(format: NSLocalizedString("config.resetMessage", comment: ""), app.name))
         }
     }
 
@@ -141,7 +141,7 @@ struct ConfigOverviewPane: View {
                     Text(app.name)
                         .font(.title2.bold())
                     if app.isRunning {
-                        Text("ui51.sidebar.runningBadge")
+                        Text("sidebar.runningBadge")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.green)
                             .padding(.horizontal, 8)

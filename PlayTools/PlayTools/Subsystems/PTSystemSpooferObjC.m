@@ -80,7 +80,7 @@ static NSUUID *ps_fallback_vendor_uuid(void) {
     static NSUUID *s_fallbackUUID = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier] ?: @"com.playcover.app";
+        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier] ?: @"app.makedie.app";
         const char *vh = pt_get_virtual_home_cstr();
         NSString *seed = [NSString stringWithFormat:@"ps-idfv:%@:%s", bundleID, (vh != NULL) ? vh : ""];
         NSData *seedData = [seed dataUsingEncoding:NSUTF8StringEncoding];
@@ -177,7 +177,8 @@ __attribute__((visibility("hidden"))) NSUUID *ps_hook_device_identifierForVendor
                 @"activator",
                 @"ssh",
                 @"apt",
-                @"playcover"
+                @"playcover",
+                @"macover"
             ]];
         });
         NSString *scheme = [url.scheme lowercaseString];
@@ -248,6 +249,9 @@ static BOOL ps_is_hidden_bundle_identifier(NSString *bId) {
     return ([bId containsString:@"PlayTools"] ||
             [bId containsString:@"AKInterface"] ||
             [bId containsString:@"playcover"] ||
+            [bId containsString:@"macover"] ||
+            [bId containsString:@"MacOver"] ||
+            [bId containsString:@"app.makedie"] ||
             [bId isEqualToString:@"com.apple.AppKit"] ||
             [bId isEqualToString:@"com.apple.UIKitMacHelper"] ||
             [bId isEqualToString:@"com.apple.ViewBridge"] ||
@@ -386,7 +390,7 @@ __attribute__((visibility("hidden"))) NSString *ps_app_settings_plist_path(void)
             }
         }
         if (root.length > 0) {
-            s_plistPath = [NSString stringWithFormat:@"%@/Library/Containers/io.playcover.PlayCover/App Settings/%@.plist",
+            s_plistPath = [NSString stringWithFormat:@"%@/Library/Containers/app.makedie.MacOver/App Settings/%@.plist",
                            root, bundleID];
         }
     });
@@ -1048,6 +1052,7 @@ static NSString *ps_cached_bundle_executable_name(void) {
 static NSString *ps_sanitize_process_name(NSString *orig) {
     if (orig.length > 0 &&
         ([orig rangeOfString:@"PlayCover" options:NSCaseInsensitiveSearch].location == NSNotFound) &&
+        ([orig rangeOfString:@"MacOver" options:NSCaseInsensitiveSearch].location == NSNotFound) &&
         ([orig rangeOfString:@"PlayTools" options:NSCaseInsensitiveSearch].location == NSNotFound)) {
         return orig;
     }
@@ -1706,6 +1711,8 @@ static NSDictionary *ps_sanitize_process_environment(NSDictionary *orig) {
             if ([valStr rangeOfString:@"/Users/" options:NSCaseInsensitiveSearch].location != NSNotFound ||
                 [valStr rangeOfString:@"PlayTools" options:NSCaseInsensitiveSearch].location != NSNotFound ||
                 [valStr rangeOfString:@"PlayCover" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                [valStr rangeOfString:@"MacOver" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                [valStr rangeOfString:@"app.makedie" options:NSCaseInsensitiveSearch].location != NSNotFound ||
                 [valStr rangeOfString:@"/var/folders/" options:NSCaseInsensitiveSearch].location != NSNotFound) {
                 [sanitized removeObjectForKey:key];
             }

@@ -26,7 +26,7 @@ struct ConfigSidebar: View {
                 app.settings.flush()
                 navState.closeConfiguration()
             } label: {
-                Label("ui51.sidebar.backToLibrary", systemImage: "chevron.left")
+                Label("sidebar.backToLibrary", systemImage: "chevron.left")
                     .font(.callout.weight(.medium))
             }
             .buttonStyle(.plain)

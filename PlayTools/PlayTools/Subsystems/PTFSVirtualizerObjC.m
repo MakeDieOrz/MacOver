@@ -215,12 +215,13 @@ static NSString *ps_scrub_host_paths_in_text(NSString *s, BOOL usePrivatePrefix)
         if (hr != NULL && hr[0] == '/') {
             s_hostRoot = [NSString stringWithUTF8String:hr];
         }
-        s_hostPathRe = [NSRegularExpression regularExpressionWithPattern:@"(?:/System/Volumes/Data)?(?:/Users/[^/\\s\"'”)>\\]]+(?:/[^\\s\"'”)>\\]]*)?|/Applications/PlayCover\\.app(?:/[^\\s\"'”)>\\]]*)?|/Library/Frameworks/PlayTools\\.framework(?:/[^\\s\"'”)>\\]]*)?)"
+        s_hostPathRe = [NSRegularExpression regularExpressionWithPattern:@"(?:/System/Volumes/Data)?(?:/Users/[^/\\s\"'”)>\\]]+(?:/[^\\s\"'”)>\\]]*)?|/Applications/(?:MacOver|PlayCover)\\.app(?:/[^\\s\"'”)>\\]]*)?|/Library/Frameworks/PlayTools\\.framework(?:/[^\\s\"'”)>\\]]*)?)"
                                                                  options:0
                                                                    error:nil];
     });
     BOOL maybeHost = ([s rangeOfString:@"/Users/"].location != NSNotFound ||
                       [s rangeOfString:@"/System/Volumes/Data/"].location != NSNotFound ||
+                      [s rangeOfString:@"MacOver"].location != NSNotFound ||
                       [s rangeOfString:@"PlayCover"].location != NSNotFound ||
                       [s rangeOfString:@"PlayTools"].location != NSNotFound ||
                       (s_hostRoot.length > 0 && [s rangeOfString:s_hostRoot].location != NSNotFound));
@@ -734,7 +735,7 @@ static NSOperationQueue *ps_vfile_operation_queue(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         s_ioQueue = [[NSOperationQueue alloc] init];
-        s_ioQueue.name = @"io.playcover.PlayShadow.vfile.io";
+        s_ioQueue.name = @"app.makedie.PlayShadow.vfile.io";
         s_ioQueue.maxConcurrentOperationCount = 6;
         s_ioQueue.qualityOfService = NSQualityOfServiceUserInitiated;
     });
@@ -1526,6 +1527,8 @@ static inline BOOL ps_is_hidden_url_item(NSString *itemPath, const void *caller)
         [itemPath containsString:@"Playtools.strings"] ||
         [itemPath containsString:@"AKInterface"] ||
         [itemPath containsString:@"UserPlugins"] ||
+        ([itemPath containsString:@"app.makedie.MacOver"] &&
+         ![itemPath containsString:@"/app.makedie.MacOver/Applications/"]) ||
         ([itemPath containsString:@"io.playcover.PlayCover"] &&
          ![itemPath containsString:@"/io.playcover.PlayCover/Applications/"])) {
         return YES;

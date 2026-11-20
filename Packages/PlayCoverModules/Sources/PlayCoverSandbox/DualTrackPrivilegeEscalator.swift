@@ -4,8 +4,8 @@ import Security
 import ServiceManagement
 
 public enum DualTrackPrivilegeEscalator {
-    public static let helperMachServiceName = "io.playcover.PlayCover.Helper"
-    public static let helperDaemonPlistName = "io.playcover.PlayCover.Helper.plist"
+    public static let helperMachServiceName = "app.makedie.MacOver.Helper"
+    public static let helperDaemonPlistName = "app.makedie.MacOver.Helper.plist"
     public static let amfiBootArgs = "amfi_get_out_of_my_way=0x1 ipc_control_port_options=0"
 
     private static let nvramAMFIOptions = [
