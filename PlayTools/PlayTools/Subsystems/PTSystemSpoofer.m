@@ -2156,7 +2156,8 @@ static int pt_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *
     return sysctlbyname(name, oldp, oldlenp, newp, newlen);
 }
 
-static void pt_sanitize_system_version_dict(NSMutableDictionary *dict) {
+__attribute__((visibility("hidden")))
+void pt_sanitize_system_version_dict(NSMutableDictionary *dict) {
     if (dict == nil) {
         return;
     }
@@ -2178,26 +2179,37 @@ static void pt_sanitize_system_version_dict(NSMutableDictionary *dict) {
         dict[@"ProductName"] = @"iPhone OS";
         return;
     }
+    id origProdName = dict[@"ProductName"];
     id iosVer = dict[@"iOSSupportVersion"];
+    BOOL hadMacMarkers = (([origProdName isKindOfClass:[NSString class]] &&
+                           [(NSString *)origProdName isEqualToString:@"macOS"]) ||
+                          iosVer != nil);
     if ([iosVer isKindOfClass:[NSString class]] && [(NSString *)iosVer length] > 0) {
         dict[@"ProductVersion"] = iosVer;
         if (dict[@"ProductUserVisibleVersion"] != nil) {
             dict[@"ProductUserVisibleVersion"] = iosVer;
         }
-        [dict removeObjectForKey:@"iOSSupportVersion"];
     }
+    [dict removeObjectForKey:@"iOSSupportVersion"];
     pt_ensure_host_kernel_info();
     id buildVer = dict[@"ProductBuildVersion"];
     if ([buildVer isKindOfClass:[NSString class]] && [(NSString *)buildVer length] >= 3) {
         NSString *bstr = (NSString *)buildVer;
         unichar c0 = [bstr characterAtIndex:0];
         unichar c1 = [bstr characterAtIndex:1];
-        int major = atoi(s_real_kern_release);
-        if (major >= 24 && c0 >= '0' && c0 <= '9' && c1 >= '0' && c1 <= '9') {
+        if (c0 >= '0' && c0 <= '9' && c1 >= '0' && c1 <= '9') {
             int b_prefix = (int)(c0 - '0') * 10 + (int)(c1 - '0');
-            int target_prefix = major - 2;
-            if (b_prefix > target_prefix) {
-                dict[@"ProductBuildVersion"] = [NSString stringWithFormat:@"%d%@", target_prefix, [bstr substringFromIndex:2]];
+            if (hadMacMarkers && b_prefix >= 24) {
+                // macOS 15 (24*) -> iOS 18 (22*), macOS 26 (25*) -> iOS 26 (23*), etc.
+                dict[@"ProductBuildVersion"] = [NSString stringWithFormat:@"%d%@", b_prefix - 2, [bstr substringFromIndex:2]];
+            } else {
+                int major = atoi(s_real_kern_release);
+                if (major >= 24) {
+                    int target_prefix = major - 2;
+                    if (b_prefix > target_prefix) {
+                        dict[@"ProductBuildVersion"] = [NSString stringWithFormat:@"%d%@", target_prefix, [bstr substringFromIndex:2]];
+                    }
+                }
             }
         }
     }

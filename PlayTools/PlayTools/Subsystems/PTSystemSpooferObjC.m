@@ -751,35 +751,11 @@ static NSString *ps_virtual_mobileprovision_path_if_applicable(NSBundle *bundle,
 }
 
 static NSMutableDictionary *ps_sanitized_system_version_mutable_dict(NSDictionary *dict) {
+    if (dict == nil) {
+        return nil;
+    }
     NSMutableDictionary *modified = [dict mutableCopy];
-    modified[@"ProductName"] = @"iPhone OS";
-    const char *ovBuild = NULL;
-    const char *ovVer = pt_get_reported_ios_version_override(&ovBuild);
-    if (ovVer != NULL && ovBuild != NULL) {
-        NSString *verStr = [NSString stringWithUTF8String:ovVer];
-        if (verStr != nil) {
-            modified[@"ProductVersion"] = verStr;
-            modified[@"ProductUserVisibleVersion"] = verStr;
-        }
-        [modified removeObjectForKey:@"iOSSupportVersion"];
-        NSString *buildStr = [NSString stringWithUTF8String:ovBuild];
-        if (buildStr != nil) {
-            modified[@"ProductBuildVersion"] = buildStr;
-        }
-        return modified;
-    }
-    NSString *iosVer = modified[@"iOSSupportVersion"];
-    if ([iosVer isKindOfClass:[NSString class]] && iosVer.length > 0) {
-        modified[@"ProductVersion"] = iosVer;
-        modified[@"ProductUserVisibleVersion"] = iosVer;
-    }
-    [modified removeObjectForKey:@"iOSSupportVersion"];
-    NSString *buildVer = modified[@"ProductBuildVersion"];
-    if ([buildVer isKindOfClass:[NSString class]] &&
-        buildVer.length >= 3 &&
-        [buildVer hasPrefix:@"24"]) {
-        modified[@"ProductBuildVersion"] = [@"22" stringByAppendingString:[buildVer substringFromIndex:2]];
-    }
+    pt_sanitize_system_version_dict(modified);
     return modified;
 }
 
