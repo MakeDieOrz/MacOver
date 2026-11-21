@@ -401,36 +401,6 @@ __attribute__((visibility("hidden"))) NSString *ps_app_settings_plist_path(void)
     return s_plistPath;
 }
 
-static NSString *ps_cached_original_minimum_os_version(void) {
-    static NSString *s_origMinOS = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        NSString *plistPath = ps_app_settings_plist_path();
-        if (plistPath.length > 0) {
-            NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:plistPath];
-            id val = dict[@"originalMinimumOSVersion"];
-            if ([val isKindOfClass:[NSString class]] && [(NSString *)val length] > 0) {
-                s_origMinOS = [(NSString *)val copy];
-            }
-        }
-    });
-    return s_origMinOS;
-}
-
-static id ps_restored_minimum_os_version(id origVal) {
-    NSString *saved = ps_cached_original_minimum_os_version();
-    if (saved.length > 0) {
-        return saved;
-    }
-    if ([origVal isKindOfClass:[NSString class]]) {
-        NSString *s = (NSString *)origVal;
-        if ([s isEqualToString:@"11"] || [s isEqualToString:@"11.0"]) {
-            return @"15.0";
-        }
-    }
-    return origVal;
-}
-
 - (instancetype) pm_ps_initWithPath:(NSString *)path {
     const void *caller = __builtin_return_address(0);
     if (ps_is_hidden_path(path, caller)) {
@@ -519,22 +489,13 @@ static id ps_restored_minimum_os_version(id origVal) {
 - (NSDictionary<NSString *, id> *) pm_ps_infoDictionary {
     NSDictionary<NSString *, id> *orig = [self pm_ps_infoDictionary];
     if (orig != nil &&
-        (id)self == (id)[NSBundle mainBundle] &&
         pt_is_bypass_enabled() &&
         !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        id minOS = orig[@"MinimumOSVersion"];
-        id restoredMinOS = ps_restored_minimum_os_version(minOS);
-        BOOL stripEnv = (orig[@"LSEnvironment"] != nil);
-        BOOL stripCat = (orig[@"LSApplicationCategoryType"] != nil);
-        BOOL stripGen = (orig[@"PCInstallGeneration"] != nil);
-        BOOL changeMin = (restoredMinOS != minOS && restoredMinOS != nil && ![restoredMinOS isEqual:minOS]);
-        if (stripEnv || stripCat || stripGen || changeMin) {
-            NSMutableDictionary<NSString *, id> *modified = [orig mutableCopy];
-            if (stripEnv) [modified removeObjectForKey:@"LSEnvironment"];
-            if (stripCat) [modified removeObjectForKey:@"LSApplicationCategoryType"];
-            if (stripGen) [modified removeObjectForKey:@"PCInstallGeneration"];
-            if (changeMin) modified[@"MinimumOSVersion"] = restoredMinOS;
-            return [modified copy];
+        if (pt_info_dict_needs_sanitize(orig)) {
+            NSDictionary<NSString *, id> *clean = pt_build_sanitized_info_dict(orig);
+            if (clean != nil) {
+                return clean;
+            }
         }
     }
     return orig;
@@ -542,19 +503,32 @@ static id ps_restored_minimum_os_version(id origVal) {
 
 - (id) pm_ps_objectForInfoDictionaryKey:(NSString *)key {
     if (key != nil &&
-        (id)self == (id)[NSBundle mainBundle] &&
         pt_is_bypass_enabled() &&
         !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        if ([key isEqualToString:@"LSEnvironment"] ||
-            [key isEqualToString:@"LSApplicationCategoryType"] ||
-            [key isEqualToString:@"PCInstallGeneration"]) {
-            return nil;
+        NSDictionary<NSString *, id> *loc = [self localizedInfoDictionary];
+        if (loc != nil) {
+            NSDictionary<NSString *, id> *cleanLoc = pt_info_dict_needs_sanitize(loc)
+                ? pt_build_sanitized_info_dict(loc)
+                : loc;
+            if (cleanLoc != nil && cleanLoc[key] != nil) {
+                return cleanLoc[key];
+            }
+            if (loc[key] != nil) {
+                return nil;
+            }
         }
-        id orig = [self pm_ps_objectForInfoDictionaryKey:key];
-        if ([key isEqualToString:@"MinimumOSVersion"]) {
-            return ps_restored_minimum_os_version(orig);
+        NSDictionary<NSString *, id> *rawInfo = [self pm_ps_infoDictionary];
+        if (rawInfo != nil) {
+            NSDictionary<NSString *, id> *cleanInfo = pt_info_dict_needs_sanitize(rawInfo)
+                ? pt_build_sanitized_info_dict(rawInfo)
+                : rawInfo;
+            if (cleanInfo != nil && cleanInfo[key] != nil) {
+                return cleanInfo[key];
+            }
+            if (rawInfo[key] != nil) {
+                return nil;
+            }
         }
-        return orig;
     }
     return [self pm_ps_objectForInfoDictionaryKey:key];
 }
@@ -767,25 +741,107 @@ static NSMutableDictionary *ps_sanitized_system_version_mutable_dict(NSDictionar
 }
 
 + (NSDictionary *) pm_dictionaryWithContentsOfFile:(NSString *)path {
-    path = ps_resolve_virtual_nsstring_path(path);
-    NSDictionary *dict = [self pm_dictionaryWithContentsOfFile:path];
-    if (dict != nil && [path hasSuffix:@"/SystemVersion.plist"] &&
-        pt_is_bypass_enabled() &&
-        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        NSMutableDictionary *modified = ps_sanitized_system_version_mutable_dict(dict);
-        return [self isSubclassOfClass:[NSMutableDictionary class]] ? modified : [modified copy];
+    const void *caller = __builtin_return_address(0);
+    if (ps_is_hidden_path(path, caller)) {
+        return nil;
+    }
+    NSString *resolved = ps_resolve_virtual_nsstring_path(path);
+    if (resolved != path && ps_is_hidden_path(ps_strip_iossupport_nsstring(resolved), caller)) {
+        return nil;
+    }
+    BOOL usedBackup = NO;
+    if (resolved.length > 0) {
+        const char *resolvedC = [resolved fileSystemRepresentation];
+        if (resolvedC != NULL) {
+            char backupBuf[PATH_MAX];
+            int isSysCaller = -1;
+            const char *backup = pt_lookup_app_backup_redirect_for_caller(
+                resolvedC, caller, backupBuf, sizeof(backupBuf), &isSysCaller);
+            if (backup != NULL) {
+                CFStringRef cfBackup = CFStringCreateWithFileSystemRepresentation(kCFAllocatorDefault, backup);
+                if (cfBackup != NULL) {
+                    resolved = (__bridge_transfer NSString *)cfBackup;
+                    usedBackup = YES;
+                }
+            }
+        }
+    }
+    NSDictionary *dict = nil;
+    if (usedBackup) {
+        pt_enter_internal_scope();
+        dict = [self pm_dictionaryWithContentsOfFile:resolved];
+        pt_leave_internal_scope();
+    } else {
+        dict = [self pm_dictionaryWithContentsOfFile:resolved];
+    }
+    if (dict != nil && pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(caller)) {
+        BOOL wantMutable = [self isSubclassOfClass:[NSMutableDictionary class]];
+        if ([resolved hasSuffix:@"/SystemVersion.plist"] || pt_is_system_version_plist_dict(dict)) {
+            NSMutableDictionary *modified = ps_sanitized_system_version_mutable_dict(dict);
+            return wantMutable ? modified : [modified copy];
+        }
+        if (pt_is_info_plist_dict(dict) && pt_info_dict_needs_sanitize(dict)) {
+            NSMutableDictionary *modified = pt_build_sanitized_mutable_info_dict(dict);
+            if (!wantMutable && [modified[@"CFBundleSupportedPlatforms"] isKindOfClass:[NSMutableArray class]]) {
+                modified[@"CFBundleSupportedPlatforms"] = [modified[@"CFBundleSupportedPlatforms"] copy];
+            }
+            return wantMutable ? modified : [modified copy];
+        }
     }
     return dict;
 }
 
 + (NSDictionary *) pm_dictionaryWithContentsOfURL:(NSURL *)url {
-    url = ps_resolve_virtual_nsurl(url);
-    NSDictionary *dict = [self pm_dictionaryWithContentsOfURL:url];
-    if (dict != nil && [url.path hasSuffix:@"/SystemVersion.plist"] &&
-        pt_is_bypass_enabled() &&
-        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        NSMutableDictionary *modified = ps_sanitized_system_version_mutable_dict(dict);
-        return [self isSubclassOfClass:[NSMutableDictionary class]] ? modified : [modified copy];
+    const void *caller = __builtin_return_address(0);
+    if (url != nil && [url isFileURL] && ps_is_hidden_path(url.path, caller)) {
+        return nil;
+    }
+    NSURL *resolved = ps_resolve_virtual_nsurl(url);
+    if (resolved != url && resolved != nil && [resolved isFileURL] &&
+        ps_is_hidden_path(ps_strip_iossupport_nsstring(resolved.path), caller)) {
+        return nil;
+    }
+    BOOL usedBackup = NO;
+    if (resolved != nil && [resolved isFileURL]) {
+        char resolvedC[PATH_MAX];
+        if (CFURLGetFileSystemRepresentation((__bridge CFURLRef)resolved, true, (UInt8 *)resolvedC, sizeof(resolvedC))) {
+            char backupBuf[PATH_MAX];
+            int isSysCaller = -1;
+            const char *backup = pt_lookup_app_backup_redirect_for_caller(
+                resolvedC, caller, backupBuf, sizeof(backupBuf), &isSysCaller);
+            if (backup != NULL) {
+                CFURLRef cfBackupURL = CFURLCreateFromFileSystemRepresentation(
+                    kCFAllocatorDefault, (const UInt8 *)backup, (CFIndex)strlen(backup), false);
+                if (cfBackupURL != NULL) {
+                    resolved = (__bridge_transfer NSURL *)cfBackupURL;
+                    usedBackup = YES;
+                }
+            }
+        }
+    }
+    NSDictionary *dict = nil;
+    if (usedBackup) {
+        pt_enter_internal_scope();
+        dict = [self pm_dictionaryWithContentsOfURL:resolved];
+        pt_leave_internal_scope();
+    } else {
+        dict = [self pm_dictionaryWithContentsOfURL:resolved];
+    }
+    if (dict != nil && pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(caller)) {
+        BOOL wantMutable = [self isSubclassOfClass:[NSMutableDictionary class]];
+        if ([resolved.path hasSuffix:@"/SystemVersion.plist"] || pt_is_system_version_plist_dict(dict)) {
+            NSMutableDictionary *modified = ps_sanitized_system_version_mutable_dict(dict);
+            return wantMutable ? modified : [modified copy];
+        }
+        if (pt_is_info_plist_dict(dict) && pt_info_dict_needs_sanitize(dict)) {
+            NSMutableDictionary *modified = pt_build_sanitized_mutable_info_dict(dict);
+            if (!wantMutable && [modified[@"CFBundleSupportedPlatforms"] isKindOfClass:[NSMutableArray class]]) {
+                modified[@"CFBundleSupportedPlatforms"] = [modified[@"CFBundleSupportedPlatforms"] copy];
+            }
+            return wantMutable ? modified : [modified copy];
+        }
     }
     return dict;
 }
@@ -797,7 +853,10 @@ static NSMutableDictionary *ps_sanitized_system_version_mutable_dict(NSDictionar
         BOOL isSysVer = pt_is_system_version_plist_dict(dict);
         BOOL isCodeRes = ([dict[@"files"] isKindOfClass:[NSDictionary class]] ||
                           [dict[@"files2"] isKindOfClass:[NSDictionary class]]);
-        if ((isSysVer || isCodeRes) &&
+        BOOL isInfoPlist = (!isSysVer && !isCodeRes &&
+                            pt_is_info_plist_dict(dict) &&
+                            pt_info_dict_needs_sanitize(dict));
+        if ((isSysVer || isCodeRes || isInfoPlist) &&
             pt_is_bypass_enabled() &&
             !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
             BOOL wantMutableContainers = ((opt & (NSPropertyListMutableContainers | NSPropertyListMutableContainersAndLeaves)) != 0);
@@ -837,6 +896,16 @@ static NSMutableDictionary *ps_sanitized_system_version_mutable_dict(NSDictionar
                         return [modified copy];
                     }
                     return modified;
+                }
+            }
+            if (isInfoPlist) {
+                NSMutableDictionary *modified = pt_build_sanitized_mutable_info_dict(dict);
+                if (modified != nil) {
+                    if (!wantMutableContainers &&
+                        [modified[@"CFBundleSupportedPlatforms"] isKindOfClass:[NSMutableArray class]]) {
+                        modified[@"CFBundleSupportedPlatforms"] = [modified[@"CFBundleSupportedPlatforms"] copy];
+                    }
+                    return wantMutableContainers ? modified : [modified copy];
                 }
             }
         }

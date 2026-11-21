@@ -444,6 +444,10 @@ class Installer {
         var isDir: ObjCBool = false
         let hasProvision = fm.fileExists(atPath: provisionURL.path, isDirectory: &isDir) && !isDir.boolValue
 
+        let infoPlistURL = baseApp.url.appendingPathComponent("Info.plist")
+        var infoIsDir: ObjCBool = false
+        let hasInfoPlist = fm.fileExists(atPath: infoPlistURL.path, isDirectory: &infoIsDir) && !infoIsDir.boolValue
+
         let hasThinExecutable: Bool
         if fm.fileExists(atPath: baseApp.executable.path) {
             do {
@@ -460,7 +464,7 @@ class Installer {
             hasThinExecutable = false
         }
 
-        guard hasProvision || hasThinExecutable else {
+        guard hasProvision || hasThinExecutable || hasInfoPlist else {
             return .noneApplicable
         }
 
@@ -469,6 +473,19 @@ class Installer {
         } catch {
             PlayCoverDiagnostics.log("Failed to create AppBackups staging dir: \(error)", isError: true)
             return .failed
+        }
+
+        if hasInfoPlist {
+            let stagedInfo = stagingDir.appendingPathComponent("Info.plist")
+            if Darwin.clonefile(infoPlistURL.path, stagedInfo.path, 0) != 0 {
+                do {
+                    try fm.copyItem(at: infoPlistURL, to: stagedInfo)
+                } catch {
+                    PlayCoverDiagnostics.log("Failed to stage Info.plist backup: \(error)", isError: true)
+                    try? fm.removeItem(at: stagingDir)
+                    return .failed
+                }
+            }
         }
 
         if hasProvision {
@@ -630,6 +647,7 @@ class Installer {
             )
             var orderedNames: [String] = [
                 Installer.backupManifestFileName,
+                "Info.plist",
                 "executable",
                 "embedded.mobileprovision"
             ]

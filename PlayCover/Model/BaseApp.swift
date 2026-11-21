@@ -37,6 +37,10 @@ public class BaseApp {
         appBackupsDir.appendingPathComponent("executable")
     }
 
+    public var infoPlistBackup: URL {
+        appBackupsDir.appendingPathComponent("Info.plist")
+    }
+
     init(appUrl: URL) {
         url = appUrl
         info = AppInfo(contentsOf: url.appendingPathComponent("Info")

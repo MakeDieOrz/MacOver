@@ -692,6 +692,28 @@ final class ArchitectureAndHostTests: XCTestCase {
         try fm.createDirectory(at: appDir, withIntermediateDirectories: true)
 
         let infoURL = appDir.appendingPathComponent("Info.plist")
+        let cleanInfoDict: [String: Any] = [
+            "CFBundleIdentifier": bundleID,
+            "CFBundleExecutable": "Sample",
+            "CFBundleShortVersionString": "1.2.3",
+            "CFBundleVersion": "45",
+            "MinimumOSVersion": "16.4"
+        ]
+        try PropertyListSerialization.data(fromPropertyList: cleanInfoDict, format: .xml, options: 0)
+            .write(to: infoURL)
+        let stagingClean = dir.appendingPathComponent("staging-clean-info")
+        let baseSampleApp = BaseApp(appUrl: appDir)
+        if case .staged(let stagedURL) = Installer.stageAppBackups(for: baseSampleApp, in: stagingClean) {
+            let stagedInfoData = try Data(contentsOf: stagedURL.appendingPathComponent("Info.plist"))
+            let stagedParsed = try XCTUnwrap(
+                PropertyListSerialization.propertyList(from: stagedInfoData, format: nil) as? [String: Any]
+            )
+            XCTAssertNil(stagedParsed[Installer.installGenerationInfoKey])
+            XCTAssertEqual(stagedParsed["MinimumOSVersion"] as? String, "16.4")
+        } else {
+            XCTFail("Expected stageAppBackups to stage clean Info.plist")
+        }
+
         let v1Gen = UUID().uuidString
         let infoDict: [String: Any] = [
             "CFBundleIdentifier": bundleID,

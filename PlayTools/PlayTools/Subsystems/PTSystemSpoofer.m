@@ -2615,64 +2615,10 @@ static NSMutableDictionary *pt_sanitize_code_resources_subdict(NSDictionary *sub
 }
 
 static NSMutableDictionary *pt_maybe_sanitize_info_plist_dict(NSDictionary *dict) {
-    if (dict[@"CFBundleIdentifier"] == nil && dict[@"CFBundleExecutable"] == nil) {
+    if (!pt_is_info_plist_dict(dict) || !pt_info_dict_needs_sanitize(dict)) {
         return nil;
     }
-    BOOL needs_clean = NO;
-    id platforms = dict[@"CFBundleSupportedPlatforms"];
-    if ([platforms isKindOfClass:[NSArray class]]) {
-        for (id p in (NSArray *)platforms) {
-            if ([p isKindOfClass:[NSString class]] &&
-                ([(NSString *)p isEqualToString:@"MacOSX"] ||
-                 [(NSString *)p isEqualToString:@"macOS"])) {
-                needs_clean = YES;
-                break;
-            }
-        }
-    }
-    id dtPlat = dict[@"DTPlatformName"];
-    if ([dtPlat isKindOfClass:[NSString class]] &&
-        ([(NSString *)dtPlat caseInsensitiveCompare:@"macosx"] == NSOrderedSame)) {
-        needs_clean = YES;
-    }
-    id dtSdk = dict[@"DTSDKName"];
-    if ([dtSdk isKindOfClass:[NSString class]] &&
-        ([(NSString *)dtSdk hasPrefix:@"macosx"] || [(NSString *)dtSdk hasPrefix:@"MacOSX"])) {
-        needs_clean = YES;
-    }
-    id prin = dict[@"NSPrincipalClass"];
-    if ([prin isKindOfClass:[NSString class]] &&
-        [(NSString *)prin isEqualToString:@"NSApplication"]) {
-        needs_clean = YES;
-    }
-    if (dict[@"LSMinimumSystemVersion"] != nil ||
-        dict[@"LSEnvironment"] != nil ||
-        dict[@"PCInstallGeneration"] != nil) {
-        needs_clean = YES;
-    }
-    if (!needs_clean) {
-        return nil;
-    }
-    NSMutableDictionary *clean = [dict mutableCopy];
-    if ([platforms isKindOfClass:[NSArray class]]) {
-        clean[@"CFBundleSupportedPlatforms"] = [NSMutableArray arrayWithObject:@"iPhoneOS"];
-    }
-    if ([dtPlat isKindOfClass:[NSString class]] &&
-        [(NSString *)dtPlat caseInsensitiveCompare:@"macosx"] == NSOrderedSame) {
-        clean[@"DTPlatformName"] = @"iphoneos";
-    }
-    if ([dtSdk isKindOfClass:[NSString class]] &&
-        ([(NSString *)dtSdk hasPrefix:@"macosx"] || [(NSString *)dtSdk hasPrefix:@"MacOSX"])) {
-        clean[@"DTSDKName"] = @"iphoneos";
-    }
-    if ([prin isKindOfClass:[NSString class]] &&
-        [(NSString *)prin isEqualToString:@"NSApplication"]) {
-        clean[@"NSPrincipalClass"] = @"UIApplication";
-    }
-    [clean removeObjectForKey:@"LSMinimumSystemVersion"];
-    [clean removeObjectForKey:@"LSEnvironment"];
-    [clean removeObjectForKey:@"PCInstallGeneration"];
-    return clean;
+    return pt_build_sanitized_mutable_info_dict(dict);
 }
 
 static CFPropertyListRef pt_CFPropertyListCreateWithData(CFAllocatorRef allocator, CFDataRef data, CFOptionFlags options, CFPropertyListFormat *format, CFErrorRef *error) {
@@ -4025,6 +3971,55 @@ static BOOL pt_bundle_is_hidden(CFBundleRef bundle, const void *caller) {
     return NO;
 }
 
+static pthread_once_t s_info_min_os_once = PTHREAD_ONCE_INIT;
+static char s_info_main_bundle_id[256];
+static char s_info_orig_min_os_ver[64];
+
+static void pt_init_info_min_os_cache(void) {
+    s_info_main_bundle_id[0] = '\0';
+    s_info_orig_min_os_ver[0] = '\0';
+    (void)pt_read_main_bundle_id_early(s_info_main_bundle_id, sizeof(s_info_main_bundle_id));
+    int sfd = pt_open_early_settings_plist_fd();
+    if (sfd >= 0) {
+        (void)pt_read_plist_top_string_from_fd(
+            sfd, "originalMinimumOSVersion", s_info_orig_min_os_ver, sizeof(s_info_orig_min_os_ver));
+        close(sfd);
+    }
+}
+
+static id pt_restored_min_os_for_info_dict(NSDictionary *dict) {
+    id origVal = dict[@"MinimumOSVersion"];
+    if (origVal == nil) {
+        return nil;
+    }
+    pthread_once(&s_info_min_os_once, pt_init_info_min_os_cache);
+    id bid = dict[@"CFBundleIdentifier"];
+    if (s_info_main_bundle_id[0] != '\0') {
+        if (![bid isKindOfClass:[NSString class]]) {
+            return origVal;
+        }
+        const char *bidC = [(NSString *)bid UTF8String];
+        if (bidC == NULL || strcmp(bidC, s_info_main_bundle_id) != 0) {
+            return origVal;
+        }
+    }
+    if (s_info_orig_min_os_ver[0] != '\0') {
+        return [NSString stringWithUTF8String:s_info_orig_min_os_ver];
+    }
+    if ([origVal isKindOfClass:[NSString class]]) {
+        NSString *s = (NSString *)origVal;
+        if ([s isEqualToString:@"11"] || [s isEqualToString:@"11.0"]) {
+            return @"15.0";
+        }
+    }
+    return origVal;
+}
+
+__attribute__((visibility("hidden"))) BOOL pt_is_info_plist_dict(NSDictionary *dict) {
+    return [dict isKindOfClass:[NSDictionary class]] &&
+           (dict[@"CFBundleIdentifier"] != nil || dict[@"CFBundleExecutable"] != nil);
+}
+
 __attribute__((visibility("hidden"))) BOOL pt_info_dict_needs_sanitize(NSDictionary *dict) {
     if (![dict isKindOfClass:[NSDictionary class]]) {
         return NO;
@@ -4035,12 +4030,26 @@ __attribute__((visibility("hidden"))) BOOL pt_info_dict_needs_sanitize(NSDiction
         dict[@"NSSupportsAutomaticTermination"] != nil ||
         dict[@"NSSupportsSuddenTermination"] != nil ||
         dict[@"LSApplicationCategoryType"] != nil ||
+        dict[@"LSEnvironment"] != nil ||
         dict[@"PCInstallGeneration"] != nil) {
+        return YES;
+    }
+    id minOS = dict[@"MinimumOSVersion"];
+    if (minOS != nil) {
+        id restored = pt_restored_min_os_for_info_dict(dict);
+        if (restored != minOS && restored != nil && ![restored isEqual:minOS]) {
+            return YES;
+        }
+    }
+    id prin = dict[@"NSPrincipalClass"];
+    if ([prin isKindOfClass:[NSString class]] && [(NSString *)prin isEqualToString:@"NSApplication"]) {
         return YES;
     }
     id dtPlatform = dict[@"DTPlatformName"];
     if ([dtPlatform isKindOfClass:[NSString class]]) {
-        if ([dtPlatform isEqualToString:@"macosx"] || [dtPlatform isEqualToString:@"maccatalyst"]) {
+        NSString *dp = (NSString *)dtPlatform;
+        if ([dp caseInsensitiveCompare:@"macosx"] == NSOrderedSame ||
+            [dp caseInsensitiveCompare:@"maccatalyst"] == NSOrderedSame) {
             return YES;
         }
     }
@@ -4054,7 +4063,9 @@ __attribute__((visibility("hidden"))) BOOL pt_info_dict_needs_sanitize(NSDiction
     if ([sup isKindOfClass:[NSArray class]]) {
         for (id p in (NSArray *)sup) {
             if ([p isKindOfClass:[NSString class]] &&
-                ([p isEqualToString:@"MacOSX"] || [p isEqualToString:@"MacCatalyst"])) {
+                ([(NSString *)p isEqualToString:@"MacOSX"] ||
+                 [(NSString *)p isEqualToString:@"macOS"] ||
+                 [(NSString *)p isEqualToString:@"MacCatalyst"])) {
                 return YES;
             }
         }
@@ -4062,7 +4073,10 @@ __attribute__((visibility("hidden"))) BOOL pt_info_dict_needs_sanitize(NSDiction
     return NO;
 }
 
-__attribute__((visibility("hidden"))) NSDictionary *pt_build_sanitized_info_dict(NSDictionary *dict) {
+__attribute__((visibility("hidden"))) NSMutableDictionary *pt_build_sanitized_mutable_info_dict(NSDictionary *dict) {
+    if (![dict isKindOfClass:[NSDictionary class]]) {
+        return nil;
+    }
     NSMutableDictionary *m = [dict mutableCopy];
     [m removeObjectForKey:@"LSMinimumSystemVersion"];
     [m removeObjectForKey:@"LSMinimumSystemVersionByArchitecture"];
@@ -4070,12 +4084,27 @@ __attribute__((visibility("hidden"))) NSDictionary *pt_build_sanitized_info_dict
     [m removeObjectForKey:@"NSSupportsAutomaticTermination"];
     [m removeObjectForKey:@"NSSupportsSuddenTermination"];
     [m removeObjectForKey:@"LSApplicationCategoryType"];
+    [m removeObjectForKey:@"LSEnvironment"];
     [m removeObjectForKey:@"PCInstallGeneration"];
 
+    id minOS = dict[@"MinimumOSVersion"];
+    if (minOS != nil) {
+        id restored = pt_restored_min_os_for_info_dict(dict);
+        if (restored != minOS && restored != nil && ![restored isEqual:minOS]) {
+            m[@"MinimumOSVersion"] = restored;
+        }
+    }
+    id prin = m[@"NSPrincipalClass"];
+    if ([prin isKindOfClass:[NSString class]] && [(NSString *)prin isEqualToString:@"NSApplication"]) {
+        m[@"NSPrincipalClass"] = @"UIApplication";
+    }
     id dtPlatform = m[@"DTPlatformName"];
-    if ([dtPlatform isKindOfClass:[NSString class]] &&
-        ([dtPlatform isEqualToString:@"macosx"] || [dtPlatform isEqualToString:@"maccatalyst"])) {
-        m[@"DTPlatformName"] = @"iphoneos";
+    if ([dtPlatform isKindOfClass:[NSString class]]) {
+        NSString *dp = (NSString *)dtPlatform;
+        if ([dp caseInsensitiveCompare:@"macosx"] == NSOrderedSame ||
+            [dp caseInsensitiveCompare:@"maccatalyst"] == NSOrderedSame) {
+            m[@"DTPlatformName"] = @"iphoneos";
+        }
     }
     id dtSdk = m[@"DTSDKName"];
     if ([dtSdk isKindOfClass:[NSString class]]) {
@@ -4094,14 +4123,27 @@ __attribute__((visibility("hidden"))) NSDictionary *pt_build_sanitized_info_dict
         BOOL hasMac = NO;
         for (id p in (NSArray *)sup) {
             if ([p isKindOfClass:[NSString class]] &&
-                ([p isEqualToString:@"MacOSX"] || [p isEqualToString:@"MacCatalyst"])) {
+                ([(NSString *)p isEqualToString:@"MacOSX"] ||
+                 [(NSString *)p isEqualToString:@"macOS"] ||
+                 [(NSString *)p isEqualToString:@"MacCatalyst"])) {
                 hasMac = YES;
                 break;
             }
         }
         if (hasMac) {
-            m[@"CFBundleSupportedPlatforms"] = @[ @"iPhoneOS" ];
+            m[@"CFBundleSupportedPlatforms"] = [NSMutableArray arrayWithObject:@"iPhoneOS"];
         }
+    }
+    return m;
+}
+
+__attribute__((visibility("hidden"))) NSDictionary *pt_build_sanitized_info_dict(NSDictionary *dict) {
+    NSMutableDictionary *m = pt_build_sanitized_mutable_info_dict(dict);
+    if (m == nil) {
+        return nil;
+    }
+    if ([m[@"CFBundleSupportedPlatforms"] isKindOfClass:[NSMutableArray class]]) {
+        m[@"CFBundleSupportedPlatforms"] = [m[@"CFBundleSupportedPlatforms"] copy];
     }
     return [m copy];
 }
@@ -4398,26 +4440,21 @@ static CFTypeRef pt_CFBundleGetValueForInfoDictionaryKey(CFBundleRef bundle, CFS
     const void *caller = __builtin_return_address(0);
     if (bundle != NULL && key != NULL && pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(caller)) {
-        CFDictionaryRef sanitized = pt_sanitize_info_dict_cached_get(CFBundleGetLocalInfoDictionary(bundle), caller);
-        if (sanitized != NULL && CFDictionaryContainsKey(sanitized, key)) {
-            return CFDictionaryGetValue(sanitized, key);
+        CFDictionaryRef rawLocal = CFBundleGetLocalInfoDictionary(bundle);
+        CFDictionaryRef localSanitized = pt_sanitize_info_dict_cached_get(rawLocal, caller);
+        if (localSanitized != NULL && CFDictionaryContainsKey(localSanitized, key)) {
+            return CFDictionaryGetValue(localSanitized, key);
         }
-        CFDictionaryRef mainSanitized = pt_sanitize_info_dict_cached_get(CFBundleGetInfoDictionary(bundle), caller);
-        if (mainSanitized != NULL) {
-            NSString *nsKey = (__bridge NSString *)key;
-            if ([nsKey isEqualToString:@"LSMinimumSystemVersion"] ||
-                [nsKey isEqualToString:@"LSMinimumSystemVersionByArchitecture"] ||
-                [nsKey isEqualToString:@"LSRequiresNativeExecution"] ||
-                [nsKey isEqualToString:@"NSSupportsAutomaticTermination"] ||
-                [nsKey isEqualToString:@"NSSupportsSuddenTermination"] ||
-                [nsKey isEqualToString:@"LSApplicationCategoryType"]) {
-                return CFDictionaryGetValue(mainSanitized, key);
-            }
-            if ([nsKey isEqualToString:@"DTPlatformName"] ||
-                [nsKey isEqualToString:@"DTSDKName"] ||
-                [nsKey isEqualToString:@"CFBundleSupportedPlatforms"]) {
-                return CFDictionaryGetValue(mainSanitized, key);
-            }
+        if (rawLocal != NULL && CFDictionaryContainsKey(rawLocal, key)) {
+            return NULL;
+        }
+        CFDictionaryRef rawMain = CFBundleGetInfoDictionary(bundle);
+        CFDictionaryRef mainSanitized = pt_sanitize_info_dict_cached_get(rawMain, caller);
+        if (mainSanitized != NULL && CFDictionaryContainsKey(mainSanitized, key)) {
+            return CFDictionaryGetValue(mainSanitized, key);
+        }
+        if (rawMain != NULL && CFDictionaryContainsKey(rawMain, key)) {
+            return NULL;
         }
     }
     return CFBundleGetValueForInfoDictionaryKey(bundle, key);
