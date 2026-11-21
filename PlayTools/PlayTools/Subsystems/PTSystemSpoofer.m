@@ -2242,6 +2242,9 @@ pt_env_entry_action_t pt_resolve_env_entry(const char *key,
     return PT_ENV_ENTRY_KEEP;
 }
 
+extern int pt_orig_kernel_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen)
+    __asm("___sysctl");
+
 static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *size) {
     if (types < 3 || (name[2] != getpid())) {
         errno = ESRCH;
@@ -2249,7 +2252,7 @@ static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *
     }
     BOOL is_v2 = (name[1] == KERN_PROCARGS2);
     size_t raw_len = 0;
-    if (sysctl(name, types, NULL, &raw_len, NULL, 0) != 0 || raw_len == 0) {
+    if (pt_orig_kernel_sysctl(name, types, NULL, &raw_len, NULL, 0) != 0 || raw_len == 0) {
         return -1;
     }
     size_t alloc_len = raw_len + 64U;
@@ -2258,7 +2261,7 @@ static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *
         errno = ENOMEM;
         return -1;
     }
-    if (sysctl(name, types, raw, &raw_len, NULL, 0) != 0) {
+    if (pt_orig_kernel_sysctl(name, types, raw, &raw_len, NULL, 0) != 0) {
         int saved = errno;
         free(raw);
         errno = saved;
@@ -2601,7 +2604,13 @@ int pt_sysctl_with_caller(int *name,
             }
         }
     }
-    int ret = sysctl(name, types, buf, size, arg0, arg1);
+    // Fallback must not re-enter our ___sysctl interpose: libc's public sysctl()
+    // forwards every non-CTL_USER MIB to __sysctl, which is interposed by
+    // pt_kernel_sysctl and would recurse forever. Keep libc's userspace
+    // CTL_USER handling, and call the original kernel entry for everything else.
+    int ret = (name != NULL && types >= 1 && name[0] == CTL_USER)
+        ? sysctl(name, types, buf, size, arg0, arg1)
+        : pt_orig_kernel_sysctl(name, types, buf, size, arg0, arg1);
     if (ret == 0 && name != NULL && types >= 3 &&
         name[0] == CTL_KERN && name[1] == KERN_PROC && size != NULL) {
         BOOL is_sys = pt_sysctl_resolve_is_sys(ret_addr, &is_sys_caller);
@@ -2653,8 +2662,6 @@ static int pt_sysctl(int *name, u_int types, void *buf, size_t *size, void *arg0
     return pt_sysctl_with_caller(name, types, buf, size, arg0, arg1, __builtin_return_address(0));
 }
 
-extern int pt_orig_kernel_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen)
-    __asm("___sysctl");
 
 static int pt_kernel_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
     return pt_sysctl_with_caller(name, namelen, oldp, oldlenp, newp, newlen, __builtin_return_address(0));
