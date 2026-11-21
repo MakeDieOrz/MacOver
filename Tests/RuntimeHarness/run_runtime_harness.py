@@ -237,6 +237,10 @@ int main(int argc, const char *argv[]) {
 
         NSFileManager *fm = [NSFileManager defaultManager];
         NSBundle *mainBundle = [NSBundle mainBundle];
+        BOOL hidPCInstallGenNS = ([mainBundle objectForInfoDictionaryKey:@"PCInstallGeneration"] == nil &&
+                                  mainBundle.infoDictionary[@"PCInstallGeneration"] == nil);
+        BOOL hidPCInstallGenCF = (CFBundleGetValueForInfoDictionaryKey(
+            CFBundleGetMainBundle(), CFSTR("PCInstallGeneration")) == NULL);
         NSString *provPath = [mainBundle pathForResource:@"embedded" ofType:@"mobileprovision"] ?: @"";
         NSString *provURLPath = [mainBundle URLForResource:@"embedded" withExtension:@"mobileprovision"].path ?: @"";
         CFURLRef cfProvURL = CFBundleCopyResourceURL(CFBundleGetMainBundle(), CFSTR("embedded"), CFSTR("mobileprovision"), NULL);
@@ -461,6 +465,7 @@ int main(int argc, const char *argv[]) {
             @"cmDeviceMotionAvailable": cmDeviceMotionAvailable ? @YES : @NO,
             @"cmSampleValid": cmSampleValid ? @YES : @NO,
             @"provPath": provPath,
+            @"hidPCInstallGen": (hidPCInstallGenNS && hidPCInstallGenCF) ? @YES : @NO,
             @"provURLPath": provURLPath,
             @"cfProvURLPath": cfProvURLPath,
             @"provFMExists": provFMExists ? @YES : @NO,
@@ -589,7 +594,7 @@ def build_mock_app(work_dir: Path, playtools_fw: Path) -> Path:
     plugins_dir.mkdir(parents=True, exist_ok=True)
 
     # Flat iOS/MacCatalyst bundle Info.plist
-    info_plist = {
+    clean_info_plist = {
         "CFBundleDevelopmentRegion": "en",
         "CFBundleExecutable": "MockTarget",
         "CFBundleIdentifier": "app.makedie.harness.mockapp",
@@ -598,6 +603,10 @@ def build_mock_app(work_dir: Path, playtools_fw: Path) -> Path:
         "CFBundlePackageType": "APPL",
         "CFBundleShortVersionString": "1.0",
         "CFBundleVersion": "1",
+    }
+    info_plist = {
+        **clean_info_plist,
+        "PCInstallGeneration": "HARNESS-GEN-101",
     }
     with open(app_dir / "Info.plist", "wb") as fp:
         plistlib.dump(info_plist, fp)
@@ -719,6 +728,7 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info1["cmSampleValid"] is True,
         info1["availIOS16"] is True,
         info1["uiColorWellLoaded"] is True,
+        info1["hidPCInstallGen"] is True,
         (not info1["appAttestLoaded"]) or (
             info1["appAttestSupported"] is False and info1["appAttestGenKeyUnsupported"] is True
         ),
@@ -1068,6 +1078,34 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
     backup_prov_7.write_bytes(backup_prov_bytes)
     backup_exec_7.write_bytes(backup_exec_bytes)
     os.chmod(backup_exec_7, 0o755)
+    with open(backup_dir_7 / "Info.plist", "wb") as fp:
+        plistlib.dump(
+            {
+                "CFBundleDevelopmentRegion": "en",
+                "CFBundleExecutable": "MockTarget",
+                "CFBundleIdentifier": "app.makedie.harness.mockapp",
+                "CFBundleInfoDictionaryVersion": "6.0",
+                "CFBundleName": "MockTarget",
+                "CFBundlePackageType": "APPL",
+                "CFBundleShortVersionString": "1.0",
+                "CFBundleVersion": "1",
+            },
+            fp,
+        )
+    with open(backup_dir_7 / "manifest.plist", "wb") as fp:
+        plistlib.dump(
+            {
+                "CFBundleIdentifier": "app.makedie.harness.mockapp",
+                "CFBundleShortVersionString": "1.0",
+                "CFBundleVersion": "1",
+                "PCInstallGeneration": "HARNESS-GEN-101",
+            },
+            fp,
+        )
+    unmanifested_dir_7 = isolated_home_7 / "UnmanifestedBackups"
+    unmanifested_dir_7.mkdir(parents=True, exist_ok=True)
+    (unmanifested_dir_7 / "embedded.mobileprovision").write_bytes(backup_prov_bytes)
+    (unmanifested_dir_7 / "executable").write_bytes(backup_exec_bytes)
     plist7 = write_test_settings_plist(isolated_home_7, "app.makedie.harness.mockapp")
 
     def env7(marker_path: Path, backup_override: Path, **extra: str) -> dict[str, str]:
@@ -1111,16 +1149,33 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         ),
         check=False,
     )
-    if proc7a.returncode != 0 or proc7b.returncode != 0 or proc7c.returncode != 0:
+    marker7d = work_dir / "marker_7d.txt"
+    proc7d = run_cmd(
+        [str(target_bin)],
+        env=env7(
+            marker7d,
+            unmanifested_dir_7,
+            HARNESS_GRACEFUL_EXIT="1",
+        ),
+        check=False,
+    )
+    if (
+        proc7a.returncode != 0
+        or proc7b.returncode != 0
+        or proc7c.returncode != 0
+        or proc7d.returncode != 0
+    ):
         results.append(ScenarioResult(
             name="7. AppBackups read-only virtualization & direct-probe hiding",
             passed=False,
             duration_sec=time.monotonic() - t6,
             details=(
-                f"Sub-run rc=({proc7a.returncode}, {proc7b.returncode}, {proc7c.returncode})\n"
+                f"Sub-run rc=({proc7a.returncode}, {proc7b.returncode}, "
+                f"{proc7c.returncode}, {proc7d.returncode})\n"
                 f"7a stdout={proc7a.stdout}\n7a stderr={proc7a.stderr}\n"
                 f"7b stdout={proc7b.stdout}\n7b stderr={proc7b.stderr}\n"
-                f"7c stdout={proc7c.stdout}\n7c stderr={proc7c.stderr}"
+                f"7c stdout={proc7c.stdout}\n7c stderr={proc7c.stderr}\n"
+                f"7d stdout={proc7d.stdout}\n7d stderr={proc7d.stderr}"
             ),
         ))
         return results
@@ -1128,6 +1183,7 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
     info7a = parse_harness_json(proc7a.stdout)
     info7b = parse_harness_json(proc7b.stdout)
     info7c = parse_harness_json(proc7c.stdout)
+    info7d = parse_harness_json(proc7d.stdout)
     checks7 = [
         info7a["safeModeActive"] is False,
         info7a["provPath"].endswith("/embedded.mobileprovision"),
@@ -1162,6 +1218,11 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info7c["provFMExists"] is False,
         info7c["provPosixText"] == "",
         info7c["execPosixPrefix"] != "BACKUP_EXEC_PAYLOAD_101",
+        info7d["safeModeActive"] is False,
+        info7d["provPath"] == "",
+        info7d["provFMExists"] is False,
+        info7d["provPosixText"] == "",
+        info7d["execPosixPrefix"] != "BACKUP_EXEC_PAYLOAD_101",
     ]
     results.append(ScenarioResult(
         name="7. AppBackups read-only virtualization & direct-probe hiding",
@@ -1172,6 +1233,7 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
                 "withBackups": info7a,
                 "safeMode": info7b,
                 "absentBackups": info7c,
+                "unmanifestedBackups": info7d,
             },
             sort_keys=True,
         ),
