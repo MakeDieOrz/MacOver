@@ -1941,20 +1941,53 @@ static NSDictionary *ps_sanitize_process_environment(NSDictionary *orig) {
     return [self pm_swift_fullUserName];
 }
 
+static NSArray<NSString *> *ps_sanitize_process_arguments(NSArray<NSString *> *orig) {
+    NSUInteger count = orig.count;
+    if (count == 0) {
+        return orig;
+    }
+    NSMutableArray<NSString *> *modified = [NSMutableArray arrayWithCapacity:count];
+    BOOL changed = NO;
+    for (NSUInteger i = 0; i < count; i++) {
+        NSString *item = orig[i];
+        const char *cstr = [item isKindOfClass:[NSString class]] ? [item UTF8String] : NULL;
+        if (i == 0) {
+            if (cstr != NULL && cstr[0] != '\0') {
+                const char *sanitized = pt_sanitize_image_path_for_cstr(cstr);
+                if (sanitized != NULL && sanitized[0] != '\0') {
+                    NSString *sanitizedStr = [NSString stringWithUTF8String:sanitized];
+                    if (sanitizedStr != nil && ![sanitizedStr isEqualToString:item]) {
+                        [modified addObject:sanitizedStr];
+                        changed = YES;
+                        continue;
+                    }
+                }
+            }
+            [modified addObject:item];
+            continue;
+        }
+        const char *nextCstr = NULL;
+        if (i + 1 < count && [orig[i + 1] isKindOfClass:[NSString class]]) {
+            nextCstr = [orig[i + 1] UTF8String];
+        }
+        int skip = pt_macos_launch_arg_skip_count(cstr, nextCstr);
+        if (skip > 0) {
+            changed = YES;
+            if (skip == 2 && i + 1 < count) {
+                i++;
+            }
+            continue;
+        }
+        [modified addObject:item];
+    }
+    return changed ? [modified copy] : orig;
+}
+
 - (NSArray<NSString *> *) pm_arguments {
     NSArray<NSString *> *orig = [self pm_arguments];
     if (orig.count > 0 && pt_is_bypass_enabled() &&
         !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        NSString *first = orig[0];
-        const char *sanitized = pt_sanitize_image_path_for_cstr([first UTF8String]);
-        if (sanitized != NULL) {
-            NSString *sanitizedStr = [NSString stringWithUTF8String:sanitized];
-            if (sanitizedStr != nil && ![sanitizedStr isEqualToString:first]) {
-                NSMutableArray<NSString *> *modified = [orig mutableCopy];
-                modified[0] = sanitizedStr;
-                return [modified copy];
-            }
-        }
+        return ps_sanitize_process_arguments(orig);
     }
     return orig;
 }
@@ -1963,16 +1996,7 @@ static NSDictionary *ps_sanitize_process_environment(NSDictionary *orig) {
     NSArray<NSString *> *orig = [self pm_swift_arguments];
     if (orig.count > 0 && pt_is_bypass_enabled() &&
         !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        NSString *first = orig[0];
-        const char *sanitized = pt_sanitize_image_path_for_cstr([first UTF8String]);
-        if (sanitized != NULL) {
-            NSString *sanitizedStr = [NSString stringWithUTF8String:sanitized];
-            if (sanitizedStr != nil && ![sanitizedStr isEqualToString:first]) {
-                NSMutableArray<NSString *> *modified = [orig mutableCopy];
-                modified[0] = sanitizedStr;
-                return [modified copy];
-            }
-        }
+        return ps_sanitize_process_arguments(orig);
     }
     return orig;
 }

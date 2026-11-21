@@ -378,13 +378,34 @@ int main(int argc, const char *argv[]) {
         [fpsLink invalidate];
 
         char ***nsArgvp = _NSGetArgv();
+        int *nsArgcp = _NSGetArgc();
+        int nsArgc = (nsArgcp != NULL) ? *nsArgcp : -1;
+        NSArray<NSString *> *procArgs = [NSProcessInfo processInfo].arguments;
         NSString *nsArgv0 = (nsArgvp != NULL && *nsArgvp != NULL && (*nsArgvp)[0] != NULL)
             ? ([NSString stringWithUTF8String:(*nsArgvp)[0]] ?: @"")
             : @"";
-        NSString *procArgv0 = ([NSProcessInfo processInfo].arguments.count > 0)
-            ? [NSProcessInfo processInfo].arguments[0]
-            : @"";
-        BOOL argvConsistent = [nsArgv0 isEqualToString:procArgv0] &&
+        NSString *procArgv0 = (procArgs.count > 0) ? procArgs[0] : @"";
+        BOOL argvAllMatch = (nsArgvp != NULL && *nsArgvp != NULL &&
+                             nsArgc == (int)procArgs.count && nsArgc >= 1);
+        BOOL argvLeakedMacFlag = NO;
+        if (argvAllMatch) {
+            for (int ai = 0; ai < nsArgc; ai++) {
+                const char *ca = (*nsArgvp)[ai];
+                NSString *sa = (ca != NULL) ? [NSString stringWithUTF8String:ca] : nil;
+                if (sa == nil || ![sa isEqualToString:procArgs[(NSUInteger)ai]]) {
+                    argvAllMatch = NO;
+                    break;
+                }
+                if ([sa isEqualToString:@"-NSDocumentRevisionsDebugMode"] ||
+                    [sa isEqualToString:@"-ApplePersistenceIgnoreState"]) {
+                    argvLeakedMacFlag = YES;
+                }
+            }
+            if ((*nsArgvp)[nsArgc] != NULL) {
+                argvAllMatch = NO;
+            }
+        }
+        BOOL argvConsistent = argvAllMatch && !argvLeakedMacFlag &&
                               ([nsArgv0 rangeOfString:@"/var/containers/Bundle/Application/"].location != NSNotFound);
         void *blockedDlsym = dlsym(RTLD_DEFAULT, "pt_is_registered_hidden_module");
         Class reflectedSafeMode = NSClassFromString(@"PTSafeMode");
@@ -553,6 +574,7 @@ int main(int argc, const char *argv[]) {
             @"mh0BaseAndSlideConsistent": mh0BaseAndSlideConsistent ? @YES : @NO,
             @"mh0SectionLookupOK": mh0SectionLookupOK ? @YES : @NO,
             @"argvConsistent": argvConsistent ? @YES : @NO,
+            @"procArgCount": @(procArgs.count),
             @"stateDir": stateDir ?: @"",
             @"breadcrumbExistsAtStart": crumbAtStart ? @YES : @NO,
             @"breadcrumbExistsAfterSleep": crumbAfterSleep ? @YES : @NO,
@@ -750,7 +772,14 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
     t0 = time.monotonic()
     marker1 = work_dir / "marker_1.txt"
     proc1 = run_cmd(
-        [str(target_bin)],
+        [
+            str(target_bin),
+            "-NSDocumentRevisionsDebugMode",
+            "YES",
+            "-ApplePersistenceIgnoreState",
+            "YES",
+            "--harness-keep",
+        ],
         env=base_env(marker1, HARNESS_SLEEP_SECS="3.5"),
         check=False,
     )
@@ -780,6 +809,7 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info1["mh0BaseAndSlideConsistent"] is True,
         info1["mh0SectionLookupOK"] is True,
         info1["argvConsistent"] is True,
+        info1["procArgCount"] == 2,
         info1["cmAccelAvailable"] is True,
         info1["cmGyroAvailable"] is True,
         info1["cmDeviceMotionAvailable"] is True,

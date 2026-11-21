@@ -2264,6 +2264,7 @@ static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *
         errno = saved;
         return -1;
     }
+    raw[raw_len] = '\0';
 
     char *out = NULL;
     size_t out_len = 0;
@@ -2307,10 +2308,26 @@ static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *
         }
     }
 
+    BOOL bypass = pt_is_bypass_enabled();
     if (is_v2 && argc > 0) {
+        int written_argc = 0;
         for (int i = 0; i < argc && pos < raw_len; i++) {
             const char *arg = raw + pos;
             size_t alen = strnlen(arg, raw_len - pos);
+            size_t next_pos = pos + ((alen < raw_len - pos) ? (alen + 1U) : alen);
+            if (bypass && i > 0) {
+                const char *next_arg = (i + 1 < argc && next_pos < raw_len) ? (raw + next_pos) : NULL;
+                int skip = pt_macos_launch_arg_skip_count(arg, next_arg);
+                if (skip > 0) {
+                    pos = next_pos;
+                    if (skip == 2 && i + 1 < argc && pos < raw_len) {
+                        size_t nlen = strnlen(raw + pos, raw_len - pos);
+                        pos += (nlen < raw_len - pos) ? (nlen + 1U) : nlen;
+                        i++;
+                    }
+                    continue;
+                }
+            }
             const char *out_arg = arg;
             char varg[PATH_MAX];
             if (i == 0) {
@@ -2319,13 +2336,16 @@ static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *
             if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, out_arg, strlen(out_arg) + 1U)) {
                 free(raw); free(out); errno = ENOMEM; return -1;
             }
-            pos += (alen < raw_len - pos) ? (alen + 1U) : alen;
+            written_argc++;
+            pos = next_pos;
+        }
+        if (out != NULL && out_len >= sizeof(int)) {
+            memcpy(out, &written_argc, sizeof(int));
         }
     }
 
     const char *vh = pt_get_virtual_home_cstr();
     const char *vt = pt_get_virtual_tmpdir_cstr();
-    BOOL bypass = pt_is_bypass_enabled();
     BOOL wrote_home = NO;
     BOOL wrote_cffixed_home = NO;
     BOOL wrote_tmpdir = NO;
@@ -3884,12 +3904,109 @@ static char ***pt_NSGetEnviron(void) {
     return pt_refresh_shadow_environ(real_envp);
 }
 
+static const char *const kPTStrippedMacOSLaunchFlags[] = {
+    "-NSDocumentRevisionsDebugMode",
+    "-ApplePersistenceIgnoreState",
+};
+
+static BOOL pt_is_launch_flag_bool_value(const char *val) {
+    if (val == NULL || val[0] == '\0') {
+        return NO;
+    }
+    return (strcasecmp(val, "YES") == 0 ||
+            strcasecmp(val, "NO") == 0 ||
+            strcasecmp(val, "true") == 0 ||
+            strcasecmp(val, "false") == 0 ||
+            strcmp(val, "1") == 0 ||
+            strcmp(val, "0") == 0);
+}
+
+__attribute__((visibility("hidden")))
+int pt_macos_launch_arg_skip_count(const char *arg, const char *next_arg) {
+    if (arg == NULL || arg[0] != '-') {
+        return 0;
+    }
+    for (size_t i = 0; i < sizeof(kPTStrippedMacOSLaunchFlags) / sizeof(kPTStrippedMacOSLaunchFlags[0]); i++) {
+        if (strcmp(arg, kPTStrippedMacOSLaunchFlags[i]) == 0) {
+            return pt_is_launch_flag_bool_value(next_arg) ? 2 : 1;
+        }
+    }
+    return 0;
+}
+
 static pthread_mutex_t s_shadow_argv_mutex = PTHREAD_MUTEX_INITIALIZER;
 static char **s_shadow_argv = NULL;
-static int s_shadow_argc = -1;
+static int s_shadow_raw_argc = -1;
+static int s_shadow_filtered_argc = 0;
 static char s_shadow_progname_buf[PATH_MAX];
 static char *s_shadow_progname_ptr = NULL;
 static pthread_once_t s_shadow_progname_once = PTHREAD_ONCE_INIT;
+
+static void pt_refresh_shadow_argv_locked(char **cur_argv, int raw_argc) {
+    if (s_shadow_argv != NULL && s_shadow_raw_argc == raw_argc) {
+        return;
+    }
+    char **built = (char **)calloc((size_t)raw_argc + 1U, sizeof(char *));
+    if (built == NULL) {
+        return;
+    }
+    BOOL ok = YES;
+    int out_idx = 0;
+    for (int i = 0; i < raw_argc; i++) {
+        const char *arg = cur_argv[i] != NULL ? cur_argv[i] : "";
+        if (i > 0) {
+            const char *next_arg = (i + 1 < raw_argc) ? cur_argv[i + 1] : NULL;
+            int skip = pt_macos_launch_arg_skip_count(arg, next_arg);
+            if (skip > 0) {
+                if (skip == 2 && i + 1 < raw_argc) {
+                    i++;
+                }
+                continue;
+            }
+        }
+        const char *src = arg;
+        if (i == 0 && arg[0] != '\0') {
+            const char *san = pt_sanitize_image_path_for_cstr(arg);
+            if (san != NULL && san[0] != '\0') {
+                src = san;
+            }
+        }
+        built[out_idx] = strdup(src);
+        if (built[out_idx] == NULL) {
+            ok = NO;
+            break;
+        }
+        out_idx++;
+    }
+    if (ok) {
+        built[out_idx] = NULL;
+        if (s_shadow_argv != NULL) {
+            for (int k = 0; s_shadow_argv[k] != NULL; k++) {
+                free(s_shadow_argv[k]);
+            }
+            free(s_shadow_argv);
+        }
+        s_shadow_argv = built;
+        s_shadow_raw_argc = raw_argc;
+        s_shadow_filtered_argc = out_idx;
+    } else {
+        for (int k = 0; k < out_idx; k++) {
+            free(built[k]);
+        }
+        free(built);
+    }
+}
+
+static int pt_resolve_raw_argc(char **cur_argv) {
+    int *real_argcp = _NSGetArgc();
+    int argc = (real_argcp != NULL && *real_argcp > 0) ? *real_argcp : 0;
+    if (argc == 0 && cur_argv != NULL) {
+        while (cur_argv[argc] != NULL && argc < 4096) {
+            argc++;
+        }
+    }
+    return argc;
+}
 
 static char ***pt_NSGetArgv(void) {
     char ***real_argvp = _NSGetArgv();
@@ -3899,47 +4016,29 @@ static char ***pt_NSGetArgv(void) {
         pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return real_argvp;
     }
-    int *real_argcp = _NSGetArgc();
-    int argc = (real_argcp != NULL && *real_argcp > 0) ? *real_argcp : 0;
     char **cur_argv = *real_argvp;
-    if (argc == 0) {
-        while (cur_argv[argc] != NULL && argc < 4096) {
-            argc++;
-        }
-    }
+    int argc = pt_resolve_raw_argc(cur_argv);
     pthread_mutex_lock(&s_shadow_argv_mutex);
-    if (s_shadow_argv == NULL || s_shadow_argc != argc) {
-        char **built = (char **)calloc((size_t)argc + 1U, sizeof(char *));
-        if (built != NULL) {
-            BOOL ok = YES;
-            for (int i = 0; i < argc; i++) {
-                const char *arg = cur_argv[i] != NULL ? cur_argv[i] : "";
-                const char *src = arg;
-                if (i == 0 && arg[0] != '\0') {
-                    const char *san = pt_sanitize_image_path_for_cstr(arg);
-                    if (san != NULL && san[0] != '\0') {
-                        src = san;
-                    }
-                }
-                built[i] = strdup(src);
-                if (built[i] == NULL) {
-                    ok = NO;
-                    break;
-                }
-            }
-            if (ok) {
-                built[argc] = NULL;
-                s_shadow_argv = built;
-                s_shadow_argc = argc;
-            } else {
-                for (int i = 0; i < argc; i++) {
-                    free(built[i]);
-                }
-                free(built);
-            }
-        }
-    }
+    pt_refresh_shadow_argv_locked(cur_argv, argc);
     char ***ret = (s_shadow_argv != NULL) ? &s_shadow_argv : real_argvp;
+    pthread_mutex_unlock(&s_shadow_argv_mutex);
+    return ret;
+}
+
+static int *pt_NSGetArgc(void) {
+    int *real_argcp = _NSGetArgc();
+    char ***real_argvp = _NSGetArgv();
+    if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire) ||
+        real_argcp == NULL || real_argvp == NULL || *real_argvp == NULL ||
+        !pt_is_bypass_enabled() ||
+        pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return real_argcp;
+    }
+    char **cur_argv = *real_argvp;
+    int argc = pt_resolve_raw_argc(cur_argv);
+    pthread_mutex_lock(&s_shadow_argv_mutex);
+    pt_refresh_shadow_argv_locked(cur_argv, argc);
+    int *ret = (s_shadow_argv != NULL) ? &s_shadow_filtered_argc : real_argcp;
     pthread_mutex_unlock(&s_shadow_argv_mutex);
     return ret;
 }
@@ -6440,6 +6539,7 @@ DYLD_INTERPOSE(pt_MGGetProductType, MGGetProductType)
 DYLD_INTERPOSE(pt_getenv, getenv)
 DYLD_INTERPOSE(pt_NSGetEnviron, _NSGetEnviron)
 DYLD_INTERPOSE(pt_NSGetArgv, _NSGetArgv)
+DYLD_INTERPOSE(pt_NSGetArgc, _NSGetArgc)
 DYLD_INTERPOSE(pt_NSGetProgname, _NSGetProgname)
 DYLD_INTERPOSE(pt_getprogname, getprogname)
 DYLD_INTERPOSE(pt_gethostname, gethostname)

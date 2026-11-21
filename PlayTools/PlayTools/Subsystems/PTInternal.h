@@ -396,6 +396,7 @@ typedef enum {
 
 __attribute__((visibility("hidden"))) const char *pt_sanitize_image_path_for_app(const char *raw_path);
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_env_key(const char *name);
+__attribute__((visibility("hidden"))) int pt_macos_launch_arg_skip_count(const char *arg, const char *next_arg);
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_env_value(const char *val, BOOL has_virtual_container);
 __attribute__((visibility("hidden"))) pt_env_entry_action_t pt_resolve_env_entry(
     const char *key,
@@ -526,6 +527,7 @@ __attribute__((visibility("hidden"))) uint32_t pt_get_device_native_width(void);
 __attribute__((visibility("hidden"))) uint32_t pt_get_device_native_height(void);
 __attribute__((visibility("hidden"))) uint32_t pt_get_device_max_fps(void);
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_env_key(const char *name);
+__attribute__((visibility("hidden"))) int pt_macos_launch_arg_skip_count(const char *arg, const char *next_arg);
 __attribute__((visibility("hidden"))) CFURLRef pt_resolve_cfbundle_input_url(CFURLRef url, const void *caller, BOOL *out_blocked) CF_RETURNS_RETAINED;
 __attribute__((visibility("hidden"))) CFURLRef pt_sanitize_cfbundle_returned_url(CFURLRef CF_CONSUMED url, const void *caller) CF_RETURNS_RETAINED;
 __attribute__((visibility("hidden"))) BOOL pt_is_info_plist_dict(NSDictionary *dict);
