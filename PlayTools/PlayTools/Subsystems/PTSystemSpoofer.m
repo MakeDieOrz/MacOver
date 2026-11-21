@@ -6009,10 +6009,224 @@ static kern_return_t pt_mach_vm_region_recurse(vm_map_read_t target_task,
 
 extern int pt_orig_syscall(int, ...) __asm("_syscall");
 
+static inline BOOL pt_va_can_pop_uintptr(va_list ap, uintptr_t stack_bot, uintptr_t stack_top) {
+#if defined(__aarch64__) && defined(__APPLE__)
+    uintptr_t slot = (uintptr_t)ap;
+    if (stack_top != 0 && stack_bot < stack_top) {
+        return (slot >= stack_bot && slot + sizeof(uintptr_t) <= stack_top);
+    }
+#else
+    (void)ap;
+    (void)stack_bot;
+    (void)stack_top;
+#endif
+    return YES;
+}
+
+static int pt_xnu_bsd_syscall_nargs(int number) {
+    if (number < 0 || number >= 600) {
+        return 0;
+    }
+    switch (number) {
+        case 2:   // fork
+        case 20:  // getpid
+        case 24:  // getuid
+        case 25:  // geteuid
+        case 36:  // sync
+        case 39:  // getppid
+        case 42:  // pipe
+        case 43:  // getegid
+        case 47:  // getgid
+        case 66:  // vfork
+        case 81:  // getpgrp
+        case 89:  // getdtablesize
+        case 147: // setsid
+        case 327: // issetugid
+        case 362: // kqueue
+        case 372: // thread_selfid
+        case 429: // thread_selfusage
+            return 0;
+
+        case 1:   // exit
+        case 6:   // close
+        case 10:  // unlink
+        case 12:  // chdir
+        case 13:  // fchdir
+        case 23:  // setuid
+        case 41:  // dup
+        case 51:  // acct
+        case 60:  // umask
+        case 61:  // chroot
+        case 95:  // fsync
+        case 137: // rmdir
+        case 181: // setgid
+        case 182: // setegid
+        case 183: // seteuid
+        case 204: // undelete
+        case 294: // shared_region_check_np
+        case 310: // getsid
+        case 398: // close_nocancel
+        case 407: // fsync_nocancel
+        case 410: // sigsuspend_nocancel
+        case 501: // necp_open
+            return 1;
+
+        case 9:   // link
+        case 15:  // chmod
+        case 33:  // access
+        case 34:  // chflags
+        case 35:  // fchflags
+        case 37:  // kill
+        case 73:  // munmap
+        case 80:  // setgroups
+        case 90:  // dup2
+        case 106: // listen
+        case 117: // getrusage
+        case 122: // settimeofday
+        case 124: // fchmod
+        case 128: // rename
+        case 131: // flock
+        case 134: // shutdown
+        case 136: // mkdir
+        case 188: // stat
+        case 189: // fstat
+        case 190: // lstat
+        case 191: // pathconf
+        case 192: // fpathconf
+        case 194: // getrlimit
+        case 195: // setrlimit
+        case 200: // truncate
+        case 201: // ftruncate
+        case 286: // pthread_getugid_np
+        case 338: // stat64
+        case 339: // fstat64
+        case 340: // lstat64
+        case 500: // getentropy
+            return 2;
+
+        case 3:   // read
+        case 4:   // write
+        case 5:   // open
+        case 16:  // chown
+        case 27:  // recvmsg
+        case 28:  // sendmsg
+        case 30:  // accept
+        case 31:  // getpeername
+        case 32:  // getsockname
+        case 46:  // sigaction
+        case 48:  // sigprocmask
+        case 54:  // ioctl
+        case 57:  // symlink
+        case 58:  // readlink
+        case 59:  // execve
+        case 65:  // msync
+        case 74:  // mprotect
+        case 75:  // madvise
+        case 78:  // mincore
+        case 79:  // getgroups
+        case 83:  // setitimer
+        case 86:  // getitimer
+        case 92:  // fcntl
+        case 97:  // socket
+        case 98:  // connect
+        case 104: // bind
+        case 116: // gettimeofday
+        case 120: // readv
+        case 121: // writev
+        case 123: // fchown
+        case 199: // lseek
+        case 230: // poll
+        case 254: // lchown
+        case 396: // read_nocancel
+        case 397: // write_nocancel
+        case 399: // open_nocancel
+        case 402: // recvmsg_nocancel
+        case 403: // sendmsg_nocancel
+        case 404: // accept_nocancel
+        case 406: // fcntl_nocancel
+        case 409: // connect_nocancel
+        case 416: // readv_nocancel
+        case 417: // writev_nocancel
+        case 470: // symlinkat
+        case 472: // unlinkat
+        case 473: // readlinkat
+        case 475: // mkdirat
+        case 516: // ulock_wake
+            return 3;
+
+        case 7:   // wait4
+        case 18:  // getfsstat
+        case 26:  // ptrace
+        case 135: // socketpair
+        case 153: // pread
+        case 154: // pwrite
+        case 157: // statfs
+        case 158: // fstatfs
+        case 169: // csops
+        case 344: // getdirentries64
+        case 345: // statfs64
+        case 346: // fstatfs64
+        case 400: // wait4_nocancel
+        case 414: // pread_nocancel
+        case 415: // pwrite_nocancel
+        case 463: // openat
+        case 464: // openat_nocancel
+        case 465: // renameat
+        case 466: // faccessat
+        case 467: // fchmodat
+        case 469: // fstatat64
+        case 515: // ulock_wait
+        case 546: // shared_region_map_and_slide_2_np
+            return 4;
+
+        case 93:  // select
+        case 105: // setsockopt
+        case 118: // getsockopt
+        case 170: // csops_audittoken
+        case 220: // getattrlist
+        case 221: // setattrlist
+        case 228: // fgetattrlist
+        case 229: // fsetattrlist
+        case 244: // posix_spawn
+        case 360: // bsdthread_create
+        case 408: // select_nocancel
+        case 468: // fchownat
+        case 488: // renameatx_np
+        case 489: // mremap_encrypted
+        case 544: // ulock_wait2
+            return 5;
+
+        case 369: // kevent64
+        case 520: // terminate_with_payload
+            return 7;
+
+        case 374: // kevent_qos
+        case 375: // kevent_id
+            return 8;
+
+        default:
+            return 6;
+    }
+}
+
 static int pt_syscall(int number, ...) {
     const void *caller = __builtin_return_address(0);
+    pthread_t self_thr = pthread_self();
+    uintptr_t stack_top = (uintptr_t)pthread_get_stackaddr_np(self_thr);
+    size_t stack_sz = pthread_get_stacksize_np(self_thr);
+    uintptr_t stack_bot = (stack_top >= stack_sz && stack_sz > 0) ? (stack_top - stack_sz) : 0;
+
     va_list ap;
     va_start(ap, number);
+
+    for (int hop = 0; hop < 2 && (number == 0 || number == 198); hop++) {
+        if (!pt_va_can_pop_uintptr(ap, stack_bot, stack_top)) {
+            va_end(ap);
+            errno = EFAULT;
+            return -1;
+        }
+        number = (int)va_arg(ap, uintptr_t);
+    }
 
     switch (number) {
         case 202: { // SYS___sysctl
@@ -6055,7 +6269,8 @@ static int pt_syscall(int number, ...) {
             uintptr_t autok = va_arg(ap, uintptr_t);
             va_end(ap);
             return pt_orig_syscall(number, (uintptr_t)pid, (uintptr_t)ops,
-                                   (uintptr_t)useraddr, (uintptr_t)usersize, autok);
+                                   (uintptr_t)useraddr, (uintptr_t)usersize, autok,
+                                   (uintptr_t)0, (uintptr_t)0, (uintptr_t)0);
         }
         case 5: // SYS_open
         case 399: { // SYS_open_nocancel
@@ -6171,19 +6386,20 @@ static int pt_syscall(int number, ...) {
                 return pt_fs_proc_pidinfo_with_caller(pid, (int)flavor, arg, buffer, buffersize, caller);
             }
             return pt_orig_syscall(number, (uintptr_t)callnum, (uintptr_t)pid, (uintptr_t)flavor,
-                                   (uintptr_t)arg, (uintptr_t)buffer, (uintptr_t)buffersize);
+                                   (uintptr_t)arg, (uintptr_t)buffer, (uintptr_t)buffersize,
+                                   (uintptr_t)0, (uintptr_t)0);
         }
         default:
             break;
     }
 
+    int nargs = pt_xnu_bsd_syscall_nargs(number);
     uintptr_t args[8] = {0};
-    uintptr_t stack_top = (uintptr_t)pthread_get_stackaddr_np(pthread_self());
-    uintptr_t cur_sp = (uintptr_t)&ap;
-    for (int i = 0; i < 8; i++) {
-        if (stack_top == 0 || cur_sp + 256U <= stack_top) {
-            args[i] = va_arg(ap, uintptr_t);
+    for (int i = 0; i < nargs && i < 8; i++) {
+        if (!pt_va_can_pop_uintptr(ap, stack_bot, stack_top)) {
+            break;
         }
+        args[i] = va_arg(ap, uintptr_t);
     }
     va_end(ap);
     return pt_orig_syscall(number, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]);
