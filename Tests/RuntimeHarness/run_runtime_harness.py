@@ -30,6 +30,7 @@ from typing import Optional
 
 
 MOCK_PLUGIN_C = r"""
+#include <arpa/inet.h>
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -59,6 +60,7 @@ MOCK_TARGET_M = r"""
 @import QuartzCore;
 @import UIKit;
 @import PlayTools;
+#include <arpa/inet.h>
 #include <dlfcn.h>
 #include <crt_externs.h>
 #include <errno.h>
@@ -81,6 +83,7 @@ MOCK_TARGET_M = r"""
 extern bool pt_is_registered_hidden_module(const char *name);
 extern bool pt_is_registered_hidden_class(const char *name);
 extern int pt_harness_syscall(int, ...) __asm("_syscall");
+extern int pt_harness_csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize) __asm("_csops");
 extern void pt_harness_dyld_get_image_versions(
     const struct mach_header *mh,
     void (^callback)(uint32_t platform, uint32_t sdk, uint32_t minos))
@@ -149,6 +152,25 @@ int main(int argc, const char *argv[]) {
         if (pt_harness_syscall(274, "hw.machine", (size_t)10, syscallMachine, &syscallMachineLen, NULL, (size_t)0) != 0) {
             syscallMachine[0] = '\0';
         }
+        char csopsTeamShort[10];
+        memset(csopsTeamShort, 'X', sizeof(csopsTeamShort));
+        errno = 0;
+        BOOL csopsTeamShortERange = (pt_harness_csops(0, 14U, csopsTeamShort, sizeof(csopsTeamShort)) == -1 &&
+                                     errno == ERANGE &&
+                                     csopsTeamShort[0] == 'X');
+        char csopsTeamExact[11] = {0};
+        BOOL csopsTeamRawOK = (pt_harness_csops(0, 14U, csopsTeamExact, sizeof(csopsTeamExact)) == 0 &&
+                               strlen(csopsTeamExact) == 10U);
+        char csopsIdentity[128] = {0};
+        BOOL csopsIdentityRawOK = (pt_harness_csops(0, 11U, csopsIdentity, sizeof(csopsIdentity)) == 0 &&
+                                   strcmp(csopsIdentity, "app.makedie.harness.mockapp") == 0);
+        uint32_t csopsEntHdr[2] = {0, 0};
+        errno = 0;
+        BOOL csopsEntBlobHdrOK = (pt_harness_csops(0, 7U, csopsEntHdr, sizeof(csopsEntHdr)) == -1 &&
+                                  errno == ERANGE &&
+                                  ntohl(csopsEntHdr[0]) == 0xfade7171U &&
+                                  ntohl(csopsEntHdr[1]) > 8U);
+        BOOL csopsStringAndBlobOK = (csopsTeamShortERange && csopsTeamRawOK && csopsIdentityRawOK && csopsEntBlobHdrOK);
         size_t swapLen = 0;
         BOOL swapUsageBlocked = (sysctlbyname("vm.swapusage", NULL, &swapLen, NULL, 0) == -1 && errno == ENOENT);
         uint64_t l2CacheSize = 0;
@@ -482,6 +504,7 @@ int main(int argc, const char *argv[]) {
             @"sysctlMachine": [NSString stringWithUTF8String:sysctlMachine] ?: @"",
             @"syscallMachine": [NSString stringWithUTF8String:syscallMachine] ?: @"",
             @"swapUsageBlocked": swapUsageBlocked ? @YES : @NO,
+            @"csopsStringAndBlobOK": csopsStringAndBlobOK ? @YES : @NO,
             @"l2CacheSize": @(l2CacheSize),
             @"dscHidAppKit": dscHidAppKit ? @YES : @NO,
             @"unameRelease": [NSString stringWithUTF8String:uts.release] ?: @"",
@@ -765,6 +788,7 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info1["uiColorWellLoaded"] is True,
         info1["hidPCInstallGen"] is True,
         info1["swapUsageBlocked"] is True,
+        info1["csopsStringAndBlobOK"] is True,
         0 < int(info1["l2CacheSize"]) <= (16 << 20),
         info1["dscHidAppKit"] is True,
         (not info1["appAttestLoaded"]) or (

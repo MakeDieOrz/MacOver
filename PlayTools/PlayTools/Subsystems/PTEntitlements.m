@@ -274,6 +274,16 @@ static int pt_csops_write_blob_or_erange(uint32_t host_magic,
         errno = EFAULT;
         return -1;
     }
+    if (host_magic == 0U) {
+        if (usersize < payload_len) {
+            errno = ERANGE;
+            return -1;
+        }
+        if (payload_len > 0 && payload != NULL) {
+            memcpy(useraddr, payload, payload_len);
+        }
+        return 0;
+    }
     size_t total_len = 8U + payload_len;
     if (usersize < 8U) {
         errno = ERANGE;
