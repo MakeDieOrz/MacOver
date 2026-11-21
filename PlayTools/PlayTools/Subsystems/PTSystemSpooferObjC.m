@@ -1671,90 +1671,46 @@ static NSArray<UIWindow *> *ps_filter_windows_array(NSArray<UIWindow *> *orig, c
 }
 
 static NSDictionary *ps_sanitize_process_environment(NSDictionary *orig) {
-    if (!orig) {
-        return @{};
+    BOOL bypass = pt_is_bypass_enabled();
+    const char *vh = pt_get_virtual_home_cstr();
+    const char *vt = pt_get_virtual_tmpdir_cstr();
+    NSMutableDictionary *sanitized = [NSMutableDictionary dictionaryWithCapacity:orig.count + 4U];
+    if (orig != nil) {
+        [orig enumerateKeysAndObjectsUsingBlock:^(id keyObj, id valObj, BOOL *stop) {
+            (void)stop;
+            if (![keyObj isKindOfClass:[NSString class]]) {
+                return;
+            }
+            NSString *key = (NSString *)keyObj;
+            const char *keyCStr = [key UTF8String];
+            if (keyCStr == NULL || keyCStr[0] == '\0') {
+                return;
+            }
+            NSString *valStr = [valObj isKindOfClass:[NSString class]] ? (NSString *)valObj : [valObj description];
+            const char *valCStr = (valStr != nil) ? [valStr UTF8String] : "";
+            const char *rewritten = NULL;
+            pt_env_entry_action_t act = pt_resolve_env_entry(
+                keyCStr, valCStr, YES, bypass, vh, vt, &rewritten);
+            if (act == PT_ENV_ENTRY_REWRITE && rewritten != NULL) {
+                NSString *rewrittenStr = [NSString stringWithUTF8String:rewritten];
+                if (rewrittenStr != nil) {
+                    sanitized[key] = rewrittenStr;
+                }
+            } else if (act == PT_ENV_ENTRY_KEEP && valStr != nil) {
+                sanitized[key] = valStr;
+            }
+        }];
     }
-    static NSArray<NSString *> *s_keysToRemove = nil;
-    static NSSet<NSString *> *s_safeRewrittenKeys = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        s_keysToRemove = @[
-            @"DYLD_INSERT_LIBRARIES",
-            @"DYLD_LIBRARY_PATH",
-            @"DYLD_FRAMEWORK_PATH",
-            @"USE_EXTRA_ANTIJB",
-            @"MallocStackLogging",
-            @"SSH_AUTH_SOCK",
-            @"TERM_PROGRAM",
-            @"TERM_PROGRAM_VERSION",
-            @"SHELL",
-            @"COMMAND_MODE",
-            @"USER",
-            @"LOGNAME",
-            @"OLDPWD",
-            @"DISABLE_PLAYSHADOW_BYPASS"
-        ];
-        s_safeRewrittenKeys = [NSSet setWithObjects:
-            @"HOME", @"CFFIXED_USER_HOME", @"TMPDIR", @"TMP", @"TEMP", @"PWD", @"PATH", nil];
-    });
-    NSMutableDictionary *sanitized = [orig mutableCopy];
-    [sanitized removeObjectsForKeys:s_keysToRemove];
-    static NSString *s_virtHomeStr = nil;
-    static NSString *s_virtTmpStr = nil;
-    static dispatch_once_t envPathOnce;
-    dispatch_once(&envPathOnce, ^{
-        const char *vh = pt_get_virtual_home_cstr();
-        if (vh != NULL) {
-            s_virtHomeStr = [[NSString alloc] initWithUTF8String:vh];
-        }
-        const char *vt = pt_get_virtual_tmpdir_cstr();
-        if (vt != NULL) {
-            s_virtTmpStr = [[NSString alloc] initWithUTF8String:vt];
-        }
-    });
-    if (s_virtHomeStr != nil) {
-        sanitized[@"HOME"] = s_virtHomeStr;
-    }
-    if (s_virtTmpStr != nil) {
-        sanitized[@"TMPDIR"] = s_virtTmpStr;
-        if (sanitized[@"TMP"] != nil) {
-            sanitized[@"TMP"] = s_virtTmpStr;
-        }
-        if (sanitized[@"TEMP"] != nil) {
-            sanitized[@"TEMP"] = s_virtTmpStr;
-        }
-    }
-    if (sanitized[@"PWD"] != nil) {
-        sanitized[@"PWD"] = @"/";
-    }
-    if (sanitized[@"PATH"] != nil) {
-        sanitized[@"PATH"] = @"/usr/bin:/bin:/usr/sbin:/sbin";
-    }
-    for (NSString *key in [sanitized allKeys]) {
-        if (![key isKindOfClass:[NSString class]]) {
-            continue;
-        }
-        const char *keyCStr = [key UTF8String];
-        if ([key hasPrefix:@"XPC_"] || (keyCStr != NULL && pt_is_hidden_env_key(keyCStr))) {
-            [sanitized removeObjectForKey:key];
-            continue;
-        }
-        BOOL wasRewritten = ([s_safeRewrittenKeys containsObject:key] &&
-                             ((![key isEqualToString:@"HOME"] && ![key isEqualToString:@"CFFIXED_USER_HOME"]) || s_virtHomeStr != nil) &&
-                             ((![key isEqualToString:@"TMPDIR"] && ![key isEqualToString:@"TMP"] && ![key isEqualToString:@"TEMP"]) || s_virtTmpStr != nil));
-        if (wasRewritten) {
-            continue;
-        }
-        id val = sanitized[key];
-        if ([val isKindOfClass:[NSString class]]) {
-            NSString *valStr = (NSString *)val;
-            if ([valStr rangeOfString:@"/Users/" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                [valStr rangeOfString:@"PlayTools" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                [valStr rangeOfString:@"PlayCover" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                [valStr rangeOfString:@"MacOver" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                [valStr rangeOfString:@"app.makedie" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                [valStr rangeOfString:@"/var/folders/" options:NSCaseInsensitiveSearch].location != NSNotFound) {
-                [sanitized removeObjectForKey:key];
+    NSArray<NSString *> *mandatoryKeys = @[@"HOME", @"CFFIXED_USER_HOME", @"TMPDIR", @"PATH"];
+    for (NSString *mkey in mandatoryKeys) {
+        if (sanitized[mkey] == nil) {
+            const char *rewritten = NULL;
+            if (pt_resolve_env_entry([mkey UTF8String], NULL, NO, bypass, vh, vt, &rewritten) == PT_ENV_ENTRY_REWRITE &&
+                rewritten != NULL) {
+                NSString *rewrittenStr = [NSString stringWithUTF8String:rewritten];
+                if (rewrittenStr != nil) {
+                    sanitized[mkey] = rewrittenStr;
+                }
             }
         }
     }
@@ -1763,7 +1719,7 @@ static NSDictionary *ps_sanitize_process_environment(NSDictionary *orig) {
 
 - (NSDictionary *) pm_environment {
     NSDictionary *orig = [self pm_environment];
-    if (!pt_is_bypass_enabled() || ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return orig ?: @{};
     }
     return ps_sanitize_process_environment(orig);
@@ -1771,7 +1727,7 @@ static NSDictionary *ps_sanitize_process_environment(NSDictionary *orig) {
 
 - (NSDictionary *) pm_swift_environment {
     NSDictionary *orig = [self pm_swift_environment];
-    if (!pt_is_bypass_enabled() || ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return orig ?: @{};
     }
     return ps_sanitize_process_environment(orig);

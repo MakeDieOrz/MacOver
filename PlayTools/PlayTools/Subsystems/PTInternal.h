@@ -387,8 +387,23 @@ extern const struct mach_header *dyld_image_header_containing_address(const void
 #import "../Controls/PTFakeTouch/NSObject+Swizzle.h"
 #import <dlfcn.h>
 
+typedef enum {
+    PT_ENV_ENTRY_KEEP = 0,
+    PT_ENV_ENTRY_HIDE = 1,
+    PT_ENV_ENTRY_REWRITE = 2
+} pt_env_entry_action_t;
+
 __attribute__((visibility("hidden"))) const char *pt_sanitize_image_path_for_app(const char *raw_path);
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_env_key(const char *name);
+__attribute__((visibility("hidden"))) BOOL pt_is_hidden_env_value(const char *val, BOOL has_virtual_container);
+__attribute__((visibility("hidden"))) pt_env_entry_action_t pt_resolve_env_entry(
+    const char *key,
+    const char *raw_val,
+    BOOL has_raw_entry,
+    BOOL bypass_enabled,
+    const char *vh,
+    const char *vt,
+    const char **out_val);
 
 @import MachO;
 @import CFNetwork;

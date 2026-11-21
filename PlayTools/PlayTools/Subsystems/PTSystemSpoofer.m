@@ -1915,16 +1915,116 @@ static BOOL pt_append_procargs_bytes(char **buf, size_t *len, size_t *cap, const
     return YES;
 }
 
-static inline BOOL pt_is_hidden_env_value(const char *val) {
+__attribute__((visibility("hidden")))
+BOOL pt_is_hidden_env_value(const char *val, BOOL has_virtual_container) {
     if (val == NULL || val[0] == '\0') {
         return NO;
     }
-    return (strstr(val, "/Users/") != NULL ||
-            strcasestr(val, "PlayTools") != NULL ||
-            strcasestr(val, "PlayCover") != NULL ||
-            strcasestr(val, "MacOver") != NULL ||
-            strcasestr(val, "app.makedie") != NULL ||
-            strcasestr(val, "AKInterface") != NULL);
+    if (strstr(val, "/Users/") != NULL ||
+        strcasestr(val, "PlayTools") != NULL ||
+        strcasestr(val, "PlayCover") != NULL ||
+        strcasestr(val, "MacOver") != NULL ||
+        strcasestr(val, "app.makedie") != NULL ||
+        strcasestr(val, "AKInterface") != NULL) {
+        return YES;
+    }
+    if (has_virtual_container &&
+        (strstr(val, "/var/folders/") != NULL ||
+         strstr(val, "/private/var/folders/") != NULL)) {
+        return YES;
+    }
+    return NO;
+}
+
+__attribute__((visibility("hidden")))
+pt_env_entry_action_t pt_resolve_env_entry(const char *key,
+                                           const char *raw_val,
+                                           BOOL has_raw_entry,
+                                           BOOL bypass_enabled,
+                                           const char *vh,
+                                           const char *vt,
+                                           const char **out_val) {
+    if (out_val != NULL) {
+        *out_val = NULL;
+    }
+    if (key == NULL || key[0] == '\0') {
+        return PT_ENV_ENTRY_HIDE;
+    }
+    BOOL has_vc = (vh != NULL);
+    if (strcmp(key, "HOME") == 0 || strcmp(key, "CFFIXED_USER_HOME") == 0) {
+        if (vh != NULL) {
+            if (out_val != NULL) {
+                *out_val = vh;
+            }
+            return PT_ENV_ENTRY_REWRITE;
+        }
+        if (!has_raw_entry) {
+            return PT_ENV_ENTRY_HIDE;
+        }
+        if (bypass_enabled && pt_is_hidden_env_value(raw_val, has_vc)) {
+            return PT_ENV_ENTRY_HIDE;
+        }
+        return PT_ENV_ENTRY_KEEP;
+    }
+    if (strcmp(key, "TMPDIR") == 0) {
+        if (vt != NULL) {
+            if (out_val != NULL) {
+                *out_val = vt;
+            }
+            return PT_ENV_ENTRY_REWRITE;
+        }
+        if (!has_raw_entry) {
+            return PT_ENV_ENTRY_HIDE;
+        }
+        if (bypass_enabled && pt_is_hidden_env_value(raw_val, has_vc)) {
+            return PT_ENV_ENTRY_HIDE;
+        }
+        return PT_ENV_ENTRY_KEEP;
+    }
+    if (strcmp(key, "TMP") == 0 || strcmp(key, "TEMP") == 0) {
+        if (!has_raw_entry) {
+            return PT_ENV_ENTRY_HIDE;
+        }
+        if (vt != NULL) {
+            if (out_val != NULL) {
+                *out_val = vt;
+            }
+            return PT_ENV_ENTRY_REWRITE;
+        }
+        if (bypass_enabled && pt_is_hidden_env_value(raw_val, has_vc)) {
+            return PT_ENV_ENTRY_HIDE;
+        }
+        return PT_ENV_ENTRY_KEEP;
+    }
+    if (strcmp(key, "PWD") == 0) {
+        if (!has_raw_entry) {
+            return PT_ENV_ENTRY_HIDE;
+        }
+        if (bypass_enabled) {
+            if (out_val != NULL) {
+                *out_val = "/";
+            }
+            return PT_ENV_ENTRY_REWRITE;
+        }
+        return PT_ENV_ENTRY_KEEP;
+    }
+    if (strcmp(key, "PATH") == 0) {
+        if (bypass_enabled) {
+            if (out_val != NULL) {
+                *out_val = "/usr/bin:/bin:/usr/sbin:/sbin";
+            }
+            return PT_ENV_ENTRY_REWRITE;
+        }
+        return has_raw_entry ? PT_ENV_ENTRY_KEEP : PT_ENV_ENTRY_HIDE;
+    }
+    if (!has_raw_entry) {
+        return PT_ENV_ENTRY_HIDE;
+    }
+    if (bypass_enabled &&
+        (pt_is_hidden_env_key(key) || pt_is_hidden_env_value(raw_val, has_vc))) {
+        return PT_ENV_ENTRY_HIDE;
+    }
+    return PT_ENV_ENTRY_KEEP;
 }
 
 static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *size) {
@@ -2010,9 +2110,12 @@ static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *
 
     const char *vh = pt_get_virtual_home_cstr();
     const char *vt = pt_get_virtual_tmpdir_cstr();
+    BOOL bypass = pt_is_bypass_enabled();
     BOOL wrote_home = NO;
     BOOL wrote_cffixed_home = NO;
     BOOL wrote_tmpdir = NO;
+    BOOL wrote_tmp = NO;
+    BOOL wrote_temp = NO;
     BOOL wrote_pwd = NO;
     BOOL wrote_path = NO;
     while (pos < raw_len) {
@@ -2041,47 +2144,30 @@ static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *
                     kptr = "";
                 }
             }
-            if (strcmp(kptr, "HOME") == 0 && vh != NULL) {
-                if (!wrote_home) {
-                    if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, "HOME=", 5U) ||
-                        !pt_append_procargs_bytes(&out, &out_len, &out_cap, vh, strlen(vh) + 1U)) {
-                        free(heap_key); free(raw); free(out); errno = ENOMEM; return -1;
-                    }
-                    wrote_home = YES;
-                }
-            } else if (strcmp(kptr, "CFFIXED_USER_HOME") == 0 && vh != NULL) {
-                if (!wrote_cffixed_home) {
-                    if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, "CFFIXED_USER_HOME=", 18U) ||
-                        !pt_append_procargs_bytes(&out, &out_len, &out_cap, vh, strlen(vh) + 1U)) {
-                        free(heap_key); free(raw); free(out); errno = ENOMEM; return -1;
-                    }
-                    wrote_cffixed_home = YES;
-                }
-            } else if (strcmp(kptr, "TMPDIR") == 0 && vt != NULL) {
-                if (!wrote_tmpdir) {
-                    if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, "TMPDIR=", 7U) ||
-                        !pt_append_procargs_bytes(&out, &out_len, &out_cap, vt, strlen(vt) + 1U)) {
-                        free(heap_key); free(raw); free(out); errno = ENOMEM; return -1;
-                    }
-                    wrote_tmpdir = YES;
-                }
+            BOOL duplicate_special = NO;
+            if (strcmp(kptr, "HOME") == 0) {
+                duplicate_special = wrote_home;
+                wrote_home = YES;
+            } else if (strcmp(kptr, "CFFIXED_USER_HOME") == 0) {
+                duplicate_special = wrote_cffixed_home;
+                wrote_cffixed_home = YES;
+            } else if (strcmp(kptr, "TMPDIR") == 0) {
+                duplicate_special = wrote_tmpdir;
+                wrote_tmpdir = YES;
+            } else if (strcmp(kptr, "TMP") == 0) {
+                duplicate_special = wrote_tmp;
+                wrote_tmp = YES;
+            } else if (strcmp(kptr, "TEMP") == 0) {
+                duplicate_special = wrote_temp;
+                wrote_temp = YES;
             } else if (strcmp(kptr, "PWD") == 0) {
-                if (!wrote_pwd) {
-                    static const char kSafePwd[] = "PWD=/";
-                    if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, kSafePwd, sizeof(kSafePwd))) {
-                        free(heap_key); free(raw); free(out); errno = ENOMEM; return -1;
-                    }
-                    wrote_pwd = YES;
-                }
+                duplicate_special = wrote_pwd;
+                wrote_pwd = YES;
             } else if (strcmp(kptr, "PATH") == 0) {
-                if (!wrote_path) {
-                    static const char kSafePath[] = "PATH=/usr/bin:/bin:/usr/sbin:/sbin";
-                    if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, kSafePath, sizeof(kSafePath))) {
-                        free(heap_key); free(raw); free(out); errno = ENOMEM; return -1;
-                    }
-                    wrote_path = YES;
-                }
-            } else if (!pt_is_hidden_env_key(kptr)) {
+                duplicate_special = wrote_path;
+                wrote_path = YES;
+            }
+            if (!duplicate_special && kptr[0] != '\0') {
                 size_t vlen = elen - klen - 1U;
                 char val_stack[2048];
                 char *heap_val = NULL;
@@ -2099,9 +2185,17 @@ static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *
                         val_stack[0] = '\0';
                     }
                 }
-                BOOL hide_val = pt_is_hidden_env_value(vptr);
+                const char *rewritten = NULL;
+                pt_env_entry_action_t act = pt_resolve_env_entry(
+                    kptr, vptr, YES, bypass, vh, vt, &rewritten);
                 free(heap_val);
-                if (!hide_val) {
+                if (act == PT_ENV_ENTRY_REWRITE && rewritten != NULL) {
+                    if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, kptr, klen) ||
+                        !pt_append_procargs_bytes(&out, &out_len, &out_cap, "=", 1U) ||
+                        !pt_append_procargs_bytes(&out, &out_len, &out_cap, rewritten, strlen(rewritten) + 1U)) {
+                        free(heap_key); free(raw); free(out); errno = ENOMEM; return -1;
+                    }
+                } else if (act == PT_ENV_ENTRY_KEEP) {
                     if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, entry, elen) ||
                         !pt_append_procargs_bytes(&out, &out_len, &out_cap, "", 1U)) {
                         free(heap_key); free(raw); free(out); errno = ENOMEM; return -1;
@@ -2112,22 +2206,20 @@ static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *
         }
         pos += (elen < raw_len - pos) ? (elen + 1U) : elen;
     }
-    if (!wrote_home && vh != NULL) {
-        if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, "HOME=", 5U) ||
-            !pt_append_procargs_bytes(&out, &out_len, &out_cap, vh, strlen(vh) + 1U)) {
-            free(raw); free(out); errno = ENOMEM; return -1;
-        }
-    }
-    if (!wrote_cffixed_home && vh != NULL) {
-        if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, "CFFIXED_USER_HOME=", 18U) ||
-            !pt_append_procargs_bytes(&out, &out_len, &out_cap, vh, strlen(vh) + 1U)) {
-            free(raw); free(out); errno = ENOMEM; return -1;
-        }
-    }
-    if (!wrote_tmpdir && vt != NULL) {
-        if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, "TMPDIR=", 7U) ||
-            !pt_append_procargs_bytes(&out, &out_len, &out_cap, vt, strlen(vt) + 1U)) {
-            free(raw); free(out); errno = ENOMEM; return -1;
+    const char *const kMandatoryKeys[] = { "HOME", "CFFIXED_USER_HOME", "TMPDIR", "PATH" };
+    const BOOL wroteFlags[] = { wrote_home, wrote_cffixed_home, wrote_tmpdir, wrote_path };
+    for (size_t mi = 0; mi < 4U; mi++) {
+        if (!wroteFlags[mi]) {
+            const char *mkey = kMandatoryKeys[mi];
+            const char *rewritten = NULL;
+            if (pt_resolve_env_entry(mkey, NULL, NO, bypass, vh, vt, &rewritten) == PT_ENV_ENTRY_REWRITE &&
+                rewritten != NULL) {
+                if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, mkey, strlen(mkey)) ||
+                    !pt_append_procargs_bytes(&out, &out_len, &out_cap, "=", 1U) ||
+                    !pt_append_procargs_bytes(&out, &out_len, &out_cap, rewritten, strlen(rewritten) + 1U)) {
+                    free(raw); free(out); errno = ENOMEM; return -1;
+                }
+            }
         }
     }
     free(raw);
@@ -3221,57 +3313,27 @@ static char *pt_getenv(const char *name) {
     if (name == NULL) {
         return NULL;
     }
+    char *raw_val = getenv(name);
+    if (pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return raw_val;
+    }
     BOOL bypass = pt_is_bypass_enabled();
-    const void *caller = NULL;
-    int is_sys = -1;
-    {
-        BOOL is_home = (strcmp(name, "HOME") == 0 || strcmp(name, "CFFIXED_USER_HOME") == 0);
-        BOOL is_tmpdir = (!is_home && strcmp(name, "TMPDIR") == 0);
-        BOOL is_pwd = (!is_home && !is_tmpdir && bypass && strcmp(name, "PWD") == 0);
-        BOOL is_path = (!is_home && !is_tmpdir && !is_pwd && bypass && strcmp(name, "PATH") == 0);
-        BOOL is_hidden = (!is_home && !is_tmpdir && !is_pwd && !is_path && bypass && pt_is_hidden_env_key(name));
-        if (is_home || is_tmpdir || is_pwd || is_path || is_hidden) {
-            caller = __builtin_return_address(0);
-            is_sys = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
-            if (is_sys == 0) {
-                if (is_hidden) {
-                    PT_DEBUG_TRACE("spoofer", "hid getenv key=%s", name);
-                    return NULL;
-                }
-                if (is_pwd) {
-                    PT_DEBUG_TRACE("spoofer", "spoofed getenv PWD");
-                    return (char *)"/";
-                }
-                if (is_path) {
-                    PT_DEBUG_TRACE("spoofer", "spoofed getenv PATH");
-                    return (char *)"/usr/bin:/bin:/usr/sbin:/sbin";
-                }
-                if (is_home) {
-                    const char *vh = pt_get_virtual_home_cstr();
-                    if (vh != NULL) {
-                        PT_DEBUG_TRACE("spoofer", "virtualized getenv %s -> %s", name, vh);
-                        return (char *)vh;
-                    }
-                } else if (is_tmpdir) {
-                    const char *vt = pt_get_virtual_tmpdir_cstr();
-                    if (vt != NULL) {
-                        PT_DEBUG_TRACE("spoofer", "virtualized getenv TMPDIR -> %s", vt);
-                        return (char *)vt;
-                    }
-                }
-            }
-        }
-    }
-    char *val = getenv(name);
-    if (val != NULL && bypass && pt_is_hidden_env_value(val)) {
-        if (is_sys < 0) {
-            is_sys = pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) ? 1 : 0;
-        }
-        if (is_sys == 0) {
+    const char *vh = pt_get_virtual_home_cstr();
+    const char *vt = pt_get_virtual_tmpdir_cstr();
+    const char *rewritten = NULL;
+    pt_env_entry_action_t act = pt_resolve_env_entry(
+        name, raw_val, (raw_val != NULL), bypass, vh, vt, &rewritten);
+    switch (act) {
+        case PT_ENV_ENTRY_HIDE:
+            PT_DEBUG_TRACE("spoofer", "hid getenv key=%s", name);
             return NULL;
-        }
+        case PT_ENV_ENTRY_REWRITE:
+            PT_DEBUG_TRACE("spoofer", "virtualized getenv %s -> %s", name, rewritten != NULL ? rewritten : "");
+            return (char *)rewritten;
+        case PT_ENV_ENTRY_KEEP:
+        default:
+            return raw_val;
     }
-    return val;
 }
 
 static char *pt_alloc_env_kv(const char *key, const char *val) {
@@ -3367,7 +3429,8 @@ static char ***pt_NSGetEnviron(void) {
     }
 
     if (needs_rebuild) {
-        char **new_env = (char **)calloc(real_count + 4, sizeof(char *));
+        BOOL bypass = pt_is_bypass_enabled();
+        char **new_env = (char **)calloc(real_count + 6, sizeof(char *));
         char **new_real_snapshot = (char **)calloc(real_count + 1, sizeof(char *));
         char *new_vh = (vh != NULL) ? strdup(vh) : NULL;
         char *new_vt = (vt != NULL) ? strdup(vt) : NULL;
@@ -3379,6 +3442,10 @@ static char ***pt_NSGetEnviron(void) {
             BOOL added_home = NO;
             BOOL added_cffixed_home = NO;
             BOOL added_tmpdir = NO;
+            BOOL added_tmp = NO;
+            BOOL added_temp = NO;
+            BOOL added_pwd = NO;
+            BOOL added_path = NO;
             for (size_t i = 0; i < real_count; i++) {
                 const char *entry = cur_real[i];
                 if (entry == NULL) {
@@ -3412,129 +3479,71 @@ static char ***pt_NSGetEnviron(void) {
                     heap_key[klen] = '\0';
                     key_ptr = heap_key;
                 }
+                BOOL duplicate_special = NO;
                 if (strcmp(key_ptr, "HOME") == 0) {
+                    duplicate_special = added_home;
+                    added_home = YES;
+                } else if (strcmp(key_ptr, "CFFIXED_USER_HOME") == 0) {
+                    duplicate_special = added_cffixed_home;
+                    added_cffixed_home = YES;
+                } else if (strcmp(key_ptr, "TMPDIR") == 0) {
+                    duplicate_special = added_tmpdir;
+                    added_tmpdir = YES;
+                } else if (strcmp(key_ptr, "TMP") == 0) {
+                    duplicate_special = added_tmp;
+                    added_tmp = YES;
+                } else if (strcmp(key_ptr, "TEMP") == 0) {
+                    duplicate_special = added_temp;
+                    added_temp = YES;
+                } else if (strcmp(key_ptr, "PWD") == 0) {
+                    duplicate_special = added_pwd;
+                    added_pwd = YES;
+                } else if (strcmp(key_ptr, "PATH") == 0) {
+                    duplicate_special = added_path;
+                    added_path = YES;
+                }
+                if (duplicate_special) {
                     free(heap_key);
-                    if (vh != NULL) {
-                        if (!added_home) {
-                            char *kv = pt_alloc_env_kv("HOME", vh);
-                            if (kv == NULL) {
-                                alloc_ok = NO;
-                                break;
-                            }
-                            new_env[out_idx++] = kv;
-                            added_home = YES;
-                        }
-                    } else {
-                        char *dup = strdup(snap_dup);
-                        if (dup == NULL) {
-                            alloc_ok = NO;
-                            break;
-                        }
-                        new_env[out_idx++] = dup;
-                        added_home = YES;
-                    }
                     continue;
                 }
-                if (strcmp(key_ptr, "CFFIXED_USER_HOME") == 0) {
+                const char *rewritten = NULL;
+                pt_env_entry_action_t act = pt_resolve_env_entry(
+                    key_ptr, eq + 1, YES, bypass, vh, vt, &rewritten);
+                if (act == PT_ENV_ENTRY_REWRITE && rewritten != NULL) {
+                    char *kv = pt_alloc_env_kv(key_ptr, rewritten);
                     free(heap_key);
-                    if (vh != NULL) {
-                        if (!added_cffixed_home) {
-                            char *kv = pt_alloc_env_kv("CFFIXED_USER_HOME", vh);
-                            if (kv == NULL) {
-                                alloc_ok = NO;
-                                break;
-                            }
-                            new_env[out_idx++] = kv;
-                            added_cffixed_home = YES;
-                        }
-                    } else {
-                        char *dup = strdup(snap_dup);
-                        if (dup == NULL) {
-                            alloc_ok = NO;
-                            break;
-                        }
-                        new_env[out_idx++] = dup;
-                        added_cffixed_home = YES;
+                    if (kv == NULL) {
+                        alloc_ok = NO;
+                        break;
                     }
-                    continue;
-                }
-                if (strcmp(key_ptr, "TMPDIR") == 0) {
+                    new_env[out_idx++] = kv;
+                } else if (act == PT_ENV_ENTRY_KEEP) {
                     free(heap_key);
-                    if (vt != NULL) {
-                        if (!added_tmpdir) {
-                            char *kv = pt_alloc_env_kv("TMPDIR", vt);
-                            if (kv == NULL) {
-                                alloc_ok = NO;
-                                break;
-                            }
-                            new_env[out_idx++] = kv;
-                            added_tmpdir = YES;
-                        }
-                    } else {
-                        char *dup = strdup(snap_dup);
-                        if (dup == NULL) {
-                            alloc_ok = NO;
-                            break;
-                        }
-                        new_env[out_idx++] = dup;
-                        added_tmpdir = YES;
-                    }
-                    continue;
-                }
-                if (strcmp(key_ptr, "PWD") == 0) {
-                    free(heap_key);
-                    char *dup = strdup("PWD=/");
+                    char *dup = strdup(snap_dup);
                     if (dup == NULL) {
                         alloc_ok = NO;
                         break;
                     }
                     new_env[out_idx++] = dup;
-                    continue;
-                }
-                if (strcmp(key_ptr, "PATH") == 0) {
+                } else {
                     free(heap_key);
-                    char *dup = strdup("PATH=/usr/bin:/bin:/usr/sbin:/sbin");
-                    if (dup == NULL) {
-                        alloc_ok = NO;
-                        break;
+                }
+            }
+            const char *const kMandatoryKeys[] = { "HOME", "CFFIXED_USER_HOME", "TMPDIR", "PATH" };
+            const BOOL addedFlags[] = { added_home, added_cffixed_home, added_tmpdir, added_path };
+            for (size_t mi = 0; alloc_ok && mi < 4U; mi++) {
+                if (!addedFlags[mi]) {
+                    const char *mkey = kMandatoryKeys[mi];
+                    const char *rewritten = NULL;
+                    if (pt_resolve_env_entry(mkey, NULL, NO, bypass, vh, vt, &rewritten) == PT_ENV_ENTRY_REWRITE &&
+                        rewritten != NULL) {
+                        char *kv = pt_alloc_env_kv(mkey, rewritten);
+                        if (kv == NULL) {
+                            alloc_ok = NO;
+                            break;
+                        }
+                        new_env[out_idx++] = kv;
                     }
-                    new_env[out_idx++] = dup;
-                    continue;
-                }
-                BOOL hidden = (pt_is_hidden_env_key(key_ptr) || pt_is_hidden_env_value(eq + 1));
-                free(heap_key);
-                if (hidden) {
-                    continue;
-                }
-                char *dup = strdup(snap_dup);
-                if (dup == NULL) {
-                    alloc_ok = NO;
-                    break;
-                }
-                new_env[out_idx++] = dup;
-            }
-            if (alloc_ok && !added_home && vh != NULL) {
-                char *kv = pt_alloc_env_kv("HOME", vh);
-                if (kv == NULL) {
-                    alloc_ok = NO;
-                } else {
-                    new_env[out_idx++] = kv;
-                }
-            }
-            if (alloc_ok && !added_cffixed_home && vh != NULL) {
-                char *kv = pt_alloc_env_kv("CFFIXED_USER_HOME", vh);
-                if (kv == NULL) {
-                    alloc_ok = NO;
-                } else {
-                    new_env[out_idx++] = kv;
-                }
-            }
-            if (alloc_ok && !added_tmpdir && vt != NULL) {
-                char *kv = pt_alloc_env_kv("TMPDIR", vt);
-                if (kv == NULL) {
-                    alloc_ok = NO;
-                } else {
-                    new_env[out_idx++] = kv;
                 }
             }
         }

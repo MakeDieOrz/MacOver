@@ -57,6 +57,15 @@ extern __attribute__((visibility("hidden"))) BOOL pt_is_system_or_playtools_call
 extern __attribute__((visibility("hidden"))) BOOL pt_is_effective_system_or_playtools_caller(const void *ret_addr);
 extern __attribute__((visibility("hidden"))) BOOL pt_is_hidden_path(const char *path, const void *caller);
 extern __attribute__((visibility("hidden"))) BOOL pt_is_hidden_env_key(const char *name);
+extern __attribute__((visibility("hidden"))) BOOL pt_is_hidden_env_value(const char *val, BOOL has_virtual_container);
+extern __attribute__((visibility("hidden"))) pt_env_entry_action_t pt_resolve_env_entry(
+    const char *key,
+    const char *raw_val,
+    BOOL has_raw_entry,
+    BOOL bypass_enabled,
+    const char *vh,
+    const char *vt,
+    const char **out_val);
 extern __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_selector_name(const char *selName);
 extern __attribute__((visibility("hidden"))) BOOL pt_get_spoofed_device_is_ipad(void);
 extern __attribute__((visibility("hidden"))) double pt_get_device_native_scale(void);
