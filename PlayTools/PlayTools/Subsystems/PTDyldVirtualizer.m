@@ -148,7 +148,9 @@ BOOL pt_is_hidden_objc_selector_name(const char *selName) {
     }
     switch (selName[0]) {
         case 'p':
-            return PT_HAS_PREFIX_LIT(selName, "pm_");
+            return PT_HAS_PREFIX_LIT(selName, "pm_") ||
+                   PT_HAS_PREFIX_LIT(selName, "ps_hook_") ||
+                   PT_HAS_PREFIX_LIT(selName, "pt_hook_");
         case 'k':
             return PT_HAS_PREFIX_LIT(selName, "kif_");
         default:
@@ -334,9 +336,74 @@ static inline const void *pt_strip_code_ptr(const void *p) {
 typedef struct {
     _Atomic(uintptr_t) hook;
     _Atomic(uintptr_t) orig;
+    _Atomic(uintptr_t) raw_orig;
 } pt_swizzle_imp_slot_t;
 
 static pt_swizzle_imp_slot_t s_swizzled_imp_table[PT_SWIZZLE_IMP_SLOTS];
+static _Atomic(uintptr_t) s_swizzled_orig_set[PT_SWIZZLE_IMP_SLOTS];
+static _Atomic(uintptr_t) s_hidden_swizzle_sel_set[PT_SWIZZLE_IMP_SLOTS];
+
+static void pt_ptr_set_insert(_Atomic(uintptr_t) *table, uintptr_t val) {
+    if (val == 0 || val == 1) {
+        return;
+    }
+    uint64_t h = ((uint64_t)(val >> 2) * 11400714819323198485ULL);
+    size_t start = (size_t)((h >> 53) & (PT_SWIZZLE_IMP_SLOTS - 1U));
+    for (size_t probe = 0; probe < PT_SWIZZLE_IMP_SLOTS; probe++) {
+        size_t idx = (start + probe) & (PT_SWIZZLE_IMP_SLOTS - 1U);
+        for (;;) {
+            uintptr_t cur = atomic_load_explicit(&table[idx], memory_order_acquire);
+            if (cur == val) {
+                return;
+            }
+            if (cur == 0) {
+                uintptr_t expected = 0;
+                if (atomic_compare_exchange_strong_explicit(
+                        &table[idx], &expected, val,
+                        memory_order_release, memory_order_acquire)) {
+                    return;
+                }
+                continue;
+            }
+            break;
+        }
+    }
+}
+
+static BOOL pt_ptr_set_contains(const _Atomic(uintptr_t) *table, uintptr_t val) {
+    if (val == 0 || val == 1) {
+        return NO;
+    }
+    uint64_t h = ((uint64_t)(val >> 2) * 11400714819323198485ULL);
+    size_t start = (size_t)((h >> 53) & (PT_SWIZZLE_IMP_SLOTS - 1U));
+    for (size_t probe = 0; probe < PT_SWIZZLE_IMP_SLOTS; probe++) {
+        size_t idx = (start + probe) & (PT_SWIZZLE_IMP_SLOTS - 1U);
+        uintptr_t cur = atomic_load_explicit(&table[idx], memory_order_acquire);
+        if (cur == 0) {
+            return NO;
+        }
+        if (cur == val) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+__attribute__((visibility("hidden")))
+void pt_register_hidden_swizzle_selector(SEL sel) {
+    if (sel != NULL) {
+        pt_ptr_set_insert(s_hidden_swizzle_sel_set, (uintptr_t)sel);
+    }
+}
+
+static inline BOOL pt_is_registered_hidden_swizzle_selector(SEL sel) {
+    return (sel != NULL) && pt_ptr_set_contains(s_hidden_swizzle_sel_set, (uintptr_t)sel);
+}
+
+static inline BOOL pt_is_swizzled_orig_imp(const void *addr) {
+    uintptr_t stripped = (uintptr_t)pt_strip_code_ptr(addr);
+    return pt_ptr_set_contains(s_swizzled_orig_set, stripped);
+}
 
 static inline size_t pt_swizzle_imp_hash(uintptr_t key) {
     uint64_t h = ((uint64_t)(key >> 2) * 11400714819323198485ULL);
@@ -382,20 +449,61 @@ static const void *pt_lookup_swizzled_orig_imp(const void *addr) {
     return resolved;
 }
 
+static const void *pt_lookup_swizzled_raw_orig_imp(const void *addr) {
+    uintptr_t cur = (uintptr_t)pt_strip_code_ptr(addr);
+    if (cur == 0 || cur == 1) {
+        return NULL;
+    }
+    const void *resolved = NULL;
+    for (int depth = 0; depth < 16; depth++) {
+        size_t start = pt_swizzle_imp_hash(cur);
+        uintptr_t next_stripped = 0;
+        uintptr_t next_raw = 0;
+        for (size_t probe = 0; probe < PT_SWIZZLE_IMP_SLOTS; probe++) {
+            size_t idx = (start + probe) & (PT_SWIZZLE_IMP_SLOTS - 1U);
+            pt_swizzle_imp_slot_t *slot = &s_swizzled_imp_table[idx];
+            uintptr_t slot_hook = atomic_load_explicit(&slot->hook, memory_order_acquire);
+            while (slot_hook == 1) {
+                slot_hook = atomic_load_explicit(&slot->hook, memory_order_acquire);
+            }
+            if (slot_hook == 0) {
+                break;
+            }
+            if (slot_hook == cur) {
+                next_stripped = atomic_load_explicit(&slot->orig, memory_order_relaxed);
+                next_raw = atomic_load_explicit(&slot->raw_orig, memory_order_relaxed);
+                break;
+            }
+        }
+        if (next_stripped == 0 || next_stripped == cur) {
+            break;
+        }
+        resolved = (const void *)(next_raw != 0 ? next_raw : next_stripped);
+        cur = next_stripped;
+    }
+    return resolved;
+}
+
 __attribute__((visibility("hidden")))
 void pt_register_swizzled_imp(const void *hook_imp, const void *orig_imp) {
     uintptr_t hook = (uintptr_t)pt_strip_code_ptr(hook_imp);
     uintptr_t orig = (uintptr_t)pt_strip_code_ptr(orig_imp);
+    uintptr_t raw_orig = (uintptr_t)orig_imp;
     if (hook == 0 || orig == 0 || hook == 1 || orig == 1 || hook == orig) {
         return;
     }
+    const void *root_raw = pt_lookup_swizzled_raw_orig_imp(orig_imp);
     const void *root_orig = pt_lookup_swizzled_orig_imp((const void *)orig);
     if (root_orig != NULL) {
         orig = (uintptr_t)root_orig;
+        if (root_raw != NULL) {
+            raw_orig = (uintptr_t)root_raw;
+        }
     }
     if (hook == orig) {
         return;
     }
+    pt_ptr_set_insert(s_swizzled_orig_set, orig);
     size_t start = pt_swizzle_imp_hash(hook);
     for (size_t probe = 0; probe < PT_SWIZZLE_IMP_SLOTS; probe++) {
         size_t idx = (start + probe) & (PT_SWIZZLE_IMP_SLOTS - 1U);
@@ -414,6 +522,7 @@ void pt_register_swizzled_imp(const void *hook_imp, const void *orig_imp) {
                         &slot->hook, &expected, (uintptr_t)1,
                         memory_order_acq_rel, memory_order_acquire)) {
                     atomic_store_explicit(&slot->orig, orig, memory_order_relaxed);
+                    atomic_store_explicit(&slot->raw_orig, raw_orig, memory_order_relaxed);
                     atomic_store_explicit(&slot->hook, hook, memory_order_release);
                     return;
                 }
@@ -763,6 +872,85 @@ static int pt_objc_getClassList(Class *buffer, int bufferCount) {
     return (int)count;
 }
 
+static inline BOOL pt_is_playtools_injected_method(Method m, SEL sel) {
+    if (m == NULL || sel == NULL) {
+        return NO;
+    }
+    if (!pt_is_registered_hidden_swizzle_selector(sel) &&
+        !pt_is_hidden_objc_selector_name(sel_getName(sel))) {
+        return NO;
+    }
+    const void *imp = (const void *)method_getImplementation(m);
+    return pt_is_address_in_playtools(imp) || pt_is_swizzled_orig_imp(imp);
+}
+
+static Method pt_class_getInstanceMethod(Class cls, SEL name) {
+    if (!pt_is_valid_user_pointer((__bridge const void *)cls) ||
+        !pt_is_valid_user_pointer((const void *)name)) {
+        return NULL;
+    }
+    Method m = class_getInstanceMethod(cls, name);
+    if (m != NULL && pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_is_playtools_injected_method(m, name)) {
+        return NULL;
+    }
+    return m;
+}
+
+static Method pt_class_getClassMethod(Class cls, SEL name) {
+    if (!pt_is_valid_user_pointer((__bridge const void *)cls) ||
+        !pt_is_valid_user_pointer((const void *)name)) {
+        return NULL;
+    }
+    Method m = class_getClassMethod(cls, name);
+    if (m != NULL && pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_is_playtools_injected_method(m, name)) {
+        return NULL;
+    }
+    return m;
+}
+
+static IMP pt_method_getImplementation(Method m) {
+    if (m == NULL) {
+        return NULL;
+    }
+    IMP imp = method_getImplementation(m);
+    if (imp != NULL && pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        SEL sel = method_getName(m);
+        if (sel != NULL && pt_is_playtools_injected_method(m, sel)) {
+            return NULL;
+        }
+        const void *orig = pt_lookup_swizzled_raw_orig_imp((const void *)imp);
+        if (orig != NULL) {
+            return (IMP)orig;
+        }
+    }
+    return imp;
+}
+
+static IMP pt_class_getMethodImplementation(Class cls, SEL name) {
+    if (!pt_is_valid_user_pointer((__bridge const void *)cls) ||
+        !pt_is_valid_user_pointer((const void *)name)) {
+        return NULL;
+    }
+    IMP imp = class_getMethodImplementation(cls, name);
+    if (imp != NULL && pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        Method m = class_getInstanceMethod(cls, name);
+        if (m != NULL && pt_is_playtools_injected_method(m, name)) {
+            return class_getMethodImplementation(cls, sel_registerName("__pt_ps_nonexistent_sel_lookup__"));
+        }
+        const void *orig = pt_lookup_swizzled_raw_orig_imp((const void *)imp);
+        if (orig != NULL) {
+            return (IMP)orig;
+        }
+    }
+    return imp;
+}
+
 static Method *pt_class_copyMethodList(Class cls, unsigned int *outCount) {
     unsigned int count = 0;
     Method *methods = class_copyMethodList(cls, &count);
@@ -773,9 +961,7 @@ static Method *pt_class_copyMethodList(Class cls, unsigned int *outCount) {
             Method m = methods[i];
             if (m != NULL) {
                 SEL sel = method_getName(m);
-                const char *selName = (sel != NULL) ? sel_getName(sel) : NULL;
-                if (pt_is_hidden_objc_selector_name(selName) &&
-                    pt_is_address_in_playtools((const void *)method_getImplementation(m))) {
+                if (sel != NULL && pt_is_playtools_injected_method(m, sel)) {
                     continue;
                 }
             }
@@ -800,10 +986,9 @@ static BOOL pt_class_respondsToSelector(Class cls, SEL sel) {
     }
     BOOL orig = class_respondsToSelector(cls, sel);
     if (orig && pt_is_bypass_enabled() &&
-        pt_is_hidden_objc_selector_name(sel_getName(sel)) &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         Method m = class_getInstanceMethod(cls, sel);
-        if (m != NULL && pt_is_address_in_playtools((const void *)method_getImplementation(m))) {
+        if (m != NULL && pt_is_playtools_injected_method(m, sel)) {
             return NO;
         }
     }
@@ -1865,6 +2050,10 @@ DYLD_INTERPOSE(pt_class_getImageName, class_getImageName)
 DYLD_INTERPOSE(pt_objc_copyClassNamesForImage, objc_copyClassNamesForImage)
 DYLD_INTERPOSE(pt_objc_copyClassList, objc_copyClassList)
 DYLD_INTERPOSE(pt_objc_getClassList, objc_getClassList)
+DYLD_INTERPOSE(pt_class_getInstanceMethod, class_getInstanceMethod)
+DYLD_INTERPOSE(pt_class_getClassMethod, class_getClassMethod)
+DYLD_INTERPOSE(pt_method_getImplementation, method_getImplementation)
+DYLD_INTERPOSE(pt_class_getMethodImplementation, class_getMethodImplementation)
 DYLD_INTERPOSE(pt_class_copyMethodList, class_copyMethodList)
 DYLD_INTERPOSE(pt_class_respondsToSelector, class_respondsToSelector)
 DYLD_INTERPOSE(pt_objc_getProtocol, objc_getProtocol)
@@ -1893,8 +2082,8 @@ static IMP s_nsobject_notFoundIMP = NULL;
 
 static inline BOOL ps_should_hide_selector_for_target_class(Class targetCls, SEL aSelector, const void *caller) {
     if (targetCls == Nil ||
+        aSelector == NULL ||
         !pt_is_bypass_enabled() ||
-        !pt_is_hidden_objc_selector_name(sel_getName(aSelector)) ||
         pt_is_effective_system_or_playtools_caller(caller)) {
         return NO;
     }
@@ -1902,7 +2091,7 @@ static inline BOOL ps_should_hide_selector_for_target_class(Class targetCls, SEL
     if (m == NULL) {
         return NO;
     }
-    return pt_is_address_in_playtools((const void *)method_getImplementation(m));
+    return pt_is_playtools_injected_method(m, aSelector);
 }
 
 static BOOL ps_hook_nsobject_respondsToSelector(id self, SEL _cmd, SEL aSelector) {

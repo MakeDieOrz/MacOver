@@ -271,6 +271,22 @@ int main(int argc, const char *argv[]) {
         void *blockedDlsym = dlsym(RTLD_DEFAULT, "pt_is_registered_hidden_module");
         Class reflectedSafeMode = NSClassFromString(@"PTSafeMode");
         Class reflectedPluginCls = objc_lookUpClass("MockHarnessHiddenClass");
+        SEL shadowSel = NSSelectorFromString(@"pm_isiOSAppOnMac");
+        BOOL leakedShadowResponds = [[NSProcessInfo processInfo] respondsToSelector:shadowSel] ||
+                                    [NSProcessInfo instancesRespondToSelector:shadowSel] ||
+                                    (class_getInstanceMethod([NSProcessInfo class], shadowSel) != NULL);
+        unsigned int piMethodCount = 0;
+        Method *piMethods = class_copyMethodList([NSProcessInfo class], &piMethodCount);
+        if (piMethods != NULL) {
+            for (unsigned int mi = 0; mi < piMethodCount; mi++) {
+                const char *sname = sel_getName(method_getName(piMethods[mi]));
+                if (sname != NULL && strncmp(sname, "pm_", 3) == 0) {
+                    leakedShadowResponds = YES;
+                    break;
+                }
+            }
+            free(piMethods);
+        }
         BOOL dyldLeakedPlugin = NO;
         uint32_t imgCount = _dyld_image_count();
         for (uint32_t i = 0; i < imgCount; i++) {
@@ -350,6 +366,7 @@ int main(int argc, const char *argv[]) {
             @"antiDetectionHidDlsym": (blockedDlsym == NULL) ? @YES : @NO,
             @"antiDetectionHidSafeModeClass": (reflectedSafeMode == Nil) ? @YES : @NO,
             @"antiDetectionHidPluginClass": (reflectedPluginCls == Nil) ? @YES : @NO,
+            @"antiDetectionHidShadowSelector": (!leakedShadowResponds) ? @YES : @NO,
             @"antiDetectionHidPluginImage": (!dyldLeakedPlugin) ? @YES : @NO,
             @"stateDir": stateDir ?: @"",
             @"breadcrumbExistsAtStart": crumbAtStart ? @YES : @NO,
@@ -567,6 +584,7 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info1["antiDetectionHidDlsym"] is True,
         info1["antiDetectionHidSafeModeClass"] is True,
         info1["antiDetectionHidPluginClass"] is True,
+        info1["antiDetectionHidShadowSelector"] is True,
         info1["antiDetectionHidPluginImage"] is True,
         info1["breadcrumbExistsAtStart"] is True,
         info1["breadcrumbExistsAfterSleep"] is False,
