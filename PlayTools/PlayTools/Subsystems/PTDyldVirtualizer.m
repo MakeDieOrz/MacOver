@@ -622,6 +622,59 @@ static const char *pt_dyld_shared_cache_file_path(void) {
     return (dyld_shared_cache_file_path != NULL) ? dyld_shared_cache_file_path() : NULL;
 }
 
+extern bool pt_orig_dyld_shared_cache_contains_path(const char *path)
+    __asm("__dyld_shared_cache_contains_path") __attribute__((weak_import));
+
+static bool pt_dyld_shared_cache_contains_path(const char *path) {
+    if (pt_orig_dyld_shared_cache_contains_path == NULL) {
+        return false;
+    }
+    const void *caller = __builtin_return_address(0);
+    if (path != NULL && pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(caller)) {
+        char lex_buf[PATH_MAX];
+        const char *norm = path;
+        if (norm[0] == '/' && pt_needs_lexical_norm(norm)) {
+            const char *collapsed = pt_normalize_lexical_path(norm, lex_buf, sizeof(lex_buf));
+            if (collapsed != NULL) {
+                norm = collapsed;
+            }
+        }
+        if (strcmp(norm, "/System/iOSSupport") == 0 ||
+            strncmp(norm, "/System/iOSSupport/", 19) == 0) {
+            return false;
+        }
+        if (pt_is_hidden_dyld_image_name(norm) || pt_is_hidden_path(norm, caller)) {
+            return false;
+        }
+        if (pt_orig_dyld_shared_cache_contains_path(norm)) {
+            return true;
+        }
+        if (strncmp(norm, "/System/Library/", 16) == 0 || strncmp(norm, "/usr/lib/", 9) == 0) {
+            char ios_buf[PATH_MAX];
+            int n = snprintf(ios_buf, sizeof(ios_buf), "/System/iOSSupport%s", norm);
+            if (n > 0 && (size_t)n < sizeof(ios_buf) &&
+                pt_orig_dyld_shared_cache_contains_path(ios_buf)) {
+                return true;
+            }
+            const char *slash = strrchr(norm, '/');
+            if (slash != NULL && slash > norm && strstr(norm, ".framework/") != NULL &&
+                strstr(norm, "/Versions/") == NULL) {
+                size_t dir_len = (size_t)(slash - norm);
+                n = snprintf(ios_buf, sizeof(ios_buf),
+                             "/System/iOSSupport%.*s/Versions/A%s",
+                             (int)dir_len, norm, slash);
+                if (n > 0 && (size_t)n < sizeof(ios_buf) &&
+                    pt_orig_dyld_shared_cache_contains_path(ios_buf)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    return pt_orig_dyld_shared_cache_contains_path(path);
+}
+
 
 extern const void *pt_orig_objc_getClass(const char *name) __asm__("_objc_getClass");
 extern const void *pt_orig_objc_lookUpClass(const char *name) __asm__("_objc_lookUpClass");
@@ -2347,6 +2400,8 @@ static void *pt_dlsym(void *handle, const char *symbol) {
             PT_DEBUG_TRACE("dyld", "hid macOS-only Security symbol=%s", symbol);
             pt_set_synthetic_dlerror("symbol not found");
             return NULL;
+        } else if (strcmp(symbol, "_dyld_shared_cache_contains_path") == 0) {
+            return (void *)&pt_dyld_shared_cache_contains_path;
         } else if (strcmp(symbol, "_availability_version_check") == 0) {
             return (void *)&pt_availability_version_check;
         } else if (strcmp(symbol, "environ") == 0) {
@@ -2456,6 +2511,7 @@ static void *pt_dlsym(void *handle, const char *symbol) {
 DYLD_INTERPOSE(pt_dyld_get_active_platform, dyld_get_active_platform)
 DYLD_INTERPOSE(pt_dyld_get_base_platform, dyld_get_base_platform)
 DYLD_INTERPOSE(pt_dyld_shared_cache_file_path, dyld_shared_cache_file_path)
+DYLD_INTERPOSE(pt_dyld_shared_cache_contains_path, pt_orig_dyld_shared_cache_contains_path)
 DYLD_INTERPOSE(pt_objc_getClass, objc_getClass)
 DYLD_INTERPOSE(pt_objc_lookUpClass, objc_lookUpClass)
 DYLD_INTERPOSE(pt_NSClassFromString, NSClassFromString)

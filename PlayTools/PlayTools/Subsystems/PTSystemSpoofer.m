@@ -1739,13 +1739,18 @@ static pt_sysctl_mib_entry_t s_sysctl_mibs[] = {
     { "hw.perflevel0.physicalcpu_max", {0}, 0 },
     { "hw.perflevel0.logicalcpu", {0}, 0 },
     { "hw.perflevel0.logicalcpu_max", {0}, 0 },
+    { "hw.perflevel0.l2cachesize", {0}, 0 },
     { "hw.perflevel0.name", {0}, 0 },
     { "hw.perflevel1.physicalcpu", {0}, 0 },
     { "hw.perflevel1.physicalcpu_max", {0}, 0 },
     { "hw.perflevel1.logicalcpu", {0}, 0 },
     { "hw.perflevel1.logicalcpu_max", {0}, 0 },
+    { "hw.perflevel1.l2cachesize", {0}, 0 },
     { "hw.perflevel1.name", {0}, 0 },
+    { "hw.l2cachesize", {0}, 0 },
+    { "hw.packages", {0}, 0 },
     { "hw.use_kernelmanagerd", {0}, 0 },
+    { "vm.swapusage", {0}, 0 },
     { "kern.iossupportversion", {0}, 0 },
     { "kern.osproductversion", {0}, 0 },
     { "kern.bootargs", {0}, 0 },
@@ -1809,6 +1814,32 @@ static inline BOOL pt_sysctl_resolve_is_sys(const void *caller, int *inout_is_sy
     return (*inout_is_sys_caller != 0);
 }
 
+static void pt_get_spoofed_l2_cache_sizes(const pt_device_profile_t *profile,
+                                          uint64_t *out_p_l2,
+                                          uint64_t *out_e_l2) {
+    uint64_t p_l2 = 16ULL << 20;
+    uint64_t e_l2 = 4ULL << 20;
+    if (profile != NULL) {
+        if (profile->max_apple_gpu_family <= 1003) {
+            p_l2 = 3ULL << 20;
+            e_l2 = 0ULL;
+        } else if (profile->max_apple_gpu_family <= 1006) {
+            p_l2 = 8ULL << 20;
+            e_l2 = 4ULL << 20;
+        } else if (profile->max_apple_gpu_family == 1007 ||
+                   strcmp(profile->model, "iPhone14,3") == 0) {
+            p_l2 = 12ULL << 20;
+            e_l2 = 4ULL << 20;
+        }
+    }
+    if (out_p_l2 != NULL) {
+        *out_p_l2 = p_l2;
+    }
+    if (out_e_l2 != NULL) {
+        *out_e_l2 = e_l2;
+    }
+}
+
 static BOOL pt_handle_sysctl_name(const char *name,
                                   void *oldp,
                                   size_t *oldlenp,
@@ -1821,8 +1852,16 @@ static BOOL pt_handle_sysctl_name(const char *name,
         return NO;
     }
     char c0 = name[0];
-    if (c0 != 'h' && c0 != 'k' && c0 != 'm' && c0 != 's') {
+    if (c0 != 'h' && c0 != 'k' && c0 != 'm' && c0 != 's' && c0 != 'v') {
         return NO;
+    }
+    if (c0 == 'v' && strcmp(name, "vm.swapusage") == 0) {
+        if (!pt_is_bypass_enabled() || pt_sysctl_resolve_is_sys(caller, inout_is_sys_caller)) {
+            return NO;
+        }
+        errno = ENOENT;
+        *out_ret = -1;
+        return YES;
     }
     if (c0 == 'h' && strncmp(name, "hw.", 3) == 0) {
         if (!pt_is_bypass_enabled() || pt_sysctl_resolve_is_sys(caller, inout_is_sys_caller)) {
@@ -1842,7 +1881,18 @@ static BOOL pt_handle_sysctl_name(const char *name,
         }
         const pt_device_profile_t *profile = pt_get_active_device_profile();
         if (strcmp(sub, "use_kernelmanagerd") == 0) {
-            *out_ret = pt_write_sysctl_int(0, oldp, oldlenp);
+            errno = ENOENT;
+            *out_ret = -1;
+            return YES;
+        }
+        if (strcmp(sub, "packages") == 0) {
+            *out_ret = pt_write_sysctl_int(1, oldp, oldlenp);
+            return YES;
+        }
+        if (strcmp(sub, "l2cachesize") == 0) {
+            uint64_t p_l2 = 0;
+            pt_get_spoofed_l2_cache_sizes(profile, &p_l2, NULL);
+            *out_ret = pt_write_sysctl_uint64(oldp, oldlenp, (newlen > 0) ? newp : NULL, p_l2);
             return YES;
         }
         if (strcmp(sub, "ncpu") == 0 ||
@@ -1898,6 +1948,12 @@ static BOOL pt_handle_sysctl_name(const char *name,
                 *out_ret = pt_write_sysctl_int((int)profile->p_cores, oldp, oldlenp);
                 return YES;
             }
+            if (strcmp(psub, "l2cachesize") == 0) {
+                uint64_t p_l2 = 0;
+                pt_get_spoofed_l2_cache_sizes(profile, &p_l2, NULL);
+                *out_ret = pt_write_sysctl_uint64(oldp, oldlenp, (newlen > 0) ? newp : NULL, p_l2);
+                return YES;
+            }
             if (strcmp(psub, "name") == 0) {
                 *out_ret = pt_write_sysctl_string("Performance", oldp, oldlenp);
                 return YES;
@@ -1915,6 +1971,12 @@ static BOOL pt_handle_sysctl_name(const char *name,
                 strcmp(psub, "logicalcpu") == 0 ||
                 strcmp(psub, "logicalcpu_max") == 0) {
                 *out_ret = pt_write_sysctl_int((int)profile->e_cores, oldp, oldlenp);
+                return YES;
+            }
+            if (strcmp(psub, "l2cachesize") == 0) {
+                uint64_t e_l2 = 0;
+                pt_get_spoofed_l2_cache_sizes(profile, NULL, &e_l2);
+                *out_ret = pt_write_sysctl_uint64(oldp, oldlenp, (newlen > 0) ? newp : NULL, e_l2);
                 return YES;
             }
             if (strcmp(psub, "name") == 0) {
@@ -2024,12 +2086,20 @@ static BOOL pt_handle_sysctl_name(const char *name,
 
 static int pt_sysctlnametomib(const char *sname, int *mibp, size_t *sizep) {
     if (sname != NULL &&
-        (strcmp(sname, "kern.iossupportversion") == 0 ||
-         strcmp(sname, "kern.hibernatefile") == 0) &&
         pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        errno = ENOENT;
-        return -1;
+        if (strcmp(sname, "kern.iossupportversion") == 0 ||
+            strcmp(sname, "kern.hibernatefile") == 0 ||
+            strcmp(sname, "hw.use_kernelmanagerd") == 0 ||
+            strcmp(sname, "vm.swapusage") == 0) {
+            errno = ENOENT;
+            return -1;
+        }
+        if (strncmp(sname, "hw.perflevel1.", 14) == 0 &&
+            pt_get_active_device_profile()->e_cores == 0) {
+            errno = ENOENT;
+            return -1;
+        }
     }
     return sysctlnametomib(sname, mibp, sizep);
 }

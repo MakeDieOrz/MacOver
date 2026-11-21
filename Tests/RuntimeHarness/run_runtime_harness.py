@@ -145,6 +145,17 @@ int main(int argc, const char *argv[]) {
         if (pt_harness_syscall(274, "hw.machine", (size_t)10, syscallMachine, &syscallMachineLen, NULL, (size_t)0) != 0) {
             syscallMachine[0] = '\0';
         }
+        size_t swapLen = 0;
+        BOOL swapUsageBlocked = (sysctlbyname("vm.swapusage", NULL, &swapLen, NULL, 0) == -1 && errno == ENOENT);
+        uint64_t l2CacheSize = 0;
+        size_t l2Len = sizeof(l2CacheSize);
+        if (sysctlbyname("hw.l2cachesize", &l2CacheSize, &l2Len, NULL, 0) != 0) {
+            l2CacheSize = 0;
+        }
+        bool (*dscContains)(const char *) = (bool (*)(const char *))dlsym(RTLD_DEFAULT, "_dyld_shared_cache_contains_path");
+        BOOL dscHidAppKit = (dscContains == NULL) ||
+                            (!dscContains("/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit") &&
+                             !dscContains("/System/iOSSupport/System/Library/Frameworks/UIKit.framework/UIKit"));
 
         struct utsname uts;
         memset(&uts, 0, sizeof(uts));
@@ -449,6 +460,9 @@ int main(int argc, const char *argv[]) {
             @"sysctlVersion": [NSString stringWithUTF8String:sysctlVersion] ?: @"",
             @"sysctlMachine": [NSString stringWithUTF8String:sysctlMachine] ?: @"",
             @"syscallMachine": [NSString stringWithUTF8String:syscallMachine] ?: @"",
+            @"swapUsageBlocked": swapUsageBlocked ? @YES : @NO,
+            @"l2CacheSize": @(l2CacheSize),
+            @"dscHidAppKit": dscHidAppKit ? @YES : @NO,
             @"unameRelease": [NSString stringWithUTF8String:uts.release] ?: @"",
             @"unameVersion": [NSString stringWithUTF8String:uts.version] ?: @"",
             @"unameMachine": [NSString stringWithUTF8String:uts.machine] ?: @"",
@@ -729,6 +743,9 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info1["availIOS16"] is True,
         info1["uiColorWellLoaded"] is True,
         info1["hidPCInstallGen"] is True,
+        info1["swapUsageBlocked"] is True,
+        0 < int(info1["l2CacheSize"]) <= (16 << 20),
+        info1["dscHidAppKit"] is True,
         (not info1["appAttestLoaded"]) or (
             info1["appAttestSupported"] is False and info1["appAttestGenKeyUnsupported"] is True
         ),
