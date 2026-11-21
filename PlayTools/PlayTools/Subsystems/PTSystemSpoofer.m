@@ -1331,6 +1331,21 @@ static void pt_synthesize_ios_kernel_version_prefix(const char *release_str, cha
              tz_str, cal_year, xnu_maj, xnu_min, xnu_pat);
 }
 
+static BOOL pt_expected_ios_build_prefix_for_major(int ios_major, int *out_expected_prefix) {
+    if (out_expected_prefix == NULL) {
+        return NO;
+    }
+    if (ios_major >= 14 && ios_major <= 18) {
+        *out_expected_prefix = ios_major + 4;
+        return YES;
+    }
+    if (ios_major >= 26) {
+        *out_expected_prefix = ios_major - 3;
+        return YES;
+    }
+    return NO;
+}
+
 static BOOL pt_sanitize_ios_build_version_with_kern_major(const char *build_cstr,
                                                           const char *ios_ver_cstr,
                                                           int kern_major,
@@ -1339,29 +1354,40 @@ static BOOL pt_sanitize_ios_build_version_with_kern_major(const char *build_cstr
     if (out_buf == NULL || out_size < 4 || build_cstr == NULL) {
         return NO;
     }
-    size_t blen = strlen(build_cstr);
-    if (blen < 3 ||
-        build_cstr[0] < '0' || build_cstr[0] > '9' ||
-        build_cstr[1] < '0' || build_cstr[1] > '9') {
+    const char *p = build_cstr;
+    int b_prefix = 0;
+    size_t digit_len = 0;
+    while (*p >= '0' && *p <= '9' && digit_len < 4) {
+        b_prefix = b_prefix * 10 + (*p - '0');
+        p++;
+        digit_len++;
+    }
+    if (digit_len < 2 || digit_len > 3 ||
+        !((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z'))) {
         strlcpy(out_buf, build_cstr, out_size);
         return NO;
     }
-    int b_prefix = (build_cstr[0] - '0') * 10 + (build_cstr[1] - '0');
-    int effective_cap = 0;
-    if (ios_ver_cstr != NULL && ios_ver_cstr[0] >= '0' && ios_ver_cstr[0] <= '9') {
-        int pv_major = atoi(ios_ver_cstr);
-        if (pv_major >= 18 && pv_major <= 25) {
-            effective_cap = pv_major + 4;
-        } else if (pv_major >= 26) {
-            effective_cap = pv_major - 3;
+
+    int expected_prefix = 0;
+    int host_prefix = 0;
+    if (ios_ver_cstr != NULL) {
+        while (*ios_ver_cstr == ' ' || *ios_ver_cstr == '\t') {
+            ios_ver_cstr++;
+        }
+        if (*ios_ver_cstr >= '0' && *ios_ver_cstr <= '9') {
+            int pv_major = atoi(ios_ver_cstr);
+            if (pt_expected_ios_build_prefix_for_major(pv_major, &expected_prefix)) {
+                host_prefix = expected_prefix + 2;
+            }
         }
     }
-    if (effective_cap <= 0) {
-        effective_cap = (kern_major >= 26) ? (kern_major - 2) : 23;
+    if (expected_prefix <= 0 && kern_major >= 20) {
+        host_prefix = kern_major;
+        expected_prefix = kern_major - 2;
     }
-    if (b_prefix >= 24 && b_prefix > effective_cap) {
-        int mapped_prefix = b_prefix - 2;
-        int n = snprintf(out_buf, out_size, "%d%s", mapped_prefix, build_cstr + 2);
+
+    if (expected_prefix > 0 && b_prefix == host_prefix) {
+        int n = snprintf(out_buf, out_size, "%d%s", expected_prefix, p);
         if (n > 0 && (size_t)n < out_size) {
             return YES;
         }
