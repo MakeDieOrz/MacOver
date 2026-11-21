@@ -1558,6 +1558,86 @@ __attribute__((visibility("hidden"))) void pt_disable_reported_ios_override_for_
     }
 }
 
+__attribute__((visibility("hidden")))
+BOOL pt_is_compat13_7_active(void) {
+    if (!pt_is_bypass_enabled()) {
+        return NO;
+    }
+    pt_ensure_host_kernel_info();
+    return (pt_active_reported_ios_override() == PT_REPORTED_IOS_OVERRIDE_13_7);
+}
+
+extern bool pt_orig_availability_version_check(uint32_t count, const pt_dyld_build_version_t versions[])
+    __asm("__availability_version_check") __attribute__((weak_import));
+
+static BOOL pt_is_availability_app_caller(const void *caller, const void *frame_ptr) {
+    if (!pt_is_effective_system_or_playtools_caller(caller)) {
+        return YES;
+    }
+    const void *scaller = pt_strip_return_addr((uintptr_t)caller);
+    const char *img = (scaller != NULL) ? dyld_image_path_containing_address(scaller) : NULL;
+    if (img == NULL || strstr(img, "libswift") == NULL) {
+        return NO;
+    }
+    pthread_t self_thr = pthread_self();
+    uintptr_t stack_top = (uintptr_t)pthread_get_stackaddr_np(self_thr);
+    size_t stack_sz = pthread_get_stacksize_np(self_thr);
+    if (stack_top == 0 || stack_sz < 64 || stack_top < stack_sz) {
+        return NO;
+    }
+    uintptr_t stack_bot = stack_top - stack_sz;
+    uintptr_t fp = (uintptr_t)frame_ptr;
+    for (int depth = 0; depth < 4; depth++) {
+        if (fp < stack_bot || fp + 16U > stack_top || (fp & 0x7U) != 0) {
+            break;
+        }
+        const uintptr_t *frame = (const uintptr_t *)fp;
+        uintptr_t next_fp = frame[0];
+        const void *lr = (const void *)frame[1];
+        if (lr != NULL) {
+            if (!pt_is_effective_system_or_playtools_caller(lr)) {
+                return YES;
+            }
+            const void *slr = pt_strip_return_addr((uintptr_t)lr);
+            const char *pimg = (slr != NULL) ? dyld_image_path_containing_address(slr) : NULL;
+            if (pimg == NULL || strstr(pimg, "libswift") == NULL) {
+                return NO;
+            }
+        }
+        if (next_fp <= fp) {
+            break;
+        }
+        fp = next_fp;
+    }
+    return NO;
+}
+
+__attribute__((visibility("hidden")))
+bool pt_availability_version_check(uint32_t count, const pt_dyld_build_version_t versions[]) {
+    const void *caller = __builtin_return_address(0);
+    const void *fp = __builtin_frame_address(0);
+    if (pt_is_bypass_enabled() && versions != NULL && count > 0 && count <= 32U) {
+        pt_ensure_host_kernel_info();
+        pt_reported_ios_override_t mode = pt_active_reported_ios_override();
+        if (mode != PT_REPORTED_IOS_OVERRIDE_NONE && pt_is_availability_app_caller(caller, fp)) {
+            uint32_t spoofed_ver = (mode == PT_REPORTED_IOS_OVERRIDE_13_7) ? 0x000D0700U : 0x00120300U;
+            for (uint32_t i = 0; i < count; i++) {
+                if (versions[i].platform == 2U) { // PLATFORM_IOS
+                    return (spoofed_ver >= versions[i].version);
+                }
+            }
+            for (uint32_t i = 0; i < count; i++) {
+                if (versions[i].platform == 6U) { // PLATFORM_MACCATALYST
+                    return (spoofed_ver >= versions[i].version);
+                }
+            }
+        }
+    }
+    return (pt_orig_availability_version_check != NULL)
+        ? pt_orig_availability_version_check(count, versions)
+        : true;
+}
+
 __attribute__((visibility("hidden"))) const char *pt_get_reported_ios_version_override(const char **out_build) {
     pt_ensure_host_kernel_info();
     switch (pt_active_reported_ios_override()) {
@@ -6044,6 +6124,7 @@ static int pt_syscall(int number, ...) {
 
 
 DYLD_INTERPOSE(pt_uname, uname)
+DYLD_INTERPOSE(pt_availability_version_check, pt_orig_availability_version_check)
 DYLD_INTERPOSE(pt_syscall, pt_orig_syscall)
 DYLD_INTERPOSE(pt_kernel_sysctl, pt_orig_kernel_sysctl)
 DYLD_INTERPOSE(pt_kernel_sysctlbyname, pt_orig_kernel_sysctlbyname)

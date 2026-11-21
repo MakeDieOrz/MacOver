@@ -101,6 +101,39 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_class(const char *n
         default:
             break;
     }
+    if (pt_is_compat13_7_active()) {
+        switch (name[0]) {
+            case 'A':
+                if (strcmp(name, "ATTrackingManager") == 0) {
+                    return YES;
+                }
+                break;
+            case 'D':
+                if (strcmp(name, "DCAppAttestService") == 0) {
+                    return YES;
+                }
+                break;
+            case 'P':
+                if (strcmp(name, "PHPickerViewController") == 0 ||
+                    strcmp(name, "PHPickerConfiguration") == 0) {
+                    return YES;
+                }
+                break;
+            case 'S':
+                if (strcmp(name, "SKOverlay") == 0) {
+                    return YES;
+                }
+                break;
+            case 'U':
+                if (strcmp(name, "UIColorWell") == 0 ||
+                    strcmp(name, "UIColorPickerViewController") == 0) {
+                    return YES;
+                }
+                break;
+            default:
+                break;
+        }
+    }
     if (name[0] == '_' || strchr(name, '_') != NULL) {
         if (strstr(name, "Play") != NULL &&
             (strstr(name, "PlayTools") != NULL ||
@@ -2308,6 +2341,8 @@ static void *pt_dlsym(void *handle, const char *symbol) {
                 pt_set_synthetic_dlerror("symbol not found");
                 return NULL;
             }
+        } else if (strcmp(symbol, "_availability_version_check") == 0) {
+            return (void *)&pt_availability_version_check;
         } else if (strcmp(symbol, "environ") == 0) {
             char ***shadow_envp = pt_get_app_shadow_environ_ptr();
             if (shadow_envp != NULL) {

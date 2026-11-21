@@ -504,7 +504,14 @@ __attribute__((visibility("hidden"))) int pt_open_early_settings_plist_fd(void);
 __attribute__((visibility("hidden"))) const char *pt_get_device_model_cstr(void);
 __attribute__((visibility("hidden"))) const char *pt_get_oem_id_cstr(void);
 __attribute__((visibility("hidden"))) const char *pt_get_spoofed_ios_version_cstr(void);
+typedef struct {
+    uint32_t platform;
+    uint32_t version;
+} pt_dyld_build_version_t;
+
 __attribute__((visibility("hidden"))) const char *pt_get_reported_ios_version_override(const char **out_build);
+__attribute__((visibility("hidden"))) BOOL pt_is_compat13_7_active(void);
+__attribute__((visibility("hidden"))) bool pt_availability_version_check(uint32_t count, const pt_dyld_build_version_t versions[]);
 __attribute__((visibility("hidden"))) void pt_disable_reported_ios_override_for_safe_mode(void);
 __attribute__((visibility("hidden"))) uint32_t pt_get_spoofed_cpu_cores(void);
 __attribute__((visibility("hidden"))) uint64_t pt_get_spoofed_physical_memory(void);

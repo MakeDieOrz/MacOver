@@ -180,6 +180,11 @@ int main(int argc, const char *argv[]) {
         }
         Class appAttestCls = NSClassFromString(@"DCAppAttestService");
         BOOL appAttestLoaded = (appAttestCls != Nil);
+        BOOL availIOS16 = NO;
+        if (@available(iOS 16.0, *)) {
+            availIOS16 = YES;
+        }
+        BOOL uiColorWellLoaded = (NSClassFromString(@"UIColorWell") != Nil);
         BOOL appAttestSupported = NO;
         BOOL appAttestGenKeyUnsupported = YES;
         if (appAttestCls != Nil) {
@@ -444,6 +449,8 @@ int main(int argc, const char *argv[]) {
             @"unameVersion": [NSString stringWithUTF8String:uts.version] ?: @"",
             @"unameMachine": [NSString stringWithUTF8String:uts.machine] ?: @"",
             @"appAttestLoaded": appAttestLoaded ? @YES : @NO,
+            @"availIOS16": availIOS16 ? @YES : @NO,
+            @"uiColorWellLoaded": uiColorWellLoaded ? @YES : @NO,
             @"appAttestSupported": appAttestSupported ? @YES : @NO,
             @"appAttestGenKeyUnsupported": appAttestGenKeyUnsupported ? @YES : @NO,
             @"dcDeviceLoaded": dcDeviceLoaded ? @YES : @NO,
@@ -710,6 +717,8 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info1["cmGyroAvailable"] is True,
         info1["cmDeviceMotionAvailable"] is True,
         info1["cmSampleValid"] is True,
+        info1["availIOS16"] is True,
+        info1["uiColorWellLoaded"] is True,
         (not info1["appAttestLoaded"]) or (
             info1["appAttestSupported"] is False and info1["appAttestGenKeyUnsupported"] is True
         ),
@@ -1016,10 +1025,15 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         0.0 < float(info6a["displayLinkClampedMaxHz"]) <= 60.0,
         info6a["displayLinkClampedLegacyFPS"] == 60,
         (not info6a["appAttestLoaded"]) or (info6a["appAttestSupported"] is False),
+        info6a["appAttestLoaded"] is False,
+        info6a["availIOS16"] is False,
+        info6a["uiColorWellLoaded"] is False,
         marker6a.exists(),
         info6b["safeModeActive"] is True,
         info6b["reportedIOSVersion"] == "automatic",
         info6b["osVersionMajor"] != 13,
+        info6b["availIOS16"] is True,
+        info6b["uiColorWellLoaded"] is True,
         info6b["sysctlOSRelease"] != "19.6.0",
         info6b["unameRelease"] != "19.6.0",
         not marker6b.exists(),
