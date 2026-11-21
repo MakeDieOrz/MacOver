@@ -825,5 +825,76 @@ final class ArchitectureAndHostTests: XCTestCase {
         )
         let appDirEntries = try fm.contentsOfDirectory(atPath: appsDir.path)
         XCTAssertEqual(appDirEntries, ["\(bundleID).app"])
+
+        // Pre-swap sign/verify failure must keep existing v2 .app intact and clean up staging artifacts
+        let failingSignCandidateURL = dir.appendingPathComponent("FailingSignV3.app", isDirectory: true)
+        try fm.createDirectory(at: failingSignCandidateURL, withIntermediateDirectories: true)
+        let v3Info: [String: Any] = [
+            "CFBundleIdentifier": bundleID,
+            "CFBundleExecutable": "Sample",
+            "CFBundleShortVersionString": "3.0"
+        ]
+        try PropertyListSerialization.data(fromPropertyList: v3Info, format: .xml, options: 0)
+            .write(to: failingSignCandidateURL.appendingPathComponent("Info.plist"))
+        try Data("v3-unsigned".utf8).write(to: failingSignCandidateURL.appendingPathComponent("Sample"))
+        let failingSignApp = BaseApp(appUrl: failingSignCandidateURL)
+
+        var liveContentDuringStaging: String?
+        XCTAssertThrowsError(
+            try Installer.publishSignedBundle(
+                failingSignApp,
+                into: appsDir,
+                prepareAndVerify: { stagedURL, targetLocation in
+                    XCTAssertEqual(targetLocation.standardizedFileURL, existingAppURL.standardizedFileURL)
+                    XCTAssertNotEqual(stagedURL.standardizedFileURL, existingAppURL.standardizedFileURL)
+                    liveContentDuringStaging = try String(
+                        contentsOf: existingAppURL.appendingPathComponent("Sample"),
+                        encoding: .utf8
+                    )
+                    throw PlayCoverError.shellExecutionFailed(
+                        binary: "/usr/bin/codesign",
+                        status: 1,
+                        output: "simulated codesign failure"
+                    )
+                }
+            )
+        )
+        XCTAssertEqual(liveContentDuringStaging, "v2-live")
+        XCTAssertEqual(
+            try String(contentsOf: existingAppURL.appendingPathComponent("Sample"), encoding: .utf8),
+            "v2-live"
+        )
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: appsDir.path), ["\(bundleID).app"])
+
+        // Post-swap commit failure must atomically roll back to v2-live and leave no staging leftovers
+        let failingPostSwapURL = dir.appendingPathComponent("FailingPostSwapV3.app", isDirectory: true)
+        try fm.createDirectory(at: failingPostSwapURL, withIntermediateDirectories: true)
+        try PropertyListSerialization.data(fromPropertyList: v3Info, format: .xml, options: 0)
+            .write(to: failingPostSwapURL.appendingPathComponent("Info.plist"))
+        try Data("v3-signed".utf8).write(to: failingPostSwapURL.appendingPathComponent("Sample"))
+        let failingPostSwapApp = BaseApp(appUrl: failingPostSwapURL)
+
+        var sawPublishedV3BeforeRollback = false
+        XCTAssertThrowsError(
+            try Installer.publishSignedBundle(
+                failingPostSwapApp,
+                into: appsDir,
+                prepareAndVerify: { _, _ in },
+                afterSwap: { publishedURL in
+                    let publishedContent = try String(
+                        contentsOf: publishedURL.appendingPathComponent("Sample"),
+                        encoding: .utf8
+                    )
+                    sawPublishedV3BeforeRollback = (publishedContent == "v3-signed")
+                    throw PlayCoverError.entitlementsError("simulated post-swap failure")
+                }
+            )
+        )
+        XCTAssertTrue(sawPublishedV3BeforeRollback)
+        XCTAssertEqual(
+            try String(contentsOf: existingAppURL.appendingPathComponent("Sample"), encoding: .utf8),
+            "v2-live"
+        )
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: appsDir.path), ["\(bundleID).app"])
     }
 }

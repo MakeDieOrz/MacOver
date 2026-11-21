@@ -764,8 +764,11 @@ extension PlayApp {
         dependencies?.appsVM.fetchApps()
     }
 
-    func signThrowing() throws {
+    func signThrowing(targetBundleURL: URL? = nil) throws {
         Self.invalidateVerifiedBundleStamp(for: url)
+        if let targetBundleURL {
+            Self.invalidateVerifiedBundleStamp(for: targetBundleURL)
+        }
         let tmpDir = FileManager.default.temporaryDirectory
         let tmpEnts = tmpDir
             .appendingEscapedPathComponent(ProcessInfo().globallyUniqueString)
@@ -775,7 +778,7 @@ extension PlayApp {
                 try? FileManager.default.removeItem(at: tmpEnts)
             }
         }
-        let conf = try Entitlements.composeEntitlements(self)
+        let conf = try Entitlements.composeEntitlements(self, targetBundleURL: targetBundleURL)
         try conf.store(tmpEnts)
         try Shell.signAppWith(executable, entitlements: tmpEnts)
     }
