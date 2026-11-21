@@ -61,7 +61,10 @@ MOCK_TARGET_M = r"""
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <mach/mach.h>
 #include <mach-o/dyld.h>
+#include <mach-o/getsect.h>
+#include <mach-o/loader.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
 #include <stdbool.h>
@@ -297,6 +300,36 @@ int main(int argc, const char *argv[]) {
             }
         }
 
+        const struct mach_header_64 *mh0 = (const struct mach_header_64 *)_dyld_get_image_header(0);
+        uint32_t mh0Platform = 0;
+        BOOL mh0LeakedPlayTools = NO;
+        if (mh0 != NULL && mh0->magic == MH_MAGIC_64) {
+            const uint8_t *lcp = (const uint8_t *)(mh0 + 1);
+            const uint8_t *lcEnd = lcp + mh0->sizeofcmds;
+            for (uint32_t li = 0; li < mh0->ncmds && lcp + sizeof(struct load_command) <= lcEnd; li++) {
+                const struct load_command *lc = (const struct load_command *)lcp;
+                if (lc->cmdsize < sizeof(struct load_command) || lcp + lc->cmdsize > lcEnd) {
+                    break;
+                }
+                if (lc->cmd == LC_BUILD_VERSION && lc->cmdsize >= sizeof(struct build_version_command)) {
+                    mh0Platform = ((const struct build_version_command *)lc)->platform;
+                } else if ((lc->cmd == LC_LOAD_DYLIB || lc->cmd == LC_LOAD_WEAK_DYLIB) &&
+                           lc->cmdsize >= sizeof(struct dylib_command)) {
+                    const struct dylib_command *dc = (const struct dylib_command *)lc;
+                    if (dc->dylib.name.offset < lc->cmdsize) {
+                        const char *dn = (const char *)lc + dc->dylib.name.offset;
+                        if (strstr(dn, "PlayTools") != NULL || strstr(dn, "/Users/") != NULL) {
+                            mh0LeakedPlayTools = YES;
+                        }
+                    }
+                }
+                lcp += lc->cmdsize;
+            }
+        }
+        unsigned long mh0TextSize = 0;
+        uint8_t *mh0TextPtr = (mh0 != NULL) ? getsectiondata(mh0, "__TEXT", "__text", &mh0TextSize) : NULL;
+        BOOL mh0SectionLookupOK = (mh0TextPtr != NULL && mh0TextSize > 0);
+
         NSString *stateDir = pt_state_dir();
         NSString *crumbPath = [stateDir stringByAppendingPathComponent:@".launching_in_progress"];
         NSString *triggeredPath = [stateDir stringByAppendingPathComponent:@".safe_mode_last_triggered"];
@@ -368,6 +401,9 @@ int main(int argc, const char *argv[]) {
             @"antiDetectionHidPluginClass": (reflectedPluginCls == Nil) ? @YES : @NO,
             @"antiDetectionHidShadowSelector": (!leakedShadowResponds) ? @YES : @NO,
             @"antiDetectionHidPluginImage": (!dyldLeakedPlugin) ? @YES : @NO,
+            @"mh0Platform": @(mh0Platform),
+            @"mh0HidPlayToolsLoadCmd": (!mh0LeakedPlayTools) ? @YES : @NO,
+            @"mh0SectionLookupOK": mh0SectionLookupOK ? @YES : @NO,
             @"stateDir": stateDir ?: @"",
             @"breadcrumbExistsAtStart": crumbAtStart ? @YES : @NO,
             @"breadcrumbExistsAfterSleep": crumbAfterSleep ? @YES : @NO,
@@ -586,6 +622,9 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info1["antiDetectionHidPluginClass"] is True,
         info1["antiDetectionHidShadowSelector"] is True,
         info1["antiDetectionHidPluginImage"] is True,
+        info1["mh0Platform"] == 2,
+        info1["mh0HidPlayToolsLoadCmd"] is True,
+        info1["mh0SectionLookupOK"] is True,
         info1["breadcrumbExistsAtStart"] is True,
         info1["breadcrumbExistsAfterSleep"] is False,
     ]

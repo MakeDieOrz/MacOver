@@ -5140,6 +5140,7 @@ static kern_return_t pt_task_info(task_name_t target_task,
                             continue;
                         }
                         filtered[write_idx] = real_arr[i];
+                        filtered[write_idx].imageLoadAddress = pt_maybe_shadow_mach_header(real_arr[i].imageLoadAddress);
                         if (img_path != NULL) {
                             filtered[write_idx].imageFilePath = pt_sanitize_image_path_for_app(img_path);
                         }
@@ -5167,7 +5168,9 @@ static kern_return_t pt_task_info(task_name_t target_task,
                                 }
                             }
                             if (!hide_uuid) {
-                                filtered_uuids[uuid_write_idx++] = real_uuid_arr[j];
+                                struct dyld_uuid_info uentry = real_uuid_arr[j];
+                                uentry.imageLoadAddress = pt_maybe_shadow_mach_header(uentry.imageLoadAddress);
+                                filtered_uuids[uuid_write_idx++] = uentry;
                             }
                         }
                     }
@@ -5283,8 +5286,243 @@ static kern_return_t pt_task_info(task_name_t target_task,
     return kr;
 }
 
+extern kern_return_t pt_orig_vm_region(
+    vm_map_read_t target_task,
+    vm_address_t *address,
+    vm_size_t *size,
+    vm_region_flavor_t flavor,
+    vm_region_info_t info,
+    mach_msg_type_number_t *infoCnt,
+    mach_port_t *object_name) __asm("_vm_region");
+
+extern kern_return_t pt_orig_vm_region_64(
+    vm_map_read_t target_task,
+    vm_address_t *address,
+    vm_size_t *size,
+    vm_region_flavor_t flavor,
+    vm_region_info_t info,
+    mach_msg_type_number_t *infoCnt,
+    mach_port_t *object_name) __asm("_vm_region_64");
+
+extern kern_return_t pt_orig_vm_region_recurse(
+    vm_map_read_t target_task,
+    vm_address_t *address,
+    vm_size_t *size,
+    natural_t *nesting_depth,
+    vm_region_recurse_info_t info,
+    mach_msg_type_number_t *infoCnt) __asm("_vm_region_recurse");
+
+extern kern_return_t pt_orig_vm_region_recurse_64(
+    vm_map_read_t target_task,
+    vm_address_t *address,
+    vm_size_t *size,
+    natural_t *nesting_depth,
+    vm_region_recurse_info_t info,
+    mach_msg_type_number_t *infoCnt) __asm("_vm_region_recurse_64");
+
+extern kern_return_t pt_orig_mach_vm_region(
+    vm_map_read_t target_task,
+    mach_vm_address_t *address,
+    mach_vm_size_t *size,
+    vm_region_flavor_t flavor,
+    vm_region_info_t info,
+    mach_msg_type_number_t *infoCnt,
+    mach_port_t *object_name) __asm("_mach_vm_region");
+
+extern kern_return_t pt_orig_mach_vm_region_recurse(
+    vm_map_read_t target_task,
+    mach_vm_address_t *address,
+    mach_vm_size_t *size,
+    natural_t *nesting_depth,
+    vm_region_recurse_info_t info,
+    mach_msg_type_number_t *infoCnt) __asm("_mach_vm_region_recurse");
+
+static kern_return_t pt_vm_region_common(
+    BOOL is_64,
+    vm_map_read_t target_task,
+    vm_address_t *address,
+    vm_size_t *size,
+    vm_region_flavor_t flavor,
+    vm_region_info_t info,
+    mach_msg_type_number_t *infoCnt,
+    mach_port_t *object_name,
+    const void *caller) {
+    BOOL filter = (address != NULL && size != NULL && infoCnt != NULL &&
+                   target_task == mach_task_self() &&
+                   pt_is_bypass_enabled() &&
+                   !pt_is_effective_system_or_playtools_caller(caller));
+    mach_msg_type_number_t orig_cnt = (infoCnt != NULL) ? *infoCnt : 0;
+    for (;;) {
+        kern_return_t kr = is_64
+            ? pt_orig_vm_region_64(target_task, address, size, flavor, info, infoCnt, object_name)
+            : pt_orig_vm_region(target_task, address, size, flavor, info, infoCnt, object_name);
+        if (kr != KERN_SUCCESS || !filter) {
+            return kr;
+        }
+        vm_address_t cur_addr = *address;
+        vm_size_t cur_size = *size;
+        if (!pt_is_hidden_vm_region_range((uintptr_t)cur_addr, (uintptr_t)cur_size)) {
+            return kr;
+        }
+        if (object_name != NULL && MACH_PORT_VALID(*object_name)) {
+            mach_port_deallocate(mach_task_self(), *object_name);
+            *object_name = MACH_PORT_NULL;
+        }
+        if (cur_size == 0 || cur_addr + cur_size <= cur_addr) {
+            return KERN_INVALID_ADDRESS;
+        }
+        *address = cur_addr + cur_size;
+        *infoCnt = orig_cnt;
+    }
+}
+
+static kern_return_t pt_vm_region(vm_map_read_t target_task,
+                                  vm_address_t *address,
+                                  vm_size_t *size,
+                                  vm_region_flavor_t flavor,
+                                  vm_region_info_t info,
+                                  mach_msg_type_number_t *infoCnt,
+                                  mach_port_t *object_name) {
+    return pt_vm_region_common(NO, target_task, address, size, flavor, info, infoCnt, object_name,
+                               __builtin_return_address(0));
+}
+
+static kern_return_t pt_vm_region_64(vm_map_read_t target_task,
+                                     vm_address_t *address,
+                                     vm_size_t *size,
+                                     vm_region_flavor_t flavor,
+                                     vm_region_info_t info,
+                                     mach_msg_type_number_t *infoCnt,
+                                     mach_port_t *object_name) {
+    return pt_vm_region_common(YES, target_task, address, size, flavor, info, infoCnt, object_name,
+                               __builtin_return_address(0));
+}
+
+static kern_return_t pt_vm_region_recurse_common(
+    BOOL is_64,
+    vm_map_read_t target_task,
+    vm_address_t *address,
+    vm_size_t *size,
+    natural_t *nesting_depth,
+    vm_region_recurse_info_t info,
+    mach_msg_type_number_t *infoCnt,
+    const void *caller) {
+    BOOL filter = (address != NULL && size != NULL && infoCnt != NULL &&
+                   target_task == mach_task_self() &&
+                   pt_is_bypass_enabled() &&
+                   !pt_is_effective_system_or_playtools_caller(caller));
+    mach_msg_type_number_t orig_cnt = (infoCnt != NULL) ? *infoCnt : 0;
+    for (;;) {
+        kern_return_t kr = is_64
+            ? pt_orig_vm_region_recurse_64(target_task, address, size, nesting_depth, info, infoCnt)
+            : pt_orig_vm_region_recurse(target_task, address, size, nesting_depth, info, infoCnt);
+        if (kr != KERN_SUCCESS || !filter) {
+            return kr;
+        }
+        vm_address_t cur_addr = *address;
+        vm_size_t cur_size = *size;
+        if (!pt_is_hidden_vm_region_range((uintptr_t)cur_addr, (uintptr_t)cur_size)) {
+            return kr;
+        }
+        if (cur_size == 0 || cur_addr + cur_size <= cur_addr) {
+            return KERN_INVALID_ADDRESS;
+        }
+        *address = cur_addr + cur_size;
+        *infoCnt = orig_cnt;
+    }
+}
+
+static kern_return_t pt_vm_region_recurse(vm_map_read_t target_task,
+                                          vm_address_t *address,
+                                          vm_size_t *size,
+                                          natural_t *nesting_depth,
+                                          vm_region_recurse_info_t info,
+                                          mach_msg_type_number_t *infoCnt) {
+    return pt_vm_region_recurse_common(NO, target_task, address, size, nesting_depth, info, infoCnt,
+                                       __builtin_return_address(0));
+}
+
+static kern_return_t pt_vm_region_recurse_64(vm_map_read_t target_task,
+                                             vm_address_t *address,
+                                             vm_size_t *size,
+                                             natural_t *nesting_depth,
+                                             vm_region_recurse_info_t info,
+                                             mach_msg_type_number_t *infoCnt) {
+    return pt_vm_region_recurse_common(YES, target_task, address, size, nesting_depth, info, infoCnt,
+                                       __builtin_return_address(0));
+}
+
+static kern_return_t pt_mach_vm_region(vm_map_read_t target_task,
+                                       mach_vm_address_t *address,
+                                       mach_vm_size_t *size,
+                                       vm_region_flavor_t flavor,
+                                       vm_region_info_t info,
+                                       mach_msg_type_number_t *infoCnt,
+                                       mach_port_t *object_name) {
+    BOOL filter = (address != NULL && size != NULL && infoCnt != NULL &&
+                   target_task == mach_task_self() &&
+                   pt_is_bypass_enabled() &&
+                   !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
+    mach_msg_type_number_t orig_cnt = (infoCnt != NULL) ? *infoCnt : 0;
+    for (;;) {
+        kern_return_t kr = pt_orig_mach_vm_region(target_task, address, size, flavor, info, infoCnt, object_name);
+        if (kr != KERN_SUCCESS || !filter) {
+            return kr;
+        }
+        mach_vm_address_t cur_addr = *address;
+        mach_vm_size_t cur_size = *size;
+        if (!pt_is_hidden_vm_region_range((uintptr_t)cur_addr, (uintptr_t)cur_size)) {
+            return kr;
+        }
+        if (object_name != NULL && MACH_PORT_VALID(*object_name)) {
+            mach_port_deallocate(mach_task_self(), *object_name);
+            *object_name = MACH_PORT_NULL;
+        }
+        if (cur_size == 0 || cur_addr + cur_size <= cur_addr) {
+            return KERN_INVALID_ADDRESS;
+        }
+        *address = cur_addr + cur_size;
+        *infoCnt = orig_cnt;
+    }
+}
+
+static kern_return_t pt_mach_vm_region_recurse(vm_map_read_t target_task,
+                                               mach_vm_address_t *address,
+                                               mach_vm_size_t *size,
+                                               natural_t *nesting_depth,
+                                               vm_region_recurse_info_t info,
+                                               mach_msg_type_number_t *infoCnt) {
+    BOOL filter = (address != NULL && size != NULL && infoCnt != NULL &&
+                   target_task == mach_task_self() &&
+                   pt_is_bypass_enabled() &&
+                   !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
+    mach_msg_type_number_t orig_cnt = (infoCnt != NULL) ? *infoCnt : 0;
+    for (;;) {
+        kern_return_t kr = pt_orig_mach_vm_region_recurse(target_task, address, size, nesting_depth, info, infoCnt);
+        if (kr != KERN_SUCCESS || !filter) {
+            return kr;
+        }
+        mach_vm_address_t cur_addr = *address;
+        mach_vm_size_t cur_size = *size;
+        if (!pt_is_hidden_vm_region_range((uintptr_t)cur_addr, (uintptr_t)cur_size)) {
+            return kr;
+        }
+        if (cur_size == 0 || cur_addr + cur_size <= cur_addr) {
+            return KERN_INVALID_ADDRESS;
+        }
+        *address = cur_addr + cur_size;
+        *infoCnt = orig_cnt;
+    }
+}
+
 
 DYLD_INTERPOSE(pt_uname, uname)
+DYLD_INTERPOSE(pt_vm_region, pt_orig_vm_region)
+DYLD_INTERPOSE(pt_vm_region_64, pt_orig_vm_region_64)
+DYLD_INTERPOSE(pt_vm_region_recurse, pt_orig_vm_region_recurse)
+DYLD_INTERPOSE(pt_vm_region_recurse_64, pt_orig_vm_region_recurse_64)
+DYLD_INTERPOSE(pt_mach_vm_region, pt_orig_mach_vm_region)
+DYLD_INTERPOSE(pt_mach_vm_region_recurse, pt_orig_mach_vm_region_recurse)
 DYLD_INTERPOSE(pt_sysctlbyname, sysctlbyname)
 DYLD_INTERPOSE(pt_sysctlnametomib, sysctlnametomib)
 DYLD_INTERPOSE(pt_sysctl, sysctl)

@@ -564,6 +564,9 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_dyld_image_name(const ch
 __attribute__((visibility("hidden"))) BOOL pt_should_hide_dyld_image(const char *name);
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_dyld_image_header(const struct mach_header *mh);
 __attribute__((visibility("hidden"))) const char *pt_fallback_system_image_path(void);
+__attribute__((visibility("hidden"))) const struct mach_header *pt_maybe_shadow_mach_header(const struct mach_header *real_mh);
+__attribute__((visibility("hidden"))) const struct mach_header *pt_uncloak_shadow_mach_header(const struct mach_header *mh);
+__attribute__((visibility("hidden"))) BOOL pt_is_hidden_vm_region_range(uintptr_t addr, uintptr_t size);
 __attribute__((visibility("hidden"))) void pt_register_swizzled_imp(const void *hook_imp, const void *orig_imp);
 __attribute__((visibility("hidden"))) void pt_register_hidden_swizzle_selector(SEL sel);
 __attribute__((visibility("hidden"))) BOOL pt_is_address_in_playtools(const void *addr);

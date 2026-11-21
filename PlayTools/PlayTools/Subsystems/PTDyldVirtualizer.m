@@ -1019,6 +1019,355 @@ static const char *pt_dyld_get_image_name(uint32_t image_index) {
     return _dyld_get_image_name(image_index);
 }
 
+#ifndef MH_DYLIB_IN_CACHE
+#define MH_DYLIB_IN_CACHE 0x80000000U
+#endif
+
+#define PT_MAX_SHADOW_MACH_HEADERS 64U
+
+typedef struct {
+    const struct mach_header *real_mh;
+    const struct mach_header *shadow_mh;
+    vm_size_t alloc_size;
+} pt_shadow_mach_header_entry_t;
+
+static os_unfair_lock s_shadow_mh_lock = OS_UNFAIR_LOCK_INIT;
+static pt_shadow_mach_header_entry_t s_shadow_mh_entries[PT_MAX_SHADOW_MACH_HEADERS];
+static uint32_t s_shadow_mh_count = 0;
+
+static BOOL pt_lc_dylib_name_should_drop(const char *name) {
+    if (name == NULL || name[0] == '\0') {
+        return NO;
+    }
+    return pt_is_hidden_dyld_image_name(name) ||
+           strstr(name, "/Users/") != NULL ||
+           strcasestr(name, "PlayCover") != NULL ||
+           strcasestr(name, "MacOver") != NULL ||
+           strcasestr(name, "app.makedie") != NULL;
+}
+
+static BOOL pt_mach_header_64_needs_shadow(const struct mach_header_64 *mh) {
+    if (mh == NULL || mh->magic != MH_MAGIC_64 || (mh->flags & MH_DYLIB_IN_CACHE) != 0) {
+        return NO;
+    }
+    if (mh->sizeofcmds == 0 || mh->sizeofcmds > (1U << 20)) {
+        return NO;
+    }
+    const uint8_t *base = (const uint8_t *)mh;
+    size_t total = sizeof(struct mach_header_64) + (size_t)mh->sizeofcmds;
+    size_t off = sizeof(struct mach_header_64);
+    for (uint32_t i = 0; i < mh->ncmds && off + sizeof(struct load_command) <= total; i++) {
+        const struct load_command *lc = (const struct load_command *)(base + off);
+        if (lc->cmdsize < sizeof(struct load_command) || off + lc->cmdsize > total) {
+            break;
+        }
+        if (lc->cmd == LC_BUILD_VERSION && lc->cmdsize >= sizeof(struct build_version_command)) {
+            const struct build_version_command *bv = (const struct build_version_command *)lc;
+            if (bv->platform == PLATFORM_MACCATALYST || bv->platform == 1U) {
+                return YES;
+            }
+        } else if (lc->cmd == LC_VERSION_MIN_MACOSX) {
+            return YES;
+        } else if ((lc->cmd == LC_LOAD_DYLIB || lc->cmd == LC_LOAD_WEAK_DYLIB ||
+                    lc->cmd == LC_REEXPORT_DYLIB || lc->cmd == LC_LOAD_UPWARD_DYLIB) &&
+                   lc->cmdsize >= sizeof(struct dylib_command)) {
+            const struct dylib_command *dc = (const struct dylib_command *)lc;
+            uint32_t noff = dc->dylib.name.offset;
+            if (noff >= sizeof(struct dylib_command) && noff < lc->cmdsize) {
+                char nbuf[PATH_MAX];
+                size_t maxn = lc->cmdsize - noff;
+                size_t slen = strnlen((const char *)lc + noff, maxn);
+                if (slen < sizeof(nbuf)) {
+                    memcpy(nbuf, (const char *)lc + noff, slen);
+                    nbuf[slen] = '\0';
+                    if (pt_lc_dylib_name_should_drop(nbuf) ||
+                        strncmp(nbuf, "/System/iOSSupport/", 19) == 0) {
+                        return YES;
+                    }
+                }
+            }
+        } else if (lc->cmd == LC_RPATH && lc->cmdsize >= sizeof(struct rpath_command)) {
+            const struct rpath_command *rc = (const struct rpath_command *)lc;
+            uint32_t poff = rc->path.offset;
+            if (poff >= sizeof(struct rpath_command) && poff < lc->cmdsize) {
+                char pbuf[PATH_MAX];
+                size_t maxp = lc->cmdsize - poff;
+                size_t slen = strnlen((const char *)lc + poff, maxp);
+                if (slen < sizeof(pbuf)) {
+                    memcpy(pbuf, (const char *)lc + poff, slen);
+                    pbuf[slen] = '\0';
+                    if (pt_lc_dylib_name_should_drop(pbuf) ||
+                        strncmp(pbuf, "/System/iOSSupport", 18) == 0) {
+                        return YES;
+                    }
+                }
+            }
+        }
+        off += lc->cmdsize;
+    }
+    return NO;
+}
+
+static const struct mach_header *pt_build_shadow_mach_header_locked(const struct mach_header_64 *src_mh,
+                                                                    vm_size_t *out_alloc_size) {
+    size_t total = sizeof(struct mach_header_64) + (size_t)src_mh->sizeofcmds;
+    vm_size_t page_sz = (vm_page_size > 0) ? (vm_size_t)vm_page_size : 16384U;
+    vm_size_t alloc_sz = ((vm_size_t)total + page_sz - 1U) & ~(page_sz - 1U);
+    vm_address_t vm_addr = 0;
+    if (vm_allocate(mach_task_self(), &vm_addr, alloc_sz, VM_FLAGS_ANYWHERE) != KERN_SUCCESS || vm_addr == 0) {
+        return NULL;
+    }
+    uint8_t *dst = (uint8_t *)(uintptr_t)vm_addr;
+    memset(dst, 0, (size_t)alloc_sz);
+
+    const uint8_t *src = (const uint8_t *)src_mh;
+    struct mach_header_64 new_hdr = *src_mh;
+    size_t write_off = sizeof(struct mach_header_64);
+    uint32_t new_ncmds = 0;
+    size_t read_off = sizeof(struct mach_header_64);
+
+    for (uint32_t i = 0; i < src_mh->ncmds && read_off + sizeof(struct load_command) <= total; i++) {
+        const struct load_command *lc = (const struct load_command *)(src + read_off);
+        if (lc->cmdsize < sizeof(struct load_command) || read_off + lc->cmdsize > total) {
+            break;
+        }
+        uint32_t cmd = lc->cmd;
+        uint32_t cmdsize = lc->cmdsize;
+        read_off += cmdsize;
+
+        if (cmd == LC_BUILD_VERSION && cmdsize >= sizeof(struct build_version_command)) {
+            memcpy(dst + write_off, lc, cmdsize);
+            struct build_version_command *bv = (struct build_version_command *)(dst + write_off);
+            if (bv->platform == PLATFORM_MACCATALYST || bv->platform == 1U) {
+                bv->platform = PLATFORM_IOS;
+            }
+            write_off += cmdsize;
+            new_ncmds++;
+            continue;
+        }
+        if (cmd == LC_VERSION_MIN_MACOSX && cmdsize >= sizeof(struct version_min_command)) {
+            memcpy(dst + write_off, lc, cmdsize);
+            struct version_min_command *vmc = (struct version_min_command *)(dst + write_off);
+            vmc->cmd = LC_VERSION_MIN_IPHONEOS;
+            write_off += cmdsize;
+            new_ncmds++;
+            continue;
+        }
+        if ((cmd == LC_LOAD_DYLIB || cmd == LC_LOAD_WEAK_DYLIB ||
+             cmd == LC_REEXPORT_DYLIB || cmd == LC_LOAD_UPWARD_DYLIB) &&
+            cmdsize >= sizeof(struct dylib_command)) {
+            const struct dylib_command *dc = (const struct dylib_command *)lc;
+            uint32_t noff = dc->dylib.name.offset;
+            if (noff >= sizeof(struct dylib_command) && noff < cmdsize) {
+                char nbuf[PATH_MAX];
+                size_t maxn = cmdsize - noff;
+                size_t slen = strnlen((const char *)lc + noff, maxn);
+                if (slen < sizeof(nbuf)) {
+                    memcpy(nbuf, (const char *)lc + noff, slen);
+                    nbuf[slen] = '\0';
+                    if (pt_lc_dylib_name_should_drop(nbuf)) {
+                        continue;
+                    }
+                    char rewritten[PATH_MAX];
+                    const char *replacement = NULL;
+                    if (strncmp(nbuf, "/System/iOSSupport/usr/lib/swift/libswift", 41) == 0) {
+                        snprintf(rewritten, sizeof(rewritten), "@rpath/%s", nbuf + 33);
+                        replacement = rewritten;
+                    } else if (strncmp(nbuf, "/System/iOSSupport/", 19) == 0) {
+                        replacement = nbuf + 18;
+                    }
+                    if (replacement != NULL) {
+                        size_t rlen = strlen(replacement);
+                        size_t raw_sz = sizeof(struct dylib_command) + rlen + 1U;
+                        size_t aligned_sz = (raw_sz + 7U) & ~7ULL;
+                        if (aligned_sz <= (size_t)cmdsize && write_off + aligned_sz <= total) {
+                            struct dylib_command ndc = *dc;
+                            ndc.cmdsize = (uint32_t)aligned_sz;
+                            ndc.dylib.name.offset = (uint32_t)sizeof(struct dylib_command);
+                            memcpy(dst + write_off, &ndc, sizeof(ndc));
+                            memcpy(dst + write_off + sizeof(ndc), replacement, rlen + 1U);
+                            write_off += aligned_sz;
+                            new_ncmds++;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        if (cmd == LC_RPATH && cmdsize >= sizeof(struct rpath_command)) {
+            const struct rpath_command *rc = (const struct rpath_command *)lc;
+            uint32_t poff = rc->path.offset;
+            if (poff >= sizeof(struct rpath_command) && poff < cmdsize) {
+                char pbuf[PATH_MAX];
+                size_t maxp = cmdsize - poff;
+                size_t slen = strnlen((const char *)lc + poff, maxp);
+                if (slen < sizeof(pbuf)) {
+                    memcpy(pbuf, (const char *)lc + poff, slen);
+                    pbuf[slen] = '\0';
+                    if (pt_lc_dylib_name_should_drop(pbuf) ||
+                        strncmp(pbuf, "/System/iOSSupport", 18) == 0) {
+                        continue;
+                    }
+                }
+            }
+        }
+        memcpy(dst + write_off, lc, cmdsize);
+        write_off += cmdsize;
+        new_ncmds++;
+    }
+
+    new_hdr.ncmds = new_ncmds;
+    new_hdr.sizeofcmds = (uint32_t)(write_off - sizeof(struct mach_header_64));
+    memcpy(dst, &new_hdr, sizeof(new_hdr));
+    (void)vm_protect(mach_task_self(), vm_addr, alloc_sz, FALSE, VM_PROT_READ);
+    if (out_alloc_size != NULL) {
+        *out_alloc_size = alloc_sz;
+    }
+    return (const struct mach_header *)dst;
+}
+
+__attribute__((visibility("hidden")))
+const struct mach_header *pt_maybe_shadow_mach_header(const struct mach_header *real_mh) {
+    if (real_mh == NULL || !pt_is_valid_user_pointer((const void *)real_mh)) {
+        return real_mh;
+    }
+    os_unfair_lock_lock(&s_shadow_mh_lock);
+    for (uint32_t i = 0; i < s_shadow_mh_count; i++) {
+        if (s_shadow_mh_entries[i].real_mh == real_mh ||
+            s_shadow_mh_entries[i].shadow_mh == real_mh) {
+            const struct mach_header *res = s_shadow_mh_entries[i].shadow_mh;
+            os_unfair_lock_unlock(&s_shadow_mh_lock);
+            return res;
+        }
+    }
+    os_unfair_lock_unlock(&s_shadow_mh_lock);
+
+    const struct mach_header_64 *mh64 = (const struct mach_header_64 *)real_mh;
+    if (!pt_mach_header_64_needs_shadow(mh64)) {
+        return real_mh;
+    }
+
+    os_unfair_lock_lock(&s_shadow_mh_lock);
+    for (uint32_t i = 0; i < s_shadow_mh_count; i++) {
+        if (s_shadow_mh_entries[i].real_mh == real_mh) {
+            const struct mach_header *res = s_shadow_mh_entries[i].shadow_mh;
+            os_unfair_lock_unlock(&s_shadow_mh_lock);
+            return res;
+        }
+    }
+    const struct mach_header *shadow = real_mh;
+    if (s_shadow_mh_count < PT_MAX_SHADOW_MACH_HEADERS) {
+        vm_size_t alloc_sz = 0;
+        const struct mach_header *built = pt_build_shadow_mach_header_locked(mh64, &alloc_sz);
+        if (built != NULL) {
+            s_shadow_mh_entries[s_shadow_mh_count++] = (pt_shadow_mach_header_entry_t){
+                .real_mh = real_mh,
+                .shadow_mh = built,
+                .alloc_size = alloc_sz
+            };
+            shadow = built;
+        }
+    }
+    os_unfair_lock_unlock(&s_shadow_mh_lock);
+    return shadow;
+}
+
+__attribute__((visibility("hidden")))
+const struct mach_header *pt_uncloak_shadow_mach_header(const struct mach_header *mh) {
+    if (mh == NULL) {
+        return NULL;
+    }
+    os_unfair_lock_lock(&s_shadow_mh_lock);
+    for (uint32_t i = 0; i < s_shadow_mh_count; i++) {
+        if (s_shadow_mh_entries[i].shadow_mh == mh) {
+            const struct mach_header *real_mh = s_shadow_mh_entries[i].real_mh;
+            os_unfair_lock_unlock(&s_shadow_mh_lock);
+            return real_mh;
+        }
+    }
+    os_unfair_lock_unlock(&s_shadow_mh_lock);
+    return mh;
+}
+
+static const void *pt_uncloak_shadow_mach_header_addr(const void *addr, BOOL *out_was_shadow) {
+    if (out_was_shadow != NULL) {
+        *out_was_shadow = NO;
+    }
+    if (addr == NULL) {
+        return NULL;
+    }
+    uintptr_t u = (uintptr_t)pt_strip_code_ptr(addr);
+    os_unfair_lock_lock(&s_shadow_mh_lock);
+    for (uint32_t i = 0; i < s_shadow_mh_count; i++) {
+        uintptr_t base = (uintptr_t)s_shadow_mh_entries[i].shadow_mh;
+        uintptr_t end = base + (uintptr_t)s_shadow_mh_entries[i].alloc_size;
+        if (u >= base && u < end) {
+            const void *mapped = (const void *)((uintptr_t)s_shadow_mh_entries[i].real_mh + (u - base));
+            os_unfair_lock_unlock(&s_shadow_mh_lock);
+            if (out_was_shadow != NULL) {
+                *out_was_shadow = YES;
+            }
+            return mapped;
+        }
+    }
+    os_unfair_lock_unlock(&s_shadow_mh_lock);
+    return addr;
+}
+
+__attribute__((visibility("hidden")))
+BOOL pt_is_hidden_vm_region_range(uintptr_t addr, uintptr_t size) {
+    if (addr == 0) {
+        return NO;
+    }
+    uintptr_t end = (size > 0 && addr + size > addr) ? (addr + size) : (addr + 1U);
+    os_unfair_lock_lock(&s_shadow_mh_lock);
+    for (uint32_t i = 0; i < s_shadow_mh_count; i++) {
+        uintptr_t sbase = (uintptr_t)s_shadow_mh_entries[i].shadow_mh;
+        uintptr_t send = sbase + (uintptr_t)s_shadow_mh_entries[i].alloc_size;
+        if (addr < send && end > sbase) {
+            os_unfair_lock_unlock(&s_shadow_mh_lock);
+            return YES;
+        }
+    }
+    os_unfair_lock_unlock(&s_shadow_mh_lock);
+
+    const struct mach_header *mh = dyld_image_header_containing_address((const void *)addr);
+    if (mh != NULL && pt_is_hidden_dyld_image_header(mh)) {
+        return YES;
+    }
+    const char *path = dyld_image_path_containing_address((const void *)addr);
+    if (path != NULL && pt_should_hide_dyld_image(path)) {
+        return YES;
+    }
+    return NO;
+}
+
+static uint8_t *pt_getsectiondata(const struct mach_header_64 *mhp,
+                                  const char *segname,
+                                  const char *sectname,
+                                  unsigned long *size) {
+    const struct mach_header_64 *real_mh =
+        (const struct mach_header_64 *)pt_uncloak_shadow_mach_header((const struct mach_header *)mhp);
+    return getsectiondata(real_mh, segname, sectname, size);
+}
+
+static uint8_t *pt_getsegmentdata(const struct mach_header_64 *mhp,
+                                  const char *segname,
+                                  unsigned long *size) {
+    const struct mach_header_64 *real_mh =
+        (const struct mach_header_64 *)pt_uncloak_shadow_mach_header((const struct mach_header *)mhp);
+    return getsegmentdata(real_mh, segname, size);
+}
+
+static char *pt_getsectdatafromheader_64(const struct mach_header_64 *mhp,
+                                         const char *segname,
+                                         const char *sectname,
+                                         uint64_t *size) {
+    const struct mach_header_64 *real_mh =
+        (const struct mach_header_64 *)pt_uncloak_shadow_mach_header((const struct mach_header *)mhp);
+    return getsectdatafromheader_64(real_mh, segname, sectname, size);
+}
+
 static const struct mach_header *pt_dyld_get_image_header(uint32_t image_index) {
     if (pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
@@ -1026,7 +1375,7 @@ static const struct mach_header *pt_dyld_get_image_header(uint32_t image_index) 
         if (!pt_dyld_virtual_to_real_index(image_index, &real_idx)) {
             return NULL;
         }
-        return _dyld_get_image_header(real_idx);
+        return pt_maybe_shadow_mach_header(_dyld_get_image_header(real_idx));
     }
     return _dyld_get_image_header(image_index);
 }
@@ -1192,8 +1541,9 @@ static void pt_master_dyld_add_image_callback(const struct mach_header *mh, intp
         }
     }
     pthread_mutex_unlock(&s_app_dyld_mutex);
+    const struct mach_header *app_mh = pt_maybe_shadow_mach_header(mh);
     for (uint32_t j = 0; j < local_cb_count; j++) {
-        local_cbs[j](mh, vmaddr_slide);
+        local_cbs[j](app_mh, vmaddr_slide);
     }
 }
 
@@ -1230,9 +1580,10 @@ static void pt_master_dyld_remove_image_callback(const struct mach_header *mh, i
         local_cbs[j] = s_app_dyld_remove_callbacks[j];
     }
     pthread_mutex_unlock(&s_app_dyld_mutex);
+    const struct mach_header *app_mh = pt_maybe_shadow_mach_header(mh);
     for (uint32_t j = 0; j < cb_count; j++) {
         if (local_cbs[j] != NULL) {
-            local_cbs[j](mh, vmaddr_slide);
+            local_cbs[j](app_mh, vmaddr_slide);
         }
     }
 }
@@ -1290,7 +1641,7 @@ static void pt_dyld_register_func_for_add_image(void (*func)(const struct mach_h
     pthread_mutex_unlock(&s_app_dyld_mutex);
 
     for (size_t i = 0; i < replay_count; i++) {
-        func(replay_buf[i].mh, replay_buf[i].slide);
+        func(pt_maybe_shadow_mach_header(replay_buf[i].mh), replay_buf[i].slide);
     }
 
     if (has_slot) {
@@ -1306,7 +1657,7 @@ static void pt_dyld_register_func_for_add_image(void (*func)(const struct mach_h
 
             for (size_t k = 0; k < n; k++) {
                 if (!pt_visible_dyld_list_contains(replay_buf, replay_count, batch[k].mh, batch[k].slide)) {
-                    func(batch[k].mh, batch[k].slide);
+                    func(pt_maybe_shadow_mach_header(batch[k].mh), batch[k].slide);
                     pt_visible_dyld_list_append(&replay_buf,
                                                 &replay_count,
                                                 &replay_cap,
@@ -1342,6 +1693,7 @@ static void pt_dyld_register_func_for_remove_image(void (*func)(const struct mac
 
 extern const char *dyld_image_path_containing_address(const void *addr);
 static const char *pt_dyld_image_path_containing_address(const void *addr) {
+    addr = pt_uncloak_shadow_mach_header_addr(addr, NULL);
     BOOL hide = (pt_is_bypass_enabled() &&
                  !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
     if (hide) {
@@ -1359,6 +1711,7 @@ static const char *pt_dyld_image_path_containing_address(const void *addr) {
 
 extern const struct mach_header *dyld_image_header_containing_address(const void *addr);
 static const struct mach_header *pt_dyld_image_header_containing_address(const void *addr) {
+    addr = pt_uncloak_shadow_mach_header_addr(addr, NULL);
     BOOL hide = (pt_is_bypass_enabled() &&
                  !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
     if (hide) {
@@ -1370,11 +1723,13 @@ static const struct mach_header *pt_dyld_image_header_containing_address(const v
         if (path != NULL && pt_is_hidden_dyld_image_name(path)) {
             return _dyld_get_image_header(pt_fallback_system_image_index());
         }
+        return pt_maybe_shadow_mach_header(hdr);
     }
     return hdr;
 }
 
 static int pt_dladdr(const void *addr, Dl_info *info) {
+    addr = pt_uncloak_shadow_mach_header_addr(addr, NULL);
     BOOL hide = (pt_is_bypass_enabled() &&
                  !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
     if (hide) {
@@ -1392,7 +1747,7 @@ static int pt_dladdr(const void *addr, Dl_info *info) {
                 const struct mach_header *mh0 = _dyld_get_image_header(0);
                 const char *name0 = _dyld_get_image_name(0);
                 if (mh0 != NULL && (uintptr_t)mh0 <= stripped_addr && name0 != NULL) {
-                    fb_hdr = mh0;
+                    fb_hdr = pt_maybe_shadow_mach_header(mh0);
                     fb_path = pt_sanitize_image_path_for_app(name0);
                 }
             }
@@ -1406,6 +1761,9 @@ static int pt_dladdr(const void *addr, Dl_info *info) {
             info->dli_saddr = NULL;
         } else {
             info->dli_fname = pt_sanitize_image_path_for_app(info->dli_fname);
+            if (info->dli_fbase != NULL) {
+                info->dli_fbase = (void *)pt_maybe_shadow_mach_header((const struct mach_header *)info->dli_fbase);
+            }
         }
     }
     return ret;
@@ -2066,6 +2424,9 @@ DYLD_INTERPOSE(pt_dyld_register_func_for_add_image, _dyld_register_func_for_add_
 DYLD_INTERPOSE(pt_dyld_register_func_for_remove_image, _dyld_register_func_for_remove_image)
 DYLD_INTERPOSE(pt_dyld_image_path_containing_address, dyld_image_path_containing_address)
 DYLD_INTERPOSE(pt_dyld_image_header_containing_address, dyld_image_header_containing_address)
+DYLD_INTERPOSE(pt_getsectiondata, getsectiondata)
+DYLD_INTERPOSE(pt_getsegmentdata, getsegmentdata)
+DYLD_INTERPOSE(pt_getsectdatafromheader_64, getsectdatafromheader_64)
 DYLD_INTERPOSE(pt_dladdr, dladdr)
 DYLD_INTERPOSE(pt_dlopen, dlopen)
 DYLD_INTERPOSE(pt_dlopen_preflight, dlopen_preflight)
