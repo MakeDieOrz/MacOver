@@ -1396,31 +1396,43 @@ static BOOL pt_has_blocked_jailbreak_dlopen_component(const char *path) {
         const char *name;
         size_t len;
     } s_dir_or_fw_components[] = {
-        { "MobileSubstrate", 15 },
-        { "TweakInject", 11 },
-        { "CydiaSubstrate.framework", 24 },
-        { "ElleKit.framework", 17 },
-        { "libhooker.framework", 19 },
-        { "Substitute.framework", 20 }
+        PT_STR_ENTRY("MobileSubstrate"),
+        PT_STR_ENTRY("TweakInject"),
+        PT_STR_ENTRY("CydiaSubstrate.framework"),
+        PT_STR_ENTRY("ElleKit.framework"),
+        PT_STR_ENTRY("libhooker.framework"),
+        PT_STR_ENTRY("Substitute.framework"),
+        PT_STR_ENTRY("FridaGadget.framework"),
+        PT_STR_ENTRY("SubstrateBootstrap.framework")
     };
+#define PT_DLOPEN_PREFIX_ENTRY(lit, req_delim) { (lit), sizeof(lit) - 1, (req_delim) }
     static const struct {
         const char *prefix;
         size_t len;
+        BOOL require_delim;
     } s_basename_prefixes[] = {
-        { "MobileSubstrate", 15 },
-        { "CydiaSubstrate", 14 },
-        { "SubstrateInserter", 17 },
-        { "SubstrateBootstrap", 18 },
-        { "TweakInject", 11 },
-        { "ellekit", 7 },
-        { "libellekit", 10 },
-        { "libhooker", 9 },
-        { "libsubstitute", 13 },
-        { "fridagadget", 11 },
-        { "frida", 5 },
-        { "cycript", 7 },
-        { "libcycript", 10 }
+        PT_DLOPEN_PREFIX_ENTRY("MobileSubstrate", NO),
+        PT_DLOPEN_PREFIX_ENTRY("libMobileSubstrate", NO),
+        PT_DLOPEN_PREFIX_ENTRY("CydiaSubstrate", NO),
+        PT_DLOPEN_PREFIX_ENTRY("libCydiaSubstrate", NO),
+        PT_DLOPEN_PREFIX_ENTRY("SubstrateInserter", NO),
+        PT_DLOPEN_PREFIX_ENTRY("libSubstrateInserter", NO),
+        PT_DLOPEN_PREFIX_ENTRY("SubstrateBootstrap", NO),
+        PT_DLOPEN_PREFIX_ENTRY("libSubstrateBootstrap", NO),
+        PT_DLOPEN_PREFIX_ENTRY("TweakInject", NO),
+        PT_DLOPEN_PREFIX_ENTRY("libTweakInject", NO),
+        PT_DLOPEN_PREFIX_ENTRY("ellekit", NO),
+        PT_DLOPEN_PREFIX_ENTRY("libellekit", NO),
+        PT_DLOPEN_PREFIX_ENTRY("libhooker", NO),
+        PT_DLOPEN_PREFIX_ENTRY("libsubstitute", NO),
+        PT_DLOPEN_PREFIX_ENTRY("fridagadget", NO),
+        PT_DLOPEN_PREFIX_ENTRY("libfridagadget", NO),
+        PT_DLOPEN_PREFIX_ENTRY("frida", YES),
+        PT_DLOPEN_PREFIX_ENTRY("libfrida", YES),
+        PT_DLOPEN_PREFIX_ENTRY("cycript", YES),
+        PT_DLOPEN_PREFIX_ENTRY("libcycript", NO)
     };
+#undef PT_DLOPEN_PREFIX_ENTRY
 
     const char *last_seg = NULL;
     size_t last_seg_len = 0;
@@ -1452,11 +1464,12 @@ static BOOL pt_has_blocked_jailbreak_dlopen_component(const char *path) {
             size_t plen = s_basename_prefixes[i].len;
             if (last_seg_len >= plen &&
                 strncasecmp(last_seg, s_basename_prefixes[i].prefix, plen) == 0) {
-                if (last_seg_len == plen) {
+                if (!s_basename_prefixes[i].require_delim || last_seg_len == plen) {
                     return YES;
                 }
                 char delim = last_seg[plen];
-                if (delim == '.' || delim == '-' || delim == '_') {
+                if (delim == '.' || delim == '-' || delim == '_' ||
+                    (delim >= '0' && delim <= '9')) {
                     return YES;
                 }
             }
