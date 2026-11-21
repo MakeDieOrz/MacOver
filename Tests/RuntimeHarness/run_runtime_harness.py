@@ -78,6 +78,7 @@ MOCK_TARGET_M = r"""
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <sys/utsname.h>
+#include <time.h>
 #include <unistd.h>
 
 extern bool pt_is_registered_hidden_module(const char *name);
@@ -151,6 +152,15 @@ int main(int argc, const char *argv[]) {
         size_t syscallMachineLen = sizeof(syscallMachine);
         if (pt_harness_syscall(274, "hw.machine", (size_t)10, syscallMachine, &syscallMachineLen, NULL, (size_t)0) != 0) {
             syscallMachine[0] = '\0';
+        }
+        int kqProbe = pt_harness_syscall(362);
+        struct timespec badKevTimeout = { 0, -1 };
+        errno = 0;
+        BOOL syscallWideArityOK = (kqProbe >= 0 &&
+                                   pt_harness_syscall(369, kqProbe, NULL, 0, NULL, 0, 0U, &badKevTimeout) == -1 &&
+                                   errno == EINVAL);
+        if (kqProbe >= 0) {
+            close(kqProbe);
         }
         char csopsTeamShort[10];
         memset(csopsTeamShort, 'X', sizeof(csopsTeamShort));
@@ -524,6 +534,7 @@ int main(int argc, const char *argv[]) {
             @"sysctlVersion": [NSString stringWithUTF8String:sysctlVersion] ?: @"",
             @"sysctlMachine": [NSString stringWithUTF8String:sysctlMachine] ?: @"",
             @"syscallMachine": [NSString stringWithUTF8String:syscallMachine] ?: @"",
+            @"syscallWideArityOK": syscallWideArityOK ? @YES : @NO,
             @"swapUsageBlocked": swapUsageBlocked ? @YES : @NO,
             @"csopsStringAndBlobOK": csopsStringAndBlobOK ? @YES : @NO,
             @"l2CacheSize": @(l2CacheSize),
@@ -1123,6 +1134,7 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         "xnu-6153" in info6a["unameVersion"],
         info6a["sysctlMachine"] == "iPhone12,5",
         info6a["syscallMachine"] == "iPhone12,5",
+        info6a["syscallWideArityOK"] is True,
         info6a["unameMachine"] == "iPhone12,5",
         0.0 < float(info6a["displayLinkClampedMaxHz"]) <= 60.0,
         info6a["displayLinkClampedLegacyFPS"] == 60,

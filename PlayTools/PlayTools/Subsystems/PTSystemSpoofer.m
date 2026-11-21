@@ -6108,9 +6108,19 @@ static kern_return_t pt_mach_vm_region_recurse(vm_map_read_t target_task,
 
 extern int pt_orig_syscall(int, ...) __asm("_syscall");
 
+#define PT_XNU_SYSCALL_MAX_ARGS 8
+
 static inline BOOL pt_va_can_pop_uintptr(va_list ap, uintptr_t stack_bot, uintptr_t stack_top) {
 #if defined(__aarch64__) && defined(__APPLE__)
     uintptr_t slot = (uintptr_t)ap;
+    if (stack_top != 0 && stack_bot < stack_top) {
+        return (slot >= stack_bot && slot + sizeof(uintptr_t) <= stack_top);
+    }
+#elif defined(__x86_64__)
+    if (ap[0].gp_offset < 48U) {
+        return YES;
+    }
+    uintptr_t slot = (uintptr_t)ap[0].overflow_arg_area;
     if (stack_top != 0 && stack_bot < stack_top) {
         return (slot >= stack_bot && slot + sizeof(uintptr_t) <= stack_top);
     }
@@ -6122,189 +6132,47 @@ static inline BOOL pt_va_can_pop_uintptr(va_list ap, uintptr_t stack_bot, uintpt
     return YES;
 }
 
-static int pt_xnu_bsd_syscall_nargs(int number) {
-    if (number < 0 || number >= 600) {
-        return 0;
-    }
-    switch (number) {
-        case 2:   // fork
-        case 20:  // getpid
-        case 24:  // getuid
-        case 25:  // geteuid
-        case 36:  // sync
-        case 39:  // getppid
-        case 42:  // pipe
-        case 43:  // getegid
-        case 47:  // getgid
-        case 66:  // vfork
-        case 81:  // getpgrp
-        case 89:  // getdtablesize
-        case 147: // setsid
-        case 327: // issetugid
-        case 362: // kqueue
-        case 372: // thread_selfid
-        case 429: // thread_selfusage
-            return 0;
+#define PT_VA_POP_UINTPTR(ap, bot, top) \
+    (pt_va_can_pop_uintptr((ap), (bot), (top)) ? va_arg((ap), uintptr_t) : (uintptr_t)0)
 
-        case 1:   // exit
-        case 6:   // close
-        case 10:  // unlink
-        case 12:  // chdir
-        case 13:  // fchdir
-        case 23:  // setuid
-        case 41:  // dup
-        case 51:  // acct
-        case 60:  // umask
-        case 61:  // chroot
-        case 95:  // fsync
-        case 137: // rmdir
-        case 181: // setgid
-        case 182: // setegid
-        case 183: // seteuid
-        case 204: // undelete
-        case 294: // shared_region_check_np
-        case 310: // getsid
-        case 398: // close_nocancel
-        case 407: // fsync_nocancel
-        case 410: // sigsuspend_nocancel
-        case 501: // necp_open
-            return 1;
-
-        case 9:   // link
-        case 15:  // chmod
-        case 33:  // access
-        case 34:  // chflags
-        case 35:  // fchflags
-        case 37:  // kill
-        case 73:  // munmap
-        case 80:  // setgroups
-        case 90:  // dup2
-        case 106: // listen
-        case 117: // getrusage
-        case 122: // settimeofday
-        case 124: // fchmod
-        case 128: // rename
-        case 131: // flock
-        case 134: // shutdown
-        case 136: // mkdir
-        case 188: // stat
-        case 189: // fstat
-        case 190: // lstat
-        case 191: // pathconf
-        case 192: // fpathconf
-        case 194: // getrlimit
-        case 195: // setrlimit
-        case 200: // truncate
-        case 201: // ftruncate
-        case 286: // pthread_getugid_np
-        case 338: // stat64
-        case 339: // fstat64
-        case 340: // lstat64
-        case 500: // getentropy
-            return 2;
-
-        case 3:   // read
-        case 4:   // write
-        case 5:   // open
-        case 16:  // chown
-        case 27:  // recvmsg
-        case 28:  // sendmsg
-        case 30:  // accept
-        case 31:  // getpeername
-        case 32:  // getsockname
-        case 46:  // sigaction
-        case 48:  // sigprocmask
-        case 54:  // ioctl
-        case 57:  // symlink
-        case 58:  // readlink
-        case 59:  // execve
-        case 65:  // msync
-        case 74:  // mprotect
-        case 75:  // madvise
-        case 78:  // mincore
-        case 79:  // getgroups
-        case 83:  // setitimer
-        case 86:  // getitimer
-        case 92:  // fcntl
-        case 97:  // socket
-        case 98:  // connect
-        case 104: // bind
-        case 116: // gettimeofday
-        case 120: // readv
-        case 121: // writev
-        case 123: // fchown
-        case 199: // lseek
-        case 230: // poll
-        case 254: // lchown
-        case 396: // read_nocancel
-        case 397: // write_nocancel
-        case 399: // open_nocancel
-        case 402: // recvmsg_nocancel
-        case 403: // sendmsg_nocancel
-        case 404: // accept_nocancel
-        case 406: // fcntl_nocancel
-        case 409: // connect_nocancel
-        case 416: // readv_nocancel
-        case 417: // writev_nocancel
-        case 470: // symlinkat
-        case 472: // unlinkat
-        case 473: // readlinkat
-        case 475: // mkdirat
-        case 516: // ulock_wake
-            return 3;
-
-        case 7:   // wait4
-        case 18:  // getfsstat
-        case 26:  // ptrace
-        case 135: // socketpair
-        case 153: // pread
-        case 154: // pwrite
-        case 157: // statfs
-        case 158: // fstatfs
-        case 169: // csops
-        case 344: // getdirentries64
-        case 345: // statfs64
-        case 346: // fstatfs64
-        case 400: // wait4_nocancel
-        case 414: // pread_nocancel
-        case 415: // pwrite_nocancel
-        case 463: // openat
-        case 464: // openat_nocancel
-        case 465: // renameat
-        case 466: // faccessat
-        case 467: // fchmodat
-        case 469: // fstatat64
-        case 515: // ulock_wait
-        case 546: // shared_region_map_and_slide_2_np
-            return 4;
-
-        case 93:  // select
-        case 105: // setsockopt
-        case 118: // getsockopt
-        case 170: // csops_audittoken
-        case 220: // getattrlist
-        case 221: // setattrlist
-        case 228: // fgetattrlist
-        case 229: // fsetattrlist
-        case 244: // posix_spawn
-        case 360: // bsdthread_create
-        case 408: // select_nocancel
-        case 468: // fchownat
-        case 488: // renameatx_np
-        case 489: // mremap_encrypted
-        case 544: // ulock_wait2
-            return 5;
-
-        case 369: // kevent64
-        case 520: // terminate_with_payload
-            return 7;
-
-        case 374: // kevent_qos
-        case 375: // kevent_id
-            return 8;
-
+static inline BOOL pt_fcntl_cmd_has_no_arg(int cmd) {
+    switch (cmd) {
+        case F_GETFD:
+        case F_GETFL:
+        case F_GETOWN:
+#ifdef F_FLUSH_DATA
+        case F_FLUSH_DATA:
+#endif
+#ifdef F_CHKCLEAN
+        case F_CHKCLEAN:
+#endif
+#ifdef F_FULLFSYNC
+        case F_FULLFSYNC:
+#endif
+#ifdef F_FREEZE_FS
+        case F_FREEZE_FS:
+#endif
+#ifdef F_THAW_FS
+        case F_THAW_FS:
+#endif
+#ifdef F_GETPROTECTIONCLASS
+        case F_GETPROTECTIONCLASS:
+#endif
+#ifdef F_GETNOSIGPIPE
+        case F_GETNOSIGPIPE:
+#endif
+#ifdef F_GETPROTECTIONLEVEL
+        case F_GETPROTECTIONLEVEL:
+#endif
+#ifdef F_BARRIERFSYNC
+        case F_BARRIERFSYNC:
+#endif
+#ifdef F_GETLEASE
+        case F_GETLEASE:
+#endif
+            return YES;
         default:
-            return 6;
+            return NO;
     }
 }
 
@@ -6318,33 +6186,38 @@ static int pt_syscall(int number, ...) {
     va_list ap;
     va_start(ap, number);
 
-    for (int hop = 0; hop < 2 && (number == 0 || number == 198); hop++) {
+    if (number == 0 || number == 198) {
         if (!pt_va_can_pop_uintptr(ap, stack_bot, stack_top)) {
             va_end(ap);
             errno = EFAULT;
             return -1;
         }
         number = (int)va_arg(ap, uintptr_t);
+        if (number == 0 || number == 198) {
+            va_end(ap);
+            errno = ENOSYS;
+            return -1;
+        }
     }
 
     switch (number) {
         case 202: { // SYS___sysctl
-            int *name = va_arg(ap, int *);
-            u_int namelen = (u_int)va_arg(ap, uintptr_t);
-            void *oldp = va_arg(ap, void *);
-            size_t *oldlenp = va_arg(ap, size_t *);
-            void *newp = va_arg(ap, void *);
-            size_t newlen = (size_t)va_arg(ap, uintptr_t);
+            int *name = (int *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            u_int namelen = (u_int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            void *oldp = (void *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            size_t *oldlenp = (size_t *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            void *newp = (void *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            size_t newlen = (size_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
             va_end(ap);
             return pt_sysctl_with_caller(name, namelen, oldp, oldlenp, newp, newlen, caller);
         }
         case 274: { // SYS_sysctlbyname (XNU 6-arg ABI: name, namelen, oldp, oldlenp, newp, newlen)
-            const char *name = va_arg(ap, const char *);
-            size_t namelen = (size_t)va_arg(ap, uintptr_t);
-            void *oldp = va_arg(ap, void *);
-            size_t *oldlenp = va_arg(ap, size_t *);
-            void *newp = va_arg(ap, void *);
-            size_t newlen = (size_t)va_arg(ap, uintptr_t);
+            const char *name = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            size_t namelen = (size_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            void *oldp = (void *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            size_t *oldlenp = (size_t *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            void *newp = (void *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            size_t newlen = (size_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
             va_end(ap);
             if (name != NULL && namelen > 0 && namelen < 256U && pt_is_valid_user_pointer(name)) {
                 char nbuf[256];
@@ -6357,15 +6230,15 @@ static int pt_syscall(int number, ...) {
         }
         case 169: // SYS_csops
         case 170: { // SYS_csops_audittoken
-            pid_t pid = (pid_t)va_arg(ap, uintptr_t);
-            unsigned int ops = (unsigned int)va_arg(ap, uintptr_t);
-            void *useraddr = va_arg(ap, void *);
-            size_t usersize = (size_t)va_arg(ap, uintptr_t);
+            pid_t pid = (pid_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            unsigned int ops = (unsigned int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            void *useraddr = (void *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            size_t usersize = (size_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
             if (number == 169 || pid == 0 || pid == getpid()) {
                 va_end(ap);
                 return pt_csops_with_caller(pid, ops, useraddr, usersize, caller);
             }
-            uintptr_t autok = va_arg(ap, uintptr_t);
+            uintptr_t autok = PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
             va_end(ap);
             return pt_orig_syscall(number, (uintptr_t)pid, (uintptr_t)ops,
                                    (uintptr_t)useraddr, (uintptr_t)usersize, autok,
@@ -6373,85 +6246,85 @@ static int pt_syscall(int number, ...) {
         }
         case 5: // SYS_open
         case 399: { // SYS_open_nocancel
-            const char *path = va_arg(ap, const char *);
-            int oflag = (int)va_arg(ap, uintptr_t);
-            mode_t mode = (oflag & O_CREAT) ? (mode_t)va_arg(ap, uintptr_t) : 0;
+            const char *path = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            int oflag = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            mode_t mode = (oflag & O_CREAT) ? (mode_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top) : 0;
             va_end(ap);
             return pt_fs_open_with_caller(path, oflag, mode, caller);
         }
         case 463: // SYS_openat
         case 464: { // SYS_openat_nocancel
-            int fd = (int)va_arg(ap, uintptr_t);
-            const char *path = va_arg(ap, const char *);
-            int oflag = (int)va_arg(ap, uintptr_t);
-            mode_t mode = (oflag & O_CREAT) ? (mode_t)va_arg(ap, uintptr_t) : 0;
+            int fd = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            const char *path = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            int oflag = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            mode_t mode = (oflag & O_CREAT) ? (mode_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top) : 0;
             va_end(ap);
             return pt_fs_openat_with_caller(fd, path, oflag, mode, caller);
         }
         case 188: // SYS_stat
         case 338: { // SYS_stat64
-            const char *path = va_arg(ap, const char *);
-            struct stat *ub = va_arg(ap, struct stat *);
+            const char *path = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            struct stat *ub = (struct stat *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
             va_end(ap);
             return pt_fs_stat_with_caller(path, ub, YES, caller);
         }
         case 190: // SYS_lstat
         case 340: { // SYS_lstat64
-            const char *path = va_arg(ap, const char *);
-            struct stat *ub = va_arg(ap, struct stat *);
+            const char *path = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            struct stat *ub = (struct stat *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
             va_end(ap);
             return pt_fs_stat_with_caller(path, ub, NO, caller);
         }
         case 469: { // SYS_fstatat64
-            int fd = (int)va_arg(ap, uintptr_t);
-            const char *path = va_arg(ap, const char *);
-            struct stat *ub = va_arg(ap, struct stat *);
-            int flag = (int)va_arg(ap, uintptr_t);
+            int fd = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            const char *path = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            struct stat *ub = (struct stat *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            int flag = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
             va_end(ap);
             return pt_fs_fstatat_with_caller(fd, path, ub, flag, caller);
         }
         case 33: { // SYS_access
-            const char *path = va_arg(ap, const char *);
-            int mode = (int)va_arg(ap, uintptr_t);
+            const char *path = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            int mode = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
             va_end(ap);
             return pt_fs_access_with_caller(path, mode, caller);
         }
         case 466: { // SYS_faccessat
-            int fd = (int)va_arg(ap, uintptr_t);
-            const char *path = va_arg(ap, const char *);
-            int mode = (int)va_arg(ap, uintptr_t);
-            int flag = (int)va_arg(ap, uintptr_t);
+            int fd = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            const char *path = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            int mode = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            int flag = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
             va_end(ap);
             return pt_fs_faccessat_with_caller(fd, path, mode, flag, caller);
         }
         case 58: { // SYS_readlink
-            const char *path = va_arg(ap, const char *);
-            char *buf = va_arg(ap, char *);
-            size_t count = (size_t)va_arg(ap, uintptr_t);
+            const char *path = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            char *buf = (char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            size_t count = (size_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
             va_end(ap);
             return (int)pt_fs_readlink_with_caller(path, buf, count, caller);
         }
         case 473: { // SYS_readlinkat
-            int fd = (int)va_arg(ap, uintptr_t);
-            const char *path = va_arg(ap, const char *);
-            char *buf = va_arg(ap, char *);
-            size_t count = (size_t)va_arg(ap, uintptr_t);
+            int fd = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            const char *path = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            char *buf = (char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            size_t count = (size_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
             va_end(ap);
             return (int)pt_fs_readlinkat_with_caller(fd, path, buf, count, caller);
         }
         case 92: // SYS_fcntl
         case 406: { // SYS_fcntl_nocancel
-            int fd = (int)va_arg(ap, uintptr_t);
-            int cmd = (int)va_arg(ap, uintptr_t);
-            uintptr_t arg = va_arg(ap, uintptr_t);
+            int fd = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            int cmd = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            uintptr_t arg = pt_fcntl_cmd_has_no_arg(cmd) ? 0 : PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
             va_end(ap);
             return pt_fs_fcntl_with_caller(fd, cmd, arg, caller);
         }
         case 26: { // SYS_ptrace
-            int req = (int)va_arg(ap, uintptr_t);
-            pid_t pid = (pid_t)va_arg(ap, uintptr_t);
-            caddr_t addr = va_arg(ap, caddr_t);
-            int data = (int)va_arg(ap, uintptr_t);
+            int req = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            pid_t pid = (pid_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            caddr_t addr = (caddr_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            int data = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
             va_end(ap);
             return pt_ptrace_with_caller(req, pid, addr, data, caller);
         }
@@ -6474,12 +6347,12 @@ static int pt_syscall(int number, ...) {
             break;
         }
         case 336: { // SYS_proc_info
-            int32_t callnum = (int32_t)va_arg(ap, uintptr_t);
-            int32_t pid = (int32_t)va_arg(ap, uintptr_t);
-            uint32_t flavor = (uint32_t)va_arg(ap, uintptr_t);
-            uint64_t arg = (uint64_t)va_arg(ap, uintptr_t);
-            void *buffer = va_arg(ap, void *);
-            int32_t buffersize = (int32_t)va_arg(ap, uintptr_t);
+            int32_t callnum = (int32_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            int32_t pid = (int32_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            uint32_t flavor = (uint32_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            uint64_t arg = (uint64_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            void *buffer = (void *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            int32_t buffersize = (int32_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
             va_end(ap);
             if (callnum == 2) { // PROC_INFO_CALL_PIDINFO
                 return pt_fs_proc_pidinfo_with_caller(pid, (int)flavor, arg, buffer, buffersize, caller);
@@ -6492,9 +6365,8 @@ static int pt_syscall(int number, ...) {
             break;
     }
 
-    int nargs = pt_xnu_bsd_syscall_nargs(number);
-    uintptr_t args[8] = {0};
-    for (int i = 0; i < nargs && i < 8; i++) {
+    uintptr_t args[PT_XNU_SYSCALL_MAX_ARGS] = {0};
+    for (int i = 0; i < PT_XNU_SYSCALL_MAX_ARGS; i++) {
         if (!pt_va_can_pop_uintptr(ap, stack_bot, stack_top)) {
             break;
         }
