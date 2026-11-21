@@ -1077,4 +1077,85 @@ final class MachoTests: XCTestCase {
         let extracted = try sliced.extract(UInt32.self, offset: 4)
         XCTAssertEqual(extracted.littleEndian, 0x04030201)
     }
+
+    func testInjectLoadCommandBeforeThirdPartyDylibsOrdersAndRelocates() throws {
+        let foundation = "/System/Library/Frameworks/Foundation.framework/Foundation"
+        let antiCheat = "@rpath/AntiCheatSDK.framework/AntiCheatSDK"
+        let unity = "@rpath/UnityFramework.framework/UnityFramework"
+        let libSystem = "/usr/lib/libSystem.B.dylib"
+        let playTools = "/Users/tester/Library/Containers/app.makedie.MacOver/Frameworks/PlayTools.framework/PlayTools"
+
+        func extractDylibOrder(from url: URL) throws -> [String] {
+            let data = try Data(contentsOf: url)
+            var result: [String] = []
+            _ = try Macho.iterateLoadCommands(binary: data) { offset, shouldSwap in
+                let lc = try data.extract(load_command.self, offset: offset, swap: shouldSwap ? swap_load_command : nil)
+                if lc.cmd == UInt32(LC_LOAD_DYLIB) {
+                    let dc = try data.extract(
+                        dylib_command.self,
+                        offset: offset,
+                        swap: shouldSwap ? swap_dylib_command : nil
+                    )
+                    result.append(String(
+                        data: data,
+                        offset: offset,
+                        commandSize: Int(dc.cmdsize),
+                        loadCommandString: dc.dylib.name
+                    ))
+                }
+                return false
+            }
+            return result
+        }
+
+        // 1. Fresh injection places PlayTools after system dylib before @rpath third-party frameworks
+        let freshURL = try makeTempFile(
+            named: "inject_before_rpath",
+            data: makeThinArm64MachO(extraCommands: [
+                makeBuildVersionCommand(platform: UInt32(PLATFORM_MACCATALYST)),
+                makeLoadDylibCommand(path: foundation),
+                makeLoadDylibCommand(path: antiCheat),
+                makeLoadDylibCommand(path: unity),
+                makeLoadDylibCommand(path: libSystem)
+            ])
+        )
+        XCTAssertTrue(try Macho.injectLoadCommand(
+            at: freshURL,
+            cmdType: UInt32(LC_LOAD_DYLIB),
+            dylibPath: playTools,
+            beforeThirdPartyDylibs: true
+        ))
+        XCTAssertEqual(
+            try extractDylibOrder(from: freshURL),
+            [foundation, playTools, antiCheat, unity, libSystem]
+        )
+        // Idempotent second call when already before @rpath returns false
+        XCTAssertFalse(try Macho.injectLoadCommand(
+            at: freshURL,
+            cmdType: UInt32(LC_LOAD_DYLIB),
+            dylibPath: playTools,
+            beforeThirdPartyDylibs: true
+        ))
+
+        // 2. Legacy binary with PlayTools appended at tail gets relocated ahead of @rpath frameworks
+        let legacyURL = try makeTempFile(
+            named: "relocate_legacy_tail",
+            data: makeThinArm64MachO(extraCommands: [
+                makeBuildVersionCommand(platform: UInt32(PLATFORM_MACCATALYST)),
+                makeLoadDylibCommand(path: foundation),
+                makeLoadDylibCommand(path: antiCheat),
+                makeLoadDylibCommand(path: playTools)
+            ])
+        )
+        XCTAssertTrue(try Macho.injectLoadCommand(
+            at: legacyURL,
+            cmdType: UInt32(LC_LOAD_DYLIB),
+            dylibPath: playTools,
+            beforeThirdPartyDylibs: true
+        ))
+        XCTAssertEqual(
+            try extractDylibOrder(from: legacyURL),
+            [foundation, playTools, antiCheat]
+        )
+    }
 }

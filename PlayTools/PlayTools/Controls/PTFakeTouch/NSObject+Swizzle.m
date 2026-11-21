@@ -20,6 +20,7 @@
 #import <CoreMotion/CoreMotion.h>
 #import <GameController/GameController.h>
 
+extern __attribute__((visibility("hidden"))) void pt_ensure_playloader_early_init(void);
 extern __attribute__((visibility("hidden"))) BOOL pt_is_bypass_enabled(void);
 extern __attribute__((visibility("hidden"))) BOOL pt_is_effective_system_or_playtools_caller(const void *ret_addr);
 extern __attribute__((visibility("hidden"))) void pt_get_spoofed_screen_native_bounds(double *out_portrait_width, double *out_portrait_height, double *out_native_scale);
@@ -878,6 +879,7 @@ static Class pt_resolve_frontboard_frame_class(Class sceneCoreCls, Class sceneCl
 
 @implementation PTSwizzleLoader
 + (void)load {
+    pt_ensure_playloader_early_init();
     BOOL safeModeActive = [PTSafeMode.shared ensureEvaluatedForCurrentProcess];
     Class sceneCls = objc_getClass("FBSSceneSettings");
     Class sceneCoreCls = objc_getClass("FBSSceneSettingsCore");

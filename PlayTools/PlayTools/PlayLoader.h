@@ -22,6 +22,7 @@ __attribute__((visibility("hidden")))
 extern "C" {
 #endif
 
+__attribute__((visibility("hidden"))) void pt_ensure_playloader_early_init(void);
 __attribute__((visibility("hidden"))) BOOL pt_is_bypass_enabled(void);
 __attribute__((visibility("hidden"))) BOOL pt_is_effective_system_or_playtools_caller(const void *ret_addr);
 __attribute__((visibility("hidden"))) double pt_get_device_native_scale(void);

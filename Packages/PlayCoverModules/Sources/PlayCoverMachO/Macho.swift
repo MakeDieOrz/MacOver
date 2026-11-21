@@ -883,8 +883,19 @@ public class Macho {
         return outcome.rewroteBinary || outcome.createdSymlink || ctx.isFat || permissionsRepaired
     }
 
+    private static func isThirdPartyBundleDylibPath(_ path: String) -> Bool {
+        path.hasPrefix("@rpath/") ||
+            path.hasPrefix("@executable_path/") ||
+            path.hasPrefix("@loader_path/")
+    }
+
     @discardableResult
-    public static func injectLoadCommand(at macho: URL, cmdType: UInt32, dylibPath: String) throws -> Bool {
+    public static func injectLoadCommand(
+        at macho: URL,
+        cmdType: UInt32,
+        dylibPath: String,
+        beforeThirdPartyDylibs: Bool = false
+    ) throws -> Bool {
         var ctx = try inspectArm64Slice(at: macho)
         let headerSize = MemoryLayout<mach_header_64>.size
         var header = try ctx.headerWindow.extract(mach_header_64.self)
@@ -893,7 +904,8 @@ public class Macho {
             swap_mach_header_64(&header, NXHostByteOrder())
         }
 
-        var alreadyExists = false
+        var existingMatch: (offset: Int, size: Int)?
+        var firstThirdPartyOffset: Int?
         let commandsEnd = try iterateLoadCommands(binary: ctx.headerWindow) { offset, swapCmd in
             let lc = try ctx.headerWindow.extract(load_command.self,
                                               offset: offset,
@@ -915,14 +927,29 @@ public class Macho {
                                      commandSize: Int(dylibCmd.cmdsize),
                                      loadCommandString: dylibCmd.dylib.name)
                 if curPath == dylibPath {
-                    alreadyExists = true
-                    return true
+                    if existingMatch == nil {
+                        existingMatch = (offset, Int(dylibCmd.cmdsize))
+                    }
+                } else if firstThirdPartyOffset == nil && isThirdPartyBundleDylibPath(curPath) {
+                    firstThirdPartyOffset = offset
                 }
             }
             return false
         }
 
-        if alreadyExists {
+        if let existing = existingMatch {
+            if beforeThirdPartyDylibs,
+               let targetOffset = firstThirdPartyOffset,
+               existing.offset > targetOffset {
+                let existingData = ctx.headerWindow.subdata(in: existing.offset..<(existing.offset + existing.size))
+                let middleData = ctx.headerWindow.subdata(in: targetOffset..<existing.offset)
+                var reordered = Data(capacity: existing.size + middleData.count)
+                reordered.append(existingData)
+                reordered.append(middleData)
+                ctx.headerWindow.replaceSubrange(targetOffset..<(existing.offset + existing.size), with: reordered)
+                try writePatchedHeaderAtomically(patchedHeader: ctx.headerWindow, sliceContext: ctx, to: macho)
+                return true
+            }
             if ctx.isFat {
                 try writePatchedHeaderAtomically(patchedHeader: ctx.headerWindow, sliceContext: ctx, to: macho)
             }
@@ -964,7 +991,16 @@ public class Macho {
         cmdData.append(strData)
         cmdData.append(Data(count: padding))
 
-        ctx.headerWindow.replaceSubrange(commandsEnd..<injectionEnd, with: cmdData)
+        let insertOffset = (beforeThirdPartyDylibs ? firstThirdPartyOffset : nil) ?? commandsEnd
+        if insertOffset < commandsEnd {
+            let tailData = ctx.headerWindow.subdata(in: insertOffset..<commandsEnd)
+            var combined = Data(capacity: cmdSize + tailData.count)
+            combined.append(cmdData)
+            combined.append(tailData)
+            ctx.headerWindow.replaceSubrange(insertOffset..<injectionEnd, with: combined)
+        } else {
+            ctx.headerWindow.replaceSubrange(commandsEnd..<injectionEnd, with: cmdData)
+        }
 
         header.ncmds += 1
         header.sizeofcmds += UInt32(cmdSize)

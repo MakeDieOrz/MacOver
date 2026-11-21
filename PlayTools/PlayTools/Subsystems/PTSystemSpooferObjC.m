@@ -881,42 +881,48 @@ static NSMutableDictionary *ps_sanitized_system_version_mutable_dict(NSDictionar
 }
 
 - (BOOL) pm_isMacCatalystApp {
-    if (!ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return NO;
     }
     return [self pm_isMacCatalystApp];
 }
 
 - (BOOL) pm_swift_isMacCatalystApp {
-    if (!ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return NO;
     }
     return [self pm_swift_isMacCatalystApp];
 }
 
 - (BOOL) pm_isiOSAppOnMac {
-    if (!ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return NO;
     }
     return [self pm_isiOSAppOnMac];
 }
 
 - (BOOL) pm_swift_isiOSAppOnMac {
-    if (!ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return NO;
     }
     return [self pm_swift_isiOSAppOnMac];
 }
 
 - (BOOL) pm_macCatalystVersionIsAtLeastVersion:(NSOperatingSystemVersion)version {
-    if (!ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return NO;
     }
     return [self pm_macCatalystVersionIsAtLeastVersion:version];
 }
 
 - (BOOL) pm_swift_macCatalystVersionIsAtLeastVersion:(NSOperatingSystemVersion)version {
-    if (!ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return NO;
     }
     return [self pm_swift_macCatalystVersionIsAtLeastVersion:version];
@@ -931,7 +937,8 @@ static NSMutableDictionary *ps_sanitized_system_version_mutable_dict(NSDictionar
 }
 
 - (NSUInteger) pm_pi_processorCount {
-    if (ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (!pt_is_bypass_enabled() ||
+        ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return [self pm_pi_processorCount];
     }
     uint32_t cores = pt_get_spoofed_cpu_cores();
@@ -939,7 +946,8 @@ static NSMutableDictionary *ps_sanitized_system_version_mutable_dict(NSDictionar
 }
 
 - (NSUInteger) pm_swift_pi_processorCount {
-    if (ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (!pt_is_bypass_enabled() ||
+        ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return [self pm_swift_pi_processorCount];
     }
     uint32_t cores = pt_get_spoofed_cpu_cores();
@@ -947,7 +955,8 @@ static NSMutableDictionary *ps_sanitized_system_version_mutable_dict(NSDictionar
 }
 
 - (NSUInteger) pm_pi_activeProcessorCount {
-    if (ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (!pt_is_bypass_enabled() ||
+        ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return [self pm_pi_activeProcessorCount];
     }
     uint32_t cores = pt_get_spoofed_cpu_cores();
@@ -955,7 +964,8 @@ static NSMutableDictionary *ps_sanitized_system_version_mutable_dict(NSDictionar
 }
 
 - (NSUInteger) pm_swift_pi_activeProcessorCount {
-    if (ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (!pt_is_bypass_enabled() ||
+        ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return [self pm_swift_pi_activeProcessorCount];
     }
     uint32_t cores = pt_get_spoofed_cpu_cores();
@@ -963,7 +973,8 @@ static NSMutableDictionary *ps_sanitized_system_version_mutable_dict(NSDictionar
 }
 
 - (unsigned long long) pm_pi_physicalMemory {
-    if (ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (!pt_is_bypass_enabled() ||
+        ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return [self pm_pi_physicalMemory];
     }
     uint64_t mem = pt_get_spoofed_physical_memory();
@@ -974,7 +985,8 @@ static NSMutableDictionary *ps_sanitized_system_version_mutable_dict(NSDictionar
 }
 
 - (unsigned long long) pm_swift_pi_physicalMemory {
-    if (ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (!pt_is_bypass_enabled() ||
+        ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return [self pm_swift_pi_physicalMemory];
     }
     uint64_t mem = pt_get_spoofed_physical_memory();

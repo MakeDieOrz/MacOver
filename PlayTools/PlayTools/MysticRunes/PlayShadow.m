@@ -254,6 +254,7 @@ __attribute__((visibility("hidden"))) BOOL ps_class_defines_instance_method(Clas
 @implementation PlayShadowLoader
 
 + (void) load {
+    pt_ensure_playloader_early_init();
     (void)[PTSafeMode.shared ensureEvaluatedForCurrentProcess];
     if ([PTSafeMode isActive]) {
         pt_disable_reported_ios_override_for_safe_mode();

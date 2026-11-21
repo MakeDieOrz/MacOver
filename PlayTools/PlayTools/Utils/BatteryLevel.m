@@ -67,6 +67,7 @@ static void pt_battery_replace_method(Class cls, SEL origSel, IMP hookIMP, IMP *
 
 @implementation BatteryLevelLoader
 + (void)load {
+    pt_ensure_playloader_early_init();
     if (!pt_is_bypass_enabled()) {
         return;
     }

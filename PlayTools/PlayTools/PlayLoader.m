@@ -5,41 +5,53 @@
 
 #import "Subsystems/PTInternal.h"
 
+__attribute__((visibility("hidden"))) void pt_ensure_playloader_early_init(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        atomic_store_explicit(&s_libsystem_ready, true, memory_order_release);
+        pt_debug_trace_mark_ready();
+        pt_enter_internal_scope();
+        pt_ensure_bundle_path_map();
+        pt_ensure_data_container_map();
+        s_tls_bypass_init_depth++;
+        pthread_once(&s_pt_bypass_early_once, pt_init_early_bypass);
+        s_tls_bypass_init_depth--;
+        pt_ensure_early_device_info_safe();
+
+        BOOL prev_tls = s_tls_initializing_device_info;
+        s_tls_initializing_device_info = YES;
+        PlaySettings *settings = [PlaySettings shared];
+        BOOL bypass = [settings bypass];
+        BOOL playChain = [settings playChain];
+        BOOL playChainDebug = [settings playChainDebugging];
+        BOOL blockSleep = [settings blockSleepSpamming];
+        BOOL rootWorkDir = [settings rootWorkDir];
+        s_tls_initializing_device_info = prev_tls;
+
+        const char *dis_env = getenv("DISABLE_PLAYSHADOW_BYPASS");
+        if (dis_env != NULL && strcmp(dis_env, "1") == 0) {
+            bypass = NO;
+        }
+
+        atomic_store_explicit(&s_bypass_enabled, bypass, memory_order_release);
+        atomic_store_explicit(&s_pt_bypass_inited, YES, memory_order_release);
+        atomic_store_explicit(&s_playchain_cached, playChain ? 1 : 0, memory_order_release);
+        atomic_store_explicit(&s_playchain_debug_cached, playChainDebug ? 1 : 0, memory_order_release);
+        atomic_store_explicit(&s_block_sleep_spamming_cached, blockSleep ? 1 : 0, memory_order_release);
+        atomic_store_explicit(&s_pt_loaded, YES, memory_order_release);
+
+        pthread_once(&s_pt_device_info_once, pt_init_device_info);
+        if (rootWorkDir) {
+            chdir("/");
+        }
+        pt_leave_internal_scope();
+    });
+}
+
 @implementation PlayLoader
 
 + (void)load {
-    atomic_store_explicit(&s_libsystem_ready, true, memory_order_release);
-    pt_debug_trace_mark_ready();
-    pt_enter_internal_scope();
-    pt_ensure_bundle_path_map();
-    pt_ensure_data_container_map();
-    s_tls_bypass_init_depth++;
-    pthread_once(&s_pt_bypass_early_once, pt_init_early_bypass);
-    s_tls_bypass_init_depth--;
-    pt_ensure_early_device_info_safe();
-
-    BOOL prev_tls = s_tls_initializing_device_info;
-    s_tls_initializing_device_info = YES;
-    PlaySettings *settings = [PlaySettings shared];
-    BOOL bypass = [settings bypass];
-    BOOL playChain = [settings playChain];
-    BOOL playChainDebug = [settings playChainDebugging];
-    BOOL blockSleep = [settings blockSleepSpamming];
-    BOOL rootWorkDir = [settings rootWorkDir];
-    s_tls_initializing_device_info = prev_tls;
-
-    atomic_store_explicit(&s_bypass_enabled, bypass, memory_order_release);
-    atomic_store_explicit(&s_pt_bypass_inited, YES, memory_order_release);
-    atomic_store_explicit(&s_playchain_cached, playChain ? 1 : 0, memory_order_release);
-    atomic_store_explicit(&s_playchain_debug_cached, playChainDebug ? 1 : 0, memory_order_release);
-    atomic_store_explicit(&s_block_sleep_spamming_cached, blockSleep ? 1 : 0, memory_order_release);
-    atomic_store_explicit(&s_pt_loaded, YES, memory_order_release);
-
-    pthread_once(&s_pt_device_info_once, pt_init_device_info);
-    if (rootWorkDir) {
-        chdir("/");
-    }
-    pt_leave_internal_scope();
+    pt_ensure_playloader_early_init();
 }
 
 static void __attribute__((constructor)) initialize(void) {

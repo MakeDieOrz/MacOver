@@ -189,6 +189,7 @@ static void pt_install_media_volume_hooks_if_loaded(void) {
 @implementation MediaVolumeLoader
 
 + (void)load {
+    pt_ensure_playloader_early_init();
     if (!pt_is_bypass_enabled()) {
         return;
     }
