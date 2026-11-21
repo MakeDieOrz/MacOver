@@ -254,7 +254,14 @@ class Installer {
                             }
                             try? ipa.removeQuarantine(publishedURL)
                         },
-                        onUnrecoverableRollbackFailure: { publishedURL in
+                        onUnrecoverableRollbackFailure: { publishedURL, preservedPreviousURL in
+                            if let preservedPreviousURL {
+                                PlayCoverDiagnostics.log(
+                                    "Unrecoverable rollback for \(targetBundleID): previous app bundle preserved at " +
+                                        "\(preservedPreviousURL.path)",
+                                    isError: true
+                                )
+                            }
                             let strandedApp = BaseApp(appUrl: publishedURL)
                             let bid = strandedApp.info.bundleIdentifier.isEmpty
                                 ? targetBundleID
@@ -280,10 +287,12 @@ class Installer {
                             isError: true
                         )
                     }
+                    let excludedQuarantined: Set<URL> = quarantinedAppBackups.map { [$0.quarantinedDir] } ?? []
                     cleanupInvalidatedAppBackups(
-                        primary: quarantinedAppBackups?.quarantinedDir,
+                        primary: nil,
                         in: unrolledPublishedBackupsTarget.dir.deletingLastPathComponent(),
-                        bundleIdentifier: unrolledPublishedBackupsTarget.bundleID
+                        bundleIdentifier: unrolledPublishedBackupsTarget.bundleID,
+                        excluding: excludedQuarantined
                     )
                 } else if let quarantinedAppBackups {
                     var canRestoreQuarantined = true
@@ -294,17 +303,20 @@ class Installer {
                             bundleIdentifier: quarantinedAppBackups.bundleID
                         )
                     }
+                    var restoredQuarantined = false
                     if canRestoreQuarantined {
-                        restoreQuarantinedAppBackups(
+                        restoredQuarantined = restoreQuarantinedAppBackups(
                             quarantinedAppBackups.quarantinedDir,
                             to: quarantinedAppBackups.targetDir,
                             bundleIdentifier: quarantinedAppBackups.bundleID
                         )
                     }
+                    let preservedQuarantined: Set<URL> = restoredQuarantined ? [] : [quarantinedAppBackups.quarantinedDir]
                     cleanupInvalidatedAppBackups(
                         primary: nil,
                         in: quarantinedAppBackups.targetDir.deletingLastPathComponent(),
-                        bundleIdentifier: quarantinedAppBackups.bundleID
+                        bundleIdentifier: quarantinedAppBackups.bundleID,
+                        excluding: preservedQuarantined
                     )
                 }
                 if let touchedEntitlementsURL {
@@ -527,6 +539,23 @@ class Installer {
         return .staged(stagingDir)
     }
 
+    private static func canonicalFilePath(_ url: URL) -> String {
+        url.resolvingSymlinksInPath().standardizedFileURL.path
+    }
+
+    private static func isSubpath(_ candidate: URL, of directory: URL) -> Bool {
+        let stdDir = directory.standardizedFileURL.path
+        let stdCand = candidate.standardizedFileURL.path
+        let stdPrefix = stdDir.hasSuffix("/") ? stdDir : (stdDir + "/")
+        if stdCand.hasPrefix(stdPrefix) {
+            return true
+        }
+        let realDir = canonicalFilePath(directory)
+        let realCand = canonicalFilePath(candidate)
+        let realPrefix = realDir.hasSuffix("/") ? realDir : (realDir + "/")
+        return realCand.hasPrefix(realPrefix)
+    }
+
     private static func invalidatedBackupPrefix(for directoryName: String) -> String {
         ".\(directoryName).invalidated-"
     }
@@ -552,41 +581,57 @@ class Installer {
         return invalidatedDir
     }
 
+    @discardableResult
     static func restoreQuarantinedAppBackups(
         _ quarantinedDir: URL,
         to targetDir: URL,
         bundleIdentifier: String
-    ) {
+    ) -> Bool {
         var qst = stat()
         guard Darwin.lstat(quarantinedDir.path, &qst) == 0 else {
-            return
+            return false
         }
         var tst = stat()
         guard Darwin.lstat(targetDir.path, &tst) != 0 else {
-            return
+            PlayCoverDiagnostics.log(
+                "Cannot restore quarantined AppBackups for \(bundleIdentifier): " +
+                    "active path \(targetDir.path) is still occupied",
+                isError: true
+            )
+            return false
         }
         if Darwin.rename(quarantinedDir.path, targetDir.path) == 0 {
-            return
+            return true
         }
         let renameErr = errno
         do {
             try FileManager.default.moveItem(at: quarantinedDir, to: targetDir)
+            return true
         } catch {
             PlayCoverDiagnostics.log(
                 "Failed to restore quarantined AppBackups for \(bundleIdentifier) " +
                     "(rename errno=\(renameErr)): \(error)",
                 isError: true
             )
+            return false
         }
     }
 
     static func cleanupInvalidatedAppBackups(
         primary: URL?,
         in parentDir: URL,
-        bundleIdentifier: String
+        bundleIdentifier: String,
+        excluding excludedURLs: Set<URL> = []
     ) {
         let fm = FileManager.default
-        if let primary {
+        let excludedStdPaths = Set(excludedURLs.map { $0.standardizedFileURL.path })
+        let excludedRealPaths = Set(excludedURLs.map { canonicalFilePath($0) })
+        let isExcluded: (URL) -> Bool = { candidate in
+            excludedStdPaths.contains(candidate.standardizedFileURL.path) ||
+                excludedRealPaths.contains(canonicalFilePath(candidate))
+        }
+
+        if let primary, !isExcluded(primary) {
             var st = stat()
             if Darwin.lstat(primary.path, &st) == 0 {
                 do {
@@ -607,6 +652,9 @@ class Installer {
             options: []
         ) {
             for entry in entries where entry.lastPathComponent.hasPrefix(prefix) {
+                if isExcluded(entry) {
+                    continue
+                }
                 do {
                     try fm.removeItem(at: entry)
                 } catch {
@@ -721,6 +769,46 @@ class Installer {
         )
     }
 
+    static func replaceBackupDirectoryAtomically(
+        incomingDir: URL,
+        targetDir: URL,
+        parentDir: URL,
+        bundleIdentifier: String,
+        allowRenameSwap: Bool = true
+    ) throws {
+        let fm = FileManager.default
+        var targetStat = stat()
+        if Darwin.lstat(targetDir.path, &targetStat) == 0 {
+            if allowRenameSwap && Darwin.renamex_np(incomingDir.path, targetDir.path, UInt32(RENAME_SWAP)) == 0 {
+                try? fm.removeItem(at: incomingDir)
+                return
+            }
+            let previousDir = parentDir.appendingPathComponent(
+                ".\(targetDir.lastPathComponent).previous-\(UUID().uuidString)"
+            )
+            try fm.moveItem(at: targetDir, to: previousDir)
+            do {
+                try fm.moveItem(at: incomingDir, to: targetDir)
+                try? fm.removeItem(at: previousDir)
+            } catch {
+                if Darwin.rename(previousDir.path, targetDir.path) != 0 {
+                    do {
+                        try fm.moveItem(at: previousDir, to: targetDir)
+                    } catch let restoreError {
+                        PlayCoverDiagnostics.log(
+                            "Critical: failed to restore previous AppBackups for \(bundleIdentifier) " +
+                                "from \(previousDir.path) to \(targetDir.path): \(restoreError)",
+                            isError: true
+                        )
+                    }
+                }
+                throw error
+            }
+        } else {
+            try fm.moveItem(at: incomingDir, to: targetDir)
+        }
+    }
+
     static func commitAppBackups(
         _ stagingResult: AppBackupStagingResult,
         to targetDir: URL,
@@ -774,39 +862,74 @@ class Installer {
             let manifestURL = incomingDir.appendingPathComponent(Installer.backupManifestFileName)
             try manifestData.write(to: manifestURL, options: .atomic)
 
-            if fm.fileExists(atPath: targetDir.path) {
-                if Darwin.renamex_np(incomingDir.path, targetDir.path, UInt32(RENAME_SWAP)) == 0 {
-                    try? fm.removeItem(at: incomingDir)
-                } else {
-                    let previousDir = parentDir.appendingPathComponent(
-                        ".\(targetDir.lastPathComponent).previous-\(UUID().uuidString)"
-                    )
-                    try fm.moveItem(at: targetDir, to: previousDir)
-                    do {
-                        try fm.moveItem(at: incomingDir, to: targetDir)
-                        try? fm.removeItem(at: previousDir)
-                    } catch {
-                        try? fm.removeItem(at: previousDir)
-                        throw error
-                    }
-                }
-            } else {
-                try fm.moveItem(at: incomingDir, to: targetDir)
+            try replaceBackupDirectoryAtomically(
+                incomingDir: incomingDir,
+                targetDir: targetDir,
+                parentDir: parentDir,
+                bundleIdentifier: bundleIdentifier
+            )
+            var committedStat = stat()
+            guard Darwin.lstat(targetDir.path, &committedStat) == 0,
+                  Darwin.lstat(targetDir.appendingPathComponent(Installer.backupManifestFileName).path, &committedStat) == 0 else {
+                throw PlayCoverError.playToolsError(
+                    "Committed AppBackups verification failed at \(targetDir.path)"
+                )
             }
         } catch {
-            if fm.fileExists(atPath: incomingDir.path) {
+            var incomingStat = stat()
+            if Darwin.lstat(incomingDir.path, &incomingStat) == 0 {
                 try? fm.removeItem(at: incomingDir)
             }
-            let evicted = invalidateAppBackups(at: targetDir, bundleIdentifier: bundleIdentifier)
             PlayCoverDiagnostics.log(
                 "Failed to commit AppBackups for \(bundleIdentifier): \(error)",
                 isError: true
             )
-            if !evicted {
-                throw PlayCoverError.playToolsError(
-                    "Failed to commit AppBackups and stale backup remained active for \(bundleIdentifier)"
-                )
-            }
+            throw PlayCoverError.playToolsError(
+                "Failed to commit AppBackups for \(bundleIdentifier): \(error.localizedDescription)"
+            )
+        }
+    }
+
+    private static func preserveDisplacedBundleOnRollbackFailure(
+        _ displacedPreviousURL: URL,
+        beside location: URL,
+        stagingRoot: URL
+    ) -> (preservedURL: URL, outsideStagingRoot: Bool) {
+        let fm = FileManager.default
+        if !isSubpath(displacedPreviousURL, of: stagingRoot) {
+            PlayCoverDiagnostics.log(
+                "Critical: rollback failed for \(location.lastPathComponent); " +
+                    "previous app bundle preserved at \(displacedPreviousURL.path)",
+                isError: true
+            )
+            return (displacedPreviousURL, true)
+        }
+        let rescuedSiblingURL = location.deletingLastPathComponent().appendingPathComponent(
+            ".\(location.lastPathComponent).rollback-\(UUID().uuidString)"
+        )
+        if Darwin.rename(displacedPreviousURL.path, rescuedSiblingURL.path) == 0 {
+            PlayCoverDiagnostics.log(
+                "Critical: rollback failed for \(location.lastPathComponent); " +
+                    "previous app bundle moved beside target at \(rescuedSiblingURL.path)",
+                isError: true
+            )
+            return (rescuedSiblingURL, true)
+        }
+        do {
+            try fm.moveItem(at: displacedPreviousURL, to: rescuedSiblingURL)
+            PlayCoverDiagnostics.log(
+                "Critical: rollback failed for \(location.lastPathComponent); " +
+                    "previous app bundle moved beside target at \(rescuedSiblingURL.path)",
+                isError: true
+            )
+            return (rescuedSiblingURL, true)
+        } catch {
+            PlayCoverDiagnostics.log(
+                "Critical: rollback failed for \(location.lastPathComponent) and could not relocate " +
+                    "previous bundle beside target (\(error)); retaining staging copy at \(displacedPreviousURL.path)",
+                isError: true
+            )
+            return (displacedPreviousURL, false)
         }
     }
 
@@ -824,19 +947,63 @@ class Installer {
             var locStat = stat()
             if Darwin.lstat(location.path, &locStat) == 0 {
                 if Darwin.renamex_np(displacedPreviousURL.path, location.path, UInt32(RENAME_SWAP)) == 0 {
-                    if !displacedPreviousURL.path.hasPrefix(stagingRoot.path + "/") {
+                    if !isSubpath(displacedPreviousURL, of: stagingRoot) {
                         try? fm.removeItem(at: displacedPreviousURL)
                     }
                     return true
                 }
-                let failedNewURL = stagingRoot.appendingPathComponent("failed-\(UUID().uuidString).app")
-                if Darwin.rename(location.path, failedNewURL.path) != 0 {
-                    do {
-                        try fm.moveItem(at: location, to: failedNewURL)
-                    } catch {
-                        try? fm.removeItem(at: location)
+                let stagingParkURL = stagingRoot.appendingPathComponent("failed-\(UUID().uuidString).app")
+                let siblingParkURL = location.deletingLastPathComponent().appendingPathComponent(
+                    ".\(location.lastPathComponent).failed-\(UUID().uuidString)"
+                )
+                var parkedNewURL: URL?
+                if Darwin.rename(location.path, stagingParkURL.path) == 0 {
+                    parkedNewURL = stagingParkURL
+                } else if (try? fm.moveItem(at: location, to: stagingParkURL)) != nil {
+                    parkedNewURL = stagingParkURL
+                } else if Darwin.rename(location.path, siblingParkURL.path) == 0 {
+                    parkedNewURL = siblingParkURL
+                } else if (try? fm.moveItem(at: location, to: siblingParkURL)) != nil {
+                    parkedNewURL = siblingParkURL
+                } else {
+                    PlayCoverDiagnostics.log(
+                        "Critical: failed to move aside published app bundle at \(location.lastPathComponent) " +
+                            "during rollback; keeping both bundles untouched",
+                        isError: true
+                    )
+                    return false
+                }
+
+                let restoredToLocation: Bool
+                if Darwin.rename(displacedPreviousURL.path, location.path) == 0 {
+                    restoredToLocation = true
+                } else if (try? fm.moveItem(at: displacedPreviousURL, to: location)) != nil {
+                    restoredToLocation = true
+                } else {
+                    restoredToLocation = false
+                }
+
+                if restoredToLocation {
+                    var restoredStat = stat()
+                    if Darwin.lstat(location.path, &restoredStat) == 0 {
+                        if let parkedNewURL, !isSubpath(parkedNewURL, of: stagingRoot) {
+                            try? fm.removeItem(at: parkedNewURL)
+                        }
+                        return true
                     }
                 }
+
+                if let parkedNewURL {
+                    var checkLocStat = stat()
+                    if Darwin.lstat(location.path, &checkLocStat) != 0 {
+                        _ = Darwin.rename(parkedNewURL.path, location.path)
+                    }
+                }
+                PlayCoverDiagnostics.log(
+                    "Critical: failed to restore previous app bundle to \(location.lastPathComponent)",
+                    isError: true
+                )
+                return false
             }
             if Darwin.rename(displacedPreviousURL.path, location.path) == 0 {
                 return true
@@ -882,7 +1049,7 @@ class Installer {
         prepareAndVerify: (URL, URL) throws -> Void,
         beforeSwap: () throws -> Void = {},
         afterSwap: (URL) throws -> Void = { _ in },
-        onUnrecoverableRollbackFailure: (URL) -> Void = { _ in }
+        onUnrecoverableRollbackFailure: (URL, URL?) -> Void = { _, _ in }
     ) throws -> URL {
         let fm = FileManager.default
         let info = AppInfo(contentsOf: baseApp.url
@@ -904,17 +1071,25 @@ class Installer {
             .appendingEscapedPathComponent(info.bundleIdentifier)
             .appendingPathExtension("app")
 
+        var allowStagingCleanup = true
         defer {
-            var rootStat = stat()
-            if Darwin.lstat(stagingRoot.path, &rootStat) == 0 {
-                do {
-                    try fm.removeItem(at: stagingRoot)
-                } catch {
-                    PlayCoverDiagnostics.log(
-                        "Failed to clean up app staging root \(stagingRoot.lastPathComponent): \(error)",
-                        isError: true
-                    )
+            if allowStagingCleanup {
+                var rootStat = stat()
+                if Darwin.lstat(stagingRoot.path, &rootStat) == 0 {
+                    do {
+                        try fm.removeItem(at: stagingRoot)
+                    } catch {
+                        PlayCoverDiagnostics.log(
+                            "Failed to clean up app staging root \(stagingRoot.lastPathComponent): \(error)",
+                            isError: true
+                        )
+                    }
                 }
+            } else {
+                PlayCoverDiagnostics.log(
+                    "Retaining app staging root \(stagingRoot.path) to preserve unrecovered previous bundle",
+                    isError: true
+                )
             }
         }
 
@@ -929,6 +1104,7 @@ class Installer {
         if Darwin.lstat(location.path, &existingStat) == 0 {
             if Darwin.renamex_np(stagedBundleURL.path, location.path, UInt32(RENAME_SWAP)) == 0 {
                 displacedPreviousURL = stagedBundleURL
+                allowStagingCleanup = false
             } else {
                 let backupName = "previous-\(UUID().uuidString).app"
                 if let replacedURL = try? fm.replaceItemAt(
@@ -943,20 +1119,40 @@ class Installer {
                     let parkedPreviousURL = stagingRoot.appendingPathComponent(backupName)
                     if Darwin.rename(candidateBackupURL.path, parkedPreviousURL.path) == 0 {
                         displacedPreviousURL = parkedPreviousURL
+                        allowStagingCleanup = false
                     } else if (try? fm.moveItem(at: candidateBackupURL, to: parkedPreviousURL)) != nil {
                         displacedPreviousURL = parkedPreviousURL
+                        allowStagingCleanup = false
                     } else {
                         displacedPreviousURL = candidateBackupURL
                     }
                 } else {
                     let previousURL = stagingRoot.appendingPathComponent(backupName)
                     try fm.moveItem(at: location, to: previousURL)
+                    allowStagingCleanup = false
                     do {
                         try fm.moveItem(at: stagedBundleURL, to: location)
                         displacedPreviousURL = previousURL
                     } catch {
-                        if Darwin.rename(previousURL.path, location.path) != 0 {
-                            try? fm.moveItem(at: previousURL, to: location)
+                        let restoredPreSwap: Bool
+                        if Darwin.rename(previousURL.path, location.path) == 0 {
+                            restoredPreSwap = true
+                        } else if (try? fm.moveItem(at: previousURL, to: location)) != nil {
+                            restoredPreSwap = true
+                        } else {
+                            restoredPreSwap = false
+                        }
+                        var verifyStat = stat()
+                        if restoredPreSwap && Darwin.lstat(location.path, &verifyStat) == 0 {
+                            allowStagingCleanup = true
+                        } else {
+                            let outcome = preserveDisplacedBundleOnRollbackFailure(
+                                previousURL,
+                                beside: location,
+                                stagingRoot: stagingRoot
+                            )
+                            allowStagingCleanup = outcome.outsideStagingRoot
+                            onUnrecoverableRollbackFailure(location, outcome.preservedURL)
                         }
                         throw error
                     }
@@ -968,8 +1164,9 @@ class Installer {
 
         do {
             try afterSwap(location)
+            allowStagingCleanup = true
             if let displacedPreviousURL,
-               !displacedPreviousURL.path.hasPrefix(stagingRoot.path + "/") {
+               !isSubpath(displacedPreviousURL, of: stagingRoot) {
                 try? fm.removeItem(at: displacedPreviousURL)
             }
             return location
@@ -979,8 +1176,22 @@ class Installer {
                 displacedPreviousURL: displacedPreviousURL,
                 stagingRoot: stagingRoot
             )
-            if !restored {
-                onUnrecoverableRollbackFailure(location)
+            if restored {
+                allowStagingCleanup = true
+            } else {
+                var preservedURL: URL?
+                if let displacedPreviousURL {
+                    let outcome = preserveDisplacedBundleOnRollbackFailure(
+                        displacedPreviousURL,
+                        beside: location,
+                        stagingRoot: stagingRoot
+                    )
+                    preservedURL = outcome.preservedURL
+                    allowStagingCleanup = outcome.outsideStagingRoot
+                } else {
+                    allowStagingCleanup = true
+                }
+                onUnrecoverableRollbackFailure(location, preservedURL)
             }
             throw error
         }
