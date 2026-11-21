@@ -84,7 +84,7 @@ class Installer {
 
                 var createdEntitlementsURL: URL?
                 var createdSettingsURL: URL?
-                var wrappedAppBackupsTarget: (dir: URL, bundleID: String)? URL?
+                var wrappedAppBackupsTarget: (dir: URL, bundleID: String)?
 
                 do {
                 installVM.next(.unzip, 0.0, 0.5)
