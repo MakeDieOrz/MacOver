@@ -65,6 +65,12 @@
 #import "../PTCallerAddressMath.h"
 #import "PTDebugTrace.h"
 #import "PTRegistration.h"
+
+// Shared user-pointer sanity check (definition lives here so every subsystem
+// translation unit shares one copy; previously static-local to PTDyldVirtualizer.m).
+static inline BOOL pt_is_valid_user_pointer(const void *ptr) {
+    return pt_is_valid_user_addr((uintptr_t)ptr) ? YES : NO;
+}
 #if __has_include(<libproc.h>)
 #include <libproc.h>
 #else

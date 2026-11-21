@@ -6,10 +6,6 @@
 #import "PTInternal.h"
 
 
-static BOOL pt_is_valid_user_pointer(const void *ptr) {
-    return pt_is_valid_user_addr((uintptr_t)ptr) ? YES : NO;
-}
-
 #define PT_HAS_PREFIX_LIT(s, lit) (strncmp((s), (lit), sizeof(lit) - 1) == 0)
 
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_class(const char *name) {
