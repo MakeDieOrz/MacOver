@@ -70,11 +70,228 @@ static BOOL pt_is_hidden_entitlement_key(NSString *key) {
 
 #define PT_CS_OPS_STATUS 0
 #define PT_CS_OPS_ENTITLEMENTS_BLOB 7
+#define PT_CS_OPS_IDENTITY 11
+#define PT_CS_OPS_TEAMID 14
 #define PT_CS_OPS_DER_ENTITLEMENTS_BLOB 15
+#define PT_CSMAGIC_EMBEDDED_ENTITLEMENTS 0xfade7171U
 #define PT_CS_VALID 0x00000001U
 #define PT_CS_ADHOC 0x00000002U
 #define PT_CS_GET_TASK_ALLOW 0x00000004U
 #define PT_ERR_SEC_CS_NO_SUCH_CODE ((OSStatus)-67068)
+
+static BOOL pt_is_valid_apple_team_id_str(const char *s, size_t len) {
+    if (s == NULL || len != 10) {
+        return NO;
+    }
+    for (size_t i = 0; i < 10; i++) {
+        char c = s[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) {
+            return NO;
+        }
+    }
+    if (strncmp(s, "FAKETEAMID", 10) == 0) {
+        return NO;
+    }
+    return YES;
+}
+
+static void pt_get_effective_bundle_id_cstr(char *out_bid, size_t out_size) {
+    if (out_bid == NULL || out_size == 0) {
+        return;
+    }
+    out_bid[0] = '\0';
+    NSString *mainBid = [[NSBundle mainBundle] bundleIdentifier];
+    if (mainBid.length > 0 &&
+        [mainBid rangeOfString:@"PlayCover" options:NSCaseInsensitiveSearch].location == NSNotFound &&
+        [mainBid rangeOfString:@"MacOver" options:NSCaseInsensitiveSearch].location == NSNotFound) {
+        strlcpy(out_bid, [mainBid UTF8String], out_size);
+    } else {
+        (void)pt_read_main_bundle_id_early(out_bid, out_size);
+    }
+    if (out_bid[0] == '\0') {
+        strlcpy(out_bid, "com.apple.mobile.application", out_size);
+    }
+}
+
+static BOOL pt_extract_team_id_from_mobileprovision(char out_team[16]) {
+    char vbuf[PATH_MAX];
+    const char *vpath = pt_copy_virtual_mobileprovision_path(vbuf, sizeof(vbuf));
+    if (vpath == NULL || vpath[0] == '\0') {
+        return NO;
+    }
+    char rbuf[PATH_MAX];
+    const char *rpath = pt_resolve_virtual_path(vpath, rbuf, sizeof(rbuf));
+    char bbuf[PATH_MAX];
+    int sys_flag = 0;
+    const char *bpath = pt_lookup_app_backup_redirect_for_caller(
+        rpath != NULL ? rpath : vpath, NULL, bbuf, sizeof(bbuf), &sys_flag);
+    const char *open_path = (bpath != NULL) ? bpath : rpath;
+    if (open_path == NULL || open_path[0] != '/') {
+        return NO;
+    }
+    int fd = pt_orig_open_nocancel(open_path, O_RDONLY);
+    if (fd < 0) {
+        return NO;
+    }
+    size_t len = 0, map_sz = 0;
+    uint8_t *bytes = pt_read_fd_plist_bytes(fd, &len, &map_sz);
+    close(fd);
+    if (bytes == NULL || len < 32) {
+        if (bytes != NULL) {
+            munmap(bytes, map_sz);
+        }
+        return NO;
+    }
+    BOOL found = NO;
+    const char *needle = "<key>TeamIdentifier</key>";
+    size_t nlen = strlen(needle);
+    for (size_t i = 0; i + nlen + 24 < len; i++) {
+        if (memcmp(bytes + i, needle, nlen) == 0) {
+            const char *s = (const char *)(bytes + i + nlen);
+            const char *end = (const char *)(bytes + ((i + nlen + 256 < len) ? (i + nlen + 256) : len));
+            const char *tag = "<string>";
+            for (const char *p = s; p + 18 < end; p++) {
+                if (memcmp(p, tag, 8) == 0) {
+                    const char *val = p + 8;
+                    if (pt_is_valid_apple_team_id_str(val, 10) && val[10] == '<') {
+                        memcpy(out_team, val, 10);
+                        out_team[10] = '\0';
+                        found = YES;
+                    }
+                    break;
+                }
+            }
+            break;
+        }
+    }
+    munmap(bytes, map_sz);
+    return found;
+}
+
+static const char *pt_get_effective_team_id_cstr(void) {
+    static char s_team_id[16] = {0};
+    static dispatch_once_t s_team_once;
+    dispatch_once(&s_team_once, ^{
+        NSDictionary *fb = pt_get_fallback_entitlements_dict();
+        id tObj = fb[@"com.apple.developer.team-identifier"];
+        if ([tObj isKindOfClass:[NSString class]]) {
+            const char *tc = [(NSString *)tObj UTF8String];
+            if (tc != NULL && pt_is_valid_apple_team_id_str(tc, strlen(tc))) {
+                strlcpy(s_team_id, tc, sizeof(s_team_id));
+                return;
+            }
+        }
+        id appIdObj = fb[@"application-identifier"];
+        if ([appIdObj isKindOfClass:[NSString class]]) {
+            const char *ac = [(NSString *)appIdObj UTF8String];
+            const char *dot = (ac != NULL) ? strchr(ac, '.') : NULL;
+            if (dot != NULL && pt_is_valid_apple_team_id_str(ac, (size_t)(dot - ac))) {
+                memcpy(s_team_id, ac, 10);
+                s_team_id[10] = '\0';
+                return;
+            }
+        }
+        if (pt_extract_team_id_from_mobileprovision(s_team_id)) {
+            return;
+        }
+        char bid[256];
+        pt_get_effective_bundle_id_cstr(bid, sizeof(bid));
+        static const char kAlpha[] = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+        static const char kAlnum[] = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+        uint64_t h1 = 14695981039346656037ULL;
+        for (const unsigned char *p = (const unsigned char *)bid; *p != '\0'; p++) {
+            h1 ^= (uint64_t)(*p);
+            h1 *= 1099511628211ULL;
+        }
+        uint64_t h2 = h1 ^ 0x9E3779B97F4A7C15ULL;
+        h2 *= 0xBF58476D1CE4E5B9ULL;
+        s_team_id[0] = kAlpha[h1 % 24ULL];
+        for (int i = 1; i < 10; i++) {
+            uint64_t v = (i < 6) ? (h1 >> (i * 6)) : (h2 >> ((i - 6) * 6));
+            s_team_id[i] = kAlnum[v & 31ULL];
+        }
+        s_team_id[10] = '\0';
+    });
+    return s_team_id;
+}
+
+static NSDictionary *pt_get_synthesized_app_entitlements_dict(void) {
+    static NSDictionary *s_synth_ent = nil;
+    static dispatch_once_t s_synth_once;
+    dispatch_once(&s_synth_once, ^{
+        NSMutableDictionary *m = [NSMutableDictionary dictionary];
+        NSDictionary *fb = pt_get_fallback_entitlements_dict();
+        for (NSString *k in fb) {
+            if ([k isKindOfClass:[NSString class]] && !pt_is_hidden_entitlement_key(k)) {
+                m[k] = fb[k];
+            }
+        }
+        const char *team = pt_get_effective_team_id_cstr();
+        char bid[256];
+        pt_get_effective_bundle_id_cstr(bid, sizeof(bid));
+        NSString *teamStr = [NSString stringWithUTF8String:team];
+        NSString *bidStr = [NSString stringWithUTF8String:bid];
+        if (teamStr.length == 10) {
+            if (m[@"com.apple.developer.team-identifier"] == nil) {
+                m[@"com.apple.developer.team-identifier"] = teamStr;
+            }
+            id curAppId = m[@"application-identifier"];
+            if (![curAppId isKindOfClass:[NSString class]] ||
+                [(NSString *)curAppId hasPrefix:@"FAKETEAMID."] ||
+                [(NSString *)curAppId length] == 0) {
+                m[@"application-identifier"] = [NSString stringWithFormat:@"%@.%@", teamStr, bidStr];
+            }
+            if (m[@"keychain-access-groups"] == nil) {
+                m[@"keychain-access-groups"] = @[ [NSString stringWithFormat:@"%@.%@", teamStr, bidStr] ];
+            }
+        }
+        s_synth_ent = [m copy];
+    });
+    return s_synth_ent;
+}
+
+static NSData *pt_get_synthesized_entitlements_xml_data(void) {
+    static NSData *s_xml_data = nil;
+    static dispatch_once_t s_xml_once;
+    dispatch_once(&s_xml_once, ^{
+        NSDictionary *ent = pt_get_synthesized_app_entitlements_dict();
+        if (ent != nil) {
+            s_xml_data = [NSPropertyListSerialization dataWithPropertyList:ent
+                                                                    format:NSPropertyListXMLFormat_v1_0
+                                                                   options:0
+                                                                     error:nil];
+        }
+    });
+    return s_xml_data;
+}
+
+static int pt_csops_write_blob_or_erange(uint32_t host_magic,
+                                         const void *payload,
+                                         size_t payload_len,
+                                         void *useraddr,
+                                         size_t usersize) {
+    if (usersize > 0 && useraddr == NULL) {
+        errno = EFAULT;
+        return -1;
+    }
+    size_t total_len = 8U + payload_len;
+    if (usersize < 8U) {
+        errno = ERANGE;
+        return -1;
+    }
+    uint32_t hdr[2];
+    hdr[0] = htonl(host_magic);
+    hdr[1] = htonl((uint32_t)total_len);
+    memcpy(useraddr, hdr, 8U);
+    if (usersize < total_len) {
+        errno = ERANGE;
+        return -1;
+    }
+    if (payload_len > 0 && payload != NULL) {
+        memcpy((uint8_t *)useraddr + 8U, payload, payload_len);
+    }
+    return 0;
+}
 
 static CFTypeRef pt_SecTaskCopyValueForEntitlement(SecTaskRef task, CFStringRef entitlement, CFErrorRef *error) {
     if (entitlement == NULL) {
@@ -96,7 +313,8 @@ static CFTypeRef pt_SecTaskCopyValueForEntitlement(SecTaskRef task, CFStringRef 
     CFErrorRef localErr = NULL;
     CFTypeRef val = SecTaskCopyValueForEntitlement(task, entitlement, error != NULL ? &localErr : NULL);
     if (val == NULL && key != nil && !is_sys && (!bypass || !pt_is_hidden_entitlement_key(key))) {
-        id fallback = pt_get_fallback_entitlements_dict()[key];
+        id fallback = bypass ? pt_get_synthesized_app_entitlements_dict()[key]
+                             : pt_get_fallback_entitlements_dict()[key];
         if (fallback != nil) {
             if (localErr != NULL) {
                 CFRelease(localErr);
@@ -135,7 +353,8 @@ static CFDictionaryRef pt_SecTaskCopyValuesForEntitlements(SecTaskRef task, CFAr
             }
         }
         if (entitlements != NULL) {
-            NSDictionary *fb = pt_get_fallback_entitlements_dict();
+            NSDictionary *fb = bypass ? pt_get_synthesized_app_entitlements_dict()
+                                      : pt_get_fallback_entitlements_dict();
             if (fb.count > 0) {
                 for (id reqKey in (__bridge NSArray *)entitlements) {
                     if ([reqKey isKindOfClass:[NSString class]] &&
@@ -379,6 +598,12 @@ static OSStatus pt_SecCodeCopySigningInformation(SecStaticCodeRef code, SecCSFla
                     clean[@"identifier"] = mainBid;
                 }
             }
+            if (clean[@"teamid"] == nil) {
+                const char *team = pt_get_effective_team_id_cstr();
+                if (team != NULL && team[0] != '\0') {
+                    clean[@"teamid"] = [NSString stringWithUTF8String:team];
+                }
+            }
             CFRelease(*information);
             *information = (__bridge_retained CFDictionaryRef)[clean copy];
         }
@@ -516,9 +741,39 @@ int pt_csops_with_caller(pid_t pid, unsigned int ops, void *useraddr, size_t use
     if (pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(caller) &&
         (pid == 0 || pid == getpid())) {
-        if (ops == PT_CS_OPS_ENTITLEMENTS_BLOB || ops == PT_CS_OPS_DER_ENTITLEMENTS_BLOB) {
-            PT_DEBUG_TRACE("entitlements", "blocked csops blob query pid=%d ops=0x%x", pid, ops);
-            errno = EINVAL;
+        if (ops == PT_CS_OPS_ENTITLEMENTS_BLOB) {
+            NSData *xmlData = pt_get_synthesized_entitlements_xml_data();
+            if (xmlData != nil && xmlData.length > 0) {
+                return pt_csops_write_blob_or_erange(PT_CSMAGIC_EMBEDDED_ENTITLEMENTS,
+                                                     xmlData.bytes,
+                                                     xmlData.length,
+                                                     useraddr,
+                                                     usersize);
+            }
+            errno = ENOENT;
+            return -1;
+        }
+        if (ops == PT_CS_OPS_DER_ENTITLEMENTS_BLOB) {
+            errno = ENOENT;
+            return -1;
+        }
+        if (ops == PT_CS_OPS_TEAMID) {
+            const char *team = pt_get_effective_team_id_cstr();
+            size_t tlen = (team != NULL) ? strlen(team) : 0;
+            if (tlen > 0) {
+                return pt_csops_write_blob_or_erange(0U, team, tlen + 1U, useraddr, usersize);
+            }
+            errno = ENOENT;
+            return -1;
+        }
+        if (ops == PT_CS_OPS_IDENTITY) {
+            char bid[256];
+            pt_get_effective_bundle_id_cstr(bid, sizeof(bid));
+            size_t blen = strlen(bid);
+            if (blen > 0) {
+                return pt_csops_write_blob_or_erange(0U, bid, blen + 1U, useraddr, usersize);
+            }
+            errno = ENOENT;
             return -1;
         }
         int ret = csops(pid, ops, useraddr, usersize);

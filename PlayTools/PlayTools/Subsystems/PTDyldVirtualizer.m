@@ -2341,6 +2341,12 @@ static void *pt_dlsym(void *handle, const char *symbol) {
                 pt_set_synthetic_dlerror("symbol not found");
                 return NULL;
             }
+        } else if (strncmp(symbol, "SecCode", 7) == 0 ||
+                   strncmp(symbol, "SecStaticCode", 13) == 0 ||
+                   strncmp(symbol, "SecRequirementCreate", 20) == 0) {
+            PT_DEBUG_TRACE("dyld", "hid macOS-only Security symbol=%s", symbol);
+            pt_set_synthetic_dlerror("symbol not found");
+            return NULL;
         } else if (strcmp(symbol, "_availability_version_check") == 0) {
             return (void *)&pt_availability_version_check;
         } else if (strcmp(symbol, "environ") == 0) {

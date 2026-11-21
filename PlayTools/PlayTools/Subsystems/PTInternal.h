@@ -15,6 +15,7 @@
 //
 
 #include <Foundation/Foundation.h>
+#include <arpa/inet.h>
 #include <copyfile.h>
 #include <crt_externs.h>
 #include <dirent.h>
