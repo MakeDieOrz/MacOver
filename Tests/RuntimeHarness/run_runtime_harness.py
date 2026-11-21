@@ -162,8 +162,8 @@ int main(int argc, const char *argv[]) {
                               cmSample.acceleration.z < -0.9);
         [motionMgr stopAccelerometerUpdates];
 
-        Class appAttestCls = NSClassFromString(@"DCAppAttestService");
-        if (appAttestCls == Nil) {
+        Class dcDeviceCls = NSClassFromString(@"DCDevice");
+        if (dcDeviceCls == Nil) {
             NSArray<NSString *> *dcPaths = @[
                 @"/System/iOSSupport/System/Library/Frameworks/DeviceCheck.framework",
                 @"/System/Library/Frameworks/DeviceCheck.framework"
@@ -171,19 +171,62 @@ int main(int argc, const char *argv[]) {
             for (NSString *dcPath in dcPaths) {
                 NSBundle *dcBundle = [NSBundle bundleWithPath:dcPath];
                 if (dcBundle != nil && [dcBundle load]) {
-                    appAttestCls = NSClassFromString(@"DCAppAttestService");
-                    if (appAttestCls != Nil) {
+                    dcDeviceCls = NSClassFromString(@"DCDevice");
+                    if (dcDeviceCls != Nil) {
                         break;
                     }
                 }
             }
         }
+        Class appAttestCls = NSClassFromString(@"DCAppAttestService");
         BOOL appAttestLoaded = (appAttestCls != Nil);
         BOOL appAttestSupported = NO;
+        BOOL appAttestGenKeyUnsupported = YES;
         if (appAttestCls != Nil) {
             id svc = ((id (*)(id, SEL))objc_msgSend)((id)appAttestCls, sel_registerName("sharedService"));
             if (svc != nil) {
                 appAttestSupported = ((BOOL (*)(id, SEL))objc_msgSend)(svc, sel_registerName("isSupported"));
+                if (!safeModeActive) {
+                    appAttestGenKeyUnsupported = NO;
+                    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+                    __block NSInteger errCode = -1;
+                    __block BOOL gotNilKey = NO;
+                    void (^cb)(NSString *, NSError *) = ^(NSString *keyId, NSError *err) {
+                        gotNilKey = (keyId == nil);
+                        errCode = (err != nil) ? err.code : -1;
+                        dispatch_semaphore_signal(sem);
+                    };
+                    ((void (*)(id, SEL, id))objc_msgSend)(
+                        svc, sel_registerName("generateKeyWithCompletionHandler:"), cb);
+                    if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0) {
+                        appAttestGenKeyUnsupported = (gotNilKey && errCode == 1);
+                    }
+                }
+            }
+        }
+        BOOL dcDeviceLoaded = (dcDeviceCls != Nil);
+        BOOL dcDeviceSupported = NO;
+        BOOL dcDeviceTokenUnsupported = YES;
+        if (dcDeviceCls != Nil) {
+            id dev = ((id (*)(id, SEL))objc_msgSend)((id)dcDeviceCls, sel_registerName("currentDevice"));
+            if (dev != nil) {
+                dcDeviceSupported = ((BOOL (*)(id, SEL))objc_msgSend)(dev, sel_registerName("isSupported"));
+                if (!safeModeActive) {
+                    dcDeviceTokenUnsupported = NO;
+                    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+                    __block NSInteger errCode = -1;
+                    __block BOOL gotNilToken = NO;
+                    void (^cb)(NSData *, NSError *) = ^(NSData *tok, NSError *err) {
+                        gotNilToken = (tok == nil);
+                        errCode = (err != nil) ? err.code : -1;
+                        dispatch_semaphore_signal(sem);
+                    };
+                    ((void (*)(id, SEL, id))objc_msgSend)(
+                        dev, sel_registerName("generateTokenWithCompletionHandler:"), cb);
+                    if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0) {
+                        dcDeviceTokenUnsupported = (gotNilToken && errCode == 1);
+                    }
+                }
             }
         }
 
@@ -402,6 +445,10 @@ int main(int argc, const char *argv[]) {
             @"unameMachine": [NSString stringWithUTF8String:uts.machine] ?: @"",
             @"appAttestLoaded": appAttestLoaded ? @YES : @NO,
             @"appAttestSupported": appAttestSupported ? @YES : @NO,
+            @"appAttestGenKeyUnsupported": appAttestGenKeyUnsupported ? @YES : @NO,
+            @"dcDeviceLoaded": dcDeviceLoaded ? @YES : @NO,
+            @"dcDeviceSupported": dcDeviceSupported ? @YES : @NO,
+            @"dcDeviceTokenUnsupported": dcDeviceTokenUnsupported ? @YES : @NO,
             @"cmAccelAvailable": cmAccelAvailable ? @YES : @NO,
             @"cmGyroAvailable": cmGyroAvailable ? @YES : @NO,
             @"cmDeviceMotionAvailable": cmDeviceMotionAvailable ? @YES : @NO,
@@ -663,6 +710,12 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info1["cmGyroAvailable"] is True,
         info1["cmDeviceMotionAvailable"] is True,
         info1["cmSampleValid"] is True,
+        (not info1["appAttestLoaded"]) or (
+            info1["appAttestSupported"] is False and info1["appAttestGenKeyUnsupported"] is True
+        ),
+        (not info1["dcDeviceLoaded"]) or (
+            info1["dcDeviceSupported"] is False and info1["dcDeviceTokenUnsupported"] is True
+        ),
         info1["breadcrumbExistsAtStart"] is True,
         info1["breadcrumbExistsAfterSleep"] is False,
     ]

@@ -594,6 +594,7 @@ __attribute__((visibility("hidden"))) BOOL pt_is_address_in_playtools(const void
 
 // NetworkVirtualizer exports
 __attribute__((visibility("hidden"))) int ps_should_block_host_cstr(const char *hostname);
+__attribute__((visibility("hidden"))) void ps_notify_dynamic_image_loaded(void);
 
 #ifdef __cplusplus
 }

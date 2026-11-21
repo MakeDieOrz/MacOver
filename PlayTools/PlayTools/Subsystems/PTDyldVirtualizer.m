@@ -2204,7 +2204,11 @@ static void *pt_dlopen(const char *path, int mode) {
         pt_set_synthetic_dlerror(msg);
         return NULL;
     }
-    return (caller != NULL) ? dlopen_from(path, mode, (void *)caller) : dlopen(path, mode);
+    void *handle = (caller != NULL) ? dlopen_from(path, mode, (void *)caller) : dlopen(path, mode);
+    if (handle != NULL && orig_path != NULL) {
+        ps_notify_dynamic_image_loaded();
+    }
+    return handle;
 }
 
 static bool pt_dlopen_preflight(const char *path) {

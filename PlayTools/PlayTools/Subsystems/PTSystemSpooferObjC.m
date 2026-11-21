@@ -928,12 +928,91 @@ static NSMutableDictionary *ps_sanitized_system_version_mutable_dict(NSDictionar
     return [self pm_swift_macCatalystVersionIsAtLeastVersion:version];
 }
 
+static NSError *ps_make_devicecheck_unsupported_error(void) {
+    NSString *domain = @"com.apple.devicecheck.error";
+    NSString * __unsafe_unretained const *sym =
+        (NSString * __unsafe_unretained const *)dlsym(RTLD_DEFAULT, "DCErrorDomain");
+    if (sym != NULL && *sym != nil && [*sym isKindOfClass:[NSString class]]) {
+        domain = *sym;
+    }
+    // DCErrorFeatureUnsupported == 1 in <DeviceCheck/DCError.h>
+    return [NSError errorWithDomain:domain code:1 userInfo:nil];
+}
+
 - (BOOL) pm_ps_appAttest_isSupported {
     if (pt_is_bypass_enabled() &&
         !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return NO;
     }
     return [self pm_ps_appAttest_isSupported];
+}
+
+- (void) pm_ps_appAttest_generateKeyWithCompletionHandler:(void (^)(NSString * _Nullable keyId, NSError * _Nullable error))completionHandler {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (completionHandler != nil) {
+            NSError *err = ps_make_devicecheck_unsupported_error();
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+                completionHandler(nil, err);
+            });
+        }
+        return;
+    }
+    [self pm_ps_appAttest_generateKeyWithCompletionHandler:completionHandler];
+}
+
+- (void) pm_ps_appAttest_attestKey:(NSString *)keyId
+                    clientDataHash:(NSData *)clientDataHash
+                 completionHandler:(void (^)(NSData * _Nullable attestationObject, NSError * _Nullable error))completionHandler {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (completionHandler != nil) {
+            NSError *err = ps_make_devicecheck_unsupported_error();
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+                completionHandler(nil, err);
+            });
+        }
+        return;
+    }
+    [self pm_ps_appAttest_attestKey:keyId clientDataHash:clientDataHash completionHandler:completionHandler];
+}
+
+- (void) pm_ps_appAttest_generateAssertion:(NSString *)keyId
+                            clientDataHash:(NSData *)clientDataHash
+                         completionHandler:(void (^)(NSData * _Nullable assertionObject, NSError * _Nullable error))completionHandler {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (completionHandler != nil) {
+            NSError *err = ps_make_devicecheck_unsupported_error();
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+                completionHandler(nil, err);
+            });
+        }
+        return;
+    }
+    [self pm_ps_appAttest_generateAssertion:keyId clientDataHash:clientDataHash completionHandler:completionHandler];
+}
+
+- (BOOL) pm_ps_dcDevice_isSupported {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return NO;
+    }
+    return [self pm_ps_dcDevice_isSupported];
+}
+
+- (void) pm_ps_dcDevice_generateTokenWithCompletionHandler:(void (^)(NSData * _Nullable data, NSError * _Nullable error))completion {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (completion != nil) {
+            NSError *err = ps_make_devicecheck_unsupported_error();
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+                completion(nil, err);
+            });
+        }
+        return;
+    }
+    [self pm_ps_dcDevice_generateTokenWithCompletionHandler:completion];
 }
 
 - (NSUInteger) pm_pi_processorCount {
@@ -4626,6 +4705,8 @@ static void ps_install_avcapture_hooks_if_loaded(void) {
     os_unfair_lock_unlock(&s_av_hooks_lock);
 }
 
+static _Atomic bool s_ps_dynamic_hooks_ready = false;
+
 __attribute__((visibility("hidden")))
 void ps_load_environment_bypass_hooks(void) {
     Class piClass = objc_getClass("NSProcessInfo");
@@ -4741,6 +4822,7 @@ void ps_load_environment_bypass_hooks(void) {
         ps_swizzle_instance_method(sceneCls, @selector(windows), @selector(pm_ps_scene_windows));
     }
 
+    atomic_store_explicit(&s_ps_dynamic_hooks_ready, true, memory_order_release);
     ps_install_dynamic_system_bundle_hooks();
     [[NSNotificationCenter defaultCenter] addObserverForName:NSBundleDidLoadNotification
                                                       object:nil
@@ -4751,14 +4833,47 @@ void ps_load_environment_bypass_hooks(void) {
     }];
 }
 
+__attribute__((visibility("hidden")))
+void ps_notify_dynamic_image_loaded(void) {
+    if (atomic_load_explicit(&s_ps_dynamic_hooks_ready, memory_order_acquire)) {
+        ps_install_dynamic_system_bundle_hooks();
+    }
+}
+
 static void ps_install_app_attest_hooks_if_loaded(void) {
     Class appAttestCls = objc_getClass("DCAppAttestService");
     if (appAttestCls != Nil) {
         static dispatch_once_t appAttestOnce;
         dispatch_once(&appAttestOnce, ^{
             SEL isSupportedSel = NSSelectorFromString(@"isSupported");
-            if (ps_class_defines_instance_method(appAttestCls, isSupportedSel)) {
+            if (class_getInstanceMethod(appAttestCls, isSupportedSel) != NULL) {
                 ps_swizzle_instance_method(appAttestCls, isSupportedSel, @selector(pm_ps_appAttest_isSupported));
+            }
+            SEL genKeySel = NSSelectorFromString(@"generateKeyWithCompletionHandler:");
+            if (class_getInstanceMethod(appAttestCls, genKeySel) != NULL) {
+                ps_swizzle_instance_method(appAttestCls, genKeySel, @selector(pm_ps_appAttest_generateKeyWithCompletionHandler:));
+            }
+            SEL attestSel = NSSelectorFromString(@"attestKey:clientDataHash:completionHandler:");
+            if (class_getInstanceMethod(appAttestCls, attestSel) != NULL) {
+                ps_swizzle_instance_method(appAttestCls, attestSel, @selector(pm_ps_appAttest_attestKey:clientDataHash:completionHandler:));
+            }
+            SEL assertSel = NSSelectorFromString(@"generateAssertion:clientDataHash:completionHandler:");
+            if (class_getInstanceMethod(appAttestCls, assertSel) != NULL) {
+                ps_swizzle_instance_method(appAttestCls, assertSel, @selector(pm_ps_appAttest_generateAssertion:clientDataHash:completionHandler:));
+            }
+        });
+    }
+    Class dcDeviceCls = objc_getClass("DCDevice");
+    if (dcDeviceCls != Nil) {
+        static dispatch_once_t dcDeviceOnce;
+        dispatch_once(&dcDeviceOnce, ^{
+            SEL isSupportedSel = NSSelectorFromString(@"isSupported");
+            if (class_getInstanceMethod(dcDeviceCls, isSupportedSel) != NULL) {
+                ps_swizzle_instance_method(dcDeviceCls, isSupportedSel, @selector(pm_ps_dcDevice_isSupported));
+            }
+            SEL genTokenSel = NSSelectorFromString(@"generateTokenWithCompletionHandler:");
+            if (class_getInstanceMethod(dcDeviceCls, genTokenSel) != NULL) {
+                ps_swizzle_instance_method(dcDeviceCls, genTokenSel, @selector(pm_ps_dcDevice_generateTokenWithCompletionHandler:));
             }
         });
     }
