@@ -169,6 +169,22 @@ class PlayApp: BaseApp, ObservableObject, Identifiable, Hashable {
 
             settings.sync()
 
+            let launchBundleID = info.bundleIdentifier
+            if !launchBundleID.isEmpty {
+                var backupStat = stat()
+                if Darwin.lstat(appBackupsDir.path, &backupStat) == 0,
+                   !Installer.verifyAppBackupManifest(in: appBackupsDir, for: info) {
+                    guard Installer.invalidateAppBackups(
+                        at: appBackupsDir,
+                        bundleIdentifier: launchBundleID
+                    ) else {
+                        throw PlayCoverError.playToolsError(
+                            "Failed to evict stale AppBackups for \(launchBundleID)"
+                        )
+                    }
+                }
+            }
+
             let binaryInfo = try? Macho.inspectBinary(
                 atURL: executable,
                 playToolsPath: PlayTools.playToolsPath.path

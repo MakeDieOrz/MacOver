@@ -651,7 +651,7 @@ final class ArchitectureAndHostTests: XCTestCase {
             bundleVersion: "200",
             installGeneration: "GEN-V2-UUID"
         )
-        Installer.commitAppBackups(
+        try Installer.commitAppBackups(
             .staged(stagingV2),
             to: targetDir,
             bundleIdentifier: bundleID,
@@ -663,7 +663,7 @@ final class ArchitectureAndHostTests: XCTestCase {
 
         // Upgrade with no applicable backup artifacts (e.g. Fat binary without mobileprovision)
         // must remove stale v2 backup so runtime does not serve old binary to v3 app.
-        Installer.commitAppBackups(
+        try Installer.commitAppBackups(
             .noneApplicable,
             to: targetDir,
             bundleIdentifier: bundleID,
@@ -674,7 +674,7 @@ final class ArchitectureAndHostTests: XCTestCase {
         // Failed or empty staging after app bundle wrap must also invalidate stale backup.
         try fm.createDirectory(at: targetDir, withIntermediateDirectories: true)
         try Data("v3-binary".utf8).write(to: oldExec)
-        Installer.commitAppBackups(
+        try Installer.commitAppBackups(
             .failed,
             to: targetDir,
             bundleIdentifier: bundleID,
@@ -729,7 +729,7 @@ final class ArchitectureAndHostTests: XCTestCase {
         let stagingV1 = dir.appendingPathComponent("staging-v1")
         try fm.createDirectory(at: stagingV1, withIntermediateDirectories: true)
         try Data("v1-exec".utf8).write(to: stagingV1.appendingPathComponent("executable"))
-        Installer.commitAppBackups(
+        try Installer.commitAppBackups(
             .staged(stagingV1),
             to: targetDir,
             bundleIdentifier: bundleID,
@@ -756,7 +756,7 @@ final class ArchitectureAndHostTests: XCTestCase {
         let stagingUnbound = dir.appendingPathComponent("staging-unbound")
         try fm.createDirectory(at: stagingUnbound, withIntermediateDirectories: true)
         try Data("unbound-exec".utf8).write(to: stagingUnbound.appendingPathComponent("executable"))
-        Installer.commitAppBackups(
+        try Installer.commitAppBackups(
             .staged(stagingUnbound),
             to: targetDir,
             bundleIdentifier: bundleID,

@@ -244,7 +244,7 @@ class Installer {
                             let installedApp = PlayApp(appUrl: publishedURL, dependencies: dependencies)
                             let installedBundleID = installedApp.info.bundleIdentifier
                             if !installedBundleID.isEmpty {
-                                commitAppBackups(backupStagingResult, for: installedApp)
+                                try commitAppBackups(backupStagingResult, for: installedApp)
                                 cleanupInvalidatedAppBackups(
                                     primary: quarantinedAppBackups?.quarantinedDir,
                                     in: installedApp.appBackupsDir.deletingLastPathComponent(),
@@ -270,28 +270,37 @@ class Installer {
                 returnCompletion(finalURL)
             } catch {
                 if let unrolledPublishedBackupsTarget {
-                    invalidateAppBackups(
+                    if !invalidateAppBackups(
                         at: unrolledPublishedBackupsTarget.dir,
                         bundleIdentifier: unrolledPublishedBackupsTarget.bundleID
-                    )
+                    ) {
+                        PlayCoverDiagnostics.log(
+                            "Failed to evict AppBackups after unrolled publish for " +
+                                "\(unrolledPublishedBackupsTarget.bundleID)",
+                            isError: true
+                        )
+                    }
                     cleanupInvalidatedAppBackups(
                         primary: quarantinedAppBackups?.quarantinedDir,
                         in: unrolledPublishedBackupsTarget.dir.deletingLastPathComponent(),
                         bundleIdentifier: unrolledPublishedBackupsTarget.bundleID
                     )
                 } else if let quarantinedAppBackups {
+                    var canRestoreQuarantined = true
                     var targetStat = stat()
                     if Darwin.lstat(quarantinedAppBackups.targetDir.path, &targetStat) == 0 {
-                        invalidateAppBackups(
+                        canRestoreQuarantined = invalidateAppBackups(
                             at: quarantinedAppBackups.targetDir,
                             bundleIdentifier: quarantinedAppBackups.bundleID
                         )
                     }
-                    restoreQuarantinedAppBackups(
-                        quarantinedAppBackups.quarantinedDir,
-                        to: quarantinedAppBackups.targetDir,
-                        bundleIdentifier: quarantinedAppBackups.bundleID
-                    )
+                    if canRestoreQuarantined {
+                        restoreQuarantinedAppBackups(
+                            quarantinedAppBackups.quarantinedDir,
+                            to: quarantinedAppBackups.targetDir,
+                            bundleIdentifier: quarantinedAppBackups.bundleID
+                        )
+                    }
                     cleanupInvalidatedAppBackups(
                         primary: nil,
                         in: quarantinedAppBackups.targetDir.deletingLastPathComponent(),
@@ -611,7 +620,6 @@ class Installer {
         }
     }
 
-    @discardableResult
     static func invalidateAppBackups(at targetDir: URL, bundleIdentifier: String) -> Bool {
         let fm = FileManager.default
         var st = stat()
@@ -704,8 +712,8 @@ class Installer {
         return actual == expected
     }
 
-    static func commitAppBackups(_ stagingResult: AppBackupStagingResult, for installedApp: BaseApp) {
-        commitAppBackups(
+    static func commitAppBackups(_ stagingResult: AppBackupStagingResult, for installedApp: BaseApp) throws {
+        try commitAppBackups(
             stagingResult,
             to: installedApp.appBackupsDir,
             bundleIdentifier: installedApp.info.bundleIdentifier,
@@ -718,7 +726,7 @@ class Installer {
         to targetDir: URL,
         bundleIdentifier: String,
         manifest: AppBackupManifest?
-    ) {
+    ) throws {
         let fm = FileManager.default
 
         let stagingDir: URL
@@ -726,7 +734,11 @@ class Installer {
         case .staged(let url):
             stagingDir = url
         case .noneApplicable, .failed:
-            invalidateAppBackups(at: targetDir, bundleIdentifier: bundleIdentifier)
+            guard invalidateAppBackups(at: targetDir, bundleIdentifier: bundleIdentifier) else {
+                throw PlayCoverError.playToolsError(
+                    "Failed to evict stale AppBackups for \(bundleIdentifier)"
+                )
+            }
             return
         }
 
@@ -739,7 +751,11 @@ class Installer {
             if fm.fileExists(atPath: stagingDir.path) {
                 try? fm.removeItem(at: stagingDir)
             }
-            invalidateAppBackups(at: targetDir, bundleIdentifier: bundleIdentifier)
+            guard invalidateAppBackups(at: targetDir, bundleIdentifier: bundleIdentifier) else {
+                throw PlayCoverError.playToolsError(
+                    "Failed to evict unbound AppBackups for \(bundleIdentifier)"
+                )
+            }
             return
         }
 
@@ -781,11 +797,16 @@ class Installer {
             if fm.fileExists(atPath: incomingDir.path) {
                 try? fm.removeItem(at: incomingDir)
             }
-            invalidateAppBackups(at: targetDir, bundleIdentifier: bundleIdentifier)
+            let evicted = invalidateAppBackups(at: targetDir, bundleIdentifier: bundleIdentifier)
             PlayCoverDiagnostics.log(
                 "Failed to commit AppBackups for \(bundleIdentifier): \(error)",
                 isError: true
             )
+            if !evicted {
+                throw PlayCoverError.playToolsError(
+                    "Failed to commit AppBackups and stale backup remained active for \(bundleIdentifier)"
+                )
+            }
         }
     }
 

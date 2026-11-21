@@ -281,14 +281,24 @@ static _Atomic bool s_app_backup_ready = false;
 static pthread_once_t s_app_backup_once = PTHREAD_ONCE_INIT;
 static char s_app_backup_dir[PATH_MAX];
 static size_t s_app_backup_dir_len = 0;
+static char s_backup_manifest_path[PATH_MAX];
+static dev_t s_backup_manifest_dev = 0;
+static ino_t s_backup_manifest_ino = 0;
+static BOOL s_has_backup_manifest_pin = NO;
 static char s_backup_mobileprovision_path[PATH_MAX];
 static size_t s_backup_mobileprovision_len = 0;
+static dev_t s_backup_mobileprovision_dev = 0;
+static ino_t s_backup_mobileprovision_ino = 0;
 static BOOL s_has_backup_mobileprovision = NO;
 static char s_backup_info_plist_path[PATH_MAX];
 static size_t s_backup_info_plist_len = 0;
+static dev_t s_backup_info_plist_dev = 0;
+static ino_t s_backup_info_plist_ino = 0;
 static BOOL s_has_backup_info_plist = NO;
 static char s_backup_executable_path[PATH_MAX];
 static size_t s_backup_executable_len = 0;
+static dev_t s_backup_executable_dev = 0;
+static ino_t s_backup_executable_ino = 0;
 static BOOL s_has_backup_executable = NO;
 static char s_real_main_exec_path[PATH_MAX];
 static size_t s_real_main_exec_len = 0;
@@ -1110,22 +1120,37 @@ static void pt_init_app_backup_map(void) {
         }
 
         char cand[PATH_MAX];
+        int mn = snprintf(cand, sizeof(cand), "%s/manifest.plist", s_app_backup_dir);
+        if (mn <= 0 || (size_t)mn >= sizeof(cand) || lstat(cand, &st) != 0 || !S_ISREG(st.st_mode)) {
+            break;
+        }
+        strlcpy(s_backup_manifest_path, cand, sizeof(s_backup_manifest_path));
+        s_backup_manifest_dev = st.st_dev;
+        s_backup_manifest_ino = st.st_ino;
+        s_has_backup_manifest_pin = YES;
+
         int pn = snprintf(cand, sizeof(cand), "%s/embedded.mobileprovision", s_app_backup_dir);
-        if (pn > 0 && (size_t)pn < sizeof(cand) && stat(cand, &st) == 0 && S_ISREG(st.st_mode)) {
+        if (pn > 0 && (size_t)pn < sizeof(cand) && lstat(cand, &st) == 0 && S_ISREG(st.st_mode)) {
             strlcpy(s_backup_mobileprovision_path, cand, sizeof(s_backup_mobileprovision_path));
             s_backup_mobileprovision_len = (size_t)pn;
+            s_backup_mobileprovision_dev = st.st_dev;
+            s_backup_mobileprovision_ino = st.st_ino;
             s_has_backup_mobileprovision = YES;
         }
 
         int in = snprintf(cand, sizeof(cand), "%s/Info.plist", s_app_backup_dir);
-        if (in > 0 && (size_t)in < sizeof(cand) && stat(cand, &st) == 0 && S_ISREG(st.st_mode)) {
+        if (in > 0 && (size_t)in < sizeof(cand) && lstat(cand, &st) == 0 && S_ISREG(st.st_mode)) {
             strlcpy(s_backup_info_plist_path, cand, sizeof(s_backup_info_plist_path));
             s_backup_info_plist_len = (size_t)in;
+            s_backup_info_plist_dev = st.st_dev;
+            s_backup_info_plist_ino = st.st_ino;
             s_has_backup_info_plist = YES;
         }
 
         int en = snprintf(cand, sizeof(cand), "%s/executable", s_app_backup_dir);
-        if (en > 0 && (size_t)en < sizeof(cand) && stat(cand, &st) == 0 && S_ISREG(st.st_mode)) {
+        if (en > 0 && (size_t)en < sizeof(cand) && lstat(cand, &st) == 0 && S_ISREG(st.st_mode)) {
+            dev_t exec_dev = st.st_dev;
+            ino_t exec_ino = st.st_ino;
             const char *exec_path = pt_get_main_executable_path();
             if (exec_path != NULL && exec_path[0] == '/') {
                 if (strncmp(exec_path, "/System/Volumes/Data/", 21) == 0) {
@@ -1146,6 +1171,8 @@ static void pt_init_app_backup_map(void) {
                         strlcpy(s_real_main_exec_rel_path, rel, sizeof(s_real_main_exec_rel_path));
                         strlcpy(s_backup_executable_path, cand, sizeof(s_backup_executable_path));
                         s_backup_executable_len = (size_t)en;
+                        s_backup_executable_dev = exec_dev;
+                        s_backup_executable_ino = exec_ino;
                         s_has_backup_executable = YES;
                     } else {
                         s_real_main_exec_path[0] = '\0';
@@ -1171,13 +1198,39 @@ __attribute__((visibility("hidden"))) void pt_disable_app_backups_for_safe_mode(
     atomic_store_explicit(&s_app_backups_disabled_for_safe_mode, true, memory_order_release);
 }
 
+static BOOL pt_verify_pinned_backup_file(const char *path, dev_t exp_dev, ino_t exp_ino) {
+    if (!s_has_backup_manifest_pin || path == NULL || path[0] != '/') {
+        return NO;
+    }
+    struct stat mst;
+    if (lstat(s_backup_manifest_path, &mst) != 0 ||
+        !S_ISREG(mst.st_mode) ||
+        mst.st_dev != s_backup_manifest_dev ||
+        mst.st_ino != s_backup_manifest_ino) {
+        atomic_store_explicit(&s_app_backups_disabled_for_safe_mode, true, memory_order_release);
+        return NO;
+    }
+    struct stat fst;
+    if (lstat(path, &fst) != 0 ||
+        !S_ISREG(fst.st_mode) ||
+        fst.st_dev != exp_dev ||
+        fst.st_ino != exp_ino) {
+        return NO;
+    }
+    return YES;
+}
+
 __attribute__((visibility("hidden"))) BOOL pt_has_backup_mobileprovision(void) {
     if (atomic_load_explicit(&s_app_backups_disabled_for_safe_mode, memory_order_acquire) ||
         !pt_is_bypass_enabled()) {
         return NO;
     }
     pt_ensure_app_backup_map();
-    return atomic_load_explicit(&s_app_backup_ready, memory_order_acquire) && s_has_backup_mobileprovision;
+    if (!atomic_load_explicit(&s_app_backup_ready, memory_order_acquire) || !s_has_backup_mobileprovision) {
+        return NO;
+    }
+    return pt_verify_pinned_backup_file(
+        s_backup_mobileprovision_path, s_backup_mobileprovision_dev, s_backup_mobileprovision_ino);
 }
 
 __attribute__((visibility("hidden")))
@@ -1199,17 +1252,26 @@ static const char *pt_lookup_app_backup_redirect_unlocked(const char *p, const c
     if (s_has_backup_mobileprovision && bundle_rel != NULL &&
         (strcmp(bundle_rel, "/embedded.mobileprovision") == 0 ||
          strcmp(bundle_rel, "/Contents/embedded.mobileprovision") == 0)) {
-        return s_backup_mobileprovision_path;
+        return pt_verify_pinned_backup_file(
+            s_backup_mobileprovision_path, s_backup_mobileprovision_dev, s_backup_mobileprovision_ino)
+            ? s_backup_mobileprovision_path
+            : NULL;
     }
     if (s_has_backup_info_plist && bundle_rel != NULL &&
         (strcmp(bundle_rel, "/Info.plist") == 0 ||
          strcmp(bundle_rel, "/Contents/Info.plist") == 0)) {
-        return s_backup_info_plist_path;
+        return pt_verify_pinned_backup_file(
+            s_backup_info_plist_path, s_backup_info_plist_dev, s_backup_info_plist_ino)
+            ? s_backup_info_plist_path
+            : NULL;
     }
     if (s_has_backup_executable && s_real_main_exec_len > 0 && p != NULL) {
         const char *erel = pt_match_prefix_modulo_private(p, s_real_main_exec_path, s_real_main_exec_len);
         if (erel != NULL && erel[0] == '\0') {
-            return s_backup_executable_path;
+            return pt_verify_pinned_backup_file(
+                s_backup_executable_path, s_backup_executable_dev, s_backup_executable_ino)
+                ? s_backup_executable_path
+                : NULL;
         }
     }
     return NULL;
