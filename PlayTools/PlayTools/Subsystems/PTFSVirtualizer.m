@@ -868,6 +868,71 @@ __attribute__((visibility("hidden"))) void pt_ensure_bundle_path_map(void) {
     }
 }
 
+static BOOL pt_verify_app_backup_manifest(const char *backup_dir, const char *real_bundle_dir) {
+    if (backup_dir == NULL || backup_dir[0] != '/' ||
+        real_bundle_dir == NULL || real_bundle_dir[0] != '/') {
+        return NO;
+    }
+    char manifest_path[PATH_MAX];
+    int mn = snprintf(manifest_path, sizeof(manifest_path), "%s/manifest.plist", backup_dir);
+    if (mn <= 0 || (size_t)mn >= sizeof(manifest_path)) {
+        return NO;
+    }
+    int mfd = pt_orig_open_nocancel(manifest_path, O_RDONLY);
+    if (mfd < 0) {
+        return NO;
+    }
+
+    char info_path[PATH_MAX];
+    int info_n = snprintf(info_path, sizeof(info_path), "%s/Contents/Info.plist", real_bundle_dir);
+    int ifd = (info_n > 0 && (size_t)info_n < sizeof(info_path)) ? pt_orig_open_nocancel(info_path, O_RDONLY) : -1;
+    if (ifd < 0) {
+        info_n = snprintf(info_path, sizeof(info_path), "%s/Info.plist", real_bundle_dir);
+        if (info_n > 0 && (size_t)info_n < sizeof(info_path)) {
+            ifd = pt_orig_open_nocancel(info_path, O_RDONLY);
+        }
+    }
+    if (ifd < 0) {
+        close(mfd);
+        return NO;
+    }
+
+    char m_gen[128] = {0};
+    char b_gen[128] = {0};
+    char m_bid[256] = {0};
+    char b_bid[256] = {0};
+    char m_short[128] = {0};
+    char b_short[128] = {0};
+    char m_ver[128] = {0};
+    char b_ver[128] = {0};
+
+    BOOL ok = (pt_read_plist_top_string_from_fd(mfd, "PCInstallGeneration", m_gen, sizeof(m_gen)) &&
+               pt_read_plist_top_string_from_fd(ifd, "PCInstallGeneration", b_gen, sizeof(b_gen)) &&
+               m_gen[0] != '\0' &&
+               strcmp(m_gen, b_gen) == 0 &&
+               pt_read_plist_top_string_from_fd(mfd, "CFBundleIdentifier", m_bid, sizeof(m_bid)) &&
+               pt_read_plist_top_string_from_fd(ifd, "CFBundleIdentifier", b_bid, sizeof(b_bid)) &&
+               m_bid[0] != '\0' &&
+               strcmp(m_bid, b_bid) == 0);
+    if (ok) {
+        BOOL has_m_short = pt_read_plist_top_string_from_fd(mfd, "CFBundleShortVersionString", m_short, sizeof(m_short));
+        BOOL has_b_short = pt_read_plist_top_string_from_fd(ifd, "CFBundleShortVersionString", b_short, sizeof(b_short));
+        BOOL has_m_ver = pt_read_plist_top_string_from_fd(mfd, "CFBundleVersion", m_ver, sizeof(m_ver));
+        BOOL has_b_ver = pt_read_plist_top_string_from_fd(ifd, "CFBundleVersion", b_ver, sizeof(b_ver));
+        const char *eff_m_short = has_m_short ? m_short : "";
+        const char *eff_b_short = has_b_short ? b_short : "";
+        const char *eff_m_ver = has_m_ver ? m_ver : "";
+        const char *eff_b_ver = has_b_ver ? b_ver : "";
+        if (strcmp(eff_m_short, eff_b_short) != 0 || strcmp(eff_m_ver, eff_b_ver) != 0) {
+            ok = NO;
+        }
+    }
+
+    close(ifd);
+    close(mfd);
+    return ok;
+}
+
 static void pt_init_app_backup_map(void) {
     pt_enter_internal_scope();
     do {
@@ -923,6 +988,11 @@ static void pt_init_app_backup_map(void) {
 
         struct stat st;
         if (stat(s_app_backup_dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
+            break;
+        }
+
+        if (s_real_app_bundle_len == 0 ||
+            !pt_verify_app_backup_manifest(s_app_backup_dir, s_real_app_bundle_dir)) {
             break;
         }
 

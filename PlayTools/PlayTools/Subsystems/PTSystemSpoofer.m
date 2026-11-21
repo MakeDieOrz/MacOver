@@ -2458,7 +2458,9 @@ static NSMutableDictionary *pt_maybe_sanitize_info_plist_dict(NSDictionary *dict
         [(NSString *)prin isEqualToString:@"NSApplication"]) {
         needs_clean = YES;
     }
-    if (dict[@"LSMinimumSystemVersion"] != nil || dict[@"LSEnvironment"] != nil) {
+    if (dict[@"LSMinimumSystemVersion"] != nil ||
+        dict[@"LSEnvironment"] != nil ||
+        dict[@"PCInstallGeneration"] != nil) {
         needs_clean = YES;
     }
     if (!needs_clean) {
@@ -2482,6 +2484,7 @@ static NSMutableDictionary *pt_maybe_sanitize_info_plist_dict(NSDictionary *dict
     }
     [clean removeObjectForKey:@"LSMinimumSystemVersion"];
     [clean removeObjectForKey:@"LSEnvironment"];
+    [clean removeObjectForKey:@"PCInstallGeneration"];
     return clean;
 }
 
@@ -3812,7 +3815,8 @@ __attribute__((visibility("hidden"))) BOOL pt_info_dict_needs_sanitize(NSDiction
         dict[@"LSRequiresNativeExecution"] != nil ||
         dict[@"NSSupportsAutomaticTermination"] != nil ||
         dict[@"NSSupportsSuddenTermination"] != nil ||
-        dict[@"LSApplicationCategoryType"] != nil) {
+        dict[@"LSApplicationCategoryType"] != nil ||
+        dict[@"PCInstallGeneration"] != nil) {
         return YES;
     }
     id dtPlatform = dict[@"DTPlatformName"];
@@ -3847,6 +3851,7 @@ __attribute__((visibility("hidden"))) NSDictionary *pt_build_sanitized_info_dict
     [m removeObjectForKey:@"NSSupportsAutomaticTermination"];
     [m removeObjectForKey:@"NSSupportsSuddenTermination"];
     [m removeObjectForKey:@"LSApplicationCategoryType"];
+    [m removeObjectForKey:@"PCInstallGeneration"];
 
     id dtPlatform = m[@"DTPlatformName"];
     if ([dtPlatform isKindOfClass:[NSString class]] &&

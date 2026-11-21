@@ -526,11 +526,13 @@ static id ps_restored_minimum_os_version(id origVal) {
         id restoredMinOS = ps_restored_minimum_os_version(minOS);
         BOOL stripEnv = (orig[@"LSEnvironment"] != nil);
         BOOL stripCat = (orig[@"LSApplicationCategoryType"] != nil);
+        BOOL stripGen = (orig[@"PCInstallGeneration"] != nil);
         BOOL changeMin = (restoredMinOS != minOS && restoredMinOS != nil && ![restoredMinOS isEqual:minOS]);
-        if (stripEnv || stripCat || changeMin) {
+        if (stripEnv || stripCat || stripGen || changeMin) {
             NSMutableDictionary<NSString *, id> *modified = [orig mutableCopy];
             if (stripEnv) [modified removeObjectForKey:@"LSEnvironment"];
             if (stripCat) [modified removeObjectForKey:@"LSApplicationCategoryType"];
+            if (stripGen) [modified removeObjectForKey:@"PCInstallGeneration"];
             if (changeMin) modified[@"MinimumOSVersion"] = restoredMinOS;
             return [modified copy];
         }
@@ -544,7 +546,8 @@ static id ps_restored_minimum_os_version(id origVal) {
         pt_is_bypass_enabled() &&
         !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         if ([key isEqualToString:@"LSEnvironment"] ||
-            [key isEqualToString:@"LSApplicationCategoryType"]) {
+            [key isEqualToString:@"LSApplicationCategoryType"] ||
+            [key isEqualToString:@"PCInstallGeneration"]) {
             return nil;
         }
         id orig = [self pm_ps_objectForInfoDictionaryKey:key];

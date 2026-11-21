@@ -641,22 +641,105 @@ final class ArchitectureAndHostTests: XCTestCase {
         let oldExec = targetDir.appendingPathComponent("executable")
         try Data("v1-binary".utf8).write(to: oldExec)
 
-        // Replacing with valid staged artifacts swaps in v2
+        // Replacing with valid staged artifacts and manifest swaps in v2 + manifest.plist
         let stagingV2 = dir.appendingPathComponent("staging-v2")
         try fm.createDirectory(at: stagingV2, withIntermediateDirectories: true)
         try Data("v2-binary".utf8).write(to: stagingV2.appendingPathComponent("executable"))
-        Installer.commitAppBackups(.staged(stagingV2), to: targetDir, bundleIdentifier: bundleID)
+        let manifestV2 = Installer.AppBackupManifest(
+            bundleIdentifier: bundleID,
+            shortVersionString: "2.0.0",
+            bundleVersion: "200",
+            installGeneration: "GEN-V2-UUID"
+        )
+        Installer.commitAppBackups(
+            .staged(stagingV2),
+            to: targetDir,
+            bundleIdentifier: bundleID,
+            manifest: manifestV2
+        )
         XCTAssertEqual(try String(contentsOf: oldExec, encoding: .utf8), "v2-binary")
+        let manifestURL = targetDir.appendingPathComponent(Installer.backupManifestFileName)
+        XCTAssertTrue(fm.fileExists(atPath: manifestURL.path))
 
         // Upgrade with no applicable backup artifacts (e.g. Fat binary without mobileprovision)
         // must remove stale v2 backup so runtime does not serve old binary to v3 app.
-        Installer.commitAppBackups(.noneApplicable, to: targetDir, bundleIdentifier: bundleID)
+        Installer.commitAppBackups(
+            .noneApplicable,
+            to: targetDir,
+            bundleIdentifier: bundleID,
+            manifest: nil
+        )
         XCTAssertFalse(fm.fileExists(atPath: targetDir.path))
 
         // Failed or empty staging after app bundle wrap must also invalidate stale backup.
         try fm.createDirectory(at: targetDir, withIntermediateDirectories: true)
         try Data("v3-binary".utf8).write(to: oldExec)
-        Installer.commitAppBackups(.failed, to: targetDir, bundleIdentifier: bundleID)
+        Installer.commitAppBackups(
+            .failed,
+            to: targetDir,
+            bundleIdentifier: bundleID,
+            manifest: manifestV2
+        )
+        XCTAssertFalse(fm.fileExists(atPath: targetDir.path))
+    }
+
+    func testAppBackupManifestBindsGenerationAndBundleVersion() throws {
+        let dir = try XCTUnwrap(tempDir)
+        let fm = FileManager.default
+        let bundleID = "com.example.manifestbind"
+        let targetDir = dir.appendingPathComponent("AppBackups").appendingPathComponent(bundleID)
+        let appDir = dir.appendingPathComponent("Sample.app", isDirectory: true)
+        try fm.createDirectory(at: appDir, withIntermediateDirectories: true)
+
+        let infoURL = appDir.appendingPathComponent("Info.plist")
+        let v1Gen = UUID().uuidString
+        let infoDict: [String: Any] = [
+            "CFBundleIdentifier": bundleID,
+            "CFBundleExecutable": "Sample",
+            "CFBundleShortVersionString": "1.2.3",
+            "CFBundleVersion": "45",
+            Installer.installGenerationInfoKey: v1Gen
+        ]
+        try PropertyListSerialization.data(fromPropertyList: infoDict, format: .xml, options: 0)
+            .write(to: infoURL)
+        let appInfo = AppInfo(contentsOf: infoURL)
+
+        let stagingV1 = dir.appendingPathComponent("staging-v1")
+        try fm.createDirectory(at: stagingV1, withIntermediateDirectories: true)
+        try Data("v1-exec".utf8).write(to: stagingV1.appendingPathComponent("executable"))
+        Installer.commitAppBackups(
+            .staged(stagingV1),
+            to: targetDir,
+            bundleIdentifier: bundleID,
+            manifest: Installer.AppBackupManifest(appInfo: appInfo)
+        )
+        XCTAssertTrue(Installer.verifyAppBackupManifest(in: targetDir, for: appInfo))
+
+        // Reinstall or crash-interrupted upgrade with a different installGeneration must reject stale backup
+        appInfo[string: Installer.installGenerationInfoKey] = UUID().uuidString
+        XCTAssertFalse(Installer.verifyAppBackupManifest(in: targetDir, for: appInfo))
+
+        // Restore generation, mutate CFBundleVersion -> must reject mismatched version
+        appInfo[string: Installer.installGenerationInfoKey] = v1Gen
+        XCTAssertTrue(Installer.verifyAppBackupManifest(in: targetDir, for: appInfo))
+        appInfo[string: "CFBundleVersion"] = "46"
+        XCTAssertFalse(Installer.verifyAppBackupManifest(in: targetDir, for: appInfo))
+
+        // Legacy backup directory without manifest.plist must be rejected
+        appInfo[string: "CFBundleVersion"] = "45"
+        try fm.removeItem(at: targetDir.appendingPathComponent(Installer.backupManifestFileName))
+        XCTAssertFalse(Installer.verifyAppBackupManifest(in: targetDir, for: appInfo))
+
+        // Committing staged artifacts without valid manifest must refuse and invalidate targetDir
+        let stagingUnbound = dir.appendingPathComponent("staging-unbound")
+        try fm.createDirectory(at: stagingUnbound, withIntermediateDirectories: true)
+        try Data("unbound-exec".utf8).write(to: stagingUnbound.appendingPathComponent("executable"))
+        Installer.commitAppBackups(
+            .staged(stagingUnbound),
+            to: targetDir,
+            bundleIdentifier: bundleID,
+            manifest: nil
+        )
         XCTAssertFalse(fm.fileExists(atPath: targetDir.path))
     }
 

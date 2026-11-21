@@ -9,6 +9,46 @@ import Darwin
 import Foundation
 
 class Installer {
+    static let installGenerationInfoKey = "PCInstallGeneration"
+    static let backupManifestFileName = "manifest.plist"
+
+    struct AppBackupManifest: Codable, Equatable {
+        let bundleIdentifier: String
+        let shortVersionString: String
+        let bundleVersion: String
+        let installGeneration: String
+
+        enum CodingKeys: String, CodingKey {
+            case bundleIdentifier = "CFBundleIdentifier"
+            case shortVersionString = "CFBundleShortVersionString"
+            case bundleVersion = "CFBundleVersion"
+            case installGeneration = "PCInstallGeneration"
+        }
+
+        init(
+            bundleIdentifier: String,
+            shortVersionString: String,
+            bundleVersion: String,
+            installGeneration: String
+        ) {
+            self.bundleIdentifier = bundleIdentifier
+            self.shortVersionString = shortVersionString
+            self.bundleVersion = bundleVersion
+            self.installGeneration = installGeneration
+        }
+
+        init?(appInfo: AppInfo) {
+            let bundleID = appInfo.bundleIdentifier
+            let generation = appInfo[string: Installer.installGenerationInfoKey] ?? ""
+            guard !bundleID.isEmpty, !generation.isEmpty else {
+                return nil
+            }
+            self.bundleIdentifier = bundleID
+            self.shortVersionString = appInfo[string: "CFBundleShortVersionString"] ?? ""
+            self.bundleVersion = appInfo[string: "CFBundleVersion"] ?? ""
+            self.installGeneration = generation
+        }
+    }
 
     @MainActor
     static func installPlayToolsPopup(
@@ -163,6 +203,7 @@ class Installer {
                             : originalMinimumOSVersion
                     }
                     appSettings.flush()
+                    info[string: Installer.installGenerationInfoKey] = UUID().uuidString
                 }
                 info.assert(minimumVersion: 11.0)
                 try info.write()
@@ -549,11 +590,17 @@ class Installer {
                     "(rename: \(renameMessage), remove: \(removeError))",
                 isError: true
             )
-            var entryNames = Set(["executable", "embedded.mobileprovision"])
+            var orderedNames: [String] = [
+                Installer.backupManifestFileName,
+                "executable",
+                "embedded.mobileprovision"
+            ]
             if let listed = try? fm.contentsOfDirectory(atPath: targetDir.path) {
-                entryNames.formUnion(listed)
+                for item in listed where !orderedNames.contains(item) {
+                    orderedNames.append(item)
+                }
             }
-            for name in entryNames {
+            for name in orderedNames {
                 let itemURL = targetDir.appendingPathComponent(name)
                 if Darwin.unlink(itemURL.path) != 0 {
                     let unlinkErr = errno
@@ -589,18 +636,32 @@ class Installer {
         }
     }
 
+    static func verifyAppBackupManifest(in backupDir: URL, for appInfo: AppInfo) -> Bool {
+        guard let expected = AppBackupManifest(appInfo: appInfo) else {
+            return false
+        }
+        let manifestURL = backupDir.appendingPathComponent(Installer.backupManifestFileName)
+        guard let data = try? Data(contentsOf: manifestURL),
+              let actual = try? PropertyListDecoder().decode(AppBackupManifest.self, from: data) else {
+            return false
+        }
+        return actual == expected
+    }
+
     static func commitAppBackups(_ stagingResult: AppBackupStagingResult, for installedApp: BaseApp) {
         commitAppBackups(
             stagingResult,
             to: installedApp.appBackupsDir,
-            bundleIdentifier: installedApp.info.bundleIdentifier
+            bundleIdentifier: installedApp.info.bundleIdentifier,
+            manifest: AppBackupManifest(appInfo: installedApp.info)
         )
     }
 
     static func commitAppBackups(
         _ stagingResult: AppBackupStagingResult,
         to targetDir: URL,
-        bundleIdentifier: String
+        bundleIdentifier: String,
+        manifest: AppBackupManifest?
     ) {
         let fm = FileManager.default
 
@@ -613,9 +674,15 @@ class Installer {
             return
         }
 
-        guard fm.fileExists(atPath: stagingDir.path),
+        guard let manifest,
+              !manifest.installGeneration.isEmpty,
+              manifest.bundleIdentifier == bundleIdentifier,
+              fm.fileExists(atPath: stagingDir.path),
               let entries = try? fm.contentsOfDirectory(atPath: stagingDir.path),
               !entries.isEmpty else {
+            if fm.fileExists(atPath: stagingDir.path) {
+                try? fm.removeItem(at: stagingDir)
+            }
             invalidateAppBackups(at: targetDir, bundleIdentifier: bundleIdentifier)
             return
         }
@@ -628,6 +695,12 @@ class Installer {
         do {
             try fm.createDirectory(at: parentDir, withIntermediateDirectories: true)
             try fm.moveItem(at: stagingDir, to: incomingDir)
+
+            let encoder = PropertyListEncoder()
+            encoder.outputFormat = .xml
+            let manifestData = try encoder.encode(manifest)
+            let manifestURL = incomingDir.appendingPathComponent(Installer.backupManifestFileName)
+            try manifestData.write(to: manifestURL, options: .atomic)
 
             if fm.fileExists(atPath: targetDir.path) {
                 if Darwin.renamex_np(incomingDir.path, targetDir.path, UInt32(RENAME_SWAP)) == 0 {
