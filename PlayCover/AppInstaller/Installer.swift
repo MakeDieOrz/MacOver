@@ -84,6 +84,7 @@ class Installer {
 
                 var createdEntitlementsURL: URL?
                 var createdSettingsURL: URL?
+                var quarantinedAppBackups: (quarantinedDir: URL, targetDir: URL, bundleID: String)?
                 var wrappedAppBackupsTarget: (dir: URL, bundleID: String)?
 
                 do {
@@ -174,15 +175,34 @@ class Installer {
                     try? ipa.removeQuarantine(finalURL)
                 } else {
                     try? ipa.removeQuarantine(app.url)
+                    let preWrapBundleID = info.bundleIdentifier
+                    let preWrapBackupsDir = app.appBackupsDir
+                    if !preWrapBundleID.isEmpty,
+                       let quarantinedDir = try quarantineAppBackups(
+                           at: preWrapBackupsDir,
+                           bundleIdentifier: preWrapBundleID
+                       ) {
+                        quarantinedAppBackups = (quarantinedDir, preWrapBackupsDir, preWrapBundleID)
+                    }
                     finalURL = try wrap(app)
+                    if !preWrapBundleID.isEmpty {
+                        wrappedAppBackupsTarget = (preWrapBackupsDir, preWrapBundleID)
+                    }
                     let installedApp = PlayApp(appUrl: finalURL, dependencies: dependencies)
-                    if !installedApp.info.bundleIdentifier.isEmpty {
-                        wrappedAppBackupsTarget = (installedApp.appBackupsDir, installedApp.info.bundleIdentifier)
+                    let installedBundleID = installedApp.info.bundleIdentifier
+                    if !installedBundleID.isEmpty {
+                        wrappedAppBackupsTarget = (installedApp.appBackupsDir, installedBundleID)
                     }
                     try installedApp.signThrowing()
-                    if !installedApp.info.bundleIdentifier.isEmpty {
+                    if !installedBundleID.isEmpty {
                         commitAppBackups(backupStagingResult, for: installedApp)
                         wrappedAppBackupsTarget = nil
+                        cleanupInvalidatedAppBackups(
+                            primary: quarantinedAppBackups?.quarantinedDir,
+                            in: installedApp.appBackupsDir.deletingLastPathComponent(),
+                            bundleIdentifier: installedBundleID
+                        )
+                        quarantinedAppBackups = nil
                     }
                     try? ipa.removeQuarantine(finalURL)
                 }
@@ -194,6 +214,17 @@ class Installer {
                     invalidateAppBackups(
                         at: wrappedAppBackupsTarget.dir,
                         bundleIdentifier: wrappedAppBackupsTarget.bundleID
+                    )
+                    cleanupInvalidatedAppBackups(
+                        primary: quarantinedAppBackups?.quarantinedDir,
+                        in: wrappedAppBackupsTarget.dir.deletingLastPathComponent(),
+                        bundleIdentifier: wrappedAppBackupsTarget.bundleID
+                    )
+                } else if let quarantinedAppBackups {
+                    restoreQuarantinedAppBackups(
+                        quarantinedAppBackups.quarantinedDir,
+                        to: quarantinedAppBackups.targetDir,
+                        bundleIdentifier: quarantinedAppBackups.bundleID
                     )
                 }
                 if let createdEntitlementsURL {
@@ -391,28 +422,170 @@ class Installer {
         return .staged(stagingDir)
     }
 
-    static func invalidateAppBackups(at targetDir: URL, bundleIdentifier: String) {
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: targetDir.path) else {
+    private static func invalidatedBackupPrefix(for directoryName: String) -> String {
+        ".\(directoryName).invalidated-"
+    }
+
+    static func quarantineAppBackups(at targetDir: URL, bundleIdentifier: String) throws -> URL? {
+        var st = stat()
+        guard Darwin.lstat(targetDir.path, &st) == 0 else {
+            return nil
+        }
+        let invalidatedDir = targetDir.deletingLastPathComponent().appendingPathComponent(
+            "\(invalidatedBackupPrefix(for: targetDir.lastPathComponent))\(UUID().uuidString)"
+        )
+        if Darwin.rename(targetDir.path, invalidatedDir.path) == 0 {
+            return invalidatedDir
+        }
+        let renameErr = errno
+        PlayCoverDiagnostics.log(
+            "Atomic rename failed quarantining AppBackups for \(bundleIdentifier): " +
+                "\(String(cString: strerror(renameErr)))",
+            isError: true
+        )
+        try FileManager.default.moveItem(at: targetDir, to: invalidatedDir)
+        return invalidatedDir
+    }
+
+    static func restoreQuarantinedAppBackups(
+        _ quarantinedDir: URL,
+        to targetDir: URL,
+        bundleIdentifier: String
+    ) {
+        var qst = stat()
+        guard Darwin.lstat(quarantinedDir.path, &qst) == 0 else {
             return
         }
+        var tst = stat()
+        guard Darwin.lstat(targetDir.path, &tst) != 0 else {
+            return
+        }
+        if Darwin.rename(quarantinedDir.path, targetDir.path) == 0 {
+            return
+        }
+        let renameErr = errno
         do {
-            try fm.removeItem(at: targetDir)
+            try FileManager.default.moveItem(at: quarantinedDir, to: targetDir)
         } catch {
-            let execBackup = targetDir.appendingPathComponent("executable")
-            let provisionBackup = targetDir.appendingPathComponent("embedded.mobileprovision")
-            _ = Darwin.unlink(execBackup.path)
-            _ = Darwin.unlink(provisionBackup.path)
-            let invalidatedDir = targetDir.deletingLastPathComponent().appendingPathComponent(
-                ".\(targetDir.lastPathComponent).invalidated-\(UUID().uuidString)"
-            )
-            if (try? fm.moveItem(at: targetDir, to: invalidatedDir)) != nil {
-                try? fm.removeItem(at: invalidatedDir)
-            }
             PlayCoverDiagnostics.log(
-                "Failed to remove stale AppBackups for \(bundleIdentifier): \(error)",
+                "Failed to restore quarantined AppBackups for \(bundleIdentifier) " +
+                    "(rename errno=\(renameErr)): \(error)",
                 isError: true
             )
+        }
+    }
+
+    static func cleanupInvalidatedAppBackups(
+        primary: URL?,
+        in parentDir: URL,
+        bundleIdentifier: String
+    ) {
+        let fm = FileManager.default
+        if let primary {
+            var st = stat()
+            if Darwin.lstat(primary.path, &st) == 0 {
+                do {
+                    try fm.removeItem(at: primary)
+                } catch {
+                    PlayCoverDiagnostics.log(
+                        "Failed to remove invalidated AppBackups \(primary.lastPathComponent) " +
+                            "for \(bundleIdentifier): \(error)",
+                        isError: true
+                    )
+                }
+            }
+        }
+        let prefix = invalidatedBackupPrefix(for: bundleIdentifier)
+        if let entries = try? fm.contentsOfDirectory(
+            at: parentDir,
+            includingPropertiesForKeys: nil,
+            options: []
+        ) {
+            for entry in entries where entry.lastPathComponent.hasPrefix(prefix) {
+                do {
+                    try fm.removeItem(at: entry)
+                } catch {
+                    PlayCoverDiagnostics.log(
+                        "Failed to clean up leftover invalidated AppBackups \(entry.lastPathComponent) " +
+                            "for \(bundleIdentifier): \(error)",
+                        isError: true
+                    )
+                }
+            }
+        }
+    }
+
+    @discardableResult
+    static func invalidateAppBackups(at targetDir: URL, bundleIdentifier: String) -> Bool {
+        let fm = FileManager.default
+        var st = stat()
+        guard Darwin.lstat(targetDir.path, &st) == 0 else {
+            return true
+        }
+        let invalidatedDir = targetDir.deletingLastPathComponent().appendingPathComponent(
+            "\(invalidatedBackupPrefix(for: targetDir.lastPathComponent))\(UUID().uuidString)"
+        )
+        if Darwin.rename(targetDir.path, invalidatedDir.path) == 0 {
+            do {
+                try fm.removeItem(at: invalidatedDir)
+            } catch {
+                PlayCoverDiagnostics.log(
+                    "Evicted stale AppBackups for \(bundleIdentifier) to \(invalidatedDir.lastPathComponent), " +
+                        "but removal failed: \(error)",
+                    isError: true
+                )
+            }
+            return true
+        }
+
+        let renameErr = errno
+        let renameMessage = String(cString: strerror(renameErr))
+        do {
+            try fm.removeItem(at: targetDir)
+            return true
+        } catch let removeError {
+            PlayCoverDiagnostics.log(
+                "Failed to evict stale AppBackups for \(bundleIdentifier) " +
+                    "(rename: \(renameMessage), remove: \(removeError))",
+                isError: true
+            )
+            var entryNames = Set(["executable", "embedded.mobileprovision"])
+            if let listed = try? fm.contentsOfDirectory(atPath: targetDir.path) {
+                entryNames.formUnion(listed)
+            }
+            for name in entryNames {
+                let itemURL = targetDir.appendingPathComponent(name)
+                if Darwin.unlink(itemURL.path) != 0 {
+                    let unlinkErr = errno
+                    if unlinkErr != ENOENT {
+                        PlayCoverDiagnostics.log(
+                            "Failed to unlink \(name) in stale AppBackups for \(bundleIdentifier): " +
+                                "\(String(cString: strerror(unlinkErr)))",
+                            isError: true
+                        )
+                    }
+                }
+            }
+            if Darwin.rmdir(targetDir.path) == 0 {
+                return true
+            }
+            if Darwin.rename(targetDir.path, invalidatedDir.path) == 0 {
+                do {
+                    try fm.removeItem(at: invalidatedDir)
+                } catch {
+                    PlayCoverDiagnostics.log(
+                        "Failed to remove evicted AppBackups \(invalidatedDir.lastPathComponent) " +
+                            "for \(bundleIdentifier): \(error)",
+                        isError: true
+                    )
+                }
+                return true
+            }
+            PlayCoverDiagnostics.log(
+                "Critical: stale AppBackups directory remains at active path for \(bundleIdentifier)",
+                isError: true
+            )
+            return false
         }
     }
 
@@ -488,18 +661,84 @@ class Installer {
     }
 
     /// Generates a wrapper bundle for an iOS app that allows it to be launched from Finder and other macOS UIs
-    static func wrap(_ baseApp: BaseApp) throws -> URL {
+    static func wrap(_ baseApp: BaseApp, into destinationDir: URL = AppsVM.appDirectory) throws -> URL {
+        let fm = FileManager.default
         let info = AppInfo(contentsOf: baseApp.url
             .appendingPathComponent("Info")
             .appendingPathExtension("plist"))
-        let location = AppsVM.appDirectory
+        guard !info.bundleIdentifier.isEmpty else {
+            throw PlayCoverError.infoPlistNotFound
+        }
+        try fm.createDirectory(at: destinationDir, withIntermediateDirectories: true)
+        let location = destinationDir
             .appendingEscapedPathComponent(info.bundleIdentifier)
             .appendingPathExtension("app")
-        if FileManager.default.fileExists(atPath: location.path) {
-            try FileManager.default.removeItem(at: location)
+        let tempPrefix = ".\(location.deletingPathExtension().lastPathComponent)"
+        let incomingURL = destinationDir.appendingPathComponent(
+            "\(tempPrefix).staging-\(UUID().uuidString)"
+        )
+
+        do {
+            try fm.moveItem(at: baseApp.url, to: incomingURL)
+        } catch {
+            if fm.fileExists(atPath: incomingURL.path) {
+                try? fm.removeItem(at: incomingURL)
+            }
+            throw error
         }
 
-        try FileManager.default.moveItem(at: baseApp.url, to: location)
-        return location
+        var existingStat = stat()
+        if Darwin.lstat(location.path, &existingStat) == 0 {
+            if Darwin.renamex_np(incomingURL.path, location.path, UInt32(RENAME_SWAP)) == 0 {
+                do {
+                    try fm.removeItem(at: incomingURL)
+                } catch {
+                    PlayCoverDiagnostics.log(
+                        "Failed to remove replaced app staging \(incomingURL.lastPathComponent): \(error)",
+                        isError: true
+                    )
+                }
+                return location
+            }
+            let previousURL = destinationDir.appendingPathComponent(
+                "\(tempPrefix).previous-\(UUID().uuidString)"
+            )
+            do {
+                try fm.moveItem(at: location, to: previousURL)
+            } catch {
+                try? fm.removeItem(at: incomingURL)
+                throw error
+            }
+            do {
+                try fm.moveItem(at: incomingURL, to: location)
+                do {
+                    try fm.removeItem(at: previousURL)
+                } catch {
+                    PlayCoverDiagnostics.log(
+                        "Failed to remove previous app bundle \(previousURL.lastPathComponent): \(error)",
+                        isError: true
+                    )
+                }
+                return location
+            } catch {
+                if Darwin.rename(previousURL.path, location.path) != 0 {
+                    try? fm.moveItem(at: previousURL, to: location)
+                }
+                if fm.fileExists(atPath: incomingURL.path) {
+                    try? fm.removeItem(at: incomingURL)
+                }
+                throw error
+            }
+        } else {
+            do {
+                try fm.moveItem(at: incomingURL, to: location)
+                return location
+            } catch {
+                if fm.fileExists(atPath: incomingURL.path) {
+                    try? fm.removeItem(at: incomingURL)
+                }
+                throw error
+            }
+        }
     }
 }

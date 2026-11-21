@@ -659,4 +659,88 @@ final class ArchitectureAndHostTests: XCTestCase {
         Installer.commitAppBackups(.failed, to: targetDir, bundleIdentifier: bundleID)
         XCTAssertFalse(fm.fileExists(atPath: targetDir.path))
     }
+
+    func testAppBackupsPreWrapQuarantineAndWrapReplacementSafety() throws {
+        let dir = try XCTUnwrap(tempDir)
+        let fm = FileManager.default
+        let bundleID = "com.example.txnsafety"
+        let backupsRoot = dir.appendingPathComponent("AppBackups", isDirectory: true)
+        let targetBackupDir = backupsRoot.appendingPathComponent(bundleID, isDirectory: true)
+        try fm.createDirectory(at: targetBackupDir, withIntermediateDirectories: true)
+        try Data("v1-exec".utf8).write(to: targetBackupDir.appendingPathComponent("executable"))
+
+        // Pre-wrap quarantine moves active AppBackups/<bundleID> out of runtime path immediately
+        let quarantined = try XCTUnwrap(
+            Installer.quarantineAppBackups(at: targetBackupDir, bundleIdentifier: bundleID)
+        )
+        XCTAssertFalse(fm.fileExists(atPath: targetBackupDir.path))
+        XCTAssertTrue(fm.fileExists(atPath: quarantined.path))
+
+        // Pre-wrap failure restores quarantined backup when new .app was never published
+        Installer.restoreQuarantinedAppBackups(quarantined, to: targetBackupDir, bundleIdentifier: bundleID)
+        XCTAssertTrue(fm.fileExists(atPath: targetBackupDir.path))
+        XCTAssertFalse(fm.fileExists(atPath: quarantined.path))
+
+        // Post-wrap commit cleans up quarantined directory and any orphan .invalidated-* siblings
+        let quarantined2 = try XCTUnwrap(
+            Installer.quarantineAppBackups(at: targetBackupDir, bundleIdentifier: bundleID)
+        )
+        let orphanInvalidated = backupsRoot.appendingPathComponent(".\(bundleID).invalidated-orphan")
+        try fm.createDirectory(at: orphanInvalidated, withIntermediateDirectories: true)
+        Installer.cleanupInvalidatedAppBackups(
+            primary: quarantined2,
+            in: backupsRoot,
+            bundleIdentifier: bundleID
+        )
+        XCTAssertFalse(fm.fileExists(atPath: quarantined2.path))
+        XCTAssertFalse(fm.fileExists(atPath: orphanInvalidated.path))
+
+        // wrap(_:into:) replaces existing .app atomically and preserves existing .app if source fails
+        let appsDir = dir.appendingPathComponent("Applications", isDirectory: true)
+        try fm.createDirectory(at: appsDir, withIntermediateDirectories: true)
+        let existingAppURL = appsDir.appendingPathComponent("\(bundleID).app", isDirectory: true)
+        try fm.createDirectory(at: existingAppURL, withIntermediateDirectories: true)
+        let v1Info: [String: Any] = [
+            "CFBundleIdentifier": bundleID,
+            "CFBundleExecutable": "Sample",
+            "CFBundleShortVersionString": "1.0"
+        ]
+        try PropertyListSerialization.data(fromPropertyList: v1Info, format: .xml, options: 0)
+            .write(to: existingAppURL.appendingPathComponent("Info.plist"))
+        try Data("v1-live".utf8).write(to: existingAppURL.appendingPathComponent("Sample"))
+
+        // Broken incoming app whose directory vanished before move must not delete existing .app
+        let brokenCandidateURL = dir.appendingPathComponent("BrokenIncoming.app", isDirectory: true)
+        try fm.createDirectory(at: brokenCandidateURL, withIntermediateDirectories: true)
+        try PropertyListSerialization.data(fromPropertyList: v1Info, format: .xml, options: 0)
+            .write(to: brokenCandidateURL.appendingPathComponent("Info.plist"))
+        let brokenBaseApp = BaseApp(appUrl: brokenCandidateURL)
+        try fm.removeItem(at: brokenCandidateURL)
+        XCTAssertThrowsError(try Installer.wrap(brokenBaseApp, into: appsDir))
+        XCTAssertEqual(
+            try String(contentsOf: existingAppURL.appendingPathComponent("Sample"), encoding: .utf8),
+            "v1-live"
+        )
+
+        // Valid v2 incoming app swaps cleanly into Applications/<bundleID>.app
+        let incomingV2URL = dir.appendingPathComponent("IncomingV2.app", isDirectory: true)
+        try fm.createDirectory(at: incomingV2URL, withIntermediateDirectories: true)
+        let v2Info: [String: Any] = [
+            "CFBundleIdentifier": bundleID,
+            "CFBundleExecutable": "Sample",
+            "CFBundleShortVersionString": "2.0"
+        ]
+        try PropertyListSerialization.data(fromPropertyList: v2Info, format: .xml, options: 0)
+            .write(to: incomingV2URL.appendingPathComponent("Info.plist"))
+        try Data("v2-live".utf8).write(to: incomingV2URL.appendingPathComponent("Sample"))
+        let v2BaseApp = BaseApp(appUrl: incomingV2URL)
+        let wrappedURL = try Installer.wrap(v2BaseApp, into: appsDir)
+        XCTAssertEqual(wrappedURL.standardizedFileURL, existingAppURL.standardizedFileURL)
+        XCTAssertEqual(
+            try String(contentsOf: existingAppURL.appendingPathComponent("Sample"), encoding: .utf8),
+            "v2-live"
+        )
+        let appDirEntries = try fm.contentsOfDirectory(atPath: appsDir.path)
+        XCTAssertEqual(appDirEntries, ["\(bundleID).app"])
+    }
 }
