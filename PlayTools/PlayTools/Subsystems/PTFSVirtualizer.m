@@ -318,6 +318,21 @@ __attribute__((visibility("hidden"))) const char *pt_match_prefix_modulo_private
     return NULL;
 }
 
+static inline BOOL pt_match_path_component_token(const char *start,
+                                                 const char *q,
+                                                 const char *tok,
+                                                 size_t tok_len,
+                                                 BOOL allow_dot_end) {
+    if (q != start && q[-1] != '/') {
+        return NO;
+    }
+    if (strncmp(q, tok, tok_len) != 0) {
+        return NO;
+    }
+    char endc = q[tok_len];
+    return (endc == '\0' || endc == '/' || (allow_dot_end && endc == '.'));
+}
+
 static inline BOOL pt_rel_subpath_has_hidden_plugin_component(const char *rel) {
     if (rel == NULL || rel[0] == '\0') {
         return NO;
@@ -326,33 +341,36 @@ static inline BOOL pt_rel_subpath_has_hidden_plugin_component(const char *rel) {
         return YES;
     }
     for (const char *q = rel; *q != '\0'; q++) {
+        if (q != rel && q[-1] != '/') {
+            continue;
+        }
         switch (*q) {
             case 'P':
                 if (q[1] == 'l' && q[2] == 'a' && q[3] == 'y') {
-                    if (strncmp(q, "PlayTools.framework", 19) == 0 ||
-                        strncmp(q, "PlayTools.dylib", 15) == 0 ||
-                        strncmp(q, "Playtools.strings", 17) == 0) {
+                    if (pt_match_path_component_token(rel, q, "PlayTools.framework", 19, NO) ||
+                        pt_match_path_component_token(rel, q, "PlayTools.dylib", 15, NO) ||
+                        pt_match_path_component_token(rel, q, "Playtools.strings", 17, NO)) {
                         return YES;
                     }
                 }
                 break;
             case 'i':
-                if (strncmp(q, "io.playcover.PlayCover", 22) == 0) {
+                if (pt_match_path_component_token(rel, q, "io.playcover.PlayCover", 22, YES)) {
                     return YES;
                 }
                 break;
             case 'a':
-                if (strncmp(q, "app.makedie.MacOver", 19) == 0) {
+                if (pt_match_path_component_token(rel, q, "app.makedie.MacOver", 19, YES)) {
                     return YES;
                 }
                 break;
             case 'A':
-                if (strncmp(q, "AKInterface.bundle", 18) == 0) {
+                if (pt_match_path_component_token(rel, q, "AKInterface.bundle", 18, NO)) {
                     return YES;
                 }
                 break;
             case 'U':
-                if (strncmp(q, "UserPlugins", 11) == 0) {
+                if (pt_match_path_component_token(rel, q, "UserPlugins", 11, NO)) {
                     return YES;
                 }
                 break;
@@ -509,9 +527,14 @@ static BOOL pt_is_hidden_normalized_path_cached_caller(const char *norm, const v
                 PT_STR_ENTRY("/var/log/apt"),
                 PT_STR_ENTRY("/var/log/syslog"),
                 PT_STR_ENTRY("/usr/lib/TweakInject"),
+                PT_STR_ENTRY("/var/jb/usr/lib/TweakInject"),
+                PT_STR_ENTRY("/private/var/jb/usr/lib/TweakInject"),
                 PT_STR_ENTRY("/usr/lib/ellekit.dylib"),
                 PT_STR_ENTRY("/usr/lib/libhooker.dylib"),
                 PT_STR_ENTRY("/usr/lib/libsubstitute.dylib"),
+                PT_STR_ENTRY("/usr/lib/SSLKillSwitch2.dylib"),
+                PT_STR_ENTRY("/usr/lib/Shadow.dylib"),
+                PT_STR_ENTRY("/usr/lib/Choicy.dylib"),
                 PT_STR_ENTRY("/usr/lib/substrate"),
                 PT_STR_ENTRY("/usr/sbin/frida-server"),
                 PT_STR_ENTRY("/usr/bin/cycript"),
@@ -640,53 +663,59 @@ static BOOL pt_is_hidden_normalized_path_cached_caller(const char *norm, const v
         for (const char *q = norm; *q != '\0' && !is_candidate; q++) {
             switch (*q) {
                 case 'd':
-                    if (strncmp(q, "discord-ipc-", 12) == 0) {
+                    if ((q == norm || q[-1] == '/') && strncmp(q, "discord-ipc-", 12) == 0) {
                         is_candidate = YES;
                     }
                     break;
                 case 'P':
-                    if (q[1] == 'l' && q[2] == 'a' && q[3] == 'y') {
-                        if (strncmp(q, "PlayTools.framework", 19) == 0 ||
-                            strncmp(q, "PlayTools.dylib", 15) == 0 ||
-                            strncmp(q, "Playtools.strings", 17) == 0) {
+                    if ((q == norm || q[-1] == '/') && q[1] == 'l' && q[2] == 'a' && q[3] == 'y') {
+                        if (pt_match_path_component_token(norm, q, "PlayTools.framework", 19, NO) ||
+                            pt_match_path_component_token(norm, q, "PlayTools.dylib", 15, NO) ||
+                            pt_match_path_component_token(norm, q, "Playtools.strings", 17, NO)) {
                             is_candidate = YES;
                         }
                     }
                     break;
                 case 'i':
-                    if (strncmp(q, "io.playcover.PlayCover", 22) == 0) {
+                    if (pt_match_path_component_token(norm, q, "io.playcover.PlayCover", 22, YES)) {
                         if (strstr(norm, "/io.playcover.PlayCover/Applications/") == NULL) {
                             is_candidate = YES;
                         }
                     }
                     break;
                 case 'a':
-                    if (strncmp(q, "app.makedie.MacOver", 19) == 0) {
+                    if (pt_match_path_component_token(norm, q, "app.makedie.MacOver", 19, YES)) {
                         if (strstr(norm, "/app.makedie.MacOver/Applications/") == NULL) {
                             is_candidate = YES;
                         }
                     }
                     break;
                 case 'A':
-                    if (strncmp(q, "AKInterface.bundle", 18) == 0) {
+                    if (pt_match_path_component_token(norm, q, "AKInterface.bundle", 18, NO)) {
                         is_candidate = YES;
                     }
                     break;
                 case 'U':
-                    if (strncmp(q, "UserPlugins", 11) == 0) {
+                    if (pt_match_path_component_token(norm, q, "UserPlugins", 11, NO)) {
                         is_candidate = YES;
                     }
                     break;
                 case '~':
-                    if (check_bypass_artifacts && strncmp(q, "~iosmac.savedState", 18) == 0) {
+                    if (check_bypass_artifacts &&
+                        strncmp(q, "~iosmac.savedState", 18) == 0 &&
+                        (q[18] == '\0' || q[18] == '/')) {
                         is_candidate = YES;
                     }
                     break;
                 case '/':
                     if (check_bypass_artifacts) {
-                        if (q[1] == 'S' && strncmp(q, "/Saved Application State", 24) == 0) {
+                        if (q[1] == 'S' &&
+                            strncmp(q, "/Saved Application State", 24) == 0 &&
+                            (q[24] == '\0' || q[24] == '/')) {
                             is_candidate = YES;
-                        } else if (q[1] == '.' && strncmp(q, "/.CFUserTextEncoding", 21) == 0) {
+                        } else if (q[1] == '.' &&
+                                   strncmp(q, "/.CFUserTextEncoding", 21) == 0 &&
+                                   (q[21] == '\0' || q[21] == '/')) {
                             is_candidate = YES;
                         }
                     }

@@ -71,8 +71,8 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_class(const char *n
                 PT_HAS_PREFIX_LIT(name, "NSView") ||
                 PT_HAS_PREFIX_LIT(name, "NSMenu") ||
                 PT_HAS_PREFIX_LIT(name, "NSPanel") ||
-                PT_HAS_PREFIX_LIT(name, "NSTask") ||
-                PT_HAS_PREFIX_LIT(name, "NSConcreteTask") ||
+                strcmp(name, "NSTask") == 0 ||
+                strcmp(name, "NSConcreteTask") == 0 ||
                 PT_HAS_PREFIX_LIT(name, "NSWorkspace") ||
                 PT_HAS_PREFIX_LIT(name, "NSRunningApplication") ||
                 PT_HAS_PREFIX_LIT(name, "NSScreen") ||
@@ -606,10 +606,12 @@ static BOOL pt_should_hide_resolved_objc_class(const char *name, Class cls) {
                 pt_match_prefix_modulo_private(img, s_real_app_bundle_dir, s_real_app_bundle_len) != NULL) {
                 return NO;
             }
-            if (strstr(img, "/UIKitCore.framework/") != NULL ||
-                strstr(img, "/UIKit.framework/") != NULL) {
-                return NO;
+            if (strcmp(name, "NSTask") == 0 || strcmp(name, "NSConcreteTask") == 0) {
+                return YES;
             }
+            return (pt_is_hidden_dyld_image_name(img) ||
+                    strstr(img, "/WindowManagement.framework/") != NULL ||
+                    strstr(img, "/Shortcut.framework/") != NULL);
         }
     }
     return YES;
@@ -1954,26 +1956,30 @@ static BOOL pt_has_blocked_jailbreak_dlopen_component(const char *path) {
         size_t len;
         BOOL require_delim;
     } s_basename_prefixes[] = {
-        PT_DLOPEN_PREFIX_ENTRY("MobileSubstrate", NO),
-        PT_DLOPEN_PREFIX_ENTRY("libMobileSubstrate", NO),
-        PT_DLOPEN_PREFIX_ENTRY("CydiaSubstrate", NO),
-        PT_DLOPEN_PREFIX_ENTRY("libCydiaSubstrate", NO),
-        PT_DLOPEN_PREFIX_ENTRY("SubstrateInserter", NO),
-        PT_DLOPEN_PREFIX_ENTRY("libSubstrateInserter", NO),
-        PT_DLOPEN_PREFIX_ENTRY("SubstrateBootstrap", NO),
-        PT_DLOPEN_PREFIX_ENTRY("libSubstrateBootstrap", NO),
-        PT_DLOPEN_PREFIX_ENTRY("TweakInject", NO),
-        PT_DLOPEN_PREFIX_ENTRY("libTweakInject", NO),
-        PT_DLOPEN_PREFIX_ENTRY("ellekit", NO),
-        PT_DLOPEN_PREFIX_ENTRY("libellekit", NO),
-        PT_DLOPEN_PREFIX_ENTRY("libhooker", NO),
-        PT_DLOPEN_PREFIX_ENTRY("libsubstitute", NO),
-        PT_DLOPEN_PREFIX_ENTRY("fridagadget", NO),
-        PT_DLOPEN_PREFIX_ENTRY("libfridagadget", NO),
+        PT_DLOPEN_PREFIX_ENTRY("MobileSubstrate", YES),
+        PT_DLOPEN_PREFIX_ENTRY("libMobileSubstrate", YES),
+        PT_DLOPEN_PREFIX_ENTRY("CydiaSubstrate", YES),
+        PT_DLOPEN_PREFIX_ENTRY("libCydiaSubstrate", YES),
+        PT_DLOPEN_PREFIX_ENTRY("SubstrateInserter", YES),
+        PT_DLOPEN_PREFIX_ENTRY("libSubstrateInserter", YES),
+        PT_DLOPEN_PREFIX_ENTRY("SubstrateBootstrap", YES),
+        PT_DLOPEN_PREFIX_ENTRY("libSubstrateBootstrap", YES),
+        PT_DLOPEN_PREFIX_ENTRY("TweakInject", YES),
+        PT_DLOPEN_PREFIX_ENTRY("libTweakInject", YES),
+        PT_DLOPEN_PREFIX_ENTRY("ellekit", YES),
+        PT_DLOPEN_PREFIX_ENTRY("libellekit", YES),
+        PT_DLOPEN_PREFIX_ENTRY("libhooker", YES),
+        PT_DLOPEN_PREFIX_ENTRY("libsubstitute", YES),
+        PT_DLOPEN_PREFIX_ENTRY("fridagadget", YES),
+        PT_DLOPEN_PREFIX_ENTRY("libfridagadget", YES),
         PT_DLOPEN_PREFIX_ENTRY("frida", YES),
         PT_DLOPEN_PREFIX_ENTRY("libfrida", YES),
         PT_DLOPEN_PREFIX_ENTRY("cycript", YES),
-        PT_DLOPEN_PREFIX_ENTRY("libcycript", NO)
+        PT_DLOPEN_PREFIX_ENTRY("libcycript", YES),
+        PT_DLOPEN_PREFIX_ENTRY("SSLKillSwitch2", YES),
+        PT_DLOPEN_PREFIX_ENTRY("libSSLKillSwitch2", YES),
+        PT_DLOPEN_PREFIX_ENTRY("Choicy", YES),
+        PT_DLOPEN_PREFIX_ENTRY("libChoicy", YES)
     };
 #undef PT_DLOPEN_PREFIX_ENTRY
 
