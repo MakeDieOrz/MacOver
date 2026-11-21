@@ -55,6 +55,7 @@ static void mock_plugin_init(void) {
 
 MOCK_TARGET_M = r"""
 @import Foundation;
+@import CoreMotion;
 @import QuartzCore;
 @import UIKit;
 @import PlayTools;
@@ -150,6 +151,16 @@ int main(int argc, const char *argv[]) {
         if (uname(&uts) != 0) {
             memset(&uts, 0, sizeof(uts));
         }
+
+        CMMotionManager *motionMgr = [[CMMotionManager alloc] init];
+        BOOL cmAccelAvailable = motionMgr.isAccelerometerAvailable;
+        BOOL cmGyroAvailable = motionMgr.isGyroAvailable;
+        BOOL cmDeviceMotionAvailable = motionMgr.isDeviceMotionAvailable;
+        [motionMgr startAccelerometerUpdates];
+        CMAccelerometerData *cmSample = motionMgr.accelerometerData;
+        BOOL cmSampleValid = (cmSample != nil && [cmSample isKindOfClass:[CMAccelerometerData class]] &&
+                              cmSample.acceleration.z < -0.9);
+        [motionMgr stopAccelerometerUpdates];
 
         Class appAttestCls = NSClassFromString(@"DCAppAttestService");
         if (appAttestCls == Nil) {
@@ -391,6 +402,10 @@ int main(int argc, const char *argv[]) {
             @"unameMachine": [NSString stringWithUTF8String:uts.machine] ?: @"",
             @"appAttestLoaded": appAttestLoaded ? @YES : @NO,
             @"appAttestSupported": appAttestSupported ? @YES : @NO,
+            @"cmAccelAvailable": cmAccelAvailable ? @YES : @NO,
+            @"cmGyroAvailable": cmGyroAvailable ? @YES : @NO,
+            @"cmDeviceMotionAvailable": cmDeviceMotionAvailable ? @YES : @NO,
+            @"cmSampleValid": cmSampleValid ? @YES : @NO,
             @"provPath": provPath,
             @"provURLPath": provURLPath,
             @"cfProvURLPath": cfProvURLPath,
@@ -576,6 +591,7 @@ def build_mock_app(work_dir: Path, playtools_fw: Path) -> Path:
         "-iframework", ios_support_fw,
         "-F", fw_parent,
         "-framework", "Foundation",
+        "-framework", "CoreMotion",
         "-framework", "QuartzCore",
         "-framework", "UIKit",
         "-framework", "PlayTools",
@@ -643,6 +659,10 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info1["mh0HidPlayToolsLoadCmd"] is True,
         info1["mh0SectionLookupOK"] is True,
         info1["argvConsistent"] is True,
+        info1["cmAccelAvailable"] is True,
+        info1["cmGyroAvailable"] is True,
+        info1["cmDeviceMotionAvailable"] is True,
+        info1["cmSampleValid"] is True,
         info1["breadcrumbExistsAtStart"] is True,
         info1["breadcrumbExistsAfterSleep"] is False,
     ]

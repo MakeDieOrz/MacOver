@@ -19,6 +19,7 @@
 //
 
 #import <Foundation/Foundation.h>
+#import <CoreMotion/CoreMotion.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <UIKit/UIKit.h>
