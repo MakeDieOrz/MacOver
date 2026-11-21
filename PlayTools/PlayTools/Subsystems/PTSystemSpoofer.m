@@ -5635,7 +5635,6 @@ static kern_return_t pt_task_info(task_name_t target_task,
                             continue;
                         }
                         filtered[write_idx] = real_arr[i];
-                        filtered[write_idx].imageLoadAddress = pt_maybe_shadow_mach_header(real_arr[i].imageLoadAddress);
                         if (img_path != NULL) {
                             filtered[write_idx].imageFilePath = pt_sanitize_image_path_for_app(img_path);
                         }
@@ -5663,9 +5662,7 @@ static kern_return_t pt_task_info(task_name_t target_task,
                                 }
                             }
                             if (!hide_uuid) {
-                                struct dyld_uuid_info uentry = real_uuid_arr[j];
-                                uentry.imageLoadAddress = pt_maybe_shadow_mach_header(uentry.imageLoadAddress);
-                                filtered_uuids[uuid_write_idx++] = uentry;
+                                filtered_uuids[uuid_write_idx++] = real_uuid_arr[j];
                             }
                         }
                     }

@@ -81,6 +81,10 @@ MOCK_TARGET_M = r"""
 extern bool pt_is_registered_hidden_module(const char *name);
 extern bool pt_is_registered_hidden_class(const char *name);
 extern int pt_harness_syscall(int, ...) __asm("_syscall");
+extern void pt_harness_dyld_get_image_versions(
+    const struct mach_header *mh,
+    void (^callback)(uint32_t platform, uint32_t sdk, uint32_t minos))
+    __asm("_dyld_get_image_versions") __attribute__((weak_import));
 
 static NSString *pt_state_dir(void) {
     NSArray<NSURL *> *caches = [[NSFileManager defaultManager] URLsForDirectory:NSCachesDirectory
@@ -389,9 +393,14 @@ int main(int argc, const char *argv[]) {
             }
         }
 
+        extern const struct mach_header_64 _mh_execute_header;
         const struct mach_header_64 *mh0 = (const struct mach_header_64 *)_dyld_get_image_header(0);
-        uint32_t mh0Platform = 0;
-        BOOL mh0LeakedPlayTools = NO;
+        intptr_t slide0 = _dyld_get_image_vmaddr_slide(0);
+        Dl_info mainDlInfo;
+        memset(&mainDlInfo, 0, sizeof(mainDlInfo));
+        BOOL dladdrOK = (dladdr((const void *)&main, &mainDlInfo) != 0);
+        intptr_t computedSlide0 = 0;
+        BOOL foundTextSeg = NO;
         if (mh0 != NULL && mh0->magic == MH_MAGIC_64) {
             const uint8_t *lcp = (const uint8_t *)(mh0 + 1);
             const uint8_t *lcEnd = lcp + mh0->sizeofcmds;
@@ -400,20 +409,32 @@ int main(int argc, const char *argv[]) {
                 if (lc->cmdsize < sizeof(struct load_command) || lcp + lc->cmdsize > lcEnd) {
                     break;
                 }
-                if (lc->cmd == LC_BUILD_VERSION && lc->cmdsize >= sizeof(struct build_version_command)) {
-                    mh0Platform = ((const struct build_version_command *)lc)->platform;
-                } else if ((lc->cmd == LC_LOAD_DYLIB || lc->cmd == LC_LOAD_WEAK_DYLIB) &&
-                           lc->cmdsize >= sizeof(struct dylib_command)) {
-                    const struct dylib_command *dc = (const struct dylib_command *)lc;
-                    if (dc->dylib.name.offset < lc->cmdsize) {
-                        const char *dn = (const char *)lc + dc->dylib.name.offset;
-                        if (strstr(dn, "PlayTools") != NULL || strstr(dn, "/Users/") != NULL) {
-                            mh0LeakedPlayTools = YES;
-                        }
+                if (lc->cmd == LC_SEGMENT_64 && lc->cmdsize >= sizeof(struct segment_command_64)) {
+                    const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+                    if (strncmp(seg->segname, "__TEXT", 16) == 0) {
+                        computedSlide0 = (intptr_t)mh0 - (intptr_t)seg->vmaddr;
+                        foundTextSeg = YES;
+                        break;
                     }
                 }
                 lcp += lc->cmdsize;
             }
+        }
+        BOOL mh0BaseAndSlideConsistent = (mh0 != NULL &&
+                                          mh0 == &_mh_execute_header &&
+                                          dladdrOK &&
+                                          mainDlInfo.dli_fbase == (void *)mh0 &&
+                                          foundTextSeg &&
+                                          computedSlide0 == slide0);
+        __block uint32_t mh0Platform = 0;
+        if (mh0 != NULL && pt_harness_dyld_get_image_versions != NULL) {
+            pt_harness_dyld_get_image_versions((const struct mach_header *)mh0, ^(uint32_t platform, uint32_t sdk, uint32_t minos) {
+                (void)sdk;
+                (void)minos;
+                if (mh0Platform == 0) {
+                    mh0Platform = platform;
+                }
+            });
         }
         unsigned long mh0TextSize = 0;
         uint8_t *mh0TextPtr = (mh0 != NULL) ? getsectiondata(mh0, "__TEXT", "__text", &mh0TextSize) : NULL;
@@ -506,7 +527,7 @@ int main(int argc, const char *argv[]) {
             @"antiDetectionHidShadowSelector": (!leakedShadowResponds) ? @YES : @NO,
             @"antiDetectionHidPluginImage": (!dyldLeakedPlugin) ? @YES : @NO,
             @"mh0Platform": @(mh0Platform),
-            @"mh0HidPlayToolsLoadCmd": (!mh0LeakedPlayTools) ? @YES : @NO,
+            @"mh0BaseAndSlideConsistent": mh0BaseAndSlideConsistent ? @YES : @NO,
             @"mh0SectionLookupOK": mh0SectionLookupOK ? @YES : @NO,
             @"argvConsistent": argvConsistent ? @YES : @NO,
             @"stateDir": stateDir ?: @"",
@@ -733,7 +754,7 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info1["antiDetectionHidShadowSelector"] is True,
         info1["antiDetectionHidPluginImage"] is True,
         info1["mh0Platform"] == 2,
-        info1["mh0HidPlayToolsLoadCmd"] is True,
+        info1["mh0BaseAndSlideConsistent"] is True,
         info1["mh0SectionLookupOK"] is True,
         info1["argvConsistent"] is True,
         info1["cmAccelAvailable"] is True,
