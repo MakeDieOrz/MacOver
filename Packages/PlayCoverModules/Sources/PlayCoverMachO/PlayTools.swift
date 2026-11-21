@@ -240,8 +240,7 @@ public class PlayTools {
         try Macho.injectLoadCommand(
             at: exec,
             cmdType: UInt32(LC_LOAD_DYLIB),
-            dylibPath: playToolsPath.path,
-            beforeThirdPartyDylibs: true
+            dylibPath: playToolsPath.path
         )
 
         let payload = exec.deletingLastPathComponent()
@@ -383,8 +382,7 @@ public class PlayTools {
         try Macho.injectLoadCommand(
             at: exec,
             cmdType: UInt32(LC_LOAD_DYLIB),
-            dylibPath: "@executable_path/Frameworks/PlayTools.dylib",
-            beforeThirdPartyDylibs: true
+            dylibPath: "@executable_path/Frameworks/PlayTools.dylib"
         )
 
         let frameworksDir = payload.appendingPathComponent("Frameworks")
