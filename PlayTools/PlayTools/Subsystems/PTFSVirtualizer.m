@@ -2440,11 +2440,12 @@ static int pt_stat_virtual_ancestor(struct stat *buf) {
     return rc;
 }
 
-static int pt_open(char const* restrict filename, int oflag, ... ) {
+__attribute__((visibility("hidden")))
+int pt_fs_open_with_caller(const char *filename, int oflag, mode_t mode, const void *caller) {
     char vbuf[PATH_MAX];
     const char *resolved = NULL;
     pt_fs_path_disposition_t disp = pt_prepare_fs_path_mode(filename,
-                                                            __builtin_return_address(0),
+                                                            caller,
                                                             vbuf,
                                                             sizeof(vbuf),
                                                             &resolved,
@@ -2466,25 +2467,29 @@ static int pt_open(char const* restrict filename, int oflag, ... ) {
     if (filename != NULL && resolved != filename) {
         PT_DEBUG_TRACE("fs", "redirected open %s -> %s", filename, resolved);
     }
-
     if (oflag & O_CREAT) {
-        int mod;
-        va_list ap;
-        va_start(ap, oflag);
-        mod = va_arg(ap, int);
-        va_end(ap);
-
-        return open(resolved, oflag, mod);
+        return open(resolved, oflag, (int)mode);
     }
-
     return open(resolved, oflag);
 }
 
-static int pt_openat(int fd, const char *path, int oflag, ...) {
+static int pt_open(char const* restrict filename, int oflag, ... ) {
+    mode_t mode = 0;
+    if (oflag & O_CREAT) {
+        va_list ap;
+        va_start(ap, oflag);
+        mode = (mode_t)va_arg(ap, int);
+        va_end(ap);
+    }
+    return pt_fs_open_with_caller(filename, oflag, mode, __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
+int pt_fs_openat_with_caller(int fd, const char *path, int oflag, mode_t mode, const void *caller) {
     char vbuf[PATH_MAX];
     pt_fs_path_disposition_t disp = pt_prepare_fs_path_at_mode(fd,
                                                                path,
-                                                               __builtin_return_address(0),
+                                                               caller,
                                                                vbuf,
                                                                sizeof(vbuf),
                                                                &path,
@@ -2497,18 +2502,21 @@ static int pt_openat(int fd, const char *path, int oflag, ...) {
         errno = (oflag & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC)) ? EACCES : EPERM;
         return -1;
     }
-
     if (oflag & O_CREAT) {
-        int mod;
+        return openat(fd, path, oflag, (int)mode);
+    }
+    return openat(fd, path, oflag);
+}
+
+static int pt_openat(int fd, const char *path, int oflag, ...) {
+    mode_t mode = 0;
+    if (oflag & O_CREAT) {
         va_list ap;
         va_start(ap, oflag);
-        mod = va_arg(ap, int);
+        mode = (mode_t)va_arg(ap, int);
         va_end(ap);
-
-        return openat(fd, path, oflag, mod);
     }
-
-    return openat(fd, path, oflag);
+    return pt_fs_openat_with_caller(fd, path, oflag, mode, __builtin_return_address(0));
 }
 
 static int pt_creat(const char *path, mode_t mode) {
@@ -2746,46 +2754,39 @@ static FILE *pt_freopen(const char *filename, const char *mode, FILE *stream) {
     return freopen(filename, mode, stream);
 }
 
-static int pt_stat(char const* restrict path, struct stat* restrict buf) {
+__attribute__((visibility("hidden")))
+int pt_fs_stat_with_caller(const char *path, struct stat *buf, BOOL follow_symlinks, const void *caller) {
     char vbuf[PATH_MAX];
     const char *resolved = NULL;
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path_ro(path, __builtin_return_address(0), vbuf, sizeof(vbuf), &resolved);
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_ro(path, caller, vbuf, sizeof(vbuf), &resolved);
     if (disp == PT_FS_PATH_HIDDEN) {
-        PT_DEBUG_TRACE("fs", "hid stat path=%s", path != NULL ? path : "<null>");
+        PT_DEBUG_TRACE("fs", "hid %s path=%s", follow_symlinks ? "stat" : "lstat", path != NULL ? path : "<null>");
         errno = ENOENT;
         return -1;
     }
     if (disp == PT_FS_PATH_VIRTUAL_ANCESTOR) {
-        PT_DEBUG_TRACE("fs", "virtual-ancestor stat path=%s", path != NULL ? path : "<null>");
+        PT_DEBUG_TRACE("fs", "virtual-ancestor %s path=%s", follow_symlinks ? "stat" : "lstat", path != NULL ? path : "<null>");
         return pt_stat_virtual_ancestor(buf);
     }
     if (resolved == NULL) {
         errno = EFAULT;
         return -1;
     }
-    if (path != NULL && resolved != path) {
-        PT_DEBUG_TRACE("fs", "redirected stat %s -> %s", path, resolved);
-    }
-    return stat(resolved, buf);
+    return follow_symlinks ? stat(resolved, buf) : lstat(resolved, buf);
+}
+
+static int pt_stat(char const* restrict path, struct stat* restrict buf) {
+    return pt_fs_stat_with_caller(path, buf, YES, __builtin_return_address(0));
 }
 
 static int pt_lstat(char const* restrict path, struct stat* restrict buf) {
-    char vbuf[PATH_MAX];
-    const char *resolved = NULL;
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path_ro(path, __builtin_return_address(0), vbuf, sizeof(vbuf), &resolved);
-    if (disp == PT_FS_PATH_HIDDEN) {
-        errno = ENOENT;
-        return -1;
-    }
-    if (disp == PT_FS_PATH_VIRTUAL_ANCESTOR) {
-        return pt_stat_virtual_ancestor(buf);
-    }
-    return lstat(resolved, buf);
+    return pt_fs_stat_with_caller(path, buf, NO, __builtin_return_address(0));
 }
 
-static int pt_fstatat(int fd, const char *path, struct stat *buf, int flag) {
+__attribute__((visibility("hidden")))
+int pt_fs_fstatat_with_caller(int fd, const char *path, struct stat *buf, int flag, const void *caller) {
     char vbuf[PATH_MAX];
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path_at_ro(fd, path, __builtin_return_address(0), vbuf, sizeof(vbuf), &path);
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_at_ro(fd, path, caller, vbuf, sizeof(vbuf), &path);
     if (disp == PT_FS_PATH_HIDDEN) {
         errno = ENOENT;
         return -1;
@@ -2794,6 +2795,10 @@ static int pt_fstatat(int fd, const char *path, struct stat *buf, int flag) {
         return pt_stat_virtual_ancestor(buf);
     }
     return fstatat(fd, path, buf, flag);
+}
+
+static int pt_fstatat(int fd, const char *path, struct stat *buf, int flag) {
+    return pt_fs_fstatat_with_caller(fd, path, buf, flag, __builtin_return_address(0));
 }
 
 static int pt_statx_np(const char *path, struct stat *buf, filesec_t fsec) {
@@ -2822,10 +2827,11 @@ static int pt_lstatx_np(const char *path, struct stat *buf, filesec_t fsec) {
     return lstatx_np(path, buf, fsec);
 }
 
-static int pt_access(char const* path, int mode) {
+__attribute__((visibility("hidden")))
+int pt_fs_access_with_caller(const char *path, int mode, const void *caller) {
     char vbuf[PATH_MAX];
     pt_fs_path_disposition_t disp = pt_prepare_fs_path_mode(path,
-                                                            __builtin_return_address(0),
+                                                            caller,
                                                             vbuf,
                                                             sizeof(vbuf),
                                                             &path,
@@ -2844,11 +2850,16 @@ static int pt_access(char const* path, int mode) {
     return access(path, mode);
 }
 
-static int pt_faccessat(int fd, const char *path, int mode, int flag) {
+static int pt_access(char const* path, int mode) {
+    return pt_fs_access_with_caller(path, mode, __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
+int pt_fs_faccessat_with_caller(int fd, const char *path, int mode, int flag, const void *caller) {
     char vbuf[PATH_MAX];
     pt_fs_path_disposition_t disp = pt_prepare_fs_path_at_mode(fd,
                                                                path,
-                                                               __builtin_return_address(0),
+                                                               caller,
                                                                vbuf,
                                                                sizeof(vbuf),
                                                                &path,
@@ -2865,6 +2876,10 @@ static int pt_faccessat(int fd, const char *path, int mode, int flag) {
         return 0;
     }
     return faccessat(fd, path, mode, flag);
+}
+
+static int pt_faccessat(int fd, const char *path, int mode, int flag) {
+    return pt_fs_faccessat_with_caller(fd, path, mode, flag, __builtin_return_address(0));
 }
 
 static ssize_t pt_finish_readlink(ssize_t len,
@@ -2896,8 +2911,8 @@ static ssize_t pt_finish_readlink(ssize_t len,
     return (ssize_t)copy_len;
 }
 
-static ssize_t pt_readlink(const char * restrict path, char * restrict buf, size_t bufsize) {
-    const void *caller = __builtin_return_address(0);
+__attribute__((visibility("hidden")))
+ssize_t pt_fs_readlink_with_caller(const char *path, char *buf, size_t bufsize, const void *caller) {
     char vbuf[PATH_MAX];
     const char *resolved = NULL;
     pt_fs_path_disposition_t disp = pt_prepare_fs_path(path, caller, vbuf, sizeof(vbuf), &resolved);
@@ -2921,8 +2936,12 @@ static ssize_t pt_readlink(const char * restrict path, char * restrict buf, size
     return pt_finish_readlink(len, raw_buf, buf, bufsize, caller);
 }
 
-static ssize_t pt_readlinkat(int fd, const char * restrict path, char * restrict buf, size_t bufsize) {
-    const void *caller = __builtin_return_address(0);
+static ssize_t pt_readlink(const char * restrict path, char * restrict buf, size_t bufsize) {
+    return pt_fs_readlink_with_caller(path, buf, bufsize, __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
+ssize_t pt_fs_readlinkat_with_caller(int fd, const char *path, char *buf, size_t bufsize, const void *caller) {
     if (pt_fd_is_sensitive(fd, caller)) {
         errno = ENOENT;
         return -1;
@@ -2944,6 +2963,10 @@ static ssize_t pt_readlinkat(int fd, const char * restrict path, char * restrict
     char raw_buf[PATH_MAX];
     ssize_t len = readlinkat(fd, resolved, raw_buf, sizeof(raw_buf) - 1);
     return pt_finish_readlink(len, raw_buf, buf, bufsize, caller);
+}
+
+static ssize_t pt_readlinkat(int fd, const char * restrict path, char * restrict buf, size_t bufsize) {
+    return pt_fs_readlinkat_with_caller(fd, path, buf, bufsize, __builtin_return_address(0));
 }
 
 extern char *pt_orig_realpath_legacy(const char *, char *) __asm("_realpath");
@@ -3106,6 +3129,61 @@ static int pt_handle_fcntl_getpath(int ret, int cmd, void *parg, const void *cal
         }
     }
     return ret;
+}
+
+__attribute__((visibility("hidden")))
+int pt_fs_fcntl_with_caller(int fd, int cmd, uintptr_t arg, const void *caller) {
+    switch (cmd) {
+        case F_GETFD:
+        case F_GETFL:
+        case F_GETOWN:
+        case F_FLUSH_DATA:
+        case F_CHKCLEAN:
+        case F_FULLFSYNC:
+        case F_FREEZE_FS:
+        case F_THAW_FS:
+        case F_GETPROTECTIONCLASS:
+        case F_GETNOSIGPIPE:
+        case F_GETPROTECTIONLEVEL:
+        case F_BARRIERFSYNC:
+#ifdef F_GETLEASE
+        case F_GETLEASE:
+#endif
+            return fcntl(fd, cmd);
+
+        case F_DUPFD:
+        case F_DUPFD_CLOEXEC:
+#ifdef F_DUPFD_CLOFORK
+        case F_DUPFD_CLOFORK:
+#endif
+        case F_SETFD:
+        case F_SETFL:
+        case F_SETOWN:
+        case F_RDAHEAD:
+        case F_NOCACHE:
+        case F_GLOBAL_NOCACHE:
+        case F_NODIRECT:
+        case F_SETPROTECTIONCLASS:
+        case F_SETBACKINGSTORE:
+        case F_SETNOSIGPIPE:
+        case F_SINGLE_WRITER:
+#ifdef F_SETLEASE
+        case F_SETLEASE:
+#endif
+#ifdef F_NOCACHE_EXT
+        case F_NOCACHE_EXT:
+#endif
+            return fcntl(fd, cmd, (int)arg);
+
+        case F_SETSIZE:
+            return fcntl(fd, cmd, (off_t)arg);
+
+        default: {
+            void *parg = (void *)arg;
+            int ret = fcntl(fd, cmd, parg);
+            return pt_handle_fcntl_getpath(ret, cmd, parg, caller);
+        }
+    }
 }
 
 static int pt_fcntl(int fd, int cmd, ...) {
@@ -3357,8 +3435,8 @@ static int pt_proc_regionfilename(int pid, uint64_t address, void *buffer, uint3
     return ret;
 }
 
-static int pt_proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer, int buffersize) {
-    const void *caller = __builtin_return_address(0);
+__attribute__((visibility("hidden")))
+int pt_fs_proc_pidinfo_with_caller(int pid, int flavor, uint64_t arg, void *buffer, int buffersize, const void *caller) {
     BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
     int self_pid = getpid();
     if (!is_sys && pid != 0 && pid != self_pid) {
@@ -3509,6 +3587,10 @@ static int pt_proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer, int 
             break;
     }
     return ret;
+}
+
+static int pt_proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer, int buffersize) {
+    return pt_fs_proc_pidinfo_with_caller(pid, flavor, arg, buffer, buffersize, __builtin_return_address(0));
 }
 
 static int pt_proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize) {

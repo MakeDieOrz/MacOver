@@ -78,6 +78,7 @@ MOCK_TARGET_M = r"""
 
 extern bool pt_is_registered_hidden_module(const char *name);
 extern bool pt_is_registered_hidden_class(const char *name);
+extern int pt_harness_syscall(int, ...) __asm("_syscall");
 
 static NSString *pt_state_dir(void) {
     NSArray<NSURL *> *caches = [[NSFileManager defaultManager] URLsForDirectory:NSCachesDirectory
@@ -136,6 +137,11 @@ int main(int argc, const char *argv[]) {
         size_t sysctlMachineLen = sizeof(sysctlMachine);
         if (sysctlbyname("hw.machine", sysctlMachine, &sysctlMachineLen, NULL, 0) != 0) {
             sysctlMachine[0] = '\0';
+        }
+        char syscallMachine[64] = {0};
+        size_t syscallMachineLen = sizeof(syscallMachine);
+        if (pt_harness_syscall(274, "hw.machine", (size_t)10, syscallMachine, &syscallMachineLen, NULL, (size_t)0) != 0) {
+            syscallMachine[0] = '\0';
         }
 
         struct utsname uts;
@@ -370,6 +376,7 @@ int main(int argc, const char *argv[]) {
             @"sysctlOSRelease": [NSString stringWithUTF8String:sysctlOSRelease] ?: @"",
             @"sysctlVersion": [NSString stringWithUTF8String:sysctlVersion] ?: @"",
             @"sysctlMachine": [NSString stringWithUTF8String:sysctlMachine] ?: @"",
+            @"syscallMachine": [NSString stringWithUTF8String:syscallMachine] ?: @"",
             @"unameRelease": [NSString stringWithUTF8String:uts.release] ?: @"",
             @"unameVersion": [NSString stringWithUTF8String:uts.version] ?: @"",
             @"unameMachine": [NSString stringWithUTF8String:uts.machine] ?: @"",
@@ -920,6 +927,7 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         "xnu-6153" in info6a["sysctlVersion"],
         "xnu-6153" in info6a["unameVersion"],
         info6a["sysctlMachine"] == "iPhone12,5",
+        info6a["syscallMachine"] == "iPhone12,5",
         info6a["unameMachine"] == "iPhone12,5",
         (not info6a["appAttestLoaded"]) or (info6a["appAttestSupported"] is False),
         marker6a.exists(),

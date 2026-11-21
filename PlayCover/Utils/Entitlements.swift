@@ -305,7 +305,10 @@ class Entitlements {
             sandboxProfile.append("(deny process-fork)")
             sandboxProfile.append(
                 "(deny sysctl-read (with errno ENOENT) (with no-report) " +
-                "(sysctl-name \"kern.bootargs\" \"kern.proc.all\" \"kern.proc.uid\" " +
+                "(sysctl-name \"kern.bootargs\" \"kern.wakereason\" \"kern.hibernatefile\" " +
+                "\"kern.hv_support\" \"vm.swapusage\" \"hw.use_kernelmanagerd\" " +
+                "\"security.mac.amfi.developer_mode_status\" " +
+                "\"kern.proc.all\" \"kern.proc.uid\" " +
                 "\"kern.proc.ruid\" \"kern.proc.tty\" \"kern.proc.pgrp\"))"
             )
 
