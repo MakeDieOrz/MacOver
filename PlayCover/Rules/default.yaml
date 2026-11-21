@@ -1,5 +1,7 @@
 blacklist:
     - /Applications
+    - /System/Applications
+    - /Volumes
     - /Developer
     - /Library/Application Support/MacOver
     - /Library/Application Support/PlayCover
@@ -62,6 +64,8 @@ blacklist:
     - /private/var/lib/apt
     - /private/var/select/sh
     - /private/var/stash
+    - /private/var/vm
+    - /var/vm
     - /cores/binpack
     - /usr/bin/sshd
     - /var/jb

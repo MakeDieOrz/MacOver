@@ -294,6 +294,7 @@ static char s_real_main_exec_path[PATH_MAX];
 static size_t s_real_main_exec_len = 0;
 static char s_real_main_exec_rel_path[PATH_MAX];
 static void pt_ensure_app_backup_map(void);
+static BOOL pt_norm_is_inside_group_container(const char *norm);
 
 __attribute__((visibility("hidden"))) const char *pt_match_prefix_modulo_private(const char *path, const char *base, size_t base_len) {
     if (path == NULL || base == NULL || base_len == 0) {
@@ -427,6 +428,15 @@ static BOOL pt_is_hidden_normalized_path_cached_caller(const char *norm, const v
                 return (*inout_is_sys_caller == 0);
             }
         }
+        if (pt_norm_is_inside_group_container(norm)) {
+            if (!pt_rel_subpath_has_hidden_plugin_component(norm)) {
+                return NO;
+            }
+            if (*inout_is_sys_caller < 0) {
+                *inout_is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
+            }
+            return (*inout_is_sys_caller == 0);
+        }
         if (!atomic_load_explicit(&s_app_backup_ready, memory_order_acquire) &&
             strstr(norm, "AppBackups") != NULL &&
             !pt_is_in_internal_scope() &&
@@ -533,12 +543,52 @@ static BOOL pt_is_hidden_normalized_path_cached_caller(const char *norm, const v
         }
     }
 
+    BOOL check_bypass_artifacts = pt_is_bypass_enabled();
     BOOL is_candidate = NO;
     if (norm[0] == '/') {
         switch (norm[1]) {
+            case 'A':
+                if (check_bypass_artifacts &&
+                    strncmp(norm, "/Applications", 13) == 0 &&
+                    (norm[13] == '\0' || norm[13] == '/')) {
+                    is_candidate = YES;
+                }
+                break;
+            case 'L':
+                if (check_bypass_artifacts &&
+                    ((strncmp(norm, "/Library/Application Support", 28) == 0 &&
+                      (norm[28] == '\0' || norm[28] == '/')) ||
+                     (strncmp(norm, "/Library/Desktop Pictures", 25) == 0 &&
+                      (norm[25] == '\0' || norm[25] == '/')))) {
+                    is_candidate = YES;
+                }
+                break;
             case 'S':
-                if (strncmp(norm, "/System/iOSSupport", 18) == 0 &&
-                    (norm[18] == '\0' || norm[18] == '/')) {
+                if ((strncmp(norm, "/System/iOSSupport", 18) == 0 &&
+                     (norm[18] == '\0' || norm[18] == '/')) ||
+                    (check_bypass_artifacts &&
+                     strncmp(norm, "/System/Applications", 20) == 0 &&
+                     (norm[20] == '\0' || norm[20] == '/'))) {
+                    is_candidate = YES;
+                }
+                break;
+            case 'U':
+                if (check_bypass_artifacts) {
+                    if (strcmp(norm, "/Users") == 0 ||
+                        strcmp(norm, "/Users/Shared") == 0 ||
+                        strncmp(norm, "/Users/Shared/", 14) == 0) {
+                        is_candidate = YES;
+                    } else if (strncmp(norm, "/Users/", 7) == 0 &&
+                               atomic_load_explicit(&s_data_map_state, memory_order_acquire) == 1 &&
+                               s_real_data_container_len > 0) {
+                        is_candidate = YES;
+                    }
+                }
+                break;
+            case 'V':
+                if (check_bypass_artifacts &&
+                    strncmp(norm, "/Volumes", 8) == 0 &&
+                    (norm[8] == '\0' || norm[8] == '/')) {
                     is_candidate = YES;
                 }
                 break;
@@ -557,17 +607,25 @@ static BOOL pt_is_hidden_normalized_path_cached_caller(const char *norm, const v
                 }
                 break;
             case 'o':
-                if (strncmp(norm, "/opt/homebrew", 13) == 0) {
+                if (check_bypass_artifacts
+                        ? (strncmp(norm, "/opt", 4) == 0 && (norm[4] == '\0' || norm[4] == '/'))
+                        : (strncmp(norm, "/opt/homebrew", 13) == 0)) {
                     is_candidate = YES;
                 }
                 break;
             case 'v':
-                if (strcmp(norm, "/var/select/sh") == 0) {
+                if (strcmp(norm, "/var/select/sh") == 0 ||
+                    (check_bypass_artifacts &&
+                     strncmp(norm, "/var/vm", 7) == 0 &&
+                     (norm[7] == '\0' || norm[7] == '/'))) {
                     is_candidate = YES;
                 }
                 break;
             case 'p':
-                if (strcmp(norm, "/private/var/select/sh") == 0) {
+                if (strcmp(norm, "/private/var/select/sh") == 0 ||
+                    (check_bypass_artifacts &&
+                     strncmp(norm, "/private/var/vm", 15) == 0 &&
+                     (norm[15] == '\0' || norm[15] == '/'))) {
                     is_candidate = YES;
                 }
                 break;
@@ -579,7 +637,6 @@ static BOOL pt_is_hidden_normalized_path_cached_caller(const char *norm, const v
         is_candidate = YES;
     }
     if (!is_candidate) {
-        BOOL check_bypass_artifacts = pt_is_bypass_enabled();
         for (const char *q = norm; *q != '\0' && !is_candidate; q++) {
             switch (*q) {
                 case 'd':
@@ -724,6 +781,30 @@ static os_unfair_lock s_group_map_lock = OS_UNFAIR_LOCK_INIT;
 static pt_group_container_entry_t s_group_map[PT_MAX_GROUP_CONTAINERS];
 static size_t s_group_map_count = 0;
 static BOOL s_group_root_scanned = NO;
+
+static BOOL pt_norm_is_inside_group_container(const char *norm) {
+    if (norm == NULL || norm[0] != '/') {
+        return NO;
+    }
+    if (s_real_group_containers_root_len > 0 &&
+        pt_match_prefix_modulo_private(norm, s_real_group_containers_root, s_real_group_containers_root_len) != NULL) {
+        if (!atomic_load_explicit(&s_group_map_nonempty, memory_order_acquire)) {
+            return NO;
+        }
+        os_unfair_lock_lock(&s_group_map_lock);
+        BOOL matched = NO;
+        for (size_t i = 0; i < s_group_map_count; i++) {
+            if (s_group_map[i].real_len > 0 &&
+                pt_match_prefix_modulo_private(norm, s_group_map[i].real_dir, s_group_map[i].real_len) != NULL) {
+                matched = YES;
+                break;
+            }
+        }
+        os_unfair_lock_unlock(&s_group_map_lock);
+        return matched;
+    }
+    return NO;
+}
 
 static os_unfair_lock s_image_path_lock = OS_UNFAIR_LOCK_INIT;
 static CFMutableDictionaryRef s_image_path_ptr_cache = NULL;
