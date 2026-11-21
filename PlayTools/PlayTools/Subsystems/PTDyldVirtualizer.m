@@ -2298,6 +2298,11 @@ static void *pt_dlsym(void *handle, const char *symbol) {
                 pt_set_synthetic_dlerror("symbol not found");
                 return NULL;
             }
+        } else if (strcmp(symbol, "environ") == 0) {
+            char ***shadow_envp = pt_get_app_shadow_environ_ptr();
+            if (shadow_envp != NULL) {
+                return (void *)shadow_envp;
+            }
         } else if (symbol[0] == 'M' && symbol[1] == 'G') {
             if (strcmp(symbol, "MGCopyAnswer") == 0) {
                 return (void *)&pt_MGCopyAnswer;

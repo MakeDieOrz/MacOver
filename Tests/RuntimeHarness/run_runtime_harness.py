@@ -59,6 +59,7 @@ MOCK_TARGET_M = r"""
 @import UIKit;
 @import PlayTools;
 #include <dlfcn.h>
+#include <crt_externs.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <mach/mach.h>
@@ -276,7 +277,15 @@ int main(int argc, const char *argv[]) {
 #pragma clang diagnostic pop
         [fpsLink invalidate];
 
-        // Untrusted app reflection checks verify anti-detection hides injected artifacts.
+        char ***nsArgvp = _NSGetArgv();
+        NSString *nsArgv0 = (nsArgvp != NULL && *nsArgvp != NULL && (*nsArgvp)[0] != NULL)
+            ? ([NSString stringWithUTF8String:(*nsArgvp)[0]] ?: @"")
+            : @"";
+        NSString *procArgv0 = ([NSProcessInfo processInfo].arguments.count > 0)
+            ? [NSProcessInfo processInfo].arguments[0]
+            : @"";
+        BOOL argvConsistent = [nsArgv0 isEqualToString:procArgv0] &&
+                              ([nsArgv0 rangeOfString:@"/var/containers/Bundle/Application/"].location != NSNotFound);
         void *blockedDlsym = dlsym(RTLD_DEFAULT, "pt_is_registered_hidden_module");
         Class reflectedSafeMode = NSClassFromString(@"PTSafeMode");
         Class reflectedPluginCls = objc_lookUpClass("MockHarnessHiddenClass");
@@ -411,6 +420,7 @@ int main(int argc, const char *argv[]) {
             @"mh0Platform": @(mh0Platform),
             @"mh0HidPlayToolsLoadCmd": (!mh0LeakedPlayTools) ? @YES : @NO,
             @"mh0SectionLookupOK": mh0SectionLookupOK ? @YES : @NO,
+            @"argvConsistent": argvConsistent ? @YES : @NO,
             @"stateDir": stateDir ?: @"",
             @"breadcrumbExistsAtStart": crumbAtStart ? @YES : @NO,
             @"breadcrumbExistsAfterSleep": crumbAfterSleep ? @YES : @NO,
@@ -632,6 +642,7 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info1["mh0Platform"] == 2,
         info1["mh0HidPlayToolsLoadCmd"] is True,
         info1["mh0SectionLookupOK"] is True,
+        info1["argvConsistent"] is True,
         info1["breadcrumbExistsAtStart"] is True,
         info1["breadcrumbExistsAfterSleep"] is False,
     ]

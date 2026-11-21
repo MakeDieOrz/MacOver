@@ -529,6 +529,7 @@ __attribute__((visibility("hidden"))) CFStringRef pt_MGGetStringAnswer(CFStringR
 __attribute__((visibility("hidden"))) int32_t pt_MGGetProductType(void);
 __attribute__((visibility("hidden"))) int pt_sysctl_with_caller(int *name, u_int types, void *buf, size_t *size, void *arg0, size_t arg1, const void *caller);
 __attribute__((visibility("hidden"))) int pt_sysctlbyname_with_caller(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen, const void *caller);
+__attribute__((visibility("hidden"))) char ***pt_get_app_shadow_environ_ptr(void);
 
 // Entitlements exports
 __attribute__((visibility("hidden"))) int pt_csops_with_caller(pid_t pid, unsigned int ops, void *useraddr, size_t usersize, const void *caller);

@@ -1921,6 +1921,8 @@ BOOL pt_is_hidden_env_value(const char *val, BOOL has_virtual_container) {
         return NO;
     }
     if (strstr(val, "/Users/") != NULL ||
+        strncmp(val, "/Volumes/", 9) == 0 ||
+        strstr(val, ":/Volumes/") != NULL ||
         strcasestr(val, "PlayTools") != NULL ||
         strcasestr(val, "PlayCover") != NULL ||
         strcasestr(val, "MacOver") != NULL ||
@@ -3314,33 +3316,29 @@ BOOL pt_is_hidden_env_key(const char *name) {
         return NO;
     }
     if (strncmp(name, "XPC_", 4) == 0 ||
+        strncmp(name, "DYLD_", 5) == 0 ||
+        strncmp(name, "__XPC_DYLD_", 11) == 0 ||
+        strncmp(name, "SIMULATOR_", 10) == 0 ||
+        strncmp(name, "METAL_", 6) == 0 ||
+        strncmp(name, "MTL_", 4) == 0 ||
         strcasestr(name, "playcover") != NULL ||
         strcasestr(name, "macover") != NULL ||
         strcasestr(name, "playtools") != NULL) {
         return YES;
     }
     static const char *const kHiddenKeys[] = {
-        "DYLD_INSERT_LIBRARIES",
-        "DYLD_LIBRARY_PATH",
-        "DYLD_FRAMEWORK_PATH",
-        "DYLD_FALLBACK_LIBRARY_PATH",
-        "DYLD_FALLBACK_FRAMEWORK_PATH",
-        "DYLD_ROOT_PATH",
-        "DYLD_SHARED_REGION",
-        "DYLD_PRINT_LIBRARIES",
-        "DYLD_PRINT_OPTS",
-        "DYLD_PRINT_ENV",
-        "DYLD_FORCE_FLAT_NAMESPACE",
         "MallocStackLogging",
         "MallocStackLoggingNoCompact",
         "NSZombieEnabled",
         "CLASSIC",
         "OSSignpostLogging",
-        "METAL_DEVICE_WRAPPER_TYPE",
-        "METAL_DEBUG_ERROR_MODE",
-        "__XPC_DYLD_LIBRARY_PATH",
-        "__XPC_DYLD_FRAMEWORK_PATH",
+        "MTLCaptureEnabled",
         "__CFBundleIdentifier",
+        "__CF_USER_TEXT_ENCODING",
+        "DARWIN_USER_TEMP_DIR",
+        "DARWIN_USER_CACHE_DIR",
+        "DARWIN_USER_DIR",
+        "SQLITE_EXEMPT_PATH_FROM_VNODE_GUARDS",
         "TERM_PROGRAM",
         "TERM_PROGRAM_VERSION",
         "TERM_SESSION_ID",
@@ -3353,6 +3351,8 @@ BOOL pt_is_hidden_env_key(const char *name) {
         "USER",
         "LOGNAME",
         "OLDPWD",
+        "SHLVL",
+        "_",
         "DISABLE_PLAYSHADOW_BYPASS"
     };
     size_t count = sizeof(kHiddenKeys) / sizeof(kHiddenKeys[0]);
@@ -3448,12 +3448,8 @@ static void pt_free_env_snapshot(char **snap, size_t count) {
     free(snap);
 }
 
-static char ***pt_NSGetEnviron(void) {
-    char ***real_envp = _NSGetEnviron();
-    if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire) ||
-        real_envp == NULL || *real_envp == NULL ||
-        pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) ||
-        !pt_is_bypass_enabled()) {
+static char ***pt_refresh_shadow_environ(char ***real_envp) {
+    if (real_envp == NULL || *real_envp == NULL) {
         return real_envp;
     }
     pthread_mutex_lock(&s_shadow_env_mutex);
@@ -3634,6 +3630,127 @@ static char ***pt_NSGetEnviron(void) {
     char ***ret_ptr = (cur_shadow != NULL) ? &s_shadow_environ : real_envp;
     pthread_mutex_unlock(&s_shadow_env_mutex);
     return ret_ptr;
+}
+
+__attribute__((visibility("hidden")))
+char ***pt_get_app_shadow_environ_ptr(void) {
+    char ***real_envp = _NSGetEnviron();
+    if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire) ||
+        real_envp == NULL || *real_envp == NULL) {
+        return real_envp;
+    }
+    return pt_refresh_shadow_environ(real_envp);
+}
+
+static char ***pt_NSGetEnviron(void) {
+    char ***real_envp = _NSGetEnviron();
+    if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire) ||
+        real_envp == NULL || *real_envp == NULL ||
+        pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return real_envp;
+    }
+    return pt_refresh_shadow_environ(real_envp);
+}
+
+static pthread_mutex_t s_shadow_argv_mutex = PTHREAD_MUTEX_INITIALIZER;
+static char **s_shadow_argv = NULL;
+static int s_shadow_argc = -1;
+static char s_shadow_progname_buf[PATH_MAX];
+static char *s_shadow_progname_ptr = NULL;
+static pthread_once_t s_shadow_progname_once = PTHREAD_ONCE_INIT;
+
+static char ***pt_NSGetArgv(void) {
+    char ***real_argvp = _NSGetArgv();
+    if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire) ||
+        real_argvp == NULL || *real_argvp == NULL ||
+        !pt_is_bypass_enabled() ||
+        pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return real_argvp;
+    }
+    int *real_argcp = _NSGetArgc();
+    int argc = (real_argcp != NULL && *real_argcp > 0) ? *real_argcp : 0;
+    char **cur_argv = *real_argvp;
+    if (argc == 0) {
+        while (cur_argv[argc] != NULL && argc < 4096) {
+            argc++;
+        }
+    }
+    pthread_mutex_lock(&s_shadow_argv_mutex);
+    if (s_shadow_argv == NULL || s_shadow_argc != argc) {
+        char **built = (char **)calloc((size_t)argc + 1U, sizeof(char *));
+        if (built != NULL) {
+            BOOL ok = YES;
+            for (int i = 0; i < argc; i++) {
+                const char *arg = cur_argv[i] != NULL ? cur_argv[i] : "";
+                const char *src = arg;
+                if (i == 0 && arg[0] != '\0') {
+                    const char *san = pt_sanitize_image_path_for_cstr(arg);
+                    if (san != NULL && san[0] != '\0') {
+                        src = san;
+                    }
+                }
+                built[i] = strdup(src);
+                if (built[i] == NULL) {
+                    ok = NO;
+                    break;
+                }
+            }
+            if (ok) {
+                built[argc] = NULL;
+                s_shadow_argv = built;
+                s_shadow_argc = argc;
+            } else {
+                for (int i = 0; i < argc; i++) {
+                    free(built[i]);
+                }
+                free(built);
+            }
+        }
+    }
+    char ***ret = (s_shadow_argv != NULL) ? &s_shadow_argv : real_argvp;
+    pthread_mutex_unlock(&s_shadow_argv_mutex);
+    return ret;
+}
+
+static void pt_init_shadow_progname(void) {
+    const char *exec_path = pt_get_main_executable_path();
+    const char *base = NULL;
+    if (exec_path != NULL && exec_path[0] != '\0') {
+        const char *slash = strrchr(exec_path, '/');
+        base = (slash != NULL && slash[1] != '\0') ? (slash + 1) : exec_path;
+    }
+    if (base == NULL || base[0] == '\0') {
+        char **real_pn = _NSGetProgname();
+        if (real_pn != NULL && *real_pn != NULL && (*real_pn)[0] != '\0') {
+            const char *slash = strrchr(*real_pn, '/');
+            base = (slash != NULL && slash[1] != '\0') ? (slash + 1) : *real_pn;
+        }
+    }
+    if (base != NULL && base[0] != '\0') {
+        strlcpy(s_shadow_progname_buf, base, sizeof(s_shadow_progname_buf));
+        s_shadow_progname_ptr = s_shadow_progname_buf;
+    }
+}
+
+static char **pt_NSGetProgname(void) {
+    char **real_pn = _NSGetProgname();
+    if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire) ||
+        !pt_is_bypass_enabled() ||
+        pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return real_pn;
+    }
+    pthread_once(&s_shadow_progname_once, pt_init_shadow_progname);
+    return (s_shadow_progname_ptr != NULL) ? &s_shadow_progname_ptr : real_pn;
+}
+
+static const char *pt_getprogname(void) {
+    if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire) ||
+        !pt_is_bypass_enabled() ||
+        pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return getprogname();
+    }
+    pthread_once(&s_shadow_progname_once, pt_init_shadow_progname);
+    return (s_shadow_progname_ptr != NULL) ? s_shadow_progname_ptr : getprogname();
 }
 
 extern CFURLRef CFCopyHomeDirectoryURL(void);
@@ -5785,6 +5902,9 @@ DYLD_INTERPOSE(pt_MGGetStringAnswer, MGGetStringAnswer)
 DYLD_INTERPOSE(pt_MGGetProductType, MGGetProductType)
 DYLD_INTERPOSE(pt_getenv, getenv)
 DYLD_INTERPOSE(pt_NSGetEnviron, _NSGetEnviron)
+DYLD_INTERPOSE(pt_NSGetArgv, _NSGetArgv)
+DYLD_INTERPOSE(pt_NSGetProgname, _NSGetProgname)
+DYLD_INTERPOSE(pt_getprogname, getprogname)
 DYLD_INTERPOSE(pt_gethostname, gethostname)
 DYLD_INTERPOSE(pt_getpwuid, getpwuid)
 DYLD_INTERPOSE(pt_getpwuid_r, getpwuid_r)
