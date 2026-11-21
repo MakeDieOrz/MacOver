@@ -1122,4 +1122,67 @@ final class ArchitectureAndHostTests: XCTestCase {
             "v1-backup-exec"
         )
     }
+
+    func testAppBackupsDistinguishesENOENTFromLstatQueryErrors() throws {
+        let dir = try XCTUnwrap(tempDir)
+        let fm = FileManager.default
+        let bundleID = "com.example.lstatquery"
+        let backupsRoot = dir.appendingPathComponent("AppBackupsQuery", isDirectory: true)
+        try fm.createDirectory(at: backupsRoot, withIntermediateDirectories: true)
+        let targetBackupDir = backupsRoot.appendingPathComponent(bundleID, isDirectory: true)
+
+        let appDir = dir.appendingPathComponent("QuerySample.app", isDirectory: true)
+        try fm.createDirectory(at: appDir, withIntermediateDirectories: true)
+        let infoURL = appDir.appendingPathComponent("Info.plist")
+        let infoDict: [String: Any] = [
+            "CFBundleIdentifier": bundleID,
+            "CFBundleExecutable": "Sample",
+            "CFBundleShortVersionString": "1.0",
+            "CFBundleVersion": "1",
+            Installer.installGenerationInfoKey: "GEN-QUERY-1"
+        ]
+        try PropertyListSerialization.data(fromPropertyList: infoDict, format: .xml, options: 0)
+            .write(to: infoURL)
+        let appInfo = AppInfo(contentsOf: infoURL)
+
+        // Genuinely absent path (ENOENT) must be treated as absent/clean across invalidation, quarantine, and launch.
+        XCTAssertTrue(Installer.invalidateAppBackups(at: targetBackupDir, bundleIdentifier: bundleID))
+        XCTAssertNil(try Installer.quarantineAppBackups(at: targetBackupDir, bundleIdentifier: bundleID))
+        XCTAssertNoThrow(try Installer.validateOrInvalidateAppBackupsForLaunch(at: targetBackupDir, for: appInfo))
+
+        // Create backup with mismatched manifest and verify launch validation evicts it when accessible.
+        try fm.createDirectory(at: targetBackupDir, withIntermediateDirectories: true)
+        try Data("stale-exec".utf8).write(to: targetBackupDir.appendingPathComponent("executable"))
+        try Installer.validateOrInvalidateAppBackupsForLaunch(at: targetBackupDir, for: appInfo)
+        XCTAssertFalse(fm.fileExists(atPath: targetBackupDir.path))
+
+        // Re-create backup, remove search/read permissions on parent directory (0o000 -> EACCES on lstat),
+        // and verify query failures return false / throw rather than silently succeeding.
+        if Darwin.geteuid() != 0 {
+            try fm.createDirectory(at: targetBackupDir, withIntermediateDirectories: true)
+            try Data("protected-exec".utf8).write(to: targetBackupDir.appendingPathComponent("executable"))
+            XCTAssertEqual(Darwin.chmod(backupsRoot.path, mode_t(0o000)), 0)
+            defer { _ = Darwin.chmod(backupsRoot.path, mode_t(0o755)) }
+
+            XCTAssertFalse(Installer.invalidateAppBackups(at: targetBackupDir, bundleIdentifier: bundleID))
+            XCTAssertThrowsError(try Installer.quarantineAppBackups(at: targetBackupDir, bundleIdentifier: bundleID))
+            XCTAssertThrowsError(
+                try Installer.commitAppBackups(
+                    .noneApplicable,
+                    to: targetBackupDir,
+                    bundleIdentifier: bundleID,
+                    manifest: nil
+                )
+            )
+            XCTAssertThrowsError(
+                try Installer.validateOrInvalidateAppBackupsForLaunch(at: targetBackupDir, for: appInfo)
+            )
+
+            XCTAssertEqual(Darwin.chmod(backupsRoot.path, mode_t(0o755)), 0)
+            XCTAssertEqual(
+                try String(contentsOf: targetBackupDir.appendingPathComponent("executable"), encoding: .utf8),
+                "protected-exec"
+            )
+        }
+    }
 }

@@ -296,12 +296,21 @@ class Installer {
                     )
                 } else if let quarantinedAppBackups {
                     var canRestoreQuarantined = true
-                    var targetStat = stat()
-                    if Darwin.lstat(quarantinedAppBackups.targetDir.path, &targetStat) == 0 {
+                    switch probePathPresence(at: quarantinedAppBackups.targetDir) {
+                    case .absent:
+                        canRestoreQuarantined = true
+                    case .present:
                         canRestoreQuarantined = invalidateAppBackups(
                             at: quarantinedAppBackups.targetDir,
                             bundleIdentifier: quarantinedAppBackups.bundleID
                         )
+                    case .queryFailed(let err):
+                        PlayCoverDiagnostics.log(
+                            "Failed to query target AppBackups during rollback for " +
+                                "\(quarantinedAppBackups.bundleID): \(String(cString: strerror(err))) (errno=\(err))",
+                            isError: true
+                        )
+                        canRestoreQuarantined = false
                     }
                     var restoredQuarantined = false
                     if canRestoreQuarantined {
@@ -556,14 +565,43 @@ class Installer {
         return realCand.hasPrefix(realPrefix)
     }
 
+    enum PathPresence {
+        case present
+        case absent
+        case queryFailed(Int32)
+    }
+
+    static func probePathPresence(at targetURL: URL) -> PathPresence {
+        var st = stat()
+        if Darwin.lstat(targetURL.path, &st) == 0 {
+            return .present
+        }
+        let err = errno
+        if err == ENOENT {
+            return .absent
+        }
+        return .queryFailed(err)
+    }
+
     private static func invalidatedBackupPrefix(for directoryName: String) -> String {
         ".\(directoryName).invalidated-"
     }
 
     static func quarantineAppBackups(at targetDir: URL, bundleIdentifier: String) throws -> URL? {
-        var st = stat()
-        guard Darwin.lstat(targetDir.path, &st) == 0 else {
+        switch probePathPresence(at: targetDir) {
+        case .absent:
             return nil
+        case .queryFailed(let err):
+            let msg = String(cString: strerror(err))
+            PlayCoverDiagnostics.log(
+                "Failed to query AppBackups before quarantine for \(bundleIdentifier): \(msg) (errno=\(err))",
+                isError: true
+            )
+            throw PlayCoverError.playToolsError(
+                "Failed to query AppBackups for \(bundleIdentifier): \(msg) (errno=\(err))"
+            )
+        case .present:
+            break
         }
         let invalidatedDir = targetDir.deletingLastPathComponent().appendingPathComponent(
             "\(invalidatedBackupPrefix(for: targetDir.lastPathComponent))\(UUID().uuidString)"
@@ -587,15 +625,33 @@ class Installer {
         to targetDir: URL,
         bundleIdentifier: String
     ) -> Bool {
-        var qst = stat()
-        guard Darwin.lstat(quarantinedDir.path, &qst) == 0 else {
+        switch probePathPresence(at: quarantinedDir) {
+        case .present:
+            break
+        case .absent:
+            return false
+        case .queryFailed(let err):
+            PlayCoverDiagnostics.log(
+                "Failed to query quarantined AppBackups for \(bundleIdentifier): " +
+                    "\(String(cString: strerror(err))) (errno=\(err))",
+                isError: true
+            )
             return false
         }
-        var tst = stat()
-        guard Darwin.lstat(targetDir.path, &tst) != 0 else {
+        switch probePathPresence(at: targetDir) {
+        case .absent:
+            break
+        case .present:
             PlayCoverDiagnostics.log(
                 "Cannot restore quarantined AppBackups for \(bundleIdentifier): " +
                     "active path \(targetDir.path) is still occupied",
+                isError: true
+            )
+            return false
+        case .queryFailed(let err):
+            PlayCoverDiagnostics.log(
+                "Cannot restore quarantined AppBackups for \(bundleIdentifier): " +
+                    "failed to query active path \(targetDir.path): \(String(cString: strerror(err))) (errno=\(err))",
                 isError: true
             )
             return false
@@ -670,9 +726,18 @@ class Installer {
 
     static func invalidateAppBackups(at targetDir: URL, bundleIdentifier: String) -> Bool {
         let fm = FileManager.default
-        var st = stat()
-        guard Darwin.lstat(targetDir.path, &st) == 0 else {
+        switch probePathPresence(at: targetDir) {
+        case .absent:
             return true
+        case .queryFailed(let err):
+            PlayCoverDiagnostics.log(
+                "Failed to query AppBackups for invalidation at \(targetDir.path) (\(bundleIdentifier)): " +
+                    "\(String(cString: strerror(err))) (errno=\(err))",
+                isError: true
+            )
+            return false
+        case .present:
+            break
         }
         let invalidatedDir = targetDir.deletingLastPathComponent().appendingPathComponent(
             "\(invalidatedBackupPrefix(for: targetDir.lastPathComponent))\(UUID().uuidString)"
@@ -760,6 +825,37 @@ class Installer {
         return actual == expected
     }
 
+    static func validateOrInvalidateAppBackupsForLaunch(
+        at backupDir: URL,
+        for appInfo: AppInfo
+    ) throws {
+        let bundleID = appInfo.bundleIdentifier
+        guard !bundleID.isEmpty else {
+            return
+        }
+        switch probePathPresence(at: backupDir) {
+        case .absent:
+            return
+        case .queryFailed(let err):
+            let msg = String(cString: strerror(err))
+            PlayCoverDiagnostics.log(
+                "Failed to query AppBackups before launch for \(bundleID): \(msg) (errno=\(err))",
+                isError: true
+            )
+            throw PlayCoverError.playToolsError(
+                "Failed to inspect AppBackups for \(bundleID): \(msg) (errno=\(err))"
+            )
+        case .present:
+            if !verifyAppBackupManifest(in: backupDir, for: appInfo) {
+                guard invalidateAppBackups(at: backupDir, bundleIdentifier: bundleID) else {
+                    throw PlayCoverError.playToolsError(
+                        "Failed to evict stale AppBackups for \(bundleID)"
+                    )
+                }
+            }
+        }
+    }
+
     static func commitAppBackups(_ stagingResult: AppBackupStagingResult, for installedApp: BaseApp) throws {
         try commitAppBackups(
             stagingResult,
@@ -777,8 +873,8 @@ class Installer {
         allowRenameSwap: Bool = true
     ) throws {
         let fm = FileManager.default
-        var targetStat = stat()
-        if Darwin.lstat(targetDir.path, &targetStat) == 0 {
+        switch probePathPresence(at: targetDir) {
+        case .present:
             if allowRenameSwap && Darwin.renamex_np(incomingDir.path, targetDir.path, UInt32(RENAME_SWAP)) == 0 {
                 try? fm.removeItem(at: incomingDir)
                 return
@@ -804,8 +900,13 @@ class Installer {
                 }
                 throw error
             }
-        } else {
+        case .absent:
             try fm.moveItem(at: incomingDir, to: targetDir)
+        case .queryFailed(let err):
+            let msg = String(cString: strerror(err))
+            throw PlayCoverError.playToolsError(
+                "Failed to query target AppBackups for \(bundleIdentifier): \(msg) (errno=\(err))"
+            )
         }
     }
 
@@ -1019,9 +1120,18 @@ class Installer {
                 return false
             }
         } else {
-            var locStat = stat()
-            guard Darwin.lstat(location.path, &locStat) == 0 else {
+            switch probePathPresence(at: location) {
+            case .absent:
                 return true
+            case .queryFailed(let err):
+                PlayCoverDiagnostics.log(
+                    "Critical: failed to query rolled-back fresh app bundle \(location.lastPathComponent): " +
+                        "\(String(cString: strerror(err))) (errno=\(err))",
+                    isError: true
+                )
+                return false
+            case .present:
+                break
             }
             let evictedNewURL = stagingRoot.appendingPathComponent("evicted-\(UUID().uuidString).app")
             if Darwin.rename(location.path, evictedNewURL.path) == 0 {
@@ -1100,8 +1210,8 @@ class Installer {
         try beforeSwap()
 
         var displacedPreviousURL: URL?
-        var existingStat = stat()
-        if Darwin.lstat(location.path, &existingStat) == 0 {
+        switch probePathPresence(at: location) {
+        case .present:
             if Darwin.renamex_np(stagedBundleURL.path, location.path, UInt32(RENAME_SWAP)) == 0 {
                 displacedPreviousURL = stagedBundleURL
                 allowStagingCleanup = false
@@ -1158,8 +1268,13 @@ class Installer {
                     }
                 }
             }
-        } else {
+        case .absent:
             try fm.moveItem(at: stagedBundleURL, to: location)
+        case .queryFailed(let err):
+            let msg = String(cString: strerror(err))
+            throw PlayCoverError.playToolsError(
+                "Failed to inspect target app location \(location.lastPathComponent): \(msg) (errno=\(err))"
+            )
         }
 
         do {
