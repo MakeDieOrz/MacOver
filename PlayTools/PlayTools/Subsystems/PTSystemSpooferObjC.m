@@ -1174,6 +1174,12 @@ static BOOL ps_get_cached_ios_sysver(NSOperatingSystemVersion *outVer, NSString 
         NSDictionary *sysVer = [NSDictionary dictionaryWithContentsOfFile:@"/System/Library/CoreServices/SystemVersion.plist"];
         NSString *verStr = nil;
         NSString *iosVer = sysVer[@"iOSSupportVersion"];
+        if (!([iosVer isKindOfClass:[NSString class]] && iosVer.length > 0)) {
+            const char *fallbackCStr = pt_get_spoofed_ios_version_cstr();
+            if (fallbackCStr != NULL && fallbackCStr[0] != '\0') {
+                iosVer = [NSString stringWithUTF8String:fallbackCStr];
+            }
+        }
         if ([iosVer isKindOfClass:[NSString class]] && iosVer.length > 0) {
             verStr = [iosVer copy];
             NSArray<NSString *> *parts = [iosVer componentsSeparatedByString:@"."];

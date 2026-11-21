@@ -48,6 +48,7 @@ extern __attribute__((visibility("hidden"))) const char *pt_get_virtual_tmpdir_c
 extern __attribute__((visibility("hidden"))) const char *pt_get_host_user_root_cstr(void);
 extern __attribute__((visibility("hidden"))) const char *pt_get_device_model_cstr(void);
 extern __attribute__((visibility("hidden"))) const char *pt_get_oem_id_cstr(void);
+extern __attribute__((visibility("hidden"))) const char *pt_get_spoofed_ios_version_cstr(void);
 extern __attribute__((visibility("hidden"))) uint32_t pt_get_spoofed_cpu_cores(void);
 extern __attribute__((visibility("hidden"))) uint64_t pt_get_spoofed_physical_memory(void);
 extern __attribute__((visibility("hidden"))) const char *pt_get_spoofed_gpu_name_cstr(void);

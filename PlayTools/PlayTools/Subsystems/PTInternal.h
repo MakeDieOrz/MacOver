@@ -503,6 +503,7 @@ __attribute__((visibility("hidden"))) BOOL pt_read_plist_top_string_from_fd(int 
 __attribute__((visibility("hidden"))) int pt_open_early_settings_plist_fd(void);
 __attribute__((visibility("hidden"))) const char *pt_get_device_model_cstr(void);
 __attribute__((visibility("hidden"))) const char *pt_get_oem_id_cstr(void);
+__attribute__((visibility("hidden"))) const char *pt_get_spoofed_ios_version_cstr(void);
 __attribute__((visibility("hidden"))) const char *pt_get_reported_ios_version_override(const char **out_build);
 __attribute__((visibility("hidden"))) void pt_disable_reported_ios_override_for_safe_mode(void);
 __attribute__((visibility("hidden"))) uint32_t pt_get_spoofed_cpu_cores(void);
