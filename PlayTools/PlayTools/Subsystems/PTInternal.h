@@ -450,6 +450,8 @@ typedef struct {
     uint32_t native_height;
     double native_scale;
     uint32_t max_fps;
+    int32_t max_apple_gpu_family;
+    const char *gpu_arch;
 } pt_device_profile_t;
 
 typedef enum {
@@ -506,6 +508,8 @@ __attribute__((visibility("hidden"))) void pt_disable_reported_ios_override_for_
 __attribute__((visibility("hidden"))) uint32_t pt_get_spoofed_cpu_cores(void);
 __attribute__((visibility("hidden"))) uint64_t pt_get_spoofed_physical_memory(void);
 __attribute__((visibility("hidden"))) const char *pt_get_spoofed_gpu_name_cstr(void);
+__attribute__((visibility("hidden"))) int32_t pt_get_spoofed_max_apple_gpu_family(void);
+__attribute__((visibility("hidden"))) const char *pt_get_spoofed_gpu_arch_cstr(void);
 __attribute__((visibility("hidden"))) BOOL pt_get_spoofed_device_is_ipad(void);
 __attribute__((visibility("hidden"))) void pt_get_spoofed_screen_native_bounds(double *out_portrait_width, double *out_portrait_height, double *out_native_scale);
 __attribute__((visibility("hidden"))) double pt_get_device_native_scale(void);

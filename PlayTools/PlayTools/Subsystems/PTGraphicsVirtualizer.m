@@ -13,6 +13,12 @@ static os_unfair_lock s_mtl_swizzle_lock = OS_UNFAIR_LOCK_INIT;
 static CFMutableDictionaryRef s_mtl_orig_name_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_working_set_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_max_buf_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_supports_family_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_supports_fset_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_architecture_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_arch_name_imps = NULL;
+
+static void ps_swizzle_mtl_arch_class(Class archCls);
 
 static uint64_t ps_mtl_memory_cap(void) {
     uint64_t mem = pt_get_spoofed_physical_memory();
@@ -101,8 +107,114 @@ static uint64_t ps_mtl_memory_cap(void) {
     return orig;
 }
 
+- (BOOL) pm_ps_mtl_supportsFamily:(NSInteger)gpuFamily {
+    SEL sel = sel_registerName("supportsFamily:");
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        // Hide macOS (2000..2999) and Mac Catalyst (4000..4999) GPU families on spoofed iOS
+        if ((gpuFamily >= 2000 && gpuFamily < 3000) || (gpuFamily >= 4000 && gpuFamily < 5000)) {
+            return NO;
+        }
+        int32_t maxAppleFam = pt_get_spoofed_max_apple_gpu_family();
+        if (gpuFamily >= 1001 && gpuFamily < 1100 && gpuFamily > (NSInteger)maxAppleFam) {
+            return NO;
+        }
+        if (gpuFamily == 5001 && maxAppleFam < 1007) { // MTLGPUFamilyMetal3 requires Apple7+
+            return NO;
+        }
+    }
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_supports_family_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            return ((BOOL (*)(id, SEL, NSInteger))origIMP)(self, sel, gpuFamily);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    return NO;
+}
+
+- (BOOL) pm_ps_mtl_supportsFeatureSet:(NSUInteger)featureSet {
+    SEL sel = sel_registerName("supportsFeatureSet:");
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        // macOS (10000+) and tvOS (30000+) feature sets do not exist on iOS
+        if (featureSet >= 10000U) {
+            return NO;
+        }
+        int32_t maxAppleFam = pt_get_spoofed_max_apple_gpu_family();
+        if ((featureSet == 11U || featureSet == 15U) && maxAppleFam < 1004) {
+            return NO;
+        }
+        if (featureSet == 16U && maxAppleFam < 1005) {
+            return NO;
+        }
+        if (featureSet <= 16U) {
+            return YES;
+        }
+    }
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_supports_fset_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            return ((BOOL (*)(id, SEL, NSUInteger))origIMP)(self, sel, featureSet);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    return NO;
+}
+
+- (NSString *) pm_ps_mtl_arch_name {
+    SEL sel = @selector(name);
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        const char *archCStr = pt_get_spoofed_gpu_arch_cstr();
+        if (archCStr != NULL && archCStr[0] != '\0') {
+            NSString *spoofed = [NSString stringWithUTF8String:archCStr];
+            if (spoofed.length > 0) {
+                return spoofed;
+            }
+        }
+    }
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_arch_name_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            return ((NSString *(*)(id, SEL))origIMP)(self, sel);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    return @"applegpu_g13g";
+}
+
+- (id) pm_ps_mtl_architecture {
+    SEL sel = sel_registerName("architecture");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_architecture_imps, self, &pushed);
+    id arch = nil;
+    if (origIMP != NULL) {
+        @try {
+            arch = ((id (*)(id, SEL))origIMP)(self, sel);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    if (arch != nil) {
+        ps_swizzle_mtl_arch_class(object_getClass(arch));
+    }
+    return arch;
+}
+
 
 @end
+
+static void ps_swizzle_mtl_arch_class(Class archCls) {
+    if (archCls == Nil) {
+        return;
+    }
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_arch_name_imps, archCls,
+                                     @selector(name), @selector(pm_ps_mtl_arch_name));
+}
 
 static void ps_swizzle_mtl_device_class(Class cls) {
     if (cls == Nil) {
@@ -116,6 +228,15 @@ static void ps_swizzle_mtl_device_class(Class cls) {
     ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_max_buf_imps, cls,
                                      sel_registerName("maxBufferLength"),
                                      @selector(pm_ps_mtl_maxBufferLength));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_supports_family_imps, cls,
+                                     sel_registerName("supportsFamily:"),
+                                     @selector(pm_ps_mtl_supportsFamily:));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_supports_fset_imps, cls,
+                                     sel_registerName("supportsFeatureSet:"),
+                                     @selector(pm_ps_mtl_supportsFeatureSet:));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_architecture_imps, cls,
+                                     sel_registerName("architecture"),
+                                     @selector(pm_ps_mtl_architecture));
 }
 
 __attribute__((visibility("hidden"))) void ps_install_metal_hooks_if_loaded(void) {
@@ -169,7 +290,17 @@ static NSInteger (*s_orig_mtkview_preferredFramesPerSecond)(id, SEL) = NULL;
 static void (*s_orig_mtkview_didMoveToWindow)(id, SEL) = NULL;
 
 static NSInteger ps_effective_target_frame_rate_hz(void) {
-    return [[PlaySettings shared] targetFrameRateHz];
+    NSInteger explicitHz = [[PlaySettings shared] targetFrameRateHz];
+    if (explicitHz > 0) {
+        return explicitHz;
+    }
+    if (![PTSafeMode isActive] && pt_is_bypass_enabled()) {
+        uint32_t devMax = pt_get_device_max_fps();
+        if (devMax > 0U) {
+            return (NSInteger)devMax;
+        }
+    }
+    return 0;
 }
 
 static CAFrameRateRange ps_clamped_frame_rate_range(CAFrameRateRange range, NSInteger capHz) {

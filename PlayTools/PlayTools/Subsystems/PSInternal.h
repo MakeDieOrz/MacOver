@@ -50,6 +50,8 @@ extern __attribute__((visibility("hidden"))) const char *pt_get_oem_id_cstr(void
 extern __attribute__((visibility("hidden"))) uint32_t pt_get_spoofed_cpu_cores(void);
 extern __attribute__((visibility("hidden"))) uint64_t pt_get_spoofed_physical_memory(void);
 extern __attribute__((visibility("hidden"))) const char *pt_get_spoofed_gpu_name_cstr(void);
+extern __attribute__((visibility("hidden"))) int32_t pt_get_spoofed_max_apple_gpu_family(void);
+extern __attribute__((visibility("hidden"))) const char *pt_get_spoofed_gpu_arch_cstr(void);
 extern __attribute__((visibility("hidden"))) BOOL pt_is_bypass_enabled(void);
 extern __attribute__((visibility("hidden"))) BOOL pt_is_virtual_container_path(const char *path);
 extern __attribute__((visibility("hidden"))) BOOL pt_is_virtual_container_ancestor_dir(const char *path);

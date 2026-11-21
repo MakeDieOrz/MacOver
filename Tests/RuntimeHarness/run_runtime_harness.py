@@ -940,6 +940,8 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info6a["sysctlMachine"] == "iPhone12,5",
         info6a["syscallMachine"] == "iPhone12,5",
         info6a["unameMachine"] == "iPhone12,5",
+        0.0 < float(info6a["displayLinkClampedMaxHz"]) <= 60.0,
+        info6a["displayLinkClampedLegacyFPS"] == 60,
         (not info6a["appAttestLoaded"]) or (info6a["appAttestSupported"] is False),
         marker6a.exists(),
         info6b["safeModeActive"] is True,
