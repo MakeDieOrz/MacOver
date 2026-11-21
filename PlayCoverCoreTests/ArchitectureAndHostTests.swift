@@ -1185,4 +1185,134 @@ final class ArchitectureAndHostTests: XCTestCase {
             )
         }
     }
+
+    func testAfterSwapPreservesQuarantinedBackupsOnStagingOrValidationFailure() throws {
+        let dir = try XCTUnwrap(tempDir)
+        let fm = FileManager.default
+        let bundleID = "com.example.degradedbackups"
+        let appsDir = dir.appendingPathComponent("ApplicationsDegraded", isDirectory: true)
+        let backupsRoot = dir.appendingPathComponent("AppBackupsDegraded", isDirectory: true)
+        let targetBackupDir = backupsRoot.appendingPathComponent(bundleID, isDirectory: true)
+        try fm.createDirectory(at: appsDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: targetBackupDir, withIntermediateDirectories: true)
+
+        let existingAppURL = appsDir.appendingPathComponent("\(bundleID).app", isDirectory: true)
+        try fm.createDirectory(at: existingAppURL, withIntermediateDirectories: true)
+        let v1Info: [String: Any] = [
+            "CFBundleIdentifier": bundleID,
+            "CFBundleExecutable": "Sample",
+            "CFBundleShortVersionString": "1.0",
+            "CFBundleVersion": "1"
+        ]
+        try PropertyListSerialization.data(fromPropertyList: v1Info, format: .xml, options: 0)
+            .write(to: existingAppURL.appendingPathComponent("Info.plist"))
+        try Data("v1-live".utf8).write(to: existingAppURL.appendingPathComponent("Sample"))
+        try Data("v1-precious-backup".utf8).write(to: targetBackupDir.appendingPathComponent("executable"))
+
+        // 1. Upgrade v2 with backup staging .failed: new .app install succeeds (not rolled back),
+        //    active targetBackupDir stays absent, and quarantined v1 backup is preserved (not deleted).
+        let candidateV2URL = dir.appendingPathComponent("CandidateDegradedV2.app", isDirectory: true)
+        try fm.createDirectory(at: candidateV2URL, withIntermediateDirectories: true)
+        let v2Info: [String: Any] = [
+            "CFBundleIdentifier": bundleID,
+            "CFBundleExecutable": "Sample",
+            "CFBundleShortVersionString": "2.0",
+            "CFBundleVersion": "2",
+            Installer.installGenerationInfoKey: "GEN-V2"
+        ]
+        try PropertyListSerialization.data(fromPropertyList: v2Info, format: .xml, options: 0)
+            .write(to: candidateV2URL.appendingPathComponent("Info.plist"))
+        try Data("v2-live".utf8).write(to: candidateV2URL.appendingPathComponent("Sample"))
+
+        var quarantinedV1Dir: URL?
+        var v2CommitOutcome: Installer.AppBackupCommitOutcome?
+        let publishedV2URL = try Installer.publishSignedBundle(
+            BaseApp(appUrl: candidateV2URL),
+            into: appsDir,
+            prepareAndVerify: { _, _ in },
+            beforeSwap: {
+                quarantinedV1Dir = try Installer.quarantineAppBackups(
+                    at: targetBackupDir,
+                    bundleIdentifier: bundleID
+                )
+            },
+            afterSwap: { publishedURL in
+                let installedInfo = AppInfo(contentsOf: publishedURL.appendingPathComponent("Info.plist"))
+                v2CommitOutcome = try Installer.finalizeAppBackupsAfterSwap(
+                    .failed,
+                    to: targetBackupDir,
+                    bundleIdentifier: bundleID,
+                    manifest: Installer.AppBackupManifest(appInfo: installedInfo),
+                    quarantinedDir: quarantinedV1Dir
+                )
+            }
+        )
+        let preservedQuarantinedURL = try XCTUnwrap(quarantinedV1Dir)
+        XCTAssertEqual(publishedV2URL.standardizedFileURL, existingAppURL.standardizedFileURL)
+        XCTAssertEqual(v2CommitOutcome, .degradedWithoutBackups)
+        XCTAssertEqual(
+            try String(contentsOf: existingAppURL.appendingPathComponent("Sample"), encoding: .utf8),
+            "v2-live"
+        )
+        XCTAssertFalse(fm.fileExists(atPath: targetBackupDir.path))
+        XCTAssertTrue(fm.fileExists(atPath: preservedQuarantinedURL.path))
+        XCTAssertEqual(
+            try String(contentsOf: preservedQuarantinedURL.appendingPathComponent("executable"), encoding: .utf8),
+            "v1-precious-backup"
+        )
+
+        // 2. Subsequent upgrade v3 with .staged validation failure (nil manifest) must also succeed
+        //    without rolling back v3 and without wiping previously preserved .invalidated-* backups.
+        let candidateV3URL = dir.appendingPathComponent("CandidateDegradedV3.app", isDirectory: true)
+        try fm.createDirectory(at: candidateV3URL, withIntermediateDirectories: true)
+        let v3Info: [String: Any] = [
+            "CFBundleIdentifier": bundleID,
+            "CFBundleExecutable": "Sample",
+            "CFBundleShortVersionString": "3.0",
+            "CFBundleVersion": "3"
+        ]
+        try PropertyListSerialization.data(fromPropertyList: v3Info, format: .xml, options: 0)
+            .write(to: candidateV3URL.appendingPathComponent("Info.plist"))
+        try Data("v3-live".utf8).write(to: candidateV3URL.appendingPathComponent("Sample"))
+        let invalidStagedV3 = dir.appendingPathComponent("staging-v3-unbound", isDirectory: true)
+        try fm.createDirectory(at: invalidStagedV3, withIntermediateDirectories: true)
+        try Data("v3-exec".utf8).write(to: invalidStagedV3.appendingPathComponent("executable"))
+
+        var v3CommitOutcome: Installer.AppBackupCommitOutcome?
+        _ = try Installer.publishSignedBundle(
+            BaseApp(appUrl: candidateV3URL),
+            into: appsDir,
+            prepareAndVerify: { _, _ in },
+            beforeSwap: {
+                XCTAssertNil(try Installer.quarantineAppBackups(at: targetBackupDir, bundleIdentifier: bundleID))
+            },
+            afterSwap: { _ in
+                v3CommitOutcome = try Installer.finalizeAppBackupsAfterSwap(
+                    .staged(invalidStagedV3),
+                    to: targetBackupDir,
+                    bundleIdentifier: bundleID,
+                    manifest: nil,
+                    quarantinedDir: nil
+                )
+            }
+        )
+        XCTAssertEqual(v3CommitOutcome, .degradedWithoutBackups)
+        XCTAssertEqual(
+            try String(contentsOf: existingAppURL.appendingPathComponent("Sample"), encoding: .utf8),
+            "v3-live"
+        )
+        XCTAssertFalse(fm.fileExists(atPath: invalidStagedV3.path))
+        XCTAssertTrue(fm.fileExists(atPath: preservedQuarantinedURL.path))
+
+        // 3. .noneApplicable (new app genuinely needs no backups) still cleans up invalidated backups.
+        let noneOutcome = try Installer.finalizeAppBackupsAfterSwap(
+            .noneApplicable,
+            to: targetBackupDir,
+            bundleIdentifier: bundleID,
+            manifest: nil,
+            quarantinedDir: preservedQuarantinedURL
+        )
+        XCTAssertEqual(noneOutcome, .noneApplicable)
+        XCTAssertFalse(fm.fileExists(atPath: preservedQuarantinedURL.path))
+    }
 }

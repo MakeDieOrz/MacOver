@@ -244,11 +244,10 @@ class Installer {
                             let installedApp = PlayApp(appUrl: publishedURL, dependencies: dependencies)
                             let installedBundleID = installedApp.info.bundleIdentifier
                             if !installedBundleID.isEmpty {
-                                try commitAppBackups(backupStagingResult, for: installedApp)
-                                cleanupInvalidatedAppBackups(
-                                    primary: quarantinedAppBackups?.quarantinedDir,
-                                    in: installedApp.appBackupsDir.deletingLastPathComponent(),
-                                    bundleIdentifier: installedBundleID
+                                try finalizeAppBackupsAfterSwap(
+                                    backupStagingResult,
+                                    for: installedApp,
+                                    quarantinedDir: quarantinedAppBackups?.quarantinedDir
                                 )
                                 quarantinedAppBackups = nil
                             }
@@ -856,7 +855,71 @@ class Installer {
         }
     }
 
-    static func commitAppBackups(_ stagingResult: AppBackupStagingResult, for installedApp: BaseApp) throws {
+    enum AppBackupCommitOutcome: Equatable {
+        case committed
+        case noneApplicable
+        case degradedWithoutBackups
+    }
+
+    @discardableResult
+    static func finalizeAppBackupsAfterSwap(
+        _ stagingResult: AppBackupStagingResult,
+        for installedApp: BaseApp,
+        quarantinedDir: URL?
+    ) throws -> AppBackupCommitOutcome {
+        try finalizeAppBackupsAfterSwap(
+            stagingResult,
+            to: installedApp.appBackupsDir,
+            bundleIdentifier: installedApp.info.bundleIdentifier,
+            manifest: AppBackupManifest(appInfo: installedApp.info),
+            quarantinedDir: quarantinedDir
+        )
+    }
+
+    @discardableResult
+    static func finalizeAppBackupsAfterSwap(
+        _ stagingResult: AppBackupStagingResult,
+        to targetDir: URL,
+        bundleIdentifier: String,
+        manifest: AppBackupManifest?,
+        quarantinedDir: URL?
+    ) throws -> AppBackupCommitOutcome {
+        let outcome = try commitAppBackups(
+            stagingResult,
+            to: targetDir,
+            bundleIdentifier: bundleIdentifier,
+            manifest: manifest
+        )
+        switch outcome {
+        case .committed, .noneApplicable:
+            cleanupInvalidatedAppBackups(
+                primary: quarantinedDir,
+                in: targetDir.deletingLastPathComponent(),
+                bundleIdentifier: bundleIdentifier
+            )
+        case .degradedWithoutBackups:
+            if let quarantinedDir {
+                PlayCoverDiagnostics.log(
+                    "AppBackups staging or validation failed for \(bundleIdentifier); " +
+                        "preserving quarantined previous AppBackups at \(quarantinedDir.path)",
+                    isError: true
+                )
+            } else {
+                PlayCoverDiagnostics.log(
+                    "AppBackups staging or validation failed for \(bundleIdentifier); " +
+                        "continuing installation without AppBackups",
+                    isError: true
+                )
+            }
+        }
+        return outcome
+    }
+
+    @discardableResult
+    static func commitAppBackups(
+        _ stagingResult: AppBackupStagingResult,
+        for installedApp: BaseApp
+    ) throws -> AppBackupCommitOutcome {
         try commitAppBackups(
             stagingResult,
             to: installedApp.appBackupsDir,
@@ -910,25 +973,33 @@ class Installer {
         }
     }
 
+    @discardableResult
     static func commitAppBackups(
         _ stagingResult: AppBackupStagingResult,
         to targetDir: URL,
         bundleIdentifier: String,
         manifest: AppBackupManifest?
-    ) throws {
+    ) throws -> AppBackupCommitOutcome {
         let fm = FileManager.default
 
         let stagingDir: URL
         switch stagingResult {
         case .staged(let url):
             stagingDir = url
-        case .noneApplicable, .failed:
+        case .noneApplicable:
             guard invalidateAppBackups(at: targetDir, bundleIdentifier: bundleIdentifier) else {
                 throw PlayCoverError.playToolsError(
                     "Failed to evict stale AppBackups for \(bundleIdentifier)"
                 )
             }
-            return
+            return .noneApplicable
+        case .failed:
+            guard invalidateAppBackups(at: targetDir, bundleIdentifier: bundleIdentifier) else {
+                throw PlayCoverError.playToolsError(
+                    "Failed to evict stale AppBackups for \(bundleIdentifier)"
+                )
+            }
+            return .degradedWithoutBackups
         }
 
         guard let manifest,
@@ -945,7 +1016,7 @@ class Installer {
                     "Failed to evict unbound AppBackups for \(bundleIdentifier)"
                 )
             }
-            return
+            return .degradedWithoutBackups
         }
 
         let parentDir = targetDir.deletingLastPathComponent()
@@ -976,6 +1047,7 @@ class Installer {
                     "Committed AppBackups verification failed at \(targetDir.path)"
                 )
             }
+            return .committed
         } catch {
             var incomingStat = stat()
             if Darwin.lstat(incomingDir.path, &incomingStat) == 0 {
