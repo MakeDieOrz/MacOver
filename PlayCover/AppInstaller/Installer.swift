@@ -12,18 +12,18 @@ class Installer {
     static let installGenerationInfoKey = "PCInstallGeneration"
     static let backupManifestFileName = "manifest.plist"
 
+    private enum AppBackupManifestCodingKeys: String, CodingKey {
+        case bundleIdentifier = "CFBundleIdentifier"
+        case shortVersionString = "CFBundleShortVersionString"
+        case bundleVersion = "CFBundleVersion"
+        case installGeneration = "PCInstallGeneration"
+    }
+
     struct AppBackupManifest: Codable, Equatable {
         let bundleIdentifier: String
         let shortVersionString: String
         let bundleVersion: String
         let installGeneration: String
-
-        enum CodingKeys: String, CodingKey {
-            case bundleIdentifier = "CFBundleIdentifier"
-            case shortVersionString = "CFBundleShortVersionString"
-            case bundleVersion = "CFBundleVersion"
-            case installGeneration = "PCInstallGeneration"
-        }
 
         init(
             bundleIdentifier: String,
@@ -47,6 +47,22 @@ class Installer {
             self.shortVersionString = appInfo[string: "CFBundleShortVersionString"] ?? ""
             self.bundleVersion = appInfo[string: "CFBundleVersion"] ?? ""
             self.installGeneration = generation
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: AppBackupManifestCodingKeys.self)
+            self.bundleIdentifier = try container.decode(String.self, forKey: .bundleIdentifier)
+            self.shortVersionString = try container.decode(String.self, forKey: .shortVersionString)
+            self.bundleVersion = try container.decode(String.self, forKey: .bundleVersion)
+            self.installGeneration = try container.decode(String.self, forKey: .installGeneration)
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: AppBackupManifestCodingKeys.self)
+            try container.encode(bundleIdentifier, forKey: .bundleIdentifier)
+            try container.encode(shortVersionString, forKey: .shortVersionString)
+            try container.encode(bundleVersion, forKey: .bundleVersion)
+            try container.encode(installGeneration, forKey: .installGeneration)
         }
     }
 
@@ -319,7 +335,9 @@ class Installer {
                             bundleIdentifier: quarantinedAppBackups.bundleID
                         )
                     }
-                    let preservedQuarantined: Set<URL> = restoredQuarantined ? [] : [quarantinedAppBackups.quarantinedDir]
+                    let preservedQuarantined: Set<URL> = restoredQuarantined
+                        ? []
+                        : [quarantinedAppBackups.quarantinedDir]
                     cleanupInvalidatedAppBackups(
                         primary: nil,
                         in: quarantinedAppBackups.targetDir.deletingLastPathComponent(),
@@ -1042,7 +1060,10 @@ class Installer {
             )
             var committedStat = stat()
             guard Darwin.lstat(targetDir.path, &committedStat) == 0,
-                  Darwin.lstat(targetDir.appendingPathComponent(Installer.backupManifestFileName).path, &committedStat) == 0 else {
+                  Darwin.lstat(
+                      targetDir.appendingPathComponent(Installer.backupManifestFileName).path,
+                      &committedStat
+                  ) == 0 else {
                 throw PlayCoverError.playToolsError(
                     "Committed AppBackups verification failed at \(targetDir.path)"
                 )
