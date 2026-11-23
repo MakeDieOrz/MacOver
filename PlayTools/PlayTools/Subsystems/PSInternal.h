@@ -47,9 +47,12 @@ extern __attribute__((visibility("hidden"))) const char *pt_get_virtual_tmpdir_c
 extern __attribute__((visibility("hidden"))) const char *pt_get_host_user_root_cstr(void);
 extern __attribute__((visibility("hidden"))) const char *pt_get_device_model_cstr(void);
 extern __attribute__((visibility("hidden"))) const char *pt_get_oem_id_cstr(void);
+extern __attribute__((visibility("hidden"))) const char *pt_get_spoofed_ios_version_cstr(void);
 extern __attribute__((visibility("hidden"))) uint32_t pt_get_spoofed_cpu_cores(void);
 extern __attribute__((visibility("hidden"))) uint64_t pt_get_spoofed_physical_memory(void);
 extern __attribute__((visibility("hidden"))) const char *pt_get_spoofed_gpu_name_cstr(void);
+extern __attribute__((visibility("hidden"))) int32_t pt_get_spoofed_max_apple_gpu_family(void);
+extern __attribute__((visibility("hidden"))) const char *pt_get_spoofed_gpu_arch_cstr(void);
 extern __attribute__((visibility("hidden"))) BOOL pt_is_bypass_enabled(void);
 extern __attribute__((visibility("hidden"))) BOOL pt_is_virtual_container_path(const char *path);
 extern __attribute__((visibility("hidden"))) BOOL pt_is_virtual_container_ancestor_dir(const char *path);
@@ -57,11 +60,23 @@ extern __attribute__((visibility("hidden"))) BOOL pt_is_system_or_playtools_call
 extern __attribute__((visibility("hidden"))) BOOL pt_is_effective_system_or_playtools_caller(const void *ret_addr);
 extern __attribute__((visibility("hidden"))) BOOL pt_is_hidden_path(const char *path, const void *caller);
 extern __attribute__((visibility("hidden"))) BOOL pt_is_hidden_env_key(const char *name);
+extern __attribute__((visibility("hidden"))) BOOL pt_is_hidden_env_value(const char *val, BOOL has_virtual_container);
+extern __attribute__((visibility("hidden"))) pt_env_entry_action_t pt_resolve_env_entry(
+    const char *key,
+    const char *raw_val,
+    BOOL has_raw_entry,
+    BOOL bypass_enabled,
+    const char *vh,
+    const char *vt,
+    const char **out_val);
 extern __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_selector_name(const char *selName);
 extern __attribute__((visibility("hidden"))) BOOL pt_get_spoofed_device_is_ipad(void);
 extern __attribute__((visibility("hidden"))) double pt_get_device_native_scale(void);
 extern __attribute__((visibility("hidden"))) uint32_t pt_get_device_native_width(void);
 extern __attribute__((visibility("hidden"))) uint32_t pt_get_device_native_height(void);
+extern __attribute__((visibility("hidden"))) BOOL pt_is_system_version_plist_dict(NSDictionary *dict);
+extern __attribute__((visibility("hidden"))) BOOL pt_sanitize_ios_build_version_cstr(const char *build_cstr, const char *ios_ver_cstr, char *out_buf, size_t out_size);
+extern __attribute__((visibility("hidden"))) void pt_sanitize_system_version_dict(NSMutableDictionary *dict);
 extern __attribute__((visibility("hidden"))) const char *pt_register_and_virtualize_group_container(const char *real_group_path, char *buf, size_t bufsize, BOOL use_private_prefix);
 extern __attribute__((visibility("hidden"))) void pt_register_swizzled_imp(const void *hook_imp, const void *orig_imp);
 extern __attribute__((visibility("hidden"))) BOOL pt_is_address_in_playtools(const void *addr);

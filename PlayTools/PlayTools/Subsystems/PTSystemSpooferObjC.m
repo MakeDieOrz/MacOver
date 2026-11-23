@@ -169,6 +169,10 @@ __attribute__((visibility("hidden"))) NSUUID *ps_hook_device_identifierForVendor
         dispatch_once(&onceToken, ^{
             s_blockedSchemes = [NSSet setWithArray:@[
                 @"apple-magnifier",
+                @"trollstore",
+                @"dopamine",
+                @"palera1n",
+                @"santander",
                 @"cydia",
                 @"sileo",
                 @"zbra",
@@ -397,36 +401,6 @@ __attribute__((visibility("hidden"))) NSString *ps_app_settings_plist_path(void)
     return s_plistPath;
 }
 
-static NSString *ps_cached_original_minimum_os_version(void) {
-    static NSString *s_origMinOS = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        NSString *plistPath = ps_app_settings_plist_path();
-        if (plistPath.length > 0) {
-            NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:plistPath];
-            id val = dict[@"originalMinimumOSVersion"];
-            if ([val isKindOfClass:[NSString class]] && [(NSString *)val length] > 0) {
-                s_origMinOS = [(NSString *)val copy];
-            }
-        }
-    });
-    return s_origMinOS;
-}
-
-static id ps_restored_minimum_os_version(id origVal) {
-    NSString *saved = ps_cached_original_minimum_os_version();
-    if (saved.length > 0) {
-        return saved;
-    }
-    if ([origVal isKindOfClass:[NSString class]]) {
-        NSString *s = (NSString *)origVal;
-        if ([s isEqualToString:@"11"] || [s isEqualToString:@"11.0"]) {
-            return @"15.0";
-        }
-    }
-    return origVal;
-}
-
 - (instancetype) pm_ps_initWithPath:(NSString *)path {
     const void *caller = __builtin_return_address(0);
     if (ps_is_hidden_path(path, caller)) {
@@ -515,20 +489,15 @@ static id ps_restored_minimum_os_version(id origVal) {
 - (NSDictionary<NSString *, id> *) pm_ps_infoDictionary {
     NSDictionary<NSString *, id> *orig = [self pm_ps_infoDictionary];
     if (orig != nil &&
-        (id)self == (id)[NSBundle mainBundle] &&
         pt_is_bypass_enabled() &&
         !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        id minOS = orig[@"MinimumOSVersion"];
-        id restoredMinOS = ps_restored_minimum_os_version(minOS);
-        BOOL stripEnv = (orig[@"LSEnvironment"] != nil);
-        BOOL stripCat = (orig[@"LSApplicationCategoryType"] != nil);
-        BOOL changeMin = (restoredMinOS != minOS && restoredMinOS != nil && ![restoredMinOS isEqual:minOS]);
-        if (stripEnv || stripCat || changeMin) {
-            NSMutableDictionary<NSString *, id> *modified = [orig mutableCopy];
-            if (stripEnv) [modified removeObjectForKey:@"LSEnvironment"];
-            if (stripCat) [modified removeObjectForKey:@"LSApplicationCategoryType"];
-            if (changeMin) modified[@"MinimumOSVersion"] = restoredMinOS;
-            return [modified copy];
+        if (pt_info_dict_needs_sanitize(orig)) {
+            NSDictionary<NSString *, id> *clean = [orig isKindOfClass:[NSMutableDictionary class]]
+                ? pt_build_sanitized_mutable_info_dict(orig)
+                : pt_build_sanitized_info_dict(orig);
+            if (clean != nil) {
+                return clean;
+            }
         }
     }
     return orig;
@@ -536,18 +505,32 @@ static id ps_restored_minimum_os_version(id origVal) {
 
 - (id) pm_ps_objectForInfoDictionaryKey:(NSString *)key {
     if (key != nil &&
-        (id)self == (id)[NSBundle mainBundle] &&
         pt_is_bypass_enabled() &&
         !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        if ([key isEqualToString:@"LSEnvironment"] ||
-            [key isEqualToString:@"LSApplicationCategoryType"]) {
-            return nil;
+        NSDictionary<NSString *, id> *loc = [(NSBundle *)(id)self localizedInfoDictionary];
+        if (loc != nil) {
+            NSDictionary<NSString *, id> *cleanLoc = pt_info_dict_needs_sanitize(loc)
+                ? pt_build_sanitized_info_dict(loc)
+                : loc;
+            if (cleanLoc != nil && cleanLoc[key] != nil) {
+                return cleanLoc[key];
+            }
+            if (loc[key] != nil) {
+                return nil;
+            }
         }
-        id orig = [self pm_ps_objectForInfoDictionaryKey:key];
-        if ([key isEqualToString:@"MinimumOSVersion"]) {
-            return ps_restored_minimum_os_version(orig);
+        NSDictionary<NSString *, id> *rawInfo = [self pm_ps_infoDictionary];
+        if (rawInfo != nil) {
+            NSDictionary<NSString *, id> *cleanInfo = pt_info_dict_needs_sanitize(rawInfo)
+                ? pt_build_sanitized_info_dict(rawInfo)
+                : rawInfo;
+            if (cleanInfo != nil && cleanInfo[key] != nil) {
+                return cleanInfo[key];
+            }
+            if (rawInfo[key] != nil) {
+                return nil;
+            }
         }
-        return orig;
     }
     return [self pm_ps_objectForInfoDictionaryKey:key];
 }
@@ -751,58 +734,116 @@ static NSString *ps_virtual_mobileprovision_path_if_applicable(NSBundle *bundle,
 }
 
 static NSMutableDictionary *ps_sanitized_system_version_mutable_dict(NSDictionary *dict) {
+    if (dict == nil) {
+        return nil;
+    }
     NSMutableDictionary *modified = [dict mutableCopy];
-    modified[@"ProductName"] = @"iPhone OS";
-    const char *ovBuild = NULL;
-    const char *ovVer = pt_get_reported_ios_version_override(&ovBuild);
-    if (ovVer != NULL && ovBuild != NULL) {
-        NSString *verStr = [NSString stringWithUTF8String:ovVer];
-        if (verStr != nil) {
-            modified[@"ProductVersion"] = verStr;
-            modified[@"ProductUserVisibleVersion"] = verStr;
-        }
-        [modified removeObjectForKey:@"iOSSupportVersion"];
-        NSString *buildStr = [NSString stringWithUTF8String:ovBuild];
-        if (buildStr != nil) {
-            modified[@"ProductBuildVersion"] = buildStr;
-        }
-        return modified;
-    }
-    NSString *iosVer = modified[@"iOSSupportVersion"];
-    if ([iosVer isKindOfClass:[NSString class]] && iosVer.length > 0) {
-        modified[@"ProductVersion"] = iosVer;
-        modified[@"ProductUserVisibleVersion"] = iosVer;
-    }
-    [modified removeObjectForKey:@"iOSSupportVersion"];
-    NSString *buildVer = modified[@"ProductBuildVersion"];
-    if ([buildVer isKindOfClass:[NSString class]] &&
-        buildVer.length >= 3 &&
-        [buildVer hasPrefix:@"24"]) {
-        modified[@"ProductBuildVersion"] = [@"22" stringByAppendingString:[buildVer substringFromIndex:2]];
-    }
+    pt_sanitize_system_version_dict(modified);
     return modified;
 }
 
 + (NSDictionary *) pm_dictionaryWithContentsOfFile:(NSString *)path {
-    path = ps_resolve_virtual_nsstring_path(path);
-    NSDictionary *dict = [self pm_dictionaryWithContentsOfFile:path];
-    if (dict != nil && [path hasSuffix:@"/SystemVersion.plist"] &&
-        pt_is_bypass_enabled() &&
-        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        NSMutableDictionary *modified = ps_sanitized_system_version_mutable_dict(dict);
-        return [self isSubclassOfClass:[NSMutableDictionary class]] ? modified : [modified copy];
+    const void *caller = __builtin_return_address(0);
+    if (ps_is_hidden_path(path, caller)) {
+        return nil;
+    }
+    NSString *resolved = ps_resolve_virtual_nsstring_path(path);
+    if (resolved != path && ps_is_hidden_path(ps_strip_iossupport_nsstring(resolved), caller)) {
+        return nil;
+    }
+    BOOL usedBackup = NO;
+    if (resolved.length > 0) {
+        const char *resolvedC = [resolved fileSystemRepresentation];
+        if (resolvedC != NULL) {
+            char backupBuf[PATH_MAX];
+            int isSysCaller = -1;
+            const char *backup = pt_lookup_app_backup_redirect_for_caller(
+                resolvedC, caller, backupBuf, sizeof(backupBuf), &isSysCaller);
+            if (backup != NULL) {
+                CFStringRef cfBackup = CFStringCreateWithFileSystemRepresentation(kCFAllocatorDefault, backup);
+                if (cfBackup != NULL) {
+                    resolved = (__bridge_transfer NSString *)cfBackup;
+                    usedBackup = YES;
+                }
+            }
+        }
+    }
+    NSDictionary *dict = nil;
+    if (usedBackup) {
+        pt_enter_internal_scope();
+        dict = [self pm_dictionaryWithContentsOfFile:resolved];
+        pt_leave_internal_scope();
+    } else {
+        dict = [self pm_dictionaryWithContentsOfFile:resolved];
+    }
+    if (dict != nil && pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(caller)) {
+        BOOL wantMutable = [self isSubclassOfClass:[NSMutableDictionary class]];
+        if ([resolved hasSuffix:@"/SystemVersion.plist"] || pt_is_system_version_plist_dict(dict)) {
+            NSMutableDictionary *modified = ps_sanitized_system_version_mutable_dict(dict);
+            return wantMutable ? modified : [modified copy];
+        }
+        if (pt_is_info_plist_dict(dict) && pt_info_dict_needs_sanitize(dict)) {
+            NSMutableDictionary *modified = pt_build_sanitized_mutable_info_dict(dict);
+            if (!wantMutable && [modified[@"CFBundleSupportedPlatforms"] isKindOfClass:[NSMutableArray class]]) {
+                modified[@"CFBundleSupportedPlatforms"] = [modified[@"CFBundleSupportedPlatforms"] copy];
+            }
+            return wantMutable ? modified : [modified copy];
+        }
     }
     return dict;
 }
 
 + (NSDictionary *) pm_dictionaryWithContentsOfURL:(NSURL *)url {
-    url = ps_resolve_virtual_nsurl(url);
-    NSDictionary *dict = [self pm_dictionaryWithContentsOfURL:url];
-    if (dict != nil && [url.path hasSuffix:@"/SystemVersion.plist"] &&
-        pt_is_bypass_enabled() &&
-        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        NSMutableDictionary *modified = ps_sanitized_system_version_mutable_dict(dict);
-        return [self isSubclassOfClass:[NSMutableDictionary class]] ? modified : [modified copy];
+    const void *caller = __builtin_return_address(0);
+    if (url != nil && [url isFileURL] && ps_is_hidden_path(url.path, caller)) {
+        return nil;
+    }
+    NSURL *resolved = ps_resolve_virtual_nsurl(url);
+    if (resolved != url && resolved != nil && [resolved isFileURL] &&
+        ps_is_hidden_path(ps_strip_iossupport_nsstring(resolved.path), caller)) {
+        return nil;
+    }
+    BOOL usedBackup = NO;
+    if (resolved != nil && [resolved isFileURL]) {
+        char resolvedC[PATH_MAX];
+        if (CFURLGetFileSystemRepresentation((__bridge CFURLRef)resolved, true, (UInt8 *)resolvedC, sizeof(resolvedC))) {
+            char backupBuf[PATH_MAX];
+            int isSysCaller = -1;
+            const char *backup = pt_lookup_app_backup_redirect_for_caller(
+                resolvedC, caller, backupBuf, sizeof(backupBuf), &isSysCaller);
+            if (backup != NULL) {
+                CFURLRef cfBackupURL = CFURLCreateFromFileSystemRepresentation(
+                    kCFAllocatorDefault, (const UInt8 *)backup, (CFIndex)strlen(backup), false);
+                if (cfBackupURL != NULL) {
+                    resolved = (__bridge_transfer NSURL *)cfBackupURL;
+                    usedBackup = YES;
+                }
+            }
+        }
+    }
+    NSDictionary *dict = nil;
+    if (usedBackup) {
+        pt_enter_internal_scope();
+        dict = [self pm_dictionaryWithContentsOfURL:resolved];
+        pt_leave_internal_scope();
+    } else {
+        dict = [self pm_dictionaryWithContentsOfURL:resolved];
+    }
+    if (dict != nil && pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(caller)) {
+        BOOL wantMutable = [self isSubclassOfClass:[NSMutableDictionary class]];
+        if ([resolved.path hasSuffix:@"/SystemVersion.plist"] || pt_is_system_version_plist_dict(dict)) {
+            NSMutableDictionary *modified = ps_sanitized_system_version_mutable_dict(dict);
+            return wantMutable ? modified : [modified copy];
+        }
+        if (pt_is_info_plist_dict(dict) && pt_info_dict_needs_sanitize(dict)) {
+            NSMutableDictionary *modified = pt_build_sanitized_mutable_info_dict(dict);
+            if (!wantMutable && [modified[@"CFBundleSupportedPlatforms"] isKindOfClass:[NSMutableArray class]]) {
+                modified[@"CFBundleSupportedPlatforms"] = [modified[@"CFBundleSupportedPlatforms"] copy];
+            }
+            return wantMutable ? modified : [modified copy];
+        }
     }
     return dict;
 }
@@ -811,13 +852,13 @@ static NSMutableDictionary *ps_sanitized_system_version_mutable_dict(NSDictionar
     id plist = [self pm_propertyListWithData:data options:opt format:format error:error];
     if ([plist isKindOfClass:[NSDictionary class]]) {
         NSDictionary *dict = (NSDictionary *)plist;
-        id prodName = dict[@"ProductName"];
-        BOOL isSysVer = (dict[@"ProductBuildVersion"] != nil &&
-                         (([prodName isKindOfClass:[NSString class]] && [(NSString *)prodName isEqualToString:@"macOS"]) ||
-                          dict[@"iOSSupportVersion"] != nil));
+        BOOL isSysVer = pt_is_system_version_plist_dict(dict);
         BOOL isCodeRes = ([dict[@"files"] isKindOfClass:[NSDictionary class]] ||
                           [dict[@"files2"] isKindOfClass:[NSDictionary class]]);
-        if ((isSysVer || isCodeRes) &&
+        BOOL isInfoPlist = (!isSysVer && !isCodeRes &&
+                            pt_is_info_plist_dict(dict) &&
+                            pt_info_dict_needs_sanitize(dict));
+        if ((isSysVer || isCodeRes || isInfoPlist) &&
             pt_is_bypass_enabled() &&
             !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
             BOOL wantMutableContainers = ((opt & (NSPropertyListMutableContainers | NSPropertyListMutableContainersAndLeaves)) != 0);
@@ -857,6 +898,16 @@ static NSMutableDictionary *ps_sanitized_system_version_mutable_dict(NSDictionar
                         return [modified copy];
                     }
                     return modified;
+                }
+            }
+            if (isInfoPlist) {
+                NSMutableDictionary *modified = pt_build_sanitized_mutable_info_dict(dict);
+                if (modified != nil) {
+                    if (!wantMutableContainers &&
+                        [modified[@"CFBundleSupportedPlatforms"] isKindOfClass:[NSMutableArray class]]) {
+                        modified[@"CFBundleSupportedPlatforms"] = [modified[@"CFBundleSupportedPlatforms"] copy];
+                    }
+                    return wantMutableContainers ? modified : [modified copy];
                 }
             }
         }
@@ -901,45 +952,62 @@ static NSMutableDictionary *ps_sanitized_system_version_mutable_dict(NSDictionar
 }
 
 - (BOOL) pm_isMacCatalystApp {
-    if (!ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return NO;
     }
     return [self pm_isMacCatalystApp];
 }
 
 - (BOOL) pm_swift_isMacCatalystApp {
-    if (!ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return NO;
     }
     return [self pm_swift_isMacCatalystApp];
 }
 
 - (BOOL) pm_isiOSAppOnMac {
-    if (!ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return NO;
     }
     return [self pm_isiOSAppOnMac];
 }
 
 - (BOOL) pm_swift_isiOSAppOnMac {
-    if (!ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return NO;
     }
     return [self pm_swift_isiOSAppOnMac];
 }
 
 - (BOOL) pm_macCatalystVersionIsAtLeastVersion:(NSOperatingSystemVersion)version {
-    if (!ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return NO;
     }
     return [self pm_macCatalystVersionIsAtLeastVersion:version];
 }
 
 - (BOOL) pm_swift_macCatalystVersionIsAtLeastVersion:(NSOperatingSystemVersion)version {
-    if (!ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return NO;
     }
     return [self pm_swift_macCatalystVersionIsAtLeastVersion:version];
+}
+
+static NSError *ps_make_devicecheck_unsupported_error(void) {
+    NSString *domain = @"com.apple.devicecheck.error";
+    NSString * __unsafe_unretained const *sym =
+        (NSString * __unsafe_unretained const *)dlsym(RTLD_DEFAULT, "DCErrorDomain");
+    if (sym != NULL && *sym != nil && [*sym isKindOfClass:[NSString class]]) {
+        domain = *sym;
+    }
+    // DCErrorFeatureUnsupported == 1 in <DeviceCheck/DCError.h>
+    return [NSError errorWithDomain:domain code:1 userInfo:nil];
 }
 
 - (BOOL) pm_ps_appAttest_isSupported {
@@ -950,8 +1018,77 @@ static NSMutableDictionary *ps_sanitized_system_version_mutable_dict(NSDictionar
     return [self pm_ps_appAttest_isSupported];
 }
 
+- (void) pm_ps_appAttest_generateKeyWithCompletionHandler:(void (^)(NSString * _Nullable keyId, NSError * _Nullable error))completionHandler {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (completionHandler != nil) {
+            NSError *err = ps_make_devicecheck_unsupported_error();
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+                completionHandler(nil, err);
+            });
+        }
+        return;
+    }
+    [self pm_ps_appAttest_generateKeyWithCompletionHandler:completionHandler];
+}
+
+- (void) pm_ps_appAttest_attestKey:(NSString *)keyId
+                    clientDataHash:(NSData *)clientDataHash
+                 completionHandler:(void (^)(NSData * _Nullable attestationObject, NSError * _Nullable error))completionHandler {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (completionHandler != nil) {
+            NSError *err = ps_make_devicecheck_unsupported_error();
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+                completionHandler(nil, err);
+            });
+        }
+        return;
+    }
+    [self pm_ps_appAttest_attestKey:keyId clientDataHash:clientDataHash completionHandler:completionHandler];
+}
+
+- (void) pm_ps_appAttest_generateAssertion:(NSString *)keyId
+                            clientDataHash:(NSData *)clientDataHash
+                         completionHandler:(void (^)(NSData * _Nullable assertionObject, NSError * _Nullable error))completionHandler {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (completionHandler != nil) {
+            NSError *err = ps_make_devicecheck_unsupported_error();
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+                completionHandler(nil, err);
+            });
+        }
+        return;
+    }
+    [self pm_ps_appAttest_generateAssertion:keyId clientDataHash:clientDataHash completionHandler:completionHandler];
+}
+
+- (BOOL) pm_ps_dcDevice_isSupported {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return NO;
+    }
+    return [self pm_ps_dcDevice_isSupported];
+}
+
+- (void) pm_ps_dcDevice_generateTokenWithCompletionHandler:(void (^)(NSData * _Nullable data, NSError * _Nullable error))completion {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (completion != nil) {
+            NSError *err = ps_make_devicecheck_unsupported_error();
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+                completion(nil, err);
+            });
+        }
+        return;
+    }
+    [self pm_ps_dcDevice_generateTokenWithCompletionHandler:completion];
+}
+
 - (NSUInteger) pm_pi_processorCount {
-    if (ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (!pt_is_bypass_enabled() ||
+        ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return [self pm_pi_processorCount];
     }
     uint32_t cores = pt_get_spoofed_cpu_cores();
@@ -959,7 +1096,8 @@ static NSMutableDictionary *ps_sanitized_system_version_mutable_dict(NSDictionar
 }
 
 - (NSUInteger) pm_swift_pi_processorCount {
-    if (ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (!pt_is_bypass_enabled() ||
+        ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return [self pm_swift_pi_processorCount];
     }
     uint32_t cores = pt_get_spoofed_cpu_cores();
@@ -967,7 +1105,8 @@ static NSMutableDictionary *ps_sanitized_system_version_mutable_dict(NSDictionar
 }
 
 - (NSUInteger) pm_pi_activeProcessorCount {
-    if (ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (!pt_is_bypass_enabled() ||
+        ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return [self pm_pi_activeProcessorCount];
     }
     uint32_t cores = pt_get_spoofed_cpu_cores();
@@ -975,7 +1114,8 @@ static NSMutableDictionary *ps_sanitized_system_version_mutable_dict(NSDictionar
 }
 
 - (NSUInteger) pm_swift_pi_activeProcessorCount {
-    if (ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (!pt_is_bypass_enabled() ||
+        ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return [self pm_swift_pi_activeProcessorCount];
     }
     uint32_t cores = pt_get_spoofed_cpu_cores();
@@ -983,7 +1123,8 @@ static NSMutableDictionary *ps_sanitized_system_version_mutable_dict(NSDictionar
 }
 
 - (unsigned long long) pm_pi_physicalMemory {
-    if (ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (!pt_is_bypass_enabled() ||
+        ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return [self pm_pi_physicalMemory];
     }
     uint64_t mem = pt_get_spoofed_physical_memory();
@@ -994,7 +1135,8 @@ static NSMutableDictionary *ps_sanitized_system_version_mutable_dict(NSDictionar
 }
 
 - (unsigned long long) pm_swift_pi_physicalMemory {
-    if (ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (!pt_is_bypass_enabled() ||
+        ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return [self pm_swift_pi_physicalMemory];
     }
     uint64_t mem = pt_get_spoofed_physical_memory();
@@ -1034,6 +1176,12 @@ static BOOL ps_get_cached_ios_sysver(NSOperatingSystemVersion *outVer, NSString 
         NSDictionary *sysVer = [NSDictionary dictionaryWithContentsOfFile:@"/System/Library/CoreServices/SystemVersion.plist"];
         NSString *verStr = nil;
         NSString *iosVer = sysVer[@"iOSSupportVersion"];
+        if (!([iosVer isKindOfClass:[NSString class]] && iosVer.length > 0)) {
+            const char *fallbackCStr = pt_get_spoofed_ios_version_cstr();
+            if (fallbackCStr != NULL && fallbackCStr[0] != '\0') {
+                iosVer = [NSString stringWithUTF8String:fallbackCStr];
+            }
+        }
         if ([iosVer isKindOfClass:[NSString class]] && iosVer.length > 0) {
             verStr = [iosVer copy];
             NSArray<NSString *> *parts = [iosVer componentsSeparatedByString:@"."];
@@ -1046,18 +1194,14 @@ static BOOL ps_get_cached_ios_sysver(NSOperatingSystemVersion *outVer, NSString 
         }
         NSString *buildStr = sysVer[@"ProductBuildVersion"];
         if ([buildStr isKindOfClass:[NSString class]] && buildStr.length > 0) {
-            char rel[64] = {0};
-            size_t relLen = sizeof(rel);
-            int kernMajor = (sysctlbyname("kern.osrelease", rel, &relLen, NULL, 0) == 0) ? atoi(rel) : 0;
-            if (kernMajor >= 24 && buildStr.length >= 3) {
-                unichar c0 = [buildStr characterAtIndex:0];
-                unichar c1 = [buildStr characterAtIndex:1];
-                if (c0 >= '0' && c0 <= '9' && c1 >= '0' && c1 <= '9') {
-                    int bPrefix = (int)(c0 - '0') * 10 + (int)(c1 - '0');
-                    int targetPrefix = kernMajor - 2;
-                    if (bPrefix > targetPrefix) {
-                        buildStr = [NSString stringWithFormat:@"%d%@", targetPrefix, [buildStr substringFromIndex:2]];
-                    }
+            char sanitizedBuild[64] = {0};
+            if (pt_sanitize_ios_build_version_cstr(buildStr.UTF8String,
+                                                   verStr.UTF8String,
+                                                   sanitizedBuild,
+                                                   sizeof(sanitizedBuild))) {
+                NSString *mapped = [NSString stringWithUTF8String:sanitizedBuild];
+                if (mapped.length > 0) {
+                    buildStr = mapped;
                 }
             }
         } else {
@@ -1695,90 +1839,46 @@ static NSArray<UIWindow *> *ps_filter_windows_array(NSArray<UIWindow *> *orig, c
 }
 
 static NSDictionary *ps_sanitize_process_environment(NSDictionary *orig) {
-    if (!orig) {
-        return @{};
+    BOOL bypass = pt_is_bypass_enabled();
+    const char *vh = pt_get_virtual_home_cstr();
+    const char *vt = pt_get_virtual_tmpdir_cstr();
+    NSMutableDictionary *sanitized = [NSMutableDictionary dictionaryWithCapacity:orig.count + 4U];
+    if (orig != nil) {
+        [orig enumerateKeysAndObjectsUsingBlock:^(id keyObj, id valObj, BOOL *stop) {
+            (void)stop;
+            if (![keyObj isKindOfClass:[NSString class]]) {
+                return;
+            }
+            NSString *key = (NSString *)keyObj;
+            const char *keyCStr = [key UTF8String];
+            if (keyCStr == NULL || keyCStr[0] == '\0') {
+                return;
+            }
+            NSString *valStr = [valObj isKindOfClass:[NSString class]] ? (NSString *)valObj : [valObj description];
+            const char *valCStr = (valStr != nil) ? [valStr UTF8String] : "";
+            const char *rewritten = NULL;
+            pt_env_entry_action_t act = pt_resolve_env_entry(
+                keyCStr, valCStr, YES, bypass, vh, vt, &rewritten);
+            if (act == PT_ENV_ENTRY_REWRITE && rewritten != NULL) {
+                NSString *rewrittenStr = [NSString stringWithUTF8String:rewritten];
+                if (rewrittenStr != nil) {
+                    sanitized[key] = rewrittenStr;
+                }
+            } else if (act == PT_ENV_ENTRY_KEEP && valStr != nil) {
+                sanitized[key] = valStr;
+            }
+        }];
     }
-    static NSArray<NSString *> *s_keysToRemove = nil;
-    static NSSet<NSString *> *s_safeRewrittenKeys = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        s_keysToRemove = @[
-            @"DYLD_INSERT_LIBRARIES",
-            @"DYLD_LIBRARY_PATH",
-            @"DYLD_FRAMEWORK_PATH",
-            @"USE_EXTRA_ANTIJB",
-            @"MallocStackLogging",
-            @"SSH_AUTH_SOCK",
-            @"TERM_PROGRAM",
-            @"TERM_PROGRAM_VERSION",
-            @"SHELL",
-            @"COMMAND_MODE",
-            @"USER",
-            @"LOGNAME",
-            @"OLDPWD",
-            @"DISABLE_PLAYSHADOW_BYPASS"
-        ];
-        s_safeRewrittenKeys = [NSSet setWithObjects:
-            @"HOME", @"CFFIXED_USER_HOME", @"TMPDIR", @"TMP", @"TEMP", @"PWD", @"PATH", nil];
-    });
-    NSMutableDictionary *sanitized = [orig mutableCopy];
-    [sanitized removeObjectsForKeys:s_keysToRemove];
-    static NSString *s_virtHomeStr = nil;
-    static NSString *s_virtTmpStr = nil;
-    static dispatch_once_t envPathOnce;
-    dispatch_once(&envPathOnce, ^{
-        const char *vh = pt_get_virtual_home_cstr();
-        if (vh != NULL) {
-            s_virtHomeStr = [[NSString alloc] initWithUTF8String:vh];
-        }
-        const char *vt = pt_get_virtual_tmpdir_cstr();
-        if (vt != NULL) {
-            s_virtTmpStr = [[NSString alloc] initWithUTF8String:vt];
-        }
-    });
-    if (s_virtHomeStr != nil) {
-        sanitized[@"HOME"] = s_virtHomeStr;
-    }
-    if (s_virtTmpStr != nil) {
-        sanitized[@"TMPDIR"] = s_virtTmpStr;
-        if (sanitized[@"TMP"] != nil) {
-            sanitized[@"TMP"] = s_virtTmpStr;
-        }
-        if (sanitized[@"TEMP"] != nil) {
-            sanitized[@"TEMP"] = s_virtTmpStr;
-        }
-    }
-    if (sanitized[@"PWD"] != nil) {
-        sanitized[@"PWD"] = @"/";
-    }
-    if (sanitized[@"PATH"] != nil) {
-        sanitized[@"PATH"] = @"/usr/bin:/bin:/usr/sbin:/sbin";
-    }
-    for (NSString *key in [sanitized allKeys]) {
-        if (![key isKindOfClass:[NSString class]]) {
-            continue;
-        }
-        const char *keyCStr = [key UTF8String];
-        if ([key hasPrefix:@"XPC_"] || (keyCStr != NULL && pt_is_hidden_env_key(keyCStr))) {
-            [sanitized removeObjectForKey:key];
-            continue;
-        }
-        BOOL wasRewritten = ([s_safeRewrittenKeys containsObject:key] &&
-                             ((![key isEqualToString:@"HOME"] && ![key isEqualToString:@"CFFIXED_USER_HOME"]) || s_virtHomeStr != nil) &&
-                             ((![key isEqualToString:@"TMPDIR"] && ![key isEqualToString:@"TMP"] && ![key isEqualToString:@"TEMP"]) || s_virtTmpStr != nil));
-        if (wasRewritten) {
-            continue;
-        }
-        id val = sanitized[key];
-        if ([val isKindOfClass:[NSString class]]) {
-            NSString *valStr = (NSString *)val;
-            if ([valStr rangeOfString:@"/Users/" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                [valStr rangeOfString:@"PlayTools" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                [valStr rangeOfString:@"PlayCover" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                [valStr rangeOfString:@"MacOver" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                [valStr rangeOfString:@"app.makedie" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                [valStr rangeOfString:@"/var/folders/" options:NSCaseInsensitiveSearch].location != NSNotFound) {
-                [sanitized removeObjectForKey:key];
+    NSArray<NSString *> *mandatoryKeys = @[@"HOME", @"CFFIXED_USER_HOME", @"TMPDIR", @"PATH"];
+    for (NSString *mkey in mandatoryKeys) {
+        if (sanitized[mkey] == nil) {
+            const char *rewritten = NULL;
+            if (pt_resolve_env_entry([mkey UTF8String], NULL, NO, bypass, vh, vt, &rewritten) == PT_ENV_ENTRY_REWRITE &&
+                rewritten != NULL) {
+                NSString *rewrittenStr = [NSString stringWithUTF8String:rewritten];
+                if (rewrittenStr != nil) {
+                    sanitized[mkey] = rewrittenStr;
+                }
             }
         }
     }
@@ -1787,7 +1887,7 @@ static NSDictionary *ps_sanitize_process_environment(NSDictionary *orig) {
 
 - (NSDictionary *) pm_environment {
     NSDictionary *orig = [self pm_environment];
-    if (!pt_is_bypass_enabled() || ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return orig ?: @{};
     }
     return ps_sanitize_process_environment(orig);
@@ -1795,7 +1895,7 @@ static NSDictionary *ps_sanitize_process_environment(NSDictionary *orig) {
 
 - (NSDictionary *) pm_swift_environment {
     NSDictionary *orig = [self pm_swift_environment];
-    if (!pt_is_bypass_enabled() || ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return orig ?: @{};
     }
     return ps_sanitize_process_environment(orig);
@@ -1843,20 +1943,53 @@ static NSDictionary *ps_sanitize_process_environment(NSDictionary *orig) {
     return [self pm_swift_fullUserName];
 }
 
+static NSArray<NSString *> *ps_sanitize_process_arguments(NSArray<NSString *> *orig) {
+    NSUInteger count = orig.count;
+    if (count == 0) {
+        return orig;
+    }
+    NSMutableArray<NSString *> *modified = [NSMutableArray arrayWithCapacity:count];
+    BOOL changed = NO;
+    for (NSUInteger i = 0; i < count; i++) {
+        NSString *item = orig[i];
+        const char *cstr = [item isKindOfClass:[NSString class]] ? [item UTF8String] : NULL;
+        if (i == 0) {
+            if (cstr != NULL && cstr[0] != '\0') {
+                const char *sanitized = pt_sanitize_image_path_for_cstr(cstr);
+                if (sanitized != NULL && sanitized[0] != '\0') {
+                    NSString *sanitizedStr = [NSString stringWithUTF8String:sanitized];
+                    if (sanitizedStr != nil && ![sanitizedStr isEqualToString:item]) {
+                        [modified addObject:sanitizedStr];
+                        changed = YES;
+                        continue;
+                    }
+                }
+            }
+            [modified addObject:item];
+            continue;
+        }
+        const char *nextCstr = NULL;
+        if (i + 1 < count && [orig[i + 1] isKindOfClass:[NSString class]]) {
+            nextCstr = [orig[i + 1] UTF8String];
+        }
+        int skip = pt_macos_launch_arg_skip_count(cstr, nextCstr);
+        if (skip > 0) {
+            changed = YES;
+            if (skip == 2 && i + 1 < count) {
+                i++;
+            }
+            continue;
+        }
+        [modified addObject:item];
+    }
+    return changed ? [modified copy] : orig;
+}
+
 - (NSArray<NSString *> *) pm_arguments {
     NSArray<NSString *> *orig = [self pm_arguments];
     if (orig.count > 0 && pt_is_bypass_enabled() &&
         !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        NSString *first = orig[0];
-        const char *sanitized = pt_sanitize_image_path_for_cstr([first UTF8String]);
-        if (sanitized != NULL) {
-            NSString *sanitizedStr = [NSString stringWithUTF8String:sanitized];
-            if (sanitizedStr != nil && ![sanitizedStr isEqualToString:first]) {
-                NSMutableArray<NSString *> *modified = [orig mutableCopy];
-                modified[0] = sanitizedStr;
-                return [modified copy];
-            }
-        }
+        return ps_sanitize_process_arguments(orig);
     }
     return orig;
 }
@@ -1865,16 +1998,7 @@ static NSDictionary *ps_sanitize_process_environment(NSDictionary *orig) {
     NSArray<NSString *> *orig = [self pm_swift_arguments];
     if (orig.count > 0 && pt_is_bypass_enabled() &&
         !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        NSString *first = orig[0];
-        const char *sanitized = pt_sanitize_image_path_for_cstr([first UTF8String]);
-        if (sanitized != NULL) {
-            NSString *sanitizedStr = [NSString stringWithUTF8String:sanitized];
-            if (sanitizedStr != nil && ![sanitizedStr isEqualToString:first]) {
-                NSMutableArray<NSString *> *modified = [orig mutableCopy];
-                modified[0] = sanitizedStr;
-                return [modified copy];
-            }
-        }
+        return ps_sanitize_process_arguments(orig);
     }
     return orig;
 }
@@ -4682,6 +4806,8 @@ static void ps_install_avcapture_hooks_if_loaded(void) {
     os_unfair_lock_unlock(&s_av_hooks_lock);
 }
 
+static _Atomic bool s_ps_dynamic_hooks_ready = false;
+
 __attribute__((visibility("hidden")))
 void ps_load_environment_bypass_hooks(void) {
     Class piClass = objc_getClass("NSProcessInfo");
@@ -4798,6 +4924,7 @@ void ps_load_environment_bypass_hooks(void) {
     }
 
     ps_install_dynamic_system_bundle_hooks();
+    atomic_store_explicit(&s_ps_dynamic_hooks_ready, true, memory_order_release);
     [[NSNotificationCenter defaultCenter] addObserverForName:NSBundleDidLoadNotification
                                                       object:nil
                                                        queue:nil
@@ -4807,14 +4934,47 @@ void ps_load_environment_bypass_hooks(void) {
     }];
 }
 
+__attribute__((visibility("hidden")))
+void ps_notify_dynamic_image_loaded(void) {
+    if (atomic_load_explicit(&s_ps_dynamic_hooks_ready, memory_order_acquire)) {
+        ps_install_dynamic_system_bundle_hooks();
+    }
+}
+
 static void ps_install_app_attest_hooks_if_loaded(void) {
     Class appAttestCls = objc_getClass("DCAppAttestService");
     if (appAttestCls != Nil) {
         static dispatch_once_t appAttestOnce;
         dispatch_once(&appAttestOnce, ^{
             SEL isSupportedSel = NSSelectorFromString(@"isSupported");
-            if (ps_class_defines_instance_method(appAttestCls, isSupportedSel)) {
+            if (class_getInstanceMethod(appAttestCls, isSupportedSel) != NULL) {
                 ps_swizzle_instance_method(appAttestCls, isSupportedSel, @selector(pm_ps_appAttest_isSupported));
+            }
+            SEL genKeySel = NSSelectorFromString(@"generateKeyWithCompletionHandler:");
+            if (class_getInstanceMethod(appAttestCls, genKeySel) != NULL) {
+                ps_swizzle_instance_method(appAttestCls, genKeySel, @selector(pm_ps_appAttest_generateKeyWithCompletionHandler:));
+            }
+            SEL attestSel = NSSelectorFromString(@"attestKey:clientDataHash:completionHandler:");
+            if (class_getInstanceMethod(appAttestCls, attestSel) != NULL) {
+                ps_swizzle_instance_method(appAttestCls, attestSel, @selector(pm_ps_appAttest_attestKey:clientDataHash:completionHandler:));
+            }
+            SEL assertSel = NSSelectorFromString(@"generateAssertion:clientDataHash:completionHandler:");
+            if (class_getInstanceMethod(appAttestCls, assertSel) != NULL) {
+                ps_swizzle_instance_method(appAttestCls, assertSel, @selector(pm_ps_appAttest_generateAssertion:clientDataHash:completionHandler:));
+            }
+        });
+    }
+    Class dcDeviceCls = objc_getClass("DCDevice");
+    if (dcDeviceCls != Nil) {
+        static dispatch_once_t dcDeviceOnce;
+        dispatch_once(&dcDeviceOnce, ^{
+            SEL isSupportedSel = NSSelectorFromString(@"isSupported");
+            if (class_getInstanceMethod(dcDeviceCls, isSupportedSel) != NULL) {
+                ps_swizzle_instance_method(dcDeviceCls, isSupportedSel, @selector(pm_ps_dcDevice_isSupported));
+            }
+            SEL genTokenSel = NSSelectorFromString(@"generateTokenWithCompletionHandler:");
+            if (class_getInstanceMethod(dcDeviceCls, genTokenSel) != NULL) {
+                ps_swizzle_instance_method(dcDeviceCls, genTokenSel, @selector(pm_ps_dcDevice_generateTokenWithCompletionHandler:));
             }
         });
     }
@@ -4822,12 +4982,23 @@ static void ps_install_app_attest_hooks_if_loaded(void) {
 
 __attribute__((visibility("hidden")))
 void ps_install_dynamic_system_bundle_hooks(void) {
-    pt_install_graphics_hooks_if_loaded();
-    ps_install_webkit_hooks_if_loaded();
-    ps_install_quicklook_hooks_if_loaded();
-    ps_install_audio_session_port_hooks();
-    ps_install_avcapture_hooks_if_loaded();
-    ps_install_app_attest_hooks_if_loaded();
+    static _Thread_local bool s_tls_installing_dynamic_hooks = false;
+    static _Thread_local bool s_tls_needs_rescan = false;
+    if (s_tls_installing_dynamic_hooks) {
+        s_tls_needs_rescan = true;
+        return;
+    }
+    s_tls_installing_dynamic_hooks = true;
+    do {
+        s_tls_needs_rescan = false;
+        pt_install_graphics_hooks_if_loaded();
+        ps_install_webkit_hooks_if_loaded();
+        ps_install_quicklook_hooks_if_loaded();
+        ps_install_audio_session_port_hooks();
+        ps_install_avcapture_hooks_if_loaded();
+        ps_install_app_attest_hooks_if_loaded();
+    } while (s_tls_needs_rescan);
+    s_tls_installing_dynamic_hooks = false;
 }
 
 

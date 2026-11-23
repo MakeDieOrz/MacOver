@@ -1,5 +1,6 @@
 blacklist:
     - /Applications
+    - /System/Applications
     - /Developer
     - /Library/Application Support/MacOver
     - /Library/Application Support/PlayCover
@@ -8,12 +9,24 @@ blacklist:
     - /Library/Frameworks/PlayTools.framework
     - /Library/LaunchAgents
     - /Library/LaunchDaemons
+    - /Library/MobileSubstrate
     - /Library/MobileSubstrate/MobileSubstrate.dylib
+    - /Library/TweakInject
+    - /Library/dpkg
+    - /Library/Frameworks/CydiaSubstrate.framework
+    - /Library/Frameworks/ElleKit.framework
+    - /Library/Frameworks/libhooker.dylib
     - /Library/PreferenceBundles/LaunchInSafeMode.bundle
     - /Library/PrivilegedHelperTools
     - /Applications/MacOver.app
     - /Applications/PlayCover.app
     - /Applications/Cydia.app
+    - /Applications/Sileo.app
+    - /Applications/Zebra.app
+    - /Applications/TrollStore.app
+    - /Applications/Dopamine.app
+    - /Applications/palera1n.app
+    - /Applications/Filza.app
     - /bin/ls
     - /bin/sed
     - /bin/kill
@@ -44,14 +57,40 @@ blacklist:
     - /bin/bash
     - /bin/sh
     - /bin/mv
+    - /private/preboot
+    - /private/var/jb
     - /private/var/binpack
     - /private/var/lib/apt
     - /private/var/select/sh
     - /private/var/stash
+    - /private/var/vm
+    - /var/vm
+    - /cores/binpack
     - /usr/bin/sshd
+    - /var/jb
+    - /var/binpack
+    - /var/checkra1n.dmg
     - /var/cache/apt
     - /var/lib/apt
     - /var/lib/cydia
+    - /var/lib/dpkg
+    - /var/lib/undecimus
+    - /var/containers/Bundle/tweaksupport
+    - /var/containers/Bundle/iosbinpack64
+    - /var/mobile/Library/palera1n
+    - /var/mobile/Library/Caches/com.opa334.TrollStore
+    - /var/log/apt
+    - /usr/lib/TweakInject
+    - /usr/lib/ellekit.dylib
+    - /usr/lib/libhooker.dylib
+    - /usr/lib/libsubstitute.dylib
+    - /usr/lib/substrate
+    - /.installed_unc0ver
+    - /.bootstrapped_electra
+    - /.installed_dopamine
+    - /.installed_palera1n
+    - /.palera1n_strapped
+    - /.procursus_strapped
     - /usr/sbin/frida-server
     - /usr/bin/cycript
     - /usr/local/bin/cycript

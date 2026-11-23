@@ -15,6 +15,7 @@
 //
 
 #include <Foundation/Foundation.h>
+#include <arpa/inet.h>
 #include <copyfile.h>
 #include <crt_externs.h>
 #include <dirent.h>
@@ -64,6 +65,11 @@
 #import "../PTCallerAddressMath.h"
 #import "PTDebugTrace.h"
 #import "PTRegistration.h"
+
+// Shared user-pointer sanity check across PlayTools subsystems.
+static inline BOOL pt_is_valid_user_pointer(const void *ptr) {
+    return pt_is_valid_user_addr((uintptr_t)ptr) ? YES : NO;
+}
 #if __has_include(<libproc.h>)
 #include <libproc.h>
 #else
@@ -387,8 +393,24 @@ extern const struct mach_header *dyld_image_header_containing_address(const void
 #import "../Controls/PTFakeTouch/NSObject+Swizzle.h"
 #import <dlfcn.h>
 
+typedef enum {
+    PT_ENV_ENTRY_KEEP = 0,
+    PT_ENV_ENTRY_HIDE = 1,
+    PT_ENV_ENTRY_REWRITE = 2
+} pt_env_entry_action_t;
+
 __attribute__((visibility("hidden"))) const char *pt_sanitize_image_path_for_app(const char *raw_path);
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_env_key(const char *name);
+__attribute__((visibility("hidden"))) int pt_macos_launch_arg_skip_count(const char *arg, const char *next_arg);
+__attribute__((visibility("hidden"))) BOOL pt_is_hidden_env_value(const char *val, BOOL has_virtual_container);
+__attribute__((visibility("hidden"))) pt_env_entry_action_t pt_resolve_env_entry(
+    const char *key,
+    const char *raw_val,
+    BOOL has_raw_entry,
+    BOOL bypass_enabled,
+    const char *vh,
+    const char *vt,
+    const char **out_val);
 
 @import MachO;
 @import CFNetwork;
@@ -434,6 +456,9 @@ typedef struct {
     uint32_t native_width;
     uint32_t native_height;
     double native_scale;
+    uint32_t max_fps;
+    int32_t max_apple_gpu_family;
+    const char *gpu_arch;
 } pt_device_profile_t;
 
 typedef enum {
@@ -485,21 +510,38 @@ __attribute__((visibility("hidden"))) BOOL pt_read_plist_top_string_from_fd(int 
 __attribute__((visibility("hidden"))) int pt_open_early_settings_plist_fd(void);
 __attribute__((visibility("hidden"))) const char *pt_get_device_model_cstr(void);
 __attribute__((visibility("hidden"))) const char *pt_get_oem_id_cstr(void);
+__attribute__((visibility("hidden"))) const char *pt_get_spoofed_ios_version_cstr(void);
+typedef struct {
+    uint32_t platform;
+    uint32_t version;
+} pt_dyld_build_version_t;
+
 __attribute__((visibility("hidden"))) const char *pt_get_reported_ios_version_override(const char **out_build);
+__attribute__((visibility("hidden"))) BOOL pt_is_compat13_7_active(void);
+__attribute__((visibility("hidden"))) bool pt_availability_version_check(uint32_t count, const pt_dyld_build_version_t versions[]);
 __attribute__((visibility("hidden"))) void pt_disable_reported_ios_override_for_safe_mode(void);
 __attribute__((visibility("hidden"))) uint32_t pt_get_spoofed_cpu_cores(void);
 __attribute__((visibility("hidden"))) uint64_t pt_get_spoofed_physical_memory(void);
 __attribute__((visibility("hidden"))) const char *pt_get_spoofed_gpu_name_cstr(void);
+__attribute__((visibility("hidden"))) int32_t pt_get_spoofed_max_apple_gpu_family(void);
+__attribute__((visibility("hidden"))) const char *pt_get_spoofed_gpu_arch_cstr(void);
 __attribute__((visibility("hidden"))) BOOL pt_get_spoofed_device_is_ipad(void);
 __attribute__((visibility("hidden"))) void pt_get_spoofed_screen_native_bounds(double *out_portrait_width, double *out_portrait_height, double *out_native_scale);
 __attribute__((visibility("hidden"))) double pt_get_device_native_scale(void);
 __attribute__((visibility("hidden"))) uint32_t pt_get_device_native_width(void);
 __attribute__((visibility("hidden"))) uint32_t pt_get_device_native_height(void);
+__attribute__((visibility("hidden"))) uint32_t pt_get_device_max_fps(void);
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_env_key(const char *name);
+__attribute__((visibility("hidden"))) int pt_macos_launch_arg_skip_count(const char *arg, const char *next_arg);
 __attribute__((visibility("hidden"))) CFURLRef pt_resolve_cfbundle_input_url(CFURLRef url, const void *caller, BOOL *out_blocked) CF_RETURNS_RETAINED;
 __attribute__((visibility("hidden"))) CFURLRef pt_sanitize_cfbundle_returned_url(CFURLRef CF_CONSUMED url, const void *caller) CF_RETURNS_RETAINED;
+__attribute__((visibility("hidden"))) BOOL pt_is_info_plist_dict(NSDictionary *dict);
 __attribute__((visibility("hidden"))) BOOL pt_info_dict_needs_sanitize(NSDictionary *dict);
+__attribute__((visibility("hidden"))) NSMutableDictionary *pt_build_sanitized_mutable_info_dict(NSDictionary *dict);
 __attribute__((visibility("hidden"))) NSDictionary *pt_build_sanitized_info_dict(NSDictionary *dict);
+__attribute__((visibility("hidden"))) BOOL pt_is_system_version_plist_dict(NSDictionary *dict);
+__attribute__((visibility("hidden"))) BOOL pt_sanitize_ios_build_version_cstr(const char *build_cstr, const char *ios_ver_cstr, char *out_buf, size_t out_size);
+__attribute__((visibility("hidden"))) void pt_sanitize_system_version_dict(NSMutableDictionary *dict);
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_thread_name(const char *name);
 __attribute__((visibility("hidden"))) CFTypeRef pt_MGCopyAnswer(CFStringRef question, CFDictionaryRef options);
 __attribute__((visibility("hidden"))) CFDictionaryRef pt_MGCopyMultipleAnswers(CFArrayRef questions, CFDictionaryRef options);
@@ -507,6 +549,7 @@ __attribute__((visibility("hidden"))) bool pt_MGGetBoolAnswer(CFStringRef questi
 __attribute__((visibility("hidden"))) int32_t pt_MGGetSInt32Answer(CFStringRef question, int32_t defaultVal);
 __attribute__((visibility("hidden"))) CFStringRef pt_MGGetStringAnswer(CFStringRef question);
 __attribute__((visibility("hidden"))) int32_t pt_MGGetProductType(void);
+__attribute__((visibility("hidden"))) char ***pt_get_app_shadow_environ_ptr(void);
 
 // FSVirtualizer exports
 __attribute__((visibility("hidden"))) BOOL pt_is_system_or_playtools_caller(const void *ret_addr);
@@ -549,6 +592,7 @@ __attribute__((visibility("hidden"))) BOOL pt_is_address_in_playtools(const void
 
 // NetworkVirtualizer exports
 __attribute__((visibility("hidden"))) int ps_should_block_host_cstr(const char *hostname);
+__attribute__((visibility("hidden"))) void ps_notify_dynamic_image_loaded(void);
 
 #ifdef __cplusplus
 }

@@ -1,4 +1,5 @@
 import Combine
+import Darwin
 import Foundation
 import PlayCoverCore
 import XCTest
@@ -603,5 +604,814 @@ final class ArchitectureAndHostTests: XCTestCase {
         XCTAssertEqual(DeviceProfileOption.recommendedIOS13Model(isIPhone: true), "iPhone12,5")
         XCTAssertTrue(DeviceProfileOption.isIPhone("iPhone18,2"))
         XCTAssertFalse(DeviceProfileOption.isIPhone("iPad17,3"))
+
+        appSettings.update {
+            $0.iosDeviceModel = "iPad13,8"
+            $0.reportedIOSVersionMode = .compat13_7
+        }
+        appSettings.sync()
+        XCTAssertTrue(appSettings.flush())
+        XCTAssertEqual(appSettings.settings.iosDeviceModel, "iPad13,8")
+        XCTAssertEqual(appSettings.settings.effectiveIOSDeviceModel, "iPad8,6")
+        let reloadedPad = AppSettings(settingsUrl: settingsURL, info: info, debounceInterval: 0.2)
+        XCTAssertEqual(reloadedPad.settings.iosDeviceModel, "iPad13,8")
+        XCTAssertEqual(reloadedPad.settings.effectiveIOSDeviceModel, "iPad8,6")
+        appSettings.update { $0.reportedIOSVersionMode = .automatic }
+        XCTAssertEqual(appSettings.settings.iosDeviceModel, "iPad13,8")
+        XCTAssertEqual(appSettings.settings.effectiveIOSDeviceModel, "iPad13,8")
+
+        appSettings.update {
+            $0.iosDeviceModel = "iPhone18,2"
+            $0.reportedIOSVersionMode = .compat13_7
+        }
+        appSettings.sync()
+        XCTAssertTrue(appSettings.flush())
+        XCTAssertEqual(appSettings.settings.iosDeviceModel, "iPhone18,2")
+        XCTAssertEqual(appSettings.settings.effectiveIOSDeviceModel, "iPhone12,5")
+        appSettings.update { $0.reportedIOSVersionMode = .compat18_3 }
+        XCTAssertEqual(appSettings.settings.iosDeviceModel, "iPhone18,2")
+        XCTAssertEqual(appSettings.settings.effectiveIOSDeviceModel, "iPhone18,2")
+    }
+
+    func testCommitAppBackupsReplacesOrInvalidatesStaleBackups() throws {
+        let dir = try XCTUnwrap(tempDir)
+        let fm = FileManager.default
+        let bundleID = "com.example.appbackups"
+        let targetDir = dir.appendingPathComponent("AppBackups").appendingPathComponent(bundleID)
+        try fm.createDirectory(at: targetDir, withIntermediateDirectories: true)
+        let oldExec = targetDir.appendingPathComponent("executable")
+        try Data("v1-binary".utf8).write(to: oldExec)
+
+        // Replacing with valid staged artifacts and manifest swaps in v2 + manifest.plist
+        let stagingV2 = dir.appendingPathComponent("staging-v2")
+        try fm.createDirectory(at: stagingV2, withIntermediateDirectories: true)
+        try Data("v2-binary".utf8).write(to: stagingV2.appendingPathComponent("executable"))
+        let manifestV2 = Installer.AppBackupManifest(
+            bundleIdentifier: bundleID,
+            shortVersionString: "2.0.0",
+            bundleVersion: "200",
+            installGeneration: "GEN-V2-UUID"
+        )
+        try Installer.commitAppBackups(
+            .staged(stagingV2),
+            to: targetDir,
+            bundleIdentifier: bundleID,
+            manifest: manifestV2
+        )
+        XCTAssertEqual(try String(contentsOf: oldExec, encoding: .utf8), "v2-binary")
+        let manifestURL = targetDir.appendingPathComponent(Installer.backupManifestFileName)
+        XCTAssertTrue(fm.fileExists(atPath: manifestURL.path))
+
+        // Upgrade with no applicable backup artifacts (e.g. Fat binary without mobileprovision)
+        // must remove stale v2 backup so runtime does not serve old binary to v3 app.
+        try Installer.commitAppBackups(
+            .noneApplicable,
+            to: targetDir,
+            bundleIdentifier: bundleID,
+            manifest: nil
+        )
+        XCTAssertFalse(fm.fileExists(atPath: targetDir.path))
+
+        // Failed or empty staging after app bundle wrap must also invalidate stale backup.
+        try fm.createDirectory(at: targetDir, withIntermediateDirectories: true)
+        try Data("v3-binary".utf8).write(to: oldExec)
+        try Installer.commitAppBackups(
+            .failed,
+            to: targetDir,
+            bundleIdentifier: bundleID,
+            manifest: manifestV2
+        )
+        XCTAssertFalse(fm.fileExists(atPath: targetDir.path))
+    }
+
+    func testAppBackupManifestBindsGenerationAndBundleVersion() throws {
+        let dir = try XCTUnwrap(tempDir)
+        let fm = FileManager.default
+        let bundleID = "com.example.manifestbind"
+        let targetDir = dir.appendingPathComponent("AppBackups").appendingPathComponent(bundleID)
+        let appDir = dir.appendingPathComponent("Sample.app", isDirectory: true)
+        try fm.createDirectory(at: appDir, withIntermediateDirectories: true)
+
+        let infoURL = appDir.appendingPathComponent("Info.plist")
+        let cleanInfoDict: [String: Any] = [
+            "CFBundleIdentifier": bundleID,
+            "CFBundleExecutable": "Sample",
+            "CFBundleShortVersionString": "1.2.3",
+            "CFBundleVersion": "45",
+            "MinimumOSVersion": "16.4"
+        ]
+        try PropertyListSerialization.data(fromPropertyList: cleanInfoDict, format: .xml, options: 0)
+            .write(to: infoURL)
+        let stagingClean = dir.appendingPathComponent("staging-clean-info")
+        let baseSampleApp = BaseApp(appUrl: appDir)
+        if case .staged(let stagedURL) = Installer.stageAppBackups(for: baseSampleApp, in: stagingClean) {
+            let stagedInfoData = try Data(contentsOf: stagedURL.appendingPathComponent("Info.plist"))
+            let stagedParsed = try XCTUnwrap(
+                PropertyListSerialization.propertyList(from: stagedInfoData, format: nil) as? [String: Any]
+            )
+            XCTAssertNil(stagedParsed[Installer.installGenerationInfoKey])
+            XCTAssertEqual(stagedParsed["MinimumOSVersion"] as? String, "16.4")
+        } else {
+            XCTFail("Expected stageAppBackups to stage clean Info.plist")
+        }
+
+        let v1Gen = UUID().uuidString
+        let infoDict: [String: Any] = [
+            "CFBundleIdentifier": bundleID,
+            "CFBundleExecutable": "Sample",
+            "CFBundleShortVersionString": "1.2.3",
+            "CFBundleVersion": "45",
+            Installer.installGenerationInfoKey: v1Gen
+        ]
+        try PropertyListSerialization.data(fromPropertyList: infoDict, format: .xml, options: 0)
+            .write(to: infoURL)
+        let appInfo = AppInfo(contentsOf: infoURL)
+
+        let stagingV1 = dir.appendingPathComponent("staging-v1")
+        try fm.createDirectory(at: stagingV1, withIntermediateDirectories: true)
+        try Data("v1-exec".utf8).write(to: stagingV1.appendingPathComponent("executable"))
+        try Installer.commitAppBackups(
+            .staged(stagingV1),
+            to: targetDir,
+            bundleIdentifier: bundleID,
+            manifest: Installer.AppBackupManifest(appInfo: appInfo)
+        )
+        XCTAssertTrue(Installer.verifyAppBackupManifest(in: targetDir, for: appInfo))
+
+        // Reinstall or crash-interrupted upgrade with a different installGeneration must reject stale backup
+        appInfo[string: Installer.installGenerationInfoKey] = UUID().uuidString
+        XCTAssertFalse(Installer.verifyAppBackupManifest(in: targetDir, for: appInfo))
+
+        // Restore generation, mutate CFBundleVersion -> must reject mismatched version
+        appInfo[string: Installer.installGenerationInfoKey] = v1Gen
+        XCTAssertTrue(Installer.verifyAppBackupManifest(in: targetDir, for: appInfo))
+        appInfo[string: "CFBundleVersion"] = "46"
+        XCTAssertFalse(Installer.verifyAppBackupManifest(in: targetDir, for: appInfo))
+
+        // Legacy backup directory without manifest.plist must be rejected
+        appInfo[string: "CFBundleVersion"] = "45"
+        try fm.removeItem(at: targetDir.appendingPathComponent(Installer.backupManifestFileName))
+        XCTAssertFalse(Installer.verifyAppBackupManifest(in: targetDir, for: appInfo))
+
+        // Committing staged artifacts without valid manifest must refuse and invalidate targetDir
+        let stagingUnbound = dir.appendingPathComponent("staging-unbound")
+        try fm.createDirectory(at: stagingUnbound, withIntermediateDirectories: true)
+        try Data("unbound-exec".utf8).write(to: stagingUnbound.appendingPathComponent("executable"))
+        try Installer.commitAppBackups(
+            .staged(stagingUnbound),
+            to: targetDir,
+            bundleIdentifier: bundleID,
+            manifest: nil
+        )
+        XCTAssertFalse(fm.fileExists(atPath: targetDir.path))
+    }
+
+    func testAppBackupsPreWrapQuarantineAndWrapReplacementSafety() throws {
+        let dir = try XCTUnwrap(tempDir)
+        let fm = FileManager.default
+        let bundleID = "com.example.txnsafety"
+        let backupsRoot = dir.appendingPathComponent("AppBackups", isDirectory: true)
+        let targetBackupDir = backupsRoot.appendingPathComponent(bundleID, isDirectory: true)
+        try fm.createDirectory(at: targetBackupDir, withIntermediateDirectories: true)
+        try Data("v1-exec".utf8).write(to: targetBackupDir.appendingPathComponent("executable"))
+
+        // Pre-wrap quarantine moves active AppBackups/<bundleID> out of runtime path immediately
+        let quarantined = try XCTUnwrap(
+            Installer.quarantineAppBackups(at: targetBackupDir, bundleIdentifier: bundleID)
+        )
+        XCTAssertFalse(fm.fileExists(atPath: targetBackupDir.path))
+        XCTAssertTrue(fm.fileExists(atPath: quarantined.path))
+
+        // Pre-wrap failure restores quarantined backup when new .app was never published
+        Installer.restoreQuarantinedAppBackups(quarantined, to: targetBackupDir, bundleIdentifier: bundleID)
+        XCTAssertTrue(fm.fileExists(atPath: targetBackupDir.path))
+        XCTAssertFalse(fm.fileExists(atPath: quarantined.path))
+
+        // Post-wrap commit cleans up quarantined directory and any orphan .invalidated-* siblings
+        let quarantined2 = try XCTUnwrap(
+            Installer.quarantineAppBackups(at: targetBackupDir, bundleIdentifier: bundleID)
+        )
+        let orphanInvalidated = backupsRoot.appendingPathComponent(".\(bundleID).invalidated-orphan")
+        try fm.createDirectory(at: orphanInvalidated, withIntermediateDirectories: true)
+        Installer.cleanupInvalidatedAppBackups(
+            primary: quarantined2,
+            in: backupsRoot,
+            bundleIdentifier: bundleID
+        )
+        XCTAssertFalse(fm.fileExists(atPath: quarantined2.path))
+        XCTAssertFalse(fm.fileExists(atPath: orphanInvalidated.path))
+
+        // wrap(_:into:) replaces existing .app atomically and preserves existing .app if source fails
+        let appsDir = dir.appendingPathComponent("Applications", isDirectory: true)
+        try fm.createDirectory(at: appsDir, withIntermediateDirectories: true)
+        let existingAppURL = appsDir.appendingPathComponent("\(bundleID).app", isDirectory: true)
+        try fm.createDirectory(at: existingAppURL, withIntermediateDirectories: true)
+        let v1Info: [String: Any] = [
+            "CFBundleIdentifier": bundleID,
+            "CFBundleExecutable": "Sample",
+            "CFBundleShortVersionString": "1.0"
+        ]
+        try PropertyListSerialization.data(fromPropertyList: v1Info, format: .xml, options: 0)
+            .write(to: existingAppURL.appendingPathComponent("Info.plist"))
+        try Data("v1-live".utf8).write(to: existingAppURL.appendingPathComponent("Sample"))
+
+        // Broken incoming app whose directory vanished before move must not delete existing .app
+        let brokenCandidateURL = dir.appendingPathComponent("BrokenIncoming.app", isDirectory: true)
+        try fm.createDirectory(at: brokenCandidateURL, withIntermediateDirectories: true)
+        try PropertyListSerialization.data(fromPropertyList: v1Info, format: .xml, options: 0)
+            .write(to: brokenCandidateURL.appendingPathComponent("Info.plist"))
+        let brokenBaseApp = BaseApp(appUrl: brokenCandidateURL)
+        try fm.removeItem(at: brokenCandidateURL)
+        XCTAssertThrowsError(try Installer.wrap(brokenBaseApp, into: appsDir))
+        XCTAssertEqual(
+            try String(contentsOf: existingAppURL.appendingPathComponent("Sample"), encoding: .utf8),
+            "v1-live"
+        )
+
+        // Valid v2 incoming app swaps cleanly into Applications/<bundleID>.app
+        let incomingV2URL = dir.appendingPathComponent("IncomingV2.app", isDirectory: true)
+        try fm.createDirectory(at: incomingV2URL, withIntermediateDirectories: true)
+        let v2Info: [String: Any] = [
+            "CFBundleIdentifier": bundleID,
+            "CFBundleExecutable": "Sample",
+            "CFBundleShortVersionString": "2.0"
+        ]
+        try PropertyListSerialization.data(fromPropertyList: v2Info, format: .xml, options: 0)
+            .write(to: incomingV2URL.appendingPathComponent("Info.plist"))
+        try Data("v2-live".utf8).write(to: incomingV2URL.appendingPathComponent("Sample"))
+        let v2BaseApp = BaseApp(appUrl: incomingV2URL)
+        let wrappedURL = try Installer.wrap(v2BaseApp, into: appsDir)
+        XCTAssertEqual(wrappedURL.standardizedFileURL, existingAppURL.standardizedFileURL)
+        XCTAssertEqual(
+            try String(contentsOf: existingAppURL.appendingPathComponent("Sample"), encoding: .utf8),
+            "v2-live"
+        )
+        let appDirEntries = try fm.contentsOfDirectory(atPath: appsDir.path)
+        XCTAssertEqual(appDirEntries, ["\(bundleID).app"])
+
+        // Pre-swap sign/verify failure must keep existing v2 .app intact and clean up staging artifacts
+        let failingSignCandidateURL = dir.appendingPathComponent("FailingSignV3.app", isDirectory: true)
+        try fm.createDirectory(at: failingSignCandidateURL, withIntermediateDirectories: true)
+        let v3Info: [String: Any] = [
+            "CFBundleIdentifier": bundleID,
+            "CFBundleExecutable": "Sample",
+            "CFBundleShortVersionString": "3.0"
+        ]
+        try PropertyListSerialization.data(fromPropertyList: v3Info, format: .xml, options: 0)
+            .write(to: failingSignCandidateURL.appendingPathComponent("Info.plist"))
+        try Data("v3-unsigned".utf8).write(to: failingSignCandidateURL.appendingPathComponent("Sample"))
+        let failingSignApp = BaseApp(appUrl: failingSignCandidateURL)
+
+        var liveContentDuringStaging: String?
+        XCTAssertThrowsError(
+            try Installer.publishSignedBundle(
+                failingSignApp,
+                into: appsDir,
+                prepareAndVerify: { stagedURL, targetLocation in
+                    XCTAssertEqual(targetLocation.standardizedFileURL, existingAppURL.standardizedFileURL)
+                    XCTAssertNotEqual(stagedURL.standardizedFileURL, existingAppURL.standardizedFileURL)
+                    liveContentDuringStaging = try String(
+                        contentsOf: existingAppURL.appendingPathComponent("Sample"),
+                        encoding: .utf8
+                    )
+                    throw PlayCoverError.shellExecutionFailed(
+                        binary: "/usr/bin/codesign",
+                        status: 1,
+                        output: "simulated codesign failure"
+                    )
+                }
+            )
+        )
+        XCTAssertEqual(liveContentDuringStaging, "v2-live")
+        XCTAssertEqual(
+            try String(contentsOf: existingAppURL.appendingPathComponent("Sample"), encoding: .utf8),
+            "v2-live"
+        )
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: appsDir.path), ["\(bundleID).app"])
+
+        // Post-swap commit failure must atomically roll back to v2-live and leave no staging leftovers
+        let failingPostSwapURL = dir.appendingPathComponent("FailingPostSwapV3.app", isDirectory: true)
+        try fm.createDirectory(at: failingPostSwapURL, withIntermediateDirectories: true)
+        try PropertyListSerialization.data(fromPropertyList: v3Info, format: .xml, options: 0)
+            .write(to: failingPostSwapURL.appendingPathComponent("Info.plist"))
+        try Data("v3-signed".utf8).write(to: failingPostSwapURL.appendingPathComponent("Sample"))
+        let failingPostSwapApp = BaseApp(appUrl: failingPostSwapURL)
+
+        var sawPublishedV3BeforeRollback = false
+        XCTAssertThrowsError(
+            try Installer.publishSignedBundle(
+                failingPostSwapApp,
+                into: appsDir,
+                prepareAndVerify: { _, _ in },
+                afterSwap: { publishedURL in
+                    let publishedContent = try String(
+                        contentsOf: publishedURL.appendingPathComponent("Sample"),
+                        encoding: .utf8
+                    )
+                    sawPublishedV3BeforeRollback = (publishedContent == "v3-signed")
+                    throw PlayCoverError.entitlementsError("simulated post-swap failure")
+                }
+            )
+        )
+        XCTAssertTrue(sawPublishedV3BeforeRollback)
+        XCTAssertEqual(
+            try String(contentsOf: existingAppURL.appendingPathComponent("Sample"), encoding: .utf8),
+            "v2-live"
+        )
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: appsDir.path), ["\(bundleID).app"])
+    }
+
+    func testRollbackFailureAndBackupCommitFailurePreservePreviousArtifacts() throws {
+        let dir = try XCTUnwrap(tempDir)
+        let fm = FileManager.default
+        let bundleID = "com.example.rollbackpreserve"
+
+        // 1. Unrecoverable rollback failure must never delete the sole previous .app:
+        //    (a) When target bundle is locked (UF_IMMUTABLE) while destinationDir is writable,
+        //        previous .app is rescued beside location and stagingRoot is cleaned up.
+        //    (b) When destinationDir itself is read-only (0o555), stagingRoot is retained intact
+        //        so defer never deletes the previous .app's contents inside stagingRoot.
+        let appsDir = dir.appendingPathComponent("ApplicationsRollback", isDirectory: true)
+        try fm.createDirectory(at: appsDir, withIntermediateDirectories: true)
+        let existingAppURL = appsDir.appendingPathComponent("\(bundleID).app", isDirectory: true)
+        try fm.createDirectory(at: existingAppURL, withIntermediateDirectories: true)
+        let v1Info: [String: Any] = [
+            "CFBundleIdentifier": bundleID,
+            "CFBundleExecutable": "Sample",
+            "CFBundleShortVersionString": "1.0"
+        ]
+        let v2Info: [String: Any] = [
+            "CFBundleIdentifier": bundleID,
+            "CFBundleExecutable": "Sample",
+            "CFBundleShortVersionString": "2.0"
+        ]
+        try PropertyListSerialization.data(fromPropertyList: v1Info, format: .xml, options: 0)
+            .write(to: existingAppURL.appendingPathComponent("Info.plist"))
+        try Data("v1-precious".utf8).write(to: existingAppURL.appendingPathComponent("Sample"))
+
+        let candidateImmutableURL = dir.appendingPathComponent("CandidateImmutableV2.app", isDirectory: true)
+        try fm.createDirectory(at: candidateImmutableURL, withIntermediateDirectories: true)
+        try PropertyListSerialization.data(fromPropertyList: v2Info, format: .xml, options: 0)
+            .write(to: candidateImmutableURL.appendingPathComponent("Info.plist"))
+        try Data("v2-published".utf8).write(to: candidateImmutableURL.appendingPathComponent("Sample"))
+
+        var chflagsApplied = false
+        var reportedPreservedSiblingURL: URL?
+        defer {
+            if chflagsApplied {
+                _ = Darwin.chflags(existingAppURL.path, 0)
+            }
+        }
+        XCTAssertThrowsError(
+            try Installer.publishSignedBundle(
+                BaseApp(appUrl: candidateImmutableURL),
+                into: appsDir,
+                prepareAndVerify: { _, _ in },
+                afterSwap: { publishedURL in
+                    if Darwin.chflags(publishedURL.path, UInt32(UF_IMMUTABLE)) == 0 {
+                        chflagsApplied = true
+                    }
+                    throw PlayCoverError.entitlementsError("post-swap failure with immutable target")
+                },
+                onUnrecoverableRollbackFailure: { _, preservedURL in
+                    reportedPreservedSiblingURL = preservedURL
+                }
+            )
+        )
+        if chflagsApplied {
+            _ = Darwin.chflags(existingAppURL.path, 0)
+            chflagsApplied = false
+            let rescuedURL = try XCTUnwrap(reportedPreservedSiblingURL)
+            XCTAssertEqual(
+                rescuedURL.deletingLastPathComponent().standardizedFileURL,
+                appsDir.standardizedFileURL
+            )
+            XCTAssertEqual(
+                try String(contentsOf: rescuedURL.appendingPathComponent("Sample"), encoding: .utf8),
+                "v1-precious"
+            )
+            // Restore v1-precious back to existingAppURL for subtest (b)
+            try fm.removeItem(at: existingAppURL)
+            try fm.moveItem(at: rescuedURL, to: existingAppURL)
+        }
+
+        if Darwin.geteuid() != 0 {
+            let candidateReadOnlyDirURL = dir.appendingPathComponent("CandidateReadOnlyV2.app", isDirectory: true)
+            try fm.createDirectory(at: candidateReadOnlyDirURL, withIntermediateDirectories: true)
+            try PropertyListSerialization.data(fromPropertyList: v2Info, format: .xml, options: 0)
+                .write(to: candidateReadOnlyDirURL.appendingPathComponent("Info.plist"))
+            try Data("v2-ro".utf8).write(to: candidateReadOnlyDirURL.appendingPathComponent("Sample"))
+
+            var lockedAppsDir = false
+            var reportedPreservedInStagingURL: URL?
+            defer {
+                if lockedAppsDir {
+                    _ = Darwin.chmod(appsDir.path, mode_t(0o755))
+                }
+            }
+            XCTAssertThrowsError(
+                try Installer.publishSignedBundle(
+                    BaseApp(appUrl: candidateReadOnlyDirURL),
+                    into: appsDir,
+                    prepareAndVerify: { _, _ in },
+                    afterSwap: { _ in
+                        XCTAssertEqual(Darwin.chmod(appsDir.path, mode_t(0o555)), 0)
+                        lockedAppsDir = true
+                        throw PlayCoverError.entitlementsError("post-swap failure with read-only parent")
+                    },
+                    onUnrecoverableRollbackFailure: { _, preservedURL in
+                        reportedPreservedInStagingURL = preservedURL
+                    }
+                )
+            )
+            XCTAssertEqual(Darwin.chmod(appsDir.path, mode_t(0o755)), 0)
+            lockedAppsDir = false
+            let preservedStagingBundle = try XCTUnwrap(reportedPreservedInStagingURL)
+            XCTAssertEqual(
+                try String(contentsOf: preservedStagingBundle.appendingPathComponent("Sample"), encoding: .utf8),
+                "v1-precious"
+            )
+        }
+
+        // 2. commitAppBackups failure must restore previousDir -> targetDir, never delete existing backup,
+        //    and always throw even when targetDir is absent (never treat missing targetDir as commit success).
+        let backupsRoot = dir.appendingPathComponent("AppBackupsPreserve", isDirectory: true)
+        let targetBackupDir = backupsRoot.appendingPathComponent(bundleID, isDirectory: true)
+        try fm.createDirectory(at: targetBackupDir, withIntermediateDirectories: true)
+        try Data("v1-backup-exec".utf8).write(to: targetBackupDir.appendingPathComponent("executable"))
+
+        let missingIncoming = backupsRoot.appendingPathComponent(".missing-incoming-\(UUID().uuidString)")
+        XCTAssertThrowsError(
+            try Installer.replaceBackupDirectoryAtomically(
+                incomingDir: missingIncoming,
+                targetDir: targetBackupDir,
+                parentDir: backupsRoot,
+                bundleIdentifier: bundleID,
+                allowRenameSwap: false
+            )
+        )
+        XCTAssertEqual(
+            try String(contentsOf: targetBackupDir.appendingPathComponent("executable"), encoding: .utf8),
+            "v1-backup-exec"
+        )
+
+        if Darwin.geteuid() != 0 {
+            let stagingV2 = dir.appendingPathComponent("staging-v2-fail", isDirectory: true)
+            try fm.createDirectory(at: stagingV2, withIntermediateDirectories: true)
+            try Data("v2-backup-exec".utf8).write(to: stagingV2.appendingPathComponent("executable"))
+            let manifestV2 = Installer.AppBackupManifest(
+                bundleIdentifier: bundleID,
+                shortVersionString: "2.0",
+                bundleVersion: "2",
+                installGeneration: "GEN-V2"
+            )
+            XCTAssertEqual(Darwin.chmod(backupsRoot.path, mode_t(0o555)), 0)
+            defer { _ = Darwin.chmod(backupsRoot.path, mode_t(0o755)) }
+            XCTAssertThrowsError(
+                try Installer.commitAppBackups(
+                    .staged(stagingV2),
+                    to: targetBackupDir,
+                    bundleIdentifier: bundleID,
+                    manifest: manifestV2
+                )
+            )
+            // Even when targetDir does not exist (quarantined pre-swap), commit failure must throw!
+            let quarantinedTargetDir = backupsRoot.appendingPathComponent("com.example.absenttarget", isDirectory: true)
+            XCTAssertThrowsError(
+                try Installer.commitAppBackups(
+                    .staged(stagingV2),
+                    to: quarantinedTargetDir,
+                    bundleIdentifier: "com.example.absenttarget",
+                    manifest: Installer.AppBackupManifest(
+                        bundleIdentifier: "com.example.absenttarget",
+                        shortVersionString: "2.0",
+                        bundleVersion: "2",
+                        installGeneration: "GEN-V2"
+                    )
+                )
+            )
+            XCTAssertEqual(Darwin.chmod(backupsRoot.path, mode_t(0o755)), 0)
+            XCTAssertEqual(
+                try String(contentsOf: targetBackupDir.appendingPathComponent("executable"), encoding: .utf8),
+                "v1-backup-exec"
+            )
+        }
+
+        // 3. Unrestored quarantined AppBackups must NOT be deleted by cleanupInvalidatedAppBackups.
+        let quarantined = try XCTUnwrap(
+            Installer.quarantineAppBackups(at: targetBackupDir, bundleIdentifier: bundleID)
+        )
+        let orphanInvalidated = backupsRoot.appendingPathComponent(".\(bundleID).invalidated-stale-orphan")
+        try fm.createDirectory(at: orphanInvalidated, withIntermediateDirectories: true)
+        // Simulate obstruction at targetBackupDir causing restoreQuarantinedAppBackups to return false
+        try fm.createDirectory(at: targetBackupDir, withIntermediateDirectories: true)
+        try Data("obstructing-partial".utf8).write(to: targetBackupDir.appendingPathComponent("partial"))
+        XCTAssertFalse(
+            Installer.restoreQuarantinedAppBackups(quarantined, to: targetBackupDir, bundleIdentifier: bundleID)
+        )
+        Installer.cleanupInvalidatedAppBackups(
+            primary: nil,
+            in: backupsRoot,
+            bundleIdentifier: bundleID,
+            excluding: [quarantined]
+        )
+        XCTAssertFalse(fm.fileExists(atPath: orphanInvalidated.path))
+        XCTAssertTrue(fm.fileExists(atPath: quarantined.path))
+        XCTAssertEqual(
+            try String(contentsOf: quarantined.appendingPathComponent("executable"), encoding: .utf8),
+            "v1-backup-exec"
+        )
+    }
+
+    func testAppBackupsDistinguishesENOENTFromLstatQueryErrors() throws {
+        let dir = try XCTUnwrap(tempDir)
+        let fm = FileManager.default
+        let bundleID = "com.example.lstatquery"
+        let backupsRoot = dir.appendingPathComponent("AppBackupsQuery", isDirectory: true)
+        try fm.createDirectory(at: backupsRoot, withIntermediateDirectories: true)
+        let targetBackupDir = backupsRoot.appendingPathComponent(bundleID, isDirectory: true)
+
+        let appDir = dir.appendingPathComponent("QuerySample.app", isDirectory: true)
+        try fm.createDirectory(at: appDir, withIntermediateDirectories: true)
+        let infoURL = appDir.appendingPathComponent("Info.plist")
+        let infoDict: [String: Any] = [
+            "CFBundleIdentifier": bundleID,
+            "CFBundleExecutable": "Sample",
+            "CFBundleShortVersionString": "1.0",
+            "CFBundleVersion": "1",
+            Installer.installGenerationInfoKey: "GEN-QUERY-1"
+        ]
+        try PropertyListSerialization.data(fromPropertyList: infoDict, format: .xml, options: 0)
+            .write(to: infoURL)
+        let appInfo = AppInfo(contentsOf: infoURL)
+
+        // Genuinely absent path (ENOENT) must be treated as absent/clean across invalidation, quarantine, and launch.
+        XCTAssertTrue(Installer.invalidateAppBackups(at: targetBackupDir, bundleIdentifier: bundleID))
+        XCTAssertNil(try Installer.quarantineAppBackups(at: targetBackupDir, bundleIdentifier: bundleID))
+        XCTAssertNoThrow(try Installer.validateOrInvalidateAppBackupsForLaunch(at: targetBackupDir, for: appInfo))
+
+        // Create backup with mismatched manifest and verify launch validation evicts it when accessible.
+        try fm.createDirectory(at: targetBackupDir, withIntermediateDirectories: true)
+        try Data("stale-exec".utf8).write(to: targetBackupDir.appendingPathComponent("executable"))
+        try Installer.validateOrInvalidateAppBackupsForLaunch(at: targetBackupDir, for: appInfo)
+        XCTAssertFalse(fm.fileExists(atPath: targetBackupDir.path))
+
+        // Re-create backup, remove search/read permissions on parent directory (0o000 -> EACCES on lstat),
+        // and verify query failures return false / throw rather than silently succeeding.
+        if Darwin.geteuid() != 0 {
+            try fm.createDirectory(at: targetBackupDir, withIntermediateDirectories: true)
+            try Data("protected-exec".utf8).write(to: targetBackupDir.appendingPathComponent("executable"))
+            XCTAssertEqual(Darwin.chmod(backupsRoot.path, mode_t(0o000)), 0)
+            defer { _ = Darwin.chmod(backupsRoot.path, mode_t(0o755)) }
+
+            XCTAssertFalse(Installer.invalidateAppBackups(at: targetBackupDir, bundleIdentifier: bundleID))
+            XCTAssertThrowsError(try Installer.quarantineAppBackups(at: targetBackupDir, bundleIdentifier: bundleID))
+            XCTAssertThrowsError(
+                try Installer.commitAppBackups(
+                    .noneApplicable,
+                    to: targetBackupDir,
+                    bundleIdentifier: bundleID,
+                    manifest: nil
+                )
+            )
+            XCTAssertThrowsError(
+                try Installer.validateOrInvalidateAppBackupsForLaunch(at: targetBackupDir, for: appInfo)
+            )
+
+            XCTAssertEqual(Darwin.chmod(backupsRoot.path, mode_t(0o755)), 0)
+            XCTAssertEqual(
+                try String(contentsOf: targetBackupDir.appendingPathComponent("executable"), encoding: .utf8),
+                "protected-exec"
+            )
+        }
+    }
+
+    func testAfterSwapPreservesQuarantinedBackupsOnStagingOrValidationFailure() throws {
+        let dir = try XCTUnwrap(tempDir)
+        let fm = FileManager.default
+        let bundleID = "com.example.degradedbackups"
+        let appsDir = dir.appendingPathComponent("ApplicationsDegraded", isDirectory: true)
+        let backupsRoot = dir.appendingPathComponent("AppBackupsDegraded", isDirectory: true)
+        let targetBackupDir = backupsRoot.appendingPathComponent(bundleID, isDirectory: true)
+        try fm.createDirectory(at: appsDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: targetBackupDir, withIntermediateDirectories: true)
+
+        let existingAppURL = appsDir.appendingPathComponent("\(bundleID).app", isDirectory: true)
+        try fm.createDirectory(at: existingAppURL, withIntermediateDirectories: true)
+        let v1Info: [String: Any] = [
+            "CFBundleIdentifier": bundleID,
+            "CFBundleExecutable": "Sample",
+            "CFBundleShortVersionString": "1.0",
+            "CFBundleVersion": "1"
+        ]
+        try PropertyListSerialization.data(fromPropertyList: v1Info, format: .xml, options: 0)
+            .write(to: existingAppURL.appendingPathComponent("Info.plist"))
+        try Data("v1-live".utf8).write(to: existingAppURL.appendingPathComponent("Sample"))
+        try Data("v1-precious-backup".utf8).write(to: targetBackupDir.appendingPathComponent("executable"))
+
+        // 1. Upgrade v2 with backup staging .failed: new .app install succeeds (not rolled back),
+        //    active targetBackupDir stays absent, and quarantined v1 backup is preserved (not deleted).
+        let candidateV2URL = dir.appendingPathComponent("CandidateDegradedV2.app", isDirectory: true)
+        try fm.createDirectory(at: candidateV2URL, withIntermediateDirectories: true)
+        let v2Info: [String: Any] = [
+            "CFBundleIdentifier": bundleID,
+            "CFBundleExecutable": "Sample",
+            "CFBundleShortVersionString": "2.0",
+            "CFBundleVersion": "2",
+            Installer.installGenerationInfoKey: "GEN-V2"
+        ]
+        try PropertyListSerialization.data(fromPropertyList: v2Info, format: .xml, options: 0)
+            .write(to: candidateV2URL.appendingPathComponent("Info.plist"))
+        try Data("v2-live".utf8).write(to: candidateV2URL.appendingPathComponent("Sample"))
+
+        var quarantinedV1Dir: URL?
+        var v2CommitOutcome: Installer.AppBackupCommitOutcome?
+        let publishedV2URL = try Installer.publishSignedBundle(
+            BaseApp(appUrl: candidateV2URL),
+            into: appsDir,
+            prepareAndVerify: { _, _ in },
+            beforeSwap: {
+                quarantinedV1Dir = try Installer.quarantineAppBackups(
+                    at: targetBackupDir,
+                    bundleIdentifier: bundleID
+                )
+            },
+            afterSwap: { publishedURL in
+                let installedInfo = AppInfo(contentsOf: publishedURL.appendingPathComponent("Info.plist"))
+                v2CommitOutcome = try Installer.finalizeAppBackupsAfterSwap(
+                    .failed,
+                    to: targetBackupDir,
+                    bundleIdentifier: bundleID,
+                    manifest: Installer.AppBackupManifest(appInfo: installedInfo),
+                    quarantinedDir: quarantinedV1Dir
+                )
+            }
+        )
+        let preservedQuarantinedURL = try XCTUnwrap(quarantinedV1Dir)
+        XCTAssertEqual(publishedV2URL.standardizedFileURL, existingAppURL.standardizedFileURL)
+        XCTAssertEqual(v2CommitOutcome, .degradedWithoutBackups)
+        XCTAssertEqual(
+            try String(contentsOf: existingAppURL.appendingPathComponent("Sample"), encoding: .utf8),
+            "v2-live"
+        )
+        XCTAssertFalse(fm.fileExists(atPath: targetBackupDir.path))
+        XCTAssertTrue(fm.fileExists(atPath: preservedQuarantinedURL.path))
+        XCTAssertEqual(
+            try String(contentsOf: preservedQuarantinedURL.appendingPathComponent("executable"), encoding: .utf8),
+            "v1-precious-backup"
+        )
+
+        // 2. Subsequent upgrade v3 with .staged validation failure (nil manifest) must also succeed
+        //    without rolling back v3 and without wiping previously preserved .invalidated-* backups.
+        let candidateV3URL = dir.appendingPathComponent("CandidateDegradedV3.app", isDirectory: true)
+        try fm.createDirectory(at: candidateV3URL, withIntermediateDirectories: true)
+        let v3Info: [String: Any] = [
+            "CFBundleIdentifier": bundleID,
+            "CFBundleExecutable": "Sample",
+            "CFBundleShortVersionString": "3.0",
+            "CFBundleVersion": "3"
+        ]
+        try PropertyListSerialization.data(fromPropertyList: v3Info, format: .xml, options: 0)
+            .write(to: candidateV3URL.appendingPathComponent("Info.plist"))
+        try Data("v3-live".utf8).write(to: candidateV3URL.appendingPathComponent("Sample"))
+        let invalidStagedV3 = dir.appendingPathComponent("staging-v3-unbound", isDirectory: true)
+        try fm.createDirectory(at: invalidStagedV3, withIntermediateDirectories: true)
+        try Data("v3-exec".utf8).write(to: invalidStagedV3.appendingPathComponent("executable"))
+
+        var v3CommitOutcome: Installer.AppBackupCommitOutcome?
+        _ = try Installer.publishSignedBundle(
+            BaseApp(appUrl: candidateV3URL),
+            into: appsDir,
+            prepareAndVerify: { _, _ in },
+            beforeSwap: {
+                XCTAssertNil(try Installer.quarantineAppBackups(at: targetBackupDir, bundleIdentifier: bundleID))
+            },
+            afterSwap: { _ in
+                v3CommitOutcome = try Installer.finalizeAppBackupsAfterSwap(
+                    .staged(invalidStagedV3),
+                    to: targetBackupDir,
+                    bundleIdentifier: bundleID,
+                    manifest: nil,
+                    quarantinedDir: nil
+                )
+            }
+        )
+        XCTAssertEqual(v3CommitOutcome, .degradedWithoutBackups)
+        XCTAssertEqual(
+            try String(contentsOf: existingAppURL.appendingPathComponent("Sample"), encoding: .utf8),
+            "v3-live"
+        )
+        XCTAssertFalse(fm.fileExists(atPath: invalidStagedV3.path))
+        XCTAssertTrue(fm.fileExists(atPath: preservedQuarantinedURL.path))
+
+        // 3. .noneApplicable (new app genuinely needs no backups) still cleans up invalidated backups.
+        let noneOutcome = try Installer.finalizeAppBackupsAfterSwap(
+            .noneApplicable,
+            to: targetBackupDir,
+            bundleIdentifier: bundleID,
+            manifest: nil,
+            quarantinedDir: preservedQuarantinedURL
+        )
+        XCTAssertEqual(noneOutcome, .noneApplicable)
+        XCTAssertFalse(fm.fileExists(atPath: preservedQuarantinedURL.path))
+    }
+
+    func testAppBackupsRejectsPathTraversalSymlinkStagingAndPreservesUnreadableRollbackFiles() throws {
+        let dir = try XCTUnwrap(tempDir)
+        let fm = FileManager.default
+
+        // 1. Path-traversal and malformed bundle identifiers must never touch sibling directories.
+        let backupsRoot = dir.appendingPathComponent("AppBackupsTraversal", isDirectory: true)
+        let victimDir = backupsRoot.appendingPathComponent("victim", isDirectory: true)
+        try fm.createDirectory(at: victimDir, withIntermediateDirectories: true)
+        try Data("precious".utf8).write(to: victimDir.appendingPathComponent("keep.txt"))
+
+        let maliciousIDs = ["../victim", "nested/id", "..", ".", ".hidden", ""]
+        for badID in maliciousIDs {
+            XCTAssertFalse(Installer.isSafeBundleIdentifierForStorage(badID))
+            let escapedTarget = backupsRoot.appendingPathComponent("sub", isDirectory: true)
+                .appendingPathComponent(badID, isDirectory: true)
+            XCTAssertFalse(Installer.invalidateAppBackups(at: escapedTarget, bundleIdentifier: badID))
+            XCTAssertThrowsError(try Installer.quarantineAppBackups(at: victimDir, bundleIdentifier: badID))
+            XCTAssertThrowsError(
+                try Installer.commitAppBackups(
+                    .noneApplicable,
+                    to: victimDir,
+                    bundleIdentifier: badID,
+                    manifest: nil
+                )
+            )
+            Installer.cleanupInvalidatedAppBackups(
+                primary: victimDir,
+                in: backupsRoot,
+                bundleIdentifier: badID
+            )
+        }
+        XCTAssertTrue(fm.fileExists(atPath: victimDir.appendingPathComponent("keep.txt").path))
+
+        // 2. stageAppBackups must refuse symlinked Info.plist, embedded.mobileprovision, and executable.
+        let secretURL = dir.appendingPathComponent("secret-outside.txt")
+        try Data("SECRET_HOST_DATA".utf8).write(to: secretURL)
+        let symAppDir = dir.appendingPathComponent("SymlinkLeak.app", isDirectory: true)
+        try fm.createDirectory(at: symAppDir, withIntermediateDirectories: true)
+        let symInfoURL = symAppDir.appendingPathComponent("Info.plist")
+        let plistDict: [String: Any] = [
+            "CFBundleIdentifier": "com.example.symlinktest",
+            "CFBundleExecutable": "SymExec",
+            "CFBundleShortVersionString": "1.0"
+        ]
+        try PropertyListSerialization.data(fromPropertyList: plistDict, format: .xml, options: 0)
+            .write(to: symInfoURL)
+        let symProvURL = symAppDir.appendingPathComponent("embedded.mobileprovision")
+        let symExecURL = symAppDir.appendingPathComponent("SymExec")
+        try fm.createSymbolicLink(at: symProvURL, withDestinationURL: secretURL)
+        try fm.createSymbolicLink(at: symExecURL, withDestinationURL: secretURL)
+
+        let symStagingDir = dir.appendingPathComponent("StagingSymlinkPartial", isDirectory: true)
+        let partialStage = Installer.stageAppBackups(for: BaseApp(appUrl: symAppDir), in: symStagingDir)
+        guard case .staged(let stagedURL) = partialStage else {
+            return XCTFail("Expected Info.plist alone to still stage safely")
+        }
+        XCTAssertTrue(fm.fileExists(atPath: stagedURL.appendingPathComponent("Info.plist").path))
+        XCTAssertFalse(fm.fileExists(atPath: stagedURL.appendingPathComponent("embedded.mobileprovision").path))
+        XCTAssertFalse(fm.fileExists(atPath: stagedURL.appendingPathComponent("executable").path))
+
+        // Replace Info.plist with a symlink too -> nothing regular remains -> .noneApplicable.
+        try fm.removeItem(at: symInfoURL)
+        try fm.createSymbolicLink(at: symInfoURL, withDestinationURL: secretURL)
+        let noneStage = Installer.stageAppBackups(
+            for: BaseApp(appUrl: symAppDir),
+            in: dir.appendingPathComponent("StagingSymlinkNone", isDirectory: true)
+        )
+        guard case .noneApplicable = noneStage else {
+            return XCTFail("Expected all-symlink bundle artifacts to yield .noneApplicable")
+        }
+
+        // 3. Rollback restoration helper must delete newly created files, restore readable originals,
+        //    and NEVER delete pre-existing unreadable files.
+        let freshFile = dir.appendingPathComponent("fresh-settings.plist")
+        try Data("new".utf8).write(to: freshFile)
+        Installer.restoreRollbackFile(at: freshFile, existedBefore: false, previousData: nil, label: "settings")
+        XCTAssertFalse(fm.fileExists(atPath: freshFile.path))
+
+        let existingFile = dir.appendingPathComponent("existing-settings.plist")
+        try Data("updated".utf8).write(to: existingFile)
+        Installer.restoreRollbackFile(
+            at: existingFile,
+            existedBefore: true,
+            previousData: Data("original".utf8),
+            label: "settings"
+        )
+        XCTAssertEqual(try String(contentsOf: existingFile, encoding: .utf8), "original")
+
+        let unreadableFile = dir.appendingPathComponent("unreadable-entitlements.plist")
+        try Data("locked".utf8).write(to: unreadableFile)
+        Installer.restoreRollbackFile(
+            at: unreadableFile,
+            existedBefore: true,
+            previousData: nil,
+            label: "entitlements"
+        )
+        XCTAssertTrue(fm.fileExists(atPath: unreadableFile.path))
     }
 }

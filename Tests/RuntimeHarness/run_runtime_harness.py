@@ -30,6 +30,7 @@ from typing import Optional
 
 
 MOCK_PLUGIN_C = r"""
+#include <arpa/inet.h>
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,10 +59,15 @@ MOCK_TARGET_M = r"""
 @import QuartzCore;
 @import UIKit;
 @import PlayTools;
+#include <arpa/inet.h>
 #include <dlfcn.h>
+#include <crt_externs.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <mach/mach.h>
 #include <mach-o/dyld.h>
+#include <mach-o/getsect.h>
+#include <mach-o/loader.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
 #include <stdbool.h>
@@ -75,6 +81,7 @@ MOCK_TARGET_M = r"""
 
 extern bool pt_is_registered_hidden_module(const char *name);
 extern bool pt_is_registered_hidden_class(const char *name);
+extern int pt_harness_csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize) __asm("_csops");
 
 static NSString *pt_state_dir(void) {
     NSArray<NSURL *> *caches = [[NSFileManager defaultManager] URLsForDirectory:NSCachesDirectory
@@ -134,6 +141,59 @@ int main(int argc, const char *argv[]) {
         if (sysctlbyname("hw.machine", sysctlMachine, &sysctlMachineLen, NULL, 0) != 0) {
             sysctlMachine[0] = '\0';
         }
+        char sysctlMibMachine[64] = {0};
+        size_t sysctlMibMachineLen = sizeof(sysctlMibMachine);
+        int mibMachine[2] = { CTL_HW, HW_MACHINE };
+        if (sysctl(mibMachine, 2, sysctlMibMachine, &sysctlMibMachineLen, NULL, 0) != 0) {
+            sysctlMibMachine[0] = '\0';
+        }
+        uint32_t csopsTeamShortHdr[2] = {0x11111111U, 0x22222222U};
+        errno = 0;
+        BOOL csopsTeamShortERange = (pt_harness_csops(0, 14U, csopsTeamShortHdr, sizeof(csopsTeamShortHdr)) == -1 &&
+                                     errno == ERANGE &&
+                                     ntohl(csopsTeamShortHdr[0]) == 0U &&
+                                     ntohl(csopsTeamShortHdr[1]) == 19U);
+        uint8_t csopsTeamBuf[64] = {0};
+        uint32_t teamMagic = 0, teamLen = 0;
+        BOOL csopsTeamBlobOK = NO;
+        if (pt_harness_csops(0, 14U, csopsTeamBuf, sizeof(csopsTeamBuf)) == 0) {
+            memcpy(&teamMagic, csopsTeamBuf, 4);
+            memcpy(&teamLen, csopsTeamBuf + 4, 4);
+            const char *teamStr = (const char *)(csopsTeamBuf + 8);
+            csopsTeamBlobOK = (ntohl(teamMagic) == 0U &&
+                               ntohl(teamLen) == 19U &&
+                               strnlen(teamStr, 16) == 10U);
+        }
+        uint8_t csopsIdBuf[128] = {0};
+        uint32_t idMagic = 0, idLen = 0;
+        BOOL csopsIdentityBlobOK = NO;
+        if (pt_harness_csops(0, 11U, csopsIdBuf, sizeof(csopsIdBuf)) == 0) {
+            memcpy(&idMagic, csopsIdBuf, 4);
+            memcpy(&idLen, csopsIdBuf + 4, 4);
+            const char *idStr = (const char *)(csopsIdBuf + 8);
+            size_t expIdLen = strlen("app.makedie.harness.mockapp") + 1U;
+            csopsIdentityBlobOK = (ntohl(idMagic) == 0U &&
+                                   ntohl(idLen) == (uint32_t)(8U + expIdLen) &&
+                                   strcmp(idStr, "app.makedie.harness.mockapp") == 0);
+        }
+        uint32_t csopsEntHdr[2] = {0, 0};
+        errno = 0;
+        BOOL csopsEntBlobHdrOK = (pt_harness_csops(0, 7U, csopsEntHdr, sizeof(csopsEntHdr)) == -1 &&
+                                  errno == ERANGE &&
+                                  ntohl(csopsEntHdr[0]) == 0xfade7171U &&
+                                  ntohl(csopsEntHdr[1]) > 8U);
+        BOOL csopsStringAndBlobOK = (csopsTeamShortERange && csopsTeamBlobOK && csopsIdentityBlobOK && csopsEntBlobHdrOK);
+        size_t swapLen = 0;
+        BOOL swapUsageBlocked = (sysctlbyname("vm.swapusage", NULL, &swapLen, NULL, 0) == -1 && errno == ENOENT);
+        uint64_t l2CacheSize = 0;
+        size_t l2Len = sizeof(l2CacheSize);
+        if (sysctlbyname("hw.l2cachesize", &l2CacheSize, &l2Len, NULL, 0) != 0) {
+            l2CacheSize = 0;
+        }
+        bool (*dscContains)(const char *) = (bool (*)(const char *))dlsym(RTLD_DEFAULT, "_dyld_shared_cache_contains_path");
+        BOOL dscHidAppKit = (dscContains == NULL) ||
+                            (!dscContains("/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit") &&
+                             !dscContains("/System/iOSSupport/System/Library/Frameworks/UIKit.framework/UIKit"));
 
         struct utsname uts;
         memset(&uts, 0, sizeof(uts));
@@ -141,8 +201,8 @@ int main(int argc, const char *argv[]) {
             memset(&uts, 0, sizeof(uts));
         }
 
-        Class appAttestCls = NSClassFromString(@"DCAppAttestService");
-        if (appAttestCls == Nil) {
+        Class dcDeviceCls = NSClassFromString(@"DCDevice");
+        if (dcDeviceCls == Nil) {
             NSArray<NSString *> *dcPaths = @[
                 @"/System/iOSSupport/System/Library/Frameworks/DeviceCheck.framework",
                 @"/System/Library/Frameworks/DeviceCheck.framework"
@@ -150,24 +210,92 @@ int main(int argc, const char *argv[]) {
             for (NSString *dcPath in dcPaths) {
                 NSBundle *dcBundle = [NSBundle bundleWithPath:dcPath];
                 if (dcBundle != nil && [dcBundle load]) {
-                    appAttestCls = NSClassFromString(@"DCAppAttestService");
-                    if (appAttestCls != Nil) {
+                    dcDeviceCls = NSClassFromString(@"DCDevice");
+                    if (dcDeviceCls != Nil) {
                         break;
                     }
                 }
             }
         }
+        Class appAttestCls = NSClassFromString(@"DCAppAttestService");
         BOOL appAttestLoaded = (appAttestCls != Nil);
+        BOOL availIOS16 = NO;
+        if (@available(iOS 16.0, *)) {
+            availIOS16 = YES;
+        }
+        BOOL uiColorWellLoaded = (NSClassFromString(@"UIColorWell") != Nil);
+        BOOL uiColorWellInClassList = NO;
+        int totalClsCount = objc_getClassList(NULL, 0);
+        if (totalClsCount > 0 && totalClsCount < 100000) {
+            Class *clsBuf = (Class *)calloc((size_t)totalClsCount + 16U, sizeof(Class));
+            if (clsBuf != NULL) {
+                int gotCls = objc_getClassList(clsBuf, totalClsCount + 16);
+                for (int ci = 0; ci < gotCls; ci++) {
+                    const char *cname = (clsBuf[ci] != Nil) ? class_getName(clsBuf[ci]) : NULL;
+                    if (cname != NULL && strcmp(cname, "UIColorWell") == 0) {
+                        uiColorWellInClassList = YES;
+                        break;
+                    }
+                }
+                free(clsBuf);
+            }
+        }
         BOOL appAttestSupported = NO;
+        BOOL appAttestGenKeyUnsupported = YES;
         if (appAttestCls != Nil) {
             id svc = ((id (*)(id, SEL))objc_msgSend)((id)appAttestCls, sel_registerName("sharedService"));
             if (svc != nil) {
                 appAttestSupported = ((BOOL (*)(id, SEL))objc_msgSend)(svc, sel_registerName("isSupported"));
+                if (!safeModeActive) {
+                    appAttestGenKeyUnsupported = NO;
+                    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+                    __block NSInteger errCode = -1;
+                    __block BOOL gotNilKey = NO;
+                    void (^cb)(NSString *, NSError *) = ^(NSString *keyId, NSError *err) {
+                        gotNilKey = (keyId == nil);
+                        errCode = (err != nil) ? err.code : -1;
+                        dispatch_semaphore_signal(sem);
+                    };
+                    ((void (*)(id, SEL, id))objc_msgSend)(
+                        svc, sel_registerName("generateKeyWithCompletionHandler:"), cb);
+                    if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0) {
+                        appAttestGenKeyUnsupported = (gotNilKey && errCode == 1);
+                    }
+                }
+            }
+        }
+        BOOL dcDeviceLoaded = (dcDeviceCls != Nil);
+        BOOL dcDeviceSupported = NO;
+        BOOL dcDeviceTokenUnsupported = YES;
+        if (dcDeviceCls != Nil) {
+            id dev = ((id (*)(id, SEL))objc_msgSend)((id)dcDeviceCls, sel_registerName("currentDevice"));
+            if (dev != nil) {
+                dcDeviceSupported = ((BOOL (*)(id, SEL))objc_msgSend)(dev, sel_registerName("isSupported"));
+                if (!safeModeActive) {
+                    dcDeviceTokenUnsupported = NO;
+                    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+                    __block NSInteger errCode = -1;
+                    __block BOOL gotNilToken = NO;
+                    void (^cb)(NSData *, NSError *) = ^(NSData *tok, NSError *err) {
+                        gotNilToken = (tok == nil);
+                        errCode = (err != nil) ? err.code : -1;
+                        dispatch_semaphore_signal(sem);
+                    };
+                    ((void (*)(id, SEL, id))objc_msgSend)(
+                        dev, sel_registerName("generateTokenWithCompletionHandler:"), cb);
+                    if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0) {
+                        dcDeviceTokenUnsupported = (gotNilToken && errCode == 1);
+                    }
+                }
             }
         }
 
         NSFileManager *fm = [NSFileManager defaultManager];
         NSBundle *mainBundle = [NSBundle mainBundle];
+        BOOL hidPCInstallGenNS = ([mainBundle objectForInfoDictionaryKey:@"PCInstallGeneration"] == nil &&
+                                  mainBundle.infoDictionary[@"PCInstallGeneration"] == nil);
+        BOOL hidPCInstallGenCF = (CFBundleGetValueForInfoDictionaryKey(
+            CFBundleGetMainBundle(), CFSTR("PCInstallGeneration")) == NULL);
         NSString *provPath = [mainBundle pathForResource:@"embedded" ofType:@"mobileprovision"] ?: @"";
         NSString *provURLPath = [mainBundle URLForResource:@"embedded" withExtension:@"mobileprovision"].path ?: @"";
         CFURLRef cfProvURL = CFBundleCopyResourceURL(CFBundleGetMainBundle(), CFSTR("embedded"), CFSTR("mobileprovision"), NULL);
@@ -267,7 +395,36 @@ int main(int argc, const char *argv[]) {
 #pragma clang diagnostic pop
         [fpsLink invalidate];
 
-        // Untrusted app reflection checks verify anti-detection hides injected artifacts.
+        char ***nsArgvp = _NSGetArgv();
+        int *nsArgcp = _NSGetArgc();
+        int nsArgc = (nsArgcp != NULL) ? *nsArgcp : -1;
+        NSArray<NSString *> *procArgs = [NSProcessInfo processInfo].arguments;
+        NSString *nsArgv0 = (nsArgvp != NULL && *nsArgvp != NULL && (*nsArgvp)[0] != NULL)
+            ? ([NSString stringWithUTF8String:(*nsArgvp)[0]] ?: @"")
+            : @"";
+        NSString *procArgv0 = (procArgs.count > 0) ? procArgs[0] : @"";
+        BOOL argvAllMatch = (nsArgvp != NULL && *nsArgvp != NULL &&
+                             nsArgc == (int)procArgs.count && nsArgc >= 1);
+        BOOL argvLeakedMacFlag = NO;
+        if (argvAllMatch) {
+            for (int ai = 0; ai < nsArgc; ai++) {
+                const char *ca = (*nsArgvp)[ai];
+                NSString *sa = (ca != NULL) ? [NSString stringWithUTF8String:ca] : nil;
+                if (sa == nil || ![sa isEqualToString:procArgs[(NSUInteger)ai]]) {
+                    argvAllMatch = NO;
+                    break;
+                }
+                if ([sa isEqualToString:@"-NSDocumentRevisionsDebugMode"] ||
+                    [sa isEqualToString:@"-ApplePersistenceIgnoreState"]) {
+                    argvLeakedMacFlag = YES;
+                }
+            }
+            if ((*nsArgvp)[nsArgc] != NULL) {
+                argvAllMatch = NO;
+            }
+        }
+        BOOL argvConsistent = argvAllMatch && !argvLeakedMacFlag &&
+                              ([nsArgv0 rangeOfString:@"/var/containers/Bundle/Application/"].location != NSNotFound);
         void *blockedDlsym = dlsym(RTLD_DEFAULT, "pt_is_registered_hidden_module");
         Class reflectedSafeMode = NSClassFromString(@"PTSafeMode");
         Class reflectedPluginCls = objc_lookUpClass("MockHarnessHiddenClass");
@@ -280,6 +437,43 @@ int main(int argc, const char *argv[]) {
                 break;
             }
         }
+
+        extern const struct mach_header_64 _mh_execute_header;
+        const struct mach_header_64 *mh0 = (const struct mach_header_64 *)_dyld_get_image_header(0);
+        intptr_t slide0 = _dyld_get_image_vmaddr_slide(0);
+        Dl_info mainDlInfo;
+        memset(&mainDlInfo, 0, sizeof(mainDlInfo));
+        BOOL dladdrOK = (dladdr((const void *)&main, &mainDlInfo) != 0);
+        intptr_t computedSlide0 = 0;
+        BOOL foundTextSeg = NO;
+        if (mh0 != NULL && mh0->magic == MH_MAGIC_64) {
+            const uint8_t *lcp = (const uint8_t *)(mh0 + 1);
+            const uint8_t *lcEnd = lcp + mh0->sizeofcmds;
+            for (uint32_t li = 0; li < mh0->ncmds && lcp + sizeof(struct load_command) <= lcEnd; li++) {
+                const struct load_command *lc = (const struct load_command *)lcp;
+                if (lc->cmdsize < sizeof(struct load_command) || lcp + lc->cmdsize > lcEnd) {
+                    break;
+                }
+                if (lc->cmd == LC_SEGMENT_64 && lc->cmdsize >= sizeof(struct segment_command_64)) {
+                    const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+                    if (strncmp(seg->segname, "__TEXT", 16) == 0) {
+                        computedSlide0 = (intptr_t)mh0 - (intptr_t)seg->vmaddr;
+                        foundTextSeg = YES;
+                        break;
+                    }
+                }
+                lcp += lc->cmdsize;
+            }
+        }
+        BOOL mh0BaseAndSlideConsistent = (mh0 != NULL &&
+                                          mh0 == &_mh_execute_header &&
+                                          dladdrOK &&
+                                          mainDlInfo.dli_fbase == (void *)mh0 &&
+                                          foundTextSeg &&
+                                          computedSlide0 == slide0);
+        unsigned long mh0TextSize = 0;
+        uint8_t *mh0TextPtr = (mh0 != NULL) ? getsectiondata(mh0, "__TEXT", "__text", &mh0TextSize) : NULL;
+        BOOL mh0SectionLookupOK = (mh0TextPtr != NULL && mh0TextSize > 0);
 
         NSString *stateDir = pt_state_dir();
         NSString *crumbPath = [stateDir stringByAppendingPathComponent:@".launching_in_progress"];
@@ -321,12 +515,25 @@ int main(int argc, const char *argv[]) {
             @"sysctlOSRelease": [NSString stringWithUTF8String:sysctlOSRelease] ?: @"",
             @"sysctlVersion": [NSString stringWithUTF8String:sysctlVersion] ?: @"",
             @"sysctlMachine": [NSString stringWithUTF8String:sysctlMachine] ?: @"",
+            @"sysctlMibMachine": [NSString stringWithUTF8String:sysctlMibMachine] ?: @"",
+            @"swapUsageBlocked": swapUsageBlocked ? @YES : @NO,
+            @"csopsStringAndBlobOK": csopsStringAndBlobOK ? @YES : @NO,
+            @"l2CacheSize": @(l2CacheSize),
+            @"dscHidAppKit": dscHidAppKit ? @YES : @NO,
             @"unameRelease": [NSString stringWithUTF8String:uts.release] ?: @"",
             @"unameVersion": [NSString stringWithUTF8String:uts.version] ?: @"",
             @"unameMachine": [NSString stringWithUTF8String:uts.machine] ?: @"",
             @"appAttestLoaded": appAttestLoaded ? @YES : @NO,
+            @"availIOS16": availIOS16 ? @YES : @NO,
+            @"uiColorWellLoaded": uiColorWellLoaded ? @YES : @NO,
+            @"uiColorWellInClassList": uiColorWellInClassList ? @YES : @NO,
             @"appAttestSupported": appAttestSupported ? @YES : @NO,
+            @"appAttestGenKeyUnsupported": appAttestGenKeyUnsupported ? @YES : @NO,
+            @"dcDeviceLoaded": dcDeviceLoaded ? @YES : @NO,
+            @"dcDeviceSupported": dcDeviceSupported ? @YES : @NO,
+            @"dcDeviceTokenUnsupported": dcDeviceTokenUnsupported ? @YES : @NO,
             @"provPath": provPath,
+            @"hidPCInstallGen": (hidPCInstallGenNS && hidPCInstallGenCF) ? @YES : @NO,
             @"provURLPath": provURLPath,
             @"cfProvURLPath": cfProvURLPath,
             @"provFMExists": provFMExists ? @YES : @NO,
@@ -351,6 +558,10 @@ int main(int argc, const char *argv[]) {
             @"antiDetectionHidSafeModeClass": (reflectedSafeMode == Nil) ? @YES : @NO,
             @"antiDetectionHidPluginClass": (reflectedPluginCls == Nil) ? @YES : @NO,
             @"antiDetectionHidPluginImage": (!dyldLeakedPlugin) ? @YES : @NO,
+            @"mh0BaseAndSlideConsistent": mh0BaseAndSlideConsistent ? @YES : @NO,
+            @"mh0SectionLookupOK": mh0SectionLookupOK ? @YES : @NO,
+            @"argvConsistent": argvConsistent ? @YES : @NO,
+            @"procArgCount": @(procArgs.count),
             @"stateDir": stateDir ?: @"",
             @"breadcrumbExistsAtStart": crumbAtStart ? @YES : @NO,
             @"breadcrumbExistsAfterSleep": crumbAfterSleep ? @YES : @NO,
@@ -450,7 +661,7 @@ def build_mock_app(work_dir: Path, playtools_fw: Path) -> Path:
     plugins_dir.mkdir(parents=True, exist_ok=True)
 
     # Flat iOS/MacCatalyst bundle Info.plist
-    info_plist = {
+    clean_info_plist = {
         "CFBundleDevelopmentRegion": "en",
         "CFBundleExecutable": "MockTarget",
         "CFBundleIdentifier": "app.makedie.harness.mockapp",
@@ -459,6 +670,10 @@ def build_mock_app(work_dir: Path, playtools_fw: Path) -> Path:
         "CFBundlePackageType": "APPL",
         "CFBundleShortVersionString": "1.0",
         "CFBundleVersion": "1",
+    }
+    info_plist = {
+        **clean_info_plist,
+        "PCInstallGeneration": "HARNESS-GEN-101",
     }
     with open(app_dir / "Info.plist", "wb") as fp:
         plistlib.dump(info_plist, fp)
@@ -543,7 +758,14 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
     t0 = time.monotonic()
     marker1 = work_dir / "marker_1.txt"
     proc1 = run_cmd(
-        [str(target_bin)],
+        [
+            str(target_bin),
+            "-NSDocumentRevisionsDebugMode",
+            "YES",
+            "-ApplePersistenceIgnoreState",
+            "YES",
+            "--harness-keep",
+        ],
         env=base_env(marker1, HARNESS_SLEEP_SECS="3.5"),
         check=False,
     )
@@ -568,6 +790,24 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info1["antiDetectionHidSafeModeClass"] is True,
         info1["antiDetectionHidPluginClass"] is True,
         info1["antiDetectionHidPluginImage"] is True,
+        info1["mh0BaseAndSlideConsistent"] is True,
+        info1["mh0SectionLookupOK"] is True,
+        info1["argvConsistent"] is True,
+        info1["procArgCount"] == 2,
+        info1["availIOS16"] is True,
+        info1["uiColorWellLoaded"] is True,
+        info1["uiColorWellInClassList"] is True,
+        info1["hidPCInstallGen"] is True,
+        info1["swapUsageBlocked"] is True,
+        info1["csopsStringAndBlobOK"] is True,
+        0 < int(info1["l2CacheSize"]) <= (16 << 20),
+        info1["dscHidAppKit"] is True,
+        (not info1["appAttestLoaded"]) or (
+            info1["appAttestSupported"] is False and info1["appAttestGenKeyUnsupported"] is True
+        ),
+        (not info1["dcDeviceLoaded"]) or (
+            info1["dcDeviceSupported"] is False and info1["dcDeviceTokenUnsupported"] is True
+        ),
         info1["breadcrumbExistsAtStart"] is True,
         info1["breadcrumbExistsAfterSleep"] is False,
     ]
@@ -863,12 +1103,22 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         "xnu-6153" in info6a["sysctlVersion"],
         "xnu-6153" in info6a["unameVersion"],
         info6a["sysctlMachine"] == "iPhone12,5",
+        info6a["sysctlMibMachine"] == "iPhone12,5",
         info6a["unameMachine"] == "iPhone12,5",
+        0.0 < float(info6a["displayLinkClampedMaxHz"]) <= 60.0,
+        info6a["displayLinkClampedLegacyFPS"] == 60,
         (not info6a["appAttestLoaded"]) or (info6a["appAttestSupported"] is False),
+        info6a["appAttestLoaded"] is False,
+        info6a["availIOS16"] is False,
+        info6a["uiColorWellLoaded"] is False,
+        info6a["uiColorWellInClassList"] is False,
         marker6a.exists(),
         info6b["safeModeActive"] is True,
         info6b["reportedIOSVersion"] == "automatic",
         info6b["osVersionMajor"] != 13,
+        info6b["availIOS16"] is True,
+        info6b["uiColorWellLoaded"] is True,
+        info6b["uiColorWellInClassList"] is True,
         info6b["sysctlOSRelease"] != "19.6.0",
         info6b["unameRelease"] != "19.6.0",
         not marker6b.exists(),
@@ -903,6 +1153,34 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
     backup_prov_7.write_bytes(backup_prov_bytes)
     backup_exec_7.write_bytes(backup_exec_bytes)
     os.chmod(backup_exec_7, 0o755)
+    with open(backup_dir_7 / "Info.plist", "wb") as fp:
+        plistlib.dump(
+            {
+                "CFBundleDevelopmentRegion": "en",
+                "CFBundleExecutable": "MockTarget",
+                "CFBundleIdentifier": "app.makedie.harness.mockapp",
+                "CFBundleInfoDictionaryVersion": "6.0",
+                "CFBundleName": "MockTarget",
+                "CFBundlePackageType": "APPL",
+                "CFBundleShortVersionString": "1.0",
+                "CFBundleVersion": "1",
+            },
+            fp,
+        )
+    with open(backup_dir_7 / "manifest.plist", "wb") as fp:
+        plistlib.dump(
+            {
+                "CFBundleIdentifier": "app.makedie.harness.mockapp",
+                "CFBundleShortVersionString": "1.0",
+                "CFBundleVersion": "1",
+                "PCInstallGeneration": "HARNESS-GEN-101",
+            },
+            fp,
+        )
+    unmanifested_dir_7 = isolated_home_7 / "UnmanifestedBackups"
+    unmanifested_dir_7.mkdir(parents=True, exist_ok=True)
+    (unmanifested_dir_7 / "embedded.mobileprovision").write_bytes(backup_prov_bytes)
+    (unmanifested_dir_7 / "executable").write_bytes(backup_exec_bytes)
     plist7 = write_test_settings_plist(isolated_home_7, "app.makedie.harness.mockapp")
 
     def env7(marker_path: Path, backup_override: Path, **extra: str) -> dict[str, str]:
@@ -946,16 +1224,33 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         ),
         check=False,
     )
-    if proc7a.returncode != 0 or proc7b.returncode != 0 or proc7c.returncode != 0:
+    marker7d = work_dir / "marker_7d.txt"
+    proc7d = run_cmd(
+        [str(target_bin)],
+        env=env7(
+            marker7d,
+            unmanifested_dir_7,
+            HARNESS_GRACEFUL_EXIT="1",
+        ),
+        check=False,
+    )
+    if (
+        proc7a.returncode != 0
+        or proc7b.returncode != 0
+        or proc7c.returncode != 0
+        or proc7d.returncode != 0
+    ):
         results.append(ScenarioResult(
             name="7. AppBackups read-only virtualization & direct-probe hiding",
             passed=False,
             duration_sec=time.monotonic() - t6,
             details=(
-                f"Sub-run rc=({proc7a.returncode}, {proc7b.returncode}, {proc7c.returncode})\n"
+                f"Sub-run rc=({proc7a.returncode}, {proc7b.returncode}, "
+                f"{proc7c.returncode}, {proc7d.returncode})\n"
                 f"7a stdout={proc7a.stdout}\n7a stderr={proc7a.stderr}\n"
                 f"7b stdout={proc7b.stdout}\n7b stderr={proc7b.stderr}\n"
-                f"7c stdout={proc7c.stdout}\n7c stderr={proc7c.stderr}"
+                f"7c stdout={proc7c.stdout}\n7c stderr={proc7c.stderr}\n"
+                f"7d stdout={proc7d.stdout}\n7d stderr={proc7d.stderr}"
             ),
         ))
         return results
@@ -963,6 +1258,7 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
     info7a = parse_harness_json(proc7a.stdout)
     info7b = parse_harness_json(proc7b.stdout)
     info7c = parse_harness_json(proc7c.stdout)
+    info7d = parse_harness_json(proc7d.stdout)
     checks7 = [
         info7a["safeModeActive"] is False,
         info7a["provPath"].endswith("/embedded.mobileprovision"),
@@ -997,6 +1293,11 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info7c["provFMExists"] is False,
         info7c["provPosixText"] == "",
         info7c["execPosixPrefix"] != "BACKUP_EXEC_PAYLOAD_101",
+        info7d["safeModeActive"] is False,
+        info7d["provPath"] == "",
+        info7d["provFMExists"] is False,
+        info7d["provPosixText"] == "",
+        info7d["execPosixPrefix"] != "BACKUP_EXEC_PAYLOAD_101",
     ]
     results.append(ScenarioResult(
         name="7. AppBackups read-only virtualization & direct-probe hiding",
@@ -1007,6 +1308,7 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
                 "withBackups": info7a,
                 "safeMode": info7b,
                 "absentBackups": info7c,
+                "unmanifestedBackups": info7d,
             },
             sort_keys=True,
         ),

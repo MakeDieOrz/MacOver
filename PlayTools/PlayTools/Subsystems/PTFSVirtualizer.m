@@ -281,11 +281,24 @@ static _Atomic bool s_app_backup_ready = false;
 static pthread_once_t s_app_backup_once = PTHREAD_ONCE_INIT;
 static char s_app_backup_dir[PATH_MAX];
 static size_t s_app_backup_dir_len = 0;
+static char s_backup_manifest_path[PATH_MAX];
+static dev_t s_backup_manifest_dev = 0;
+static ino_t s_backup_manifest_ino = 0;
+static BOOL s_has_backup_manifest_pin = NO;
 static char s_backup_mobileprovision_path[PATH_MAX];
 static size_t s_backup_mobileprovision_len = 0;
+static dev_t s_backup_mobileprovision_dev = 0;
+static ino_t s_backup_mobileprovision_ino = 0;
 static BOOL s_has_backup_mobileprovision = NO;
+static char s_backup_info_plist_path[PATH_MAX];
+static size_t s_backup_info_plist_len = 0;
+static dev_t s_backup_info_plist_dev = 0;
+static ino_t s_backup_info_plist_ino = 0;
+static BOOL s_has_backup_info_plist = NO;
 static char s_backup_executable_path[PATH_MAX];
 static size_t s_backup_executable_len = 0;
+static dev_t s_backup_executable_dev = 0;
+static ino_t s_backup_executable_ino = 0;
 static BOOL s_has_backup_executable = NO;
 static char s_real_main_exec_path[PATH_MAX];
 static size_t s_real_main_exec_len = 0;
@@ -314,6 +327,21 @@ __attribute__((visibility("hidden"))) const char *pt_match_prefix_modulo_private
     return NULL;
 }
 
+static inline BOOL pt_match_path_component_token(const char *start,
+                                                 const char *q,
+                                                 const char *tok,
+                                                 size_t tok_len,
+                                                 BOOL allow_dot_end) {
+    if (q != start && q[-1] != '/') {
+        return NO;
+    }
+    if (strncmp(q, tok, tok_len) != 0) {
+        return NO;
+    }
+    char endc = q[tok_len];
+    return (endc == '\0' || endc == '/' || (allow_dot_end && endc == '.'));
+}
+
 static inline BOOL pt_rel_subpath_has_hidden_plugin_component(const char *rel) {
     if (rel == NULL || rel[0] == '\0') {
         return NO;
@@ -322,33 +350,36 @@ static inline BOOL pt_rel_subpath_has_hidden_plugin_component(const char *rel) {
         return YES;
     }
     for (const char *q = rel; *q != '\0'; q++) {
+        if (q != rel && q[-1] != '/') {
+            continue;
+        }
         switch (*q) {
             case 'P':
                 if (q[1] == 'l' && q[2] == 'a' && q[3] == 'y') {
-                    if (strncmp(q, "PlayTools.framework", 19) == 0 ||
-                        strncmp(q, "PlayTools.dylib", 15) == 0 ||
-                        strncmp(q, "Playtools.strings", 17) == 0) {
+                    if (pt_match_path_component_token(rel, q, "PlayTools.framework", 19, NO) ||
+                        pt_match_path_component_token(rel, q, "PlayTools.dylib", 15, NO) ||
+                        pt_match_path_component_token(rel, q, "Playtools.strings", 17, NO)) {
                         return YES;
                     }
                 }
                 break;
             case 'i':
-                if (strncmp(q, "io.playcover.PlayCover", 22) == 0) {
+                if (pt_match_path_component_token(rel, q, "io.playcover.PlayCover", 22, YES)) {
                     return YES;
                 }
                 break;
             case 'a':
-                if (strncmp(q, "app.makedie.MacOver", 19) == 0) {
+                if (pt_match_path_component_token(rel, q, "app.makedie.MacOver", 19, YES)) {
                     return YES;
                 }
                 break;
             case 'A':
-                if (strncmp(q, "AKInterface.bundle", 18) == 0) {
+                if (pt_match_path_component_token(rel, q, "AKInterface.bundle", 18, NO)) {
                     return YES;
                 }
                 break;
             case 'U':
-                if (strncmp(q, "UserPlugins", 11) == 0) {
+                if (pt_match_path_component_token(rel, q, "UserPlugins", 11, NO)) {
                     return YES;
                 }
                 break;
@@ -442,7 +473,7 @@ static BOOL pt_is_hidden_normalized_path_cached_caller(const char *norm, const v
 
     if (norm[0] == '/') {
         char c1 = norm[1];
-        if (c1 == 'A' || c1 == 'L' || c1 == 'p' || c1 == 'v' || c1 == 'u' || c1 == 'e' || c1 == '.') {
+        if (c1 == 'A' || c1 == 'L' || c1 == 'p' || c1 == 'v' || c1 == 'u' || c1 == 'e' || c1 == 'c' || c1 == '.') {
             typedef struct {
                 const char *prefix;
                 size_t len;
@@ -451,21 +482,60 @@ static BOOL pt_is_hidden_normalized_path_cached_caller(const char *norm, const v
                 PT_STR_ENTRY("/Applications/MacOver.app"),
                 PT_STR_ENTRY("/Applications/PlayCover.app"),
                 PT_STR_ENTRY("/Applications/Cydia.app"),
+                PT_STR_ENTRY("/Applications/Sileo.app"),
+                PT_STR_ENTRY("/Applications/Zebra.app"),
+                PT_STR_ENTRY("/Applications/TrollStore.app"),
+                PT_STR_ENTRY("/Applications/Dopamine.app"),
+                PT_STR_ENTRY("/Applications/palera1n.app"),
+                PT_STR_ENTRY("/Applications/Filza.app"),
                 PT_STR_ENTRY("/Library/MobileSubstrate"),
+                PT_STR_ENTRY("/Library/TweakInject"),
+                PT_STR_ENTRY("/Library/dpkg"),
+                PT_STR_ENTRY("/Library/Frameworks/CydiaSubstrate.framework"),
+                PT_STR_ENTRY("/Library/Frameworks/ElleKit.framework"),
+                PT_STR_ENTRY("/Library/Frameworks/libhooker.dylib"),
                 PT_STR_ENTRY("/Library/PreferenceBundles/LaunchInSafeMode.bundle"),
+                PT_STR_ENTRY("/private/preboot"),
+                PT_STR_ENTRY("/private/var/jb"),
                 PT_STR_ENTRY("/private/var/binpack"),
+                PT_STR_ENTRY("/private/var/checkra1n.dmg"),
                 PT_STR_ENTRY("/private/var/lib/apt"),
                 PT_STR_ENTRY("/private/var/lib/cydia"),
+                PT_STR_ENTRY("/private/var/lib/dpkg"),
+                PT_STR_ENTRY("/private/var/lib/undecimus"),
+                PT_STR_ENTRY("/private/var/containers/Bundle/tweaksupport"),
+                PT_STR_ENTRY("/private/var/containers/Bundle/iosbinpack64"),
+                PT_STR_ENTRY("/private/var/mobile/Library/palera1n"),
+                PT_STR_ENTRY("/private/var/mobile/Library/Caches/com.opa334.TrollStore"),
                 PT_STR_ENTRY("/private/var/log/apt"),
                 PT_STR_ENTRY("/private/var/log/syslog"),
                 PT_STR_ENTRY("/private/var/stash"),
                 PT_STR_ENTRY("/private/etc/apt"),
                 PT_STR_ENTRY("/private/etc/ssh"),
+                PT_STR_ENTRY("/var/jb"),
+                PT_STR_ENTRY("/var/binpack"),
+                PT_STR_ENTRY("/var/checkra1n.dmg"),
                 PT_STR_ENTRY("/var/cache/apt"),
                 PT_STR_ENTRY("/var/lib/apt"),
                 PT_STR_ENTRY("/var/lib/cydia"),
+                PT_STR_ENTRY("/var/lib/dpkg"),
+                PT_STR_ENTRY("/var/lib/undecimus"),
+                PT_STR_ENTRY("/var/containers/Bundle/tweaksupport"),
+                PT_STR_ENTRY("/var/containers/Bundle/iosbinpack64"),
+                PT_STR_ENTRY("/var/mobile/Library/palera1n"),
+                PT_STR_ENTRY("/var/mobile/Library/Caches/com.opa334.TrollStore"),
                 PT_STR_ENTRY("/var/log/apt"),
                 PT_STR_ENTRY("/var/log/syslog"),
+                PT_STR_ENTRY("/usr/lib/TweakInject"),
+                PT_STR_ENTRY("/var/jb/usr/lib/TweakInject"),
+                PT_STR_ENTRY("/private/var/jb/usr/lib/TweakInject"),
+                PT_STR_ENTRY("/usr/lib/ellekit.dylib"),
+                PT_STR_ENTRY("/usr/lib/libhooker.dylib"),
+                PT_STR_ENTRY("/usr/lib/libsubstitute.dylib"),
+                PT_STR_ENTRY("/usr/lib/SSLKillSwitch2.dylib"),
+                PT_STR_ENTRY("/usr/lib/Shadow.dylib"),
+                PT_STR_ENTRY("/usr/lib/Choicy.dylib"),
+                PT_STR_ENTRY("/usr/lib/substrate"),
                 PT_STR_ENTRY("/usr/sbin/frida-server"),
                 PT_STR_ENTRY("/usr/bin/cycript"),
                 PT_STR_ENTRY("/usr/local/bin/cycript"),
@@ -477,8 +547,13 @@ static BOOL pt_is_hidden_normalized_path_cached_caller(const char *norm, const v
                 PT_STR_ENTRY("/usr/bin/ssh"),
                 PT_STR_ENTRY("/etc/ssh"),
                 PT_STR_ENTRY("/etc/apt"),
+                PT_STR_ENTRY("/cores/binpack"),
                 PT_STR_ENTRY("/.installed_unc0ver"),
-                PT_STR_ENTRY("/.bootstrapped_electra")
+                PT_STR_ENTRY("/.bootstrapped_electra"),
+                PT_STR_ENTRY("/.installed_dopamine"),
+                PT_STR_ENTRY("/.installed_palera1n"),
+                PT_STR_ENTRY("/.palera1n_strapped"),
+                PT_STR_ENTRY("/.procursus_strapped")
             };
             for (size_t i = 0; i < sizeof(always_blocked) / sizeof(always_blocked[0]); ++i) {
                 size_t len = always_blocked[i].len;
@@ -541,53 +616,59 @@ static BOOL pt_is_hidden_normalized_path_cached_caller(const char *norm, const v
         for (const char *q = norm; *q != '\0' && !is_candidate; q++) {
             switch (*q) {
                 case 'd':
-                    if (strncmp(q, "discord-ipc-", 12) == 0) {
+                    if ((q == norm || q[-1] == '/') && strncmp(q, "discord-ipc-", 12) == 0) {
                         is_candidate = YES;
                     }
                     break;
                 case 'P':
-                    if (q[1] == 'l' && q[2] == 'a' && q[3] == 'y') {
-                        if (strncmp(q, "PlayTools.framework", 19) == 0 ||
-                            strncmp(q, "PlayTools.dylib", 15) == 0 ||
-                            strncmp(q, "Playtools.strings", 17) == 0) {
+                    if ((q == norm || q[-1] == '/') && q[1] == 'l' && q[2] == 'a' && q[3] == 'y') {
+                        if (pt_match_path_component_token(norm, q, "PlayTools.framework", 19, NO) ||
+                            pt_match_path_component_token(norm, q, "PlayTools.dylib", 15, NO) ||
+                            pt_match_path_component_token(norm, q, "Playtools.strings", 17, NO)) {
                             is_candidate = YES;
                         }
                     }
                     break;
                 case 'i':
-                    if (strncmp(q, "io.playcover.PlayCover", 22) == 0) {
+                    if (pt_match_path_component_token(norm, q, "io.playcover.PlayCover", 22, YES)) {
                         if (strstr(norm, "/io.playcover.PlayCover/Applications/") == NULL) {
                             is_candidate = YES;
                         }
                     }
                     break;
                 case 'a':
-                    if (strncmp(q, "app.makedie.MacOver", 19) == 0) {
+                    if (pt_match_path_component_token(norm, q, "app.makedie.MacOver", 19, YES)) {
                         if (strstr(norm, "/app.makedie.MacOver/Applications/") == NULL) {
                             is_candidate = YES;
                         }
                     }
                     break;
                 case 'A':
-                    if (strncmp(q, "AKInterface.bundle", 18) == 0) {
+                    if (pt_match_path_component_token(norm, q, "AKInterface.bundle", 18, NO)) {
                         is_candidate = YES;
                     }
                     break;
                 case 'U':
-                    if (strncmp(q, "UserPlugins", 11) == 0) {
+                    if (pt_match_path_component_token(norm, q, "UserPlugins", 11, NO)) {
                         is_candidate = YES;
                     }
                     break;
                 case '~':
-                    if (check_bypass_artifacts && strncmp(q, "~iosmac.savedState", 18) == 0) {
+                    if (check_bypass_artifacts &&
+                        strncmp(q, "~iosmac.savedState", 18) == 0 &&
+                        (q[18] == '\0' || q[18] == '/')) {
                         is_candidate = YES;
                     }
                     break;
                 case '/':
                     if (check_bypass_artifacts) {
-                        if (q[1] == 'S' && strncmp(q, "/Saved Application State", 24) == 0) {
+                        if (q[1] == 'S' &&
+                            strncmp(q, "/Saved Application State", 24) == 0 &&
+                            (q[24] == '\0' || q[24] == '/')) {
                             is_candidate = YES;
-                        } else if (q[1] == '.' && strncmp(q, "/.CFUserTextEncoding", 21) == 0) {
+                        } else if (q[1] == '.' &&
+                                   strncmp(q, "/.CFUserTextEncoding", 21) == 0 &&
+                                   (q[21] == '\0' || q[21] == '/')) {
                             is_candidate = YES;
                         }
                     }
@@ -754,6 +835,7 @@ static void pt_derive_app_folder_name(const char *real_bundle_dir, char *out_nam
 }
 
 static void pt_init_bundle_path_map(void) {
+    pt_enter_internal_scope();
     char bundle_buf[PATH_MAX];
     const char *bundle_src = NULL;
     size_t bundle_len = 0;
@@ -821,12 +903,94 @@ static void pt_init_bundle_path_map(void) {
         }
     }
     atomic_store_explicit(&s_bundle_map_ready, true, memory_order_release);
+    pt_leave_internal_scope();
 }
 
 __attribute__((visibility("hidden"))) void pt_ensure_bundle_path_map(void) {
     if (!atomic_load_explicit(&s_bundle_map_ready, memory_order_acquire)) {
         pthread_once(&s_bundle_path_once, pt_init_bundle_path_map);
     }
+}
+
+static BOOL pt_verify_app_backup_manifest(const char *backup_dir,
+                                          const char *real_bundle_dir,
+                                          dev_t *out_manifest_dev,
+                                          ino_t *out_manifest_ino) {
+    if (backup_dir == NULL || backup_dir[0] != '/' ||
+        real_bundle_dir == NULL || real_bundle_dir[0] != '/') {
+        return NO;
+    }
+    char manifest_path[PATH_MAX];
+    int mn = snprintf(manifest_path, sizeof(manifest_path), "%s/manifest.plist", backup_dir);
+    if (mn <= 0 || (size_t)mn >= sizeof(manifest_path)) {
+        return NO;
+    }
+    int mfd = pt_orig_open_nocancel(manifest_path, O_RDONLY | O_NOFOLLOW);
+    if (mfd < 0) {
+        return NO;
+    }
+    struct stat mst;
+    if (fstat(mfd, &mst) != 0 || !S_ISREG(mst.st_mode)) {
+        close(mfd);
+        return NO;
+    }
+
+    char info_path[PATH_MAX];
+    int info_n = snprintf(info_path, sizeof(info_path), "%s/Contents/Info.plist", real_bundle_dir);
+    int ifd = (info_n > 0 && (size_t)info_n < sizeof(info_path)) ? pt_orig_open_nocancel(info_path, O_RDONLY) : -1;
+    if (ifd < 0) {
+        info_n = snprintf(info_path, sizeof(info_path), "%s/Info.plist", real_bundle_dir);
+        if (info_n > 0 && (size_t)info_n < sizeof(info_path)) {
+            ifd = pt_orig_open_nocancel(info_path, O_RDONLY);
+        }
+    }
+    if (ifd < 0) {
+        close(mfd);
+        return NO;
+    }
+
+    char m_gen[128] = {0};
+    char b_gen[128] = {0};
+    char m_bid[256] = {0};
+    char b_bid[256] = {0};
+    char m_short[128] = {0};
+    char b_short[128] = {0};
+    char m_ver[128] = {0};
+    char b_ver[128] = {0};
+
+    BOOL ok = (pt_read_plist_top_string_from_fd(mfd, "PCInstallGeneration", m_gen, sizeof(m_gen)) &&
+               pt_read_plist_top_string_from_fd(ifd, "PCInstallGeneration", b_gen, sizeof(b_gen)) &&
+               m_gen[0] != '\0' &&
+               strcmp(m_gen, b_gen) == 0 &&
+               pt_read_plist_top_string_from_fd(mfd, "CFBundleIdentifier", m_bid, sizeof(m_bid)) &&
+               pt_read_plist_top_string_from_fd(ifd, "CFBundleIdentifier", b_bid, sizeof(b_bid)) &&
+               m_bid[0] != '\0' &&
+               strcmp(m_bid, b_bid) == 0);
+    if (ok) {
+        BOOL has_m_short = pt_read_plist_top_string_from_fd(mfd, "CFBundleShortVersionString", m_short, sizeof(m_short));
+        BOOL has_b_short = pt_read_plist_top_string_from_fd(ifd, "CFBundleShortVersionString", b_short, sizeof(b_short));
+        BOOL has_m_ver = pt_read_plist_top_string_from_fd(mfd, "CFBundleVersion", m_ver, sizeof(m_ver));
+        BOOL has_b_ver = pt_read_plist_top_string_from_fd(ifd, "CFBundleVersion", b_ver, sizeof(b_ver));
+        const char *eff_m_short = has_m_short ? m_short : "";
+        const char *eff_b_short = has_b_short ? b_short : "";
+        const char *eff_m_ver = has_m_ver ? m_ver : "";
+        const char *eff_b_ver = has_b_ver ? b_ver : "";
+        if (strcmp(eff_m_short, eff_b_short) != 0 || strcmp(eff_m_ver, eff_b_ver) != 0) {
+            ok = NO;
+        }
+    }
+
+    close(ifd);
+    close(mfd);
+    if (ok) {
+        if (out_manifest_dev != NULL) {
+            *out_manifest_dev = mst.st_dev;
+        }
+        if (out_manifest_ino != NULL) {
+            *out_manifest_ino = mst.st_ino;
+        }
+    }
+    return ok;
 }
 
 static void pt_init_app_backup_map(void) {
@@ -887,16 +1051,45 @@ static void pt_init_app_backup_map(void) {
             break;
         }
 
+        dev_t manifest_dev = 0;
+        ino_t manifest_ino = 0;
+        if (s_real_app_bundle_len == 0 ||
+            !pt_verify_app_backup_manifest(s_app_backup_dir, s_real_app_bundle_dir, &manifest_dev, &manifest_ino)) {
+            break;
+        }
+
         char cand[PATH_MAX];
+        int mn = snprintf(cand, sizeof(cand), "%s/manifest.plist", s_app_backup_dir);
+        if (mn <= 0 || (size_t)mn >= sizeof(cand)) {
+            break;
+        }
+        strlcpy(s_backup_manifest_path, cand, sizeof(s_backup_manifest_path));
+        s_backup_manifest_dev = manifest_dev;
+        s_backup_manifest_ino = manifest_ino;
+        s_has_backup_manifest_pin = YES;
+
         int pn = snprintf(cand, sizeof(cand), "%s/embedded.mobileprovision", s_app_backup_dir);
-        if (pn > 0 && (size_t)pn < sizeof(cand) && stat(cand, &st) == 0 && S_ISREG(st.st_mode)) {
+        if (pn > 0 && (size_t)pn < sizeof(cand) && lstat(cand, &st) == 0 && S_ISREG(st.st_mode)) {
             strlcpy(s_backup_mobileprovision_path, cand, sizeof(s_backup_mobileprovision_path));
             s_backup_mobileprovision_len = (size_t)pn;
+            s_backup_mobileprovision_dev = st.st_dev;
+            s_backup_mobileprovision_ino = st.st_ino;
             s_has_backup_mobileprovision = YES;
         }
 
+        int in = snprintf(cand, sizeof(cand), "%s/Info.plist", s_app_backup_dir);
+        if (in > 0 && (size_t)in < sizeof(cand) && lstat(cand, &st) == 0 && S_ISREG(st.st_mode)) {
+            strlcpy(s_backup_info_plist_path, cand, sizeof(s_backup_info_plist_path));
+            s_backup_info_plist_len = (size_t)in;
+            s_backup_info_plist_dev = st.st_dev;
+            s_backup_info_plist_ino = st.st_ino;
+            s_has_backup_info_plist = YES;
+        }
+
         int en = snprintf(cand, sizeof(cand), "%s/executable", s_app_backup_dir);
-        if (en > 0 && (size_t)en < sizeof(cand) && stat(cand, &st) == 0 && S_ISREG(st.st_mode)) {
+        if (en > 0 && (size_t)en < sizeof(cand) && lstat(cand, &st) == 0 && S_ISREG(st.st_mode)) {
+            dev_t exec_dev = st.st_dev;
+            ino_t exec_ino = st.st_ino;
             const char *exec_path = pt_get_main_executable_path();
             if (exec_path != NULL && exec_path[0] == '/') {
                 if (strncmp(exec_path, "/System/Volumes/Data/", 21) == 0) {
@@ -917,6 +1110,8 @@ static void pt_init_app_backup_map(void) {
                         strlcpy(s_real_main_exec_rel_path, rel, sizeof(s_real_main_exec_rel_path));
                         strlcpy(s_backup_executable_path, cand, sizeof(s_backup_executable_path));
                         s_backup_executable_len = (size_t)en;
+                        s_backup_executable_dev = exec_dev;
+                        s_backup_executable_ino = exec_ino;
                         s_has_backup_executable = YES;
                     } else {
                         s_real_main_exec_path[0] = '\0';
@@ -942,13 +1137,39 @@ __attribute__((visibility("hidden"))) void pt_disable_app_backups_for_safe_mode(
     atomic_store_explicit(&s_app_backups_disabled_for_safe_mode, true, memory_order_release);
 }
 
+static BOOL pt_verify_pinned_backup_file(const char *path, dev_t exp_dev, ino_t exp_ino) {
+    if (!s_has_backup_manifest_pin || path == NULL || path[0] != '/') {
+        return NO;
+    }
+    struct stat mst;
+    if (lstat(s_backup_manifest_path, &mst) != 0 ||
+        !S_ISREG(mst.st_mode) ||
+        mst.st_dev != s_backup_manifest_dev ||
+        mst.st_ino != s_backup_manifest_ino) {
+        atomic_store_explicit(&s_app_backups_disabled_for_safe_mode, true, memory_order_release);
+        return NO;
+    }
+    struct stat fst;
+    if (lstat(path, &fst) != 0 ||
+        !S_ISREG(fst.st_mode) ||
+        fst.st_dev != exp_dev ||
+        fst.st_ino != exp_ino) {
+        return NO;
+    }
+    return YES;
+}
+
 __attribute__((visibility("hidden"))) BOOL pt_has_backup_mobileprovision(void) {
     if (atomic_load_explicit(&s_app_backups_disabled_for_safe_mode, memory_order_acquire) ||
         !pt_is_bypass_enabled()) {
         return NO;
     }
     pt_ensure_app_backup_map();
-    return atomic_load_explicit(&s_app_backup_ready, memory_order_acquire) && s_has_backup_mobileprovision;
+    if (!atomic_load_explicit(&s_app_backup_ready, memory_order_acquire) || !s_has_backup_mobileprovision) {
+        return NO;
+    }
+    return pt_verify_pinned_backup_file(
+        s_backup_mobileprovision_path, s_backup_mobileprovision_dev, s_backup_mobileprovision_ino);
 }
 
 __attribute__((visibility("hidden")))
@@ -970,12 +1191,26 @@ static const char *pt_lookup_app_backup_redirect_unlocked(const char *p, const c
     if (s_has_backup_mobileprovision && bundle_rel != NULL &&
         (strcmp(bundle_rel, "/embedded.mobileprovision") == 0 ||
          strcmp(bundle_rel, "/Contents/embedded.mobileprovision") == 0)) {
-        return s_backup_mobileprovision_path;
+        return pt_verify_pinned_backup_file(
+            s_backup_mobileprovision_path, s_backup_mobileprovision_dev, s_backup_mobileprovision_ino)
+            ? s_backup_mobileprovision_path
+            : NULL;
+    }
+    if (s_has_backup_info_plist && bundle_rel != NULL &&
+        (strcmp(bundle_rel, "/Info.plist") == 0 ||
+         strcmp(bundle_rel, "/Contents/Info.plist") == 0)) {
+        return pt_verify_pinned_backup_file(
+            s_backup_info_plist_path, s_backup_info_plist_dev, s_backup_info_plist_ino)
+            ? s_backup_info_plist_path
+            : NULL;
     }
     if (s_has_backup_executable && s_real_main_exec_len > 0 && p != NULL) {
         const char *erel = pt_match_prefix_modulo_private(p, s_real_main_exec_path, s_real_main_exec_len);
         if (erel != NULL && erel[0] == '\0') {
-            return s_backup_executable_path;
+            return pt_verify_pinned_backup_file(
+                s_backup_executable_path, s_backup_executable_dev, s_backup_executable_ino)
+                ? s_backup_executable_path
+                : NULL;
         }
     }
     return NULL;
@@ -1038,6 +1273,12 @@ static BOOL pt_is_active_app_backup_file_path(const char *p) {
             return YES;
         }
     }
+    if (s_has_backup_info_plist && s_backup_info_plist_len > 0) {
+        const char *rel = pt_match_prefix_modulo_private(p, s_backup_info_plist_path, s_backup_info_plist_len);
+        if (rel != NULL && rel[0] == '\0') {
+            return YES;
+        }
+    }
     if (s_has_backup_executable && s_backup_executable_len > 0) {
         const char *rel = pt_match_prefix_modulo_private(p, s_backup_executable_path, s_backup_executable_len);
         if (rel != NULL && rel[0] == '\0') {
@@ -1063,6 +1304,12 @@ static const char *pt_virtualize_app_backup_path(const char *p, char *buf, size_
         const char *rel = pt_match_prefix_modulo_private(p, s_backup_mobileprovision_path, s_backup_mobileprovision_len);
         if (rel != NULL && rel[0] == '\0') {
             return pt_join_path_fast(buf, bufsize, prefix, plen, "/embedded.mobileprovision");
+        }
+    }
+    if (s_has_backup_info_plist && s_backup_info_plist_len > 0) {
+        const char *rel = pt_match_prefix_modulo_private(p, s_backup_info_plist_path, s_backup_info_plist_len);
+        if (rel != NULL && rel[0] == '\0') {
+            return pt_join_path_fast(buf, bufsize, prefix, plen, "/Info.plist");
         }
     }
     if (s_has_backup_executable && s_backup_executable_len > 0 && s_real_main_exec_rel_path[0] == '/') {

@@ -195,6 +195,11 @@ public class PlayScreen: NSObject {
         return rect.toAspectRatio()
     }
 
+    /// Backing-framebuffer `nativeBounds` for UIKit/Catalyst system callers and when `bypass`
+    /// is disabled (`windowSize * customScaler`), keeping Mac window resizing and render scaling
+    /// intact. App-level `UIScreen.nativeBounds` queries under `bypass` are intercepted in
+    /// `NSObject+Swizzle.m` (`pt_hook_screen_nativeBounds`) to report the active device profile's
+    /// physical portrait resolution (e.g. 1242x2688 on iPhone12,5).
     @objc public static func nativeBounds(_ rect: CGRect) -> CGRect {
         return rect.toAspectRatio(CGFloat((customScaler)))
     }
@@ -305,6 +310,7 @@ public class PlayScreen: NSObject {
         return rect.toAspectRatioDefault()
     }
 
+    /// Default-mode backing-framebuffer `nativeBounds` for system/non-bypass callers; see `nativeBounds(_:)`.
     @objc public static func nativeBoundsDefault(_ rect: CGRect) -> CGRect {
         return rect.toAspectRatioDefault(CGFloat((customScaler)))
     }

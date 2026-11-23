@@ -69,7 +69,7 @@ struct ConfigOverviewPane: View {
             Section("config.overview.summary") {
                 let data = settings.settings
                 LabeledContent("settings.picker.iosDevice") {
-                    Text(DeviceProfileOption.displayName(for: data.iosDeviceModel))
+                    Text(DeviceProfileOption.displayName(for: data.effectiveIOSDeviceModel))
                         .foregroundStyle(.secondary)
                 }
                 LabeledContent("settings.picker.adaptiveRes") {

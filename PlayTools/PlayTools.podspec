@@ -8,7 +8,7 @@
 
 Pod::Spec.new do |s|
     s.name             = 'PlayTools'
-    s.version          = '1.0.1'
+    s.version          = '1.0.2'
     s.summary          = 'PlayTools from PlayCover'
     s.swift_versions   = '5'
   # This description is used to generate tags and improve search results.

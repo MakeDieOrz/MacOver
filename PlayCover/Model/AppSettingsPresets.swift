@@ -116,11 +116,11 @@ struct DeviceProfileOption: Identifiable, Hashable {
     }
 
     static func supportsIOS13(_ model: String) -> Bool {
-        ["iPad6,7", "iPad8,6", "iPhone12,5"].contains(model)
+        ReportedIOSVersionMode.supportsIOS13(deviceModel: model)
     }
 
     static func recommendedIOS13Model(isIPhone: Bool) -> String {
-        isIPhone ? "iPhone12,5" : "iPad8,6"
+        ReportedIOSVersionMode.recommendedIOS13Model(isIPhone: isIPhone)
     }
 
     static func isIPhone(_ model: String) -> Bool {

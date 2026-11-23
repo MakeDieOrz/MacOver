@@ -195,10 +195,22 @@ class Entitlements {
         return ["(allow network-outbound \(regexArgs))"]
     }
 
-    private static func normalizedSelfBundlePaths(for app: PlayApp) -> (ordered: [String], lookup: Set<String>) {
+    private static func normalizedSelfBundlePaths(
+        for app: PlayApp,
+        targetBundleURL: URL? = nil
+    ) -> (ordered: [String], lookup: Set<String>) {
         var ordered = [String]()
         var lookup = Set<String>()
-        let rawPaths = [app.url.path, app.url.resolvingSymlinksInPath().path]
+        let effectiveURL = targetBundleURL ?? app.url
+        let resolvedParentURL = effectiveURL
+            .deletingLastPathComponent()
+            .resolvingSymlinksInPath()
+            .appendingPathComponent(effectiveURL.lastPathComponent)
+        let rawPaths = [
+            effectiveURL.path,
+            effectiveURL.resolvingSymlinksInPath().path,
+            resolvedParentURL.path
+        ]
 
         for rawPath in rawPaths {
             var clean = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -227,7 +239,7 @@ class Entitlements {
         return (ordered, lookup)
     }
 
-    static func composeEntitlements(_ app: PlayApp) throws -> [String: Any] {
+    static func composeEntitlements(_ app: PlayApp, targetBundleURL: URL? = nil) throws -> [String: Any] {
         var base = [String: Any]()
         let bundleID = app.info.bundleIdentifier
         if !bundleID.elementsEqual("com.devsisters.ck") {
@@ -293,7 +305,10 @@ class Entitlements {
             sandboxProfile.append("(deny process-fork)")
             sandboxProfile.append(
                 "(deny sysctl-read (with errno ENOENT) (with no-report) " +
-                "(sysctl-name \"kern.bootargs\" \"kern.proc.all\" \"kern.proc.uid\" " +
+                "(sysctl-name \"kern.bootargs\" \"kern.wakereason\" \"kern.hibernatefile\" " +
+                "\"kern.hv_support\" \"vm.swapusage\" \"hw.use_kernelmanagerd\" " +
+                "\"security.mac.amfi.developer_mode_status\" " +
+                "\"kern.proc.all\" \"kern.proc.uid\" " +
                 "\"kern.proc.ruid\" \"kern.proc.tty\" \"kern.proc.pgrp\"))"
             )
 
@@ -310,7 +325,7 @@ class Entitlements {
             deniedPaths.append(contentsOf: PlayRules.buildRules(rules: rules.blocklist ?? [], bundleID: bundleID))
         }
 
-        let selfBundle = normalizedSelfBundlePaths(for: app)
+        let selfBundle = normalizedSelfBundlePaths(for: app, targetBundleURL: targetBundleURL)
         deniedPaths.removeAll { raw in
             var trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             while trimmed.count > 1 && trimmed.hasSuffix("/") {

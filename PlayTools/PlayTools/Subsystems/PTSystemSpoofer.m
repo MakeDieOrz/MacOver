@@ -17,30 +17,33 @@ static _Thread_local int s_tls_early_device_init = 0;
 __attribute__((visibility("hidden"))) _Atomic int s_playchain_cached = -1;
 __attribute__((visibility("hidden"))) _Atomic int s_playchain_debug_cached = -1;
 __attribute__((visibility("hidden"))) pthread_once_t s_pt_bypass_early_once = PTHREAD_ONCE_INIT;
+static char s_uncoerced_device_model[64] = "";
+static _Atomic BOOL s_has_uncoerced_device_model = NO;
 static char s_early_device_model[64] = "iPad13,8";
 static char s_early_oem_id[64] = "J522AP";
 static char s_final_device_model[64] = "iPad13,8";
 static char s_final_oem_id[64] = "J522AP";
 static _Atomic(const char *) s_active_device_model = s_early_device_model;
 static _Atomic(const char *) s_active_oem_id = s_early_oem_id;
+static _Atomic BOOL s_reported_ios_override_forced_off = NO;
 static pthread_once_t s_pt_early_device_once = PTHREAD_ONCE_INIT;
 __attribute__((visibility("hidden"))) pthread_once_t s_pt_device_info_once = PTHREAD_ONCE_INIT;
 __attribute__((visibility("hidden"))) _Thread_local BOOL s_tls_initializing_device_info = NO;
 
 
 static const pt_device_profile_t s_device_profiles[] = {
-    { "iPad6,7",    "J98aAP",  "Apple A9X",        "Apple A9X GPU",     2, 2, 0, 4ULL << 30, 0x67ceee93U, "RELEASE_ARM64_T8000", "t8000", "iPad Pro (12.9-inch)",                  "ML0F2", "A1584", YES, 2048, 2732, 2.0 },
-    { "iPad8,6",    "J320xAP", "Apple A12X Bionic","Apple A12X GPU",    8, 4, 4, 4ULL << 30, 0x07d34b9fU, "RELEASE_ARM64_T8027", "t8027", "iPad Pro (12.9-inch) (3rd generation)", "MTEL2", "A1876", YES, 2048, 2732, 2.0 },
-    { "iPad13,8",   "J522AP",  "Apple M1",         "Apple M1 GPU",      8, 4, 4, 8ULL << 30, 0x1b588bb3U, "RELEASE_ARM64_T8103", "t8103", "iPad Pro (12.9-inch) (5th generation)", "MHNF3", "A2378", YES, 2048, 2732, 2.0 },
-    { "iPad14,5",   "J620AP",  "Apple M2",         "Apple M2 GPU",      8, 4, 4, 8ULL << 30, 0xda33d83dU, "RELEASE_ARM64_T8112", "t8112", "iPad Pro (12.9-inch) (6th generation)", "MNXP3", "A2436", YES, 2048, 2732, 2.0 },
-    { "iPad16,6",   "J720AP",  "Apple M4",         "Apple M4 GPU",      9, 3, 6, 8ULL << 30, 0x6f5129acU, "RELEASE_ARM64_T8132", "t8132", "iPad Pro 13-inch (M4)",                 "MVX23", "A2925", YES, 2064, 2752, 2.0 },
-    { "iPad17,3",   "J820AP",  "Apple M5",         "Apple M5 GPU",      9, 3, 6, 12ULL << 30, 0x1d5a87e8U, "RELEASE_ARM64_T8142", "t8142", "iPad Pro 13-inch (M5)",                 "MD8R4", "A3360", YES, 2064, 2752, 2.0 },
-    { "iPhone12,5", "D431AP",  "Apple A13 Bionic", "Apple A13 GPU",     6, 2, 4, 4ULL << 30, 0x573b5eecU, "RELEASE_ARM64_T8030", "t8030", "iPhone 11 Pro Max",                     "MWHD2", "A2161", NO,  1242, 2688, 3.0 },
-    { "iPhone14,3", "D64AP",   "Apple A15 Bionic", "Apple A15 GPU",     6, 2, 4, 6ULL << 30, 0xda33d83dU, "RELEASE_ARM64_T8110", "t8110", "iPhone 13 Pro Max",                     "MLL63", "A2484", NO,  1284, 2778, 3.0 },
-    { "iPhone15,3", "D74AP",   "Apple A16 Bionic", "Apple A16 GPU",     6, 2, 4, 6ULL << 30, 0x8765edeaU, "RELEASE_ARM64_T8120", "t8120", "iPhone 14 Pro Max",                     "MQ8N3", "A2651", NO,  1290, 2796, 3.0 },
-    { "iPhone16,2", "D84AP",   "Apple A17 Pro",    "Apple A17 Pro GPU", 6, 2, 4, 8ULL << 30, 0xfa33415eU, "RELEASE_ARM64_T8130", "t8130", "iPhone 15 Pro Max",                     "MU683", "A2849", NO,  1290, 2796, 3.0 },
-    { "iPhone17,2", "D94AP",   "Apple A18 Pro",    "Apple A18 Pro GPU", 6, 2, 4, 8ULL << 30, 0x75d4acb9U, "RELEASE_ARM64_T8140", "t8140", "iPhone 16 Pro Max",                     "MYWV3", "A3084", NO,  1320, 2868, 3.0 },
-    { "iPhone18,2", "D94xAP",  "Apple A19 Pro",    "Apple A19 Pro GPU", 6, 2, 4, 12ULL << 30, 0xab345f09U, "RELEASE_ARM64_T8150", "t8150", "iPhone 17 Pro Max",                     "MFY84", "A3257", NO,  1320, 2868, 3.0 },
+    { "iPad6,7",    "J98aAP",  "Apple A9X",        "Apple A9X GPU",     2, 2, 0, 4ULL << 30, 0x67ceee93U, "RELEASE_ARM64_T8000", "t8000", "iPad Pro (12.9-inch)",                  "ML0F2", "A1584", YES, 2048, 2732, 2.0, 60,  1003, "applegpu_g8s"  },
+    { "iPad8,6",    "J320xAP", "Apple A12X Bionic","Apple A12X GPU",    8, 4, 4, 4ULL << 30, 0x07d34b9fU, "RELEASE_ARM64_T8027", "t8027", "iPad Pro (12.9-inch) (3rd generation)", "MTEL2", "A1876", YES, 2048, 2732, 2.0, 120, 1005, "applegpu_g11g" },
+    { "iPad13,8",   "J522AP",  "Apple M1",         "Apple M1 GPU",      8, 4, 4, 8ULL << 30, 0x1b588bb3U, "RELEASE_ARM64_T8103", "t8103", "iPad Pro (12.9-inch) (5th generation)", "MHNF3", "A2378", YES, 2048, 2732, 2.0, 120, 1007, "applegpu_g13g" },
+    { "iPad14,5",   "J620AP",  "Apple M2",         "Apple M2 GPU",      8, 4, 4, 8ULL << 30, 0xda33d83dU, "RELEASE_ARM64_T8112", "t8112", "iPad Pro (12.9-inch) (6th generation)", "MNXP3", "A2436", YES, 2048, 2732, 2.0, 120, 1008, "applegpu_g14g" },
+    { "iPad16,6",   "J720AP",  "Apple M4",         "Apple M4 GPU",      9, 3, 6, 8ULL << 30, 0x6f5129acU, "RELEASE_ARM64_T8132", "t8132", "iPad Pro 13-inch (M4)",                 "MVX23", "A2925", YES, 2064, 2752, 2.0, 120, 1009, "applegpu_g16g" },
+    { "iPad17,3",   "J820AP",  "Apple M5",         "Apple M5 GPU",      9, 3, 6, 12ULL << 30, 0x1d5a87e8U, "RELEASE_ARM64_T8142", "t8142", "iPad Pro 13-inch (M5)",                 "MD8R4", "A3360", YES, 2064, 2752, 2.0, 120, 1010, "applegpu_g18g" },
+    { "iPhone12,5", "D431AP",  "Apple A13 Bionic", "Apple A13 GPU",     6, 2, 4, 4ULL << 30, 0x573b5eecU, "RELEASE_ARM64_T8030", "t8030", "iPhone 11 Pro Max",                     "MWHD2", "A2161", NO,  1242, 2688, 3.0, 60,  1006, "applegpu_g12p" },
+    { "iPhone14,3", "D64AP",   "Apple A15 Bionic", "Apple A15 GPU",     6, 2, 4, 6ULL << 30, 0xda33d83dU, "RELEASE_ARM64_T8110", "t8110", "iPhone 13 Pro Max",                     "MLL63", "A2484", NO,  1284, 2778, 3.0, 120, 1008, "applegpu_g14p" },
+    { "iPhone15,3", "D74AP",   "Apple A16 Bionic", "Apple A16 GPU",     6, 2, 4, 6ULL << 30, 0x8765edeaU, "RELEASE_ARM64_T8120", "t8120", "iPhone 14 Pro Max",                     "MQ8N3", "A2651", NO,  1290, 2796, 3.0, 120, 1008, "applegpu_g15p" },
+    { "iPhone16,2", "D84AP",   "Apple A17 Pro",    "Apple A17 Pro GPU", 6, 2, 4, 8ULL << 30, 0xfa33415eU, "RELEASE_ARM64_T8130", "t8130", "iPhone 15 Pro Max",                     "MU683", "A2849", NO,  1290, 2796, 3.0, 120, 1009, "applegpu_g16p" },
+    { "iPhone17,2", "D94AP",   "Apple A18 Pro",    "Apple A18 Pro GPU", 6, 2, 4, 8ULL << 30, 0x75d4acb9U, "RELEASE_ARM64_T8140", "t8140", "iPhone 16 Pro Max",                     "MYWV3", "A3084", NO,  1320, 2868, 3.0, 120, 1009, "applegpu_g17p" },
+    { "iPhone18,2", "D94xAP",  "Apple A19 Pro",    "Apple A19 Pro GPU", 6, 2, 4, 12ULL << 30, 0xab345f09U, "RELEASE_ARM64_T8150", "t8150", "iPhone 17 Pro Max",                     "MFY84", "A3257", NO,  1320, 2868, 3.0, 120, 1010, "applegpu_g18p" },
 };
 
 static _Atomic(const pt_device_profile_t *) s_active_device_profile = &s_device_profiles[2];
@@ -857,17 +860,97 @@ static const pt_device_profile_t *pt_set_cached_device_profile_from_model(const 
     return profile;
 }
 
+static BOOL pt_is_safe_mode_env_active(void);
+
+static void pt_copy_trimmed_ascii(const char *src, char *dst, size_t dst_size) {
+    if (dst == NULL || dst_size == 0) {
+        return;
+    }
+    dst[0] = '\0';
+    if (src == NULL) {
+        return;
+    }
+    while (*src == ' ' || *src == '\t' || *src == '\n' || *src == '\r') {
+        src++;
+    }
+    size_t len = strlen(src);
+    while (len > 0 && (src[len - 1] == ' ' || src[len - 1] == '\t' ||
+                       src[len - 1] == '\n' || src[len - 1] == '\r')) {
+        len--;
+    }
+    if (len == 0) {
+        return;
+    }
+    if (len >= dst_size) {
+        len = dst_size - 1;
+    }
+    memcpy(dst, src, len);
+    dst[len] = '\0';
+}
+
+static int pt_parse_reported_ios_override_mode_cstr(const char *raw_mode) {
+    char trimmed[32];
+    pt_copy_trimmed_ascii(raw_mode, trimmed, sizeof(trimmed));
+    if (trimmed[0] == '\0') {
+        return 0; // PT_REPORTED_IOS_OVERRIDE_NONE
+    }
+    if (strcasecmp(trimmed, "compat18_3") == 0 ||
+        strcmp(trimmed, "18.3") == 0 ||
+        strcasecmp(trimmed, "ios18_3") == 0) {
+        return 1; // PT_REPORTED_IOS_OVERRIDE_18_3
+    }
+    if (strcasecmp(trimmed, "compat13_7") == 0 ||
+        strcmp(trimmed, "13.7") == 0 ||
+        strcasecmp(trimmed, "ios13_7") == 0) {
+        return 2; // PT_REPORTED_IOS_OVERRIDE_13_7
+    }
+    return 0;
+}
+
+static BOOL pt_is_compat13_7_mode_cstr(const char *rep_mode) {
+    return pt_parse_reported_ios_override_mode_cstr(rep_mode) == 2;
+}
+
+static const char *pt_coerce_model_for_compat13_7(const char *model) {
+    if (model != NULL &&
+        (strcmp(model, "iPad6,7") == 0 ||
+         strcmp(model, "iPad8,6") == 0 ||
+         strcmp(model, "iPhone12,5") == 0)) {
+        return model;
+    }
+    if (model != NULL && strncmp(model, "iPhone", 6) == 0) {
+        return "iPhone12,5";
+    }
+    return "iPad8,6";
+}
+
 static void pt_init_early_device_info(void) {
     int fd = pt_open_early_settings_plist_fd();
     if (fd >= 0) {
-        char parsed_model[64];
-        if (pt_read_plist_top_string_from_fd(fd, "iosDeviceModel", parsed_model, sizeof(parsed_model)) &&
-            parsed_model[0] != '\0') {
+        char raw_model[64] = {0};
+        char parsed_model[64] = {0};
+        if (pt_read_plist_top_string_from_fd(fd, "iosDeviceModel", raw_model, sizeof(raw_model))) {
+            pt_copy_trimmed_ascii(raw_model, parsed_model, sizeof(parsed_model));
+        }
+        BOOL has_model = (parsed_model[0] != '\0');
+        const char *base_model = has_model ? parsed_model : "iPad13,8";
+        strlcpy(s_uncoerced_device_model, base_model, sizeof(s_uncoerced_device_model));
+        atomic_store_explicit(&s_has_uncoerced_device_model, YES, memory_order_release);
+
+        char rep_mode[32] = {0};
+        BOOL is_compat13 = (!atomic_load_explicit(&s_reported_ios_override_forced_off, memory_order_acquire) &&
+                            !pt_is_safe_mode_env_active() &&
+                            pt_read_plist_top_string_from_fd(fd, "reportedIOSVersion", rep_mode, sizeof(rep_mode)) &&
+                            pt_is_compat13_7_mode_cstr(rep_mode));
+        const char *effective_model = is_compat13 ? pt_coerce_model_for_compat13_7(base_model) : base_model;
+        if (has_model || is_compat13) {
             const pt_device_profile_t *profile = pt_set_cached_device_profile_from_model(
-                parsed_model,
+                effective_model,
                 s_early_device_model, sizeof(s_early_device_model),
                 s_early_oem_id, sizeof(s_early_oem_id));
             atomic_store_explicit(&s_active_device_profile, profile, memory_order_release);
+            atomic_store_explicit(&s_active_device_model, profile->model, memory_order_release);
+            atomic_store_explicit(&s_active_oem_id, profile->oem_id, memory_order_release);
         }
         close(fd);
     }
@@ -883,28 +966,49 @@ __attribute__((visibility("hidden"))) void pt_init_device_info(void) {
     strlcpy(s_final_device_model, s_early_device_model, sizeof(s_final_device_model));
     strlcpy(s_final_oem_id, s_early_oem_id, sizeof(s_final_oem_id));
     const pt_device_profile_t *final_profile = pt_device_profile_for_model(s_final_device_model);
+    const char *published_model = final_profile->model;
+    const char *published_oem = final_profile->oem_id;
     BOOL prev_tls = s_tls_initializing_device_info;
     s_tls_initializing_device_info = YES;
     @autoreleasepool {
-        NSString *model = [[PlaySettings shared] deviceModel];
+        PlaySettings *ps = [PlaySettings shared];
+        NSString *rawCfg = [ps rawConfiguredDeviceModel];
+        const char *rm = [rawCfg UTF8String];
+        if (rm != NULL && rm[0] != '\0') {
+            pt_copy_trimmed_ascii(rm, s_uncoerced_device_model, sizeof(s_uncoerced_device_model));
+            if (s_uncoerced_device_model[0] != '\0') {
+                atomic_store_explicit(&s_has_uncoerced_device_model, YES, memory_order_release);
+            }
+        }
+        NSString *model = [ps deviceModel];
         const char *m = [model UTF8String];
         if (m != NULL && m[0] != '\0') {
+            const char *eff_m = m;
+            if ((atomic_load_explicit(&s_reported_ios_override_forced_off, memory_order_acquire) ||
+                 pt_is_safe_mode_env_active()) &&
+                atomic_load_explicit(&s_has_uncoerced_device_model, memory_order_acquire) &&
+                s_uncoerced_device_model[0] != '\0') {
+                eff_m = s_uncoerced_device_model;
+            }
             final_profile = pt_set_cached_device_profile_from_model(
-                m,
+                eff_m,
                 s_final_device_model, sizeof(s_final_device_model),
                 s_final_oem_id, sizeof(s_final_oem_id));
+            published_model = final_profile->model;
+            published_oem = final_profile->oem_id;
         } else {
-            NSString *oem = [[PlaySettings shared] oemID];
+            NSString *oem = [ps oemID];
             const char *o = [oem UTF8String];
             if (o != NULL && o[0] != '\0') {
                 strlcpy(s_final_oem_id, o, sizeof(s_final_oem_id));
+                published_oem = s_final_oem_id;
             }
         }
     }
     s_tls_initializing_device_info = prev_tls;
     atomic_store_explicit(&s_active_device_profile, final_profile, memory_order_release);
-    atomic_store_explicit(&s_active_device_model, s_final_device_model, memory_order_release);
-    atomic_store_explicit(&s_active_oem_id, s_final_oem_id, memory_order_release);
+    atomic_store_explicit(&s_active_device_model, published_model, memory_order_release);
+    atomic_store_explicit(&s_active_oem_id, published_oem, memory_order_release);
     atomic_store_explicit(&s_pt_device_info_ready, YES, memory_order_release);
     pt_leave_internal_scope();
 }
@@ -983,6 +1087,18 @@ const char *pt_get_spoofed_gpu_name_cstr(void) {
 }
 
 __attribute__((visibility("hidden")))
+int32_t pt_get_spoofed_max_apple_gpu_family(void) {
+    int32_t fam = pt_get_active_device_profile()->max_apple_gpu_family;
+    return (fam > 0) ? fam : 1007;
+}
+
+__attribute__((visibility("hidden")))
+const char *pt_get_spoofed_gpu_arch_cstr(void) {
+    const char *arch = pt_get_active_device_profile()->gpu_arch;
+    return (arch != NULL && arch[0] != '\0') ? arch : "applegpu_g13g";
+}
+
+__attribute__((visibility("hidden")))
 BOOL pt_get_spoofed_device_is_ipad(void) {
     return pt_get_active_device_profile()->is_ipad;
 }
@@ -1016,6 +1132,12 @@ uint32_t pt_get_device_native_width(void) {
 __attribute__((visibility("hidden")))
 uint32_t pt_get_device_native_height(void) {
     return pt_get_active_device_profile()->native_height;
+}
+
+__attribute__((visibility("hidden")))
+uint32_t pt_get_device_max_fps(void) {
+    uint32_t fps = pt_get_active_device_profile()->max_fps;
+    return (fps > 0U) ? fps : 60U;
 }
 
 
@@ -1128,7 +1250,6 @@ static char s_compat13_kern_version_prefix[256] = "Darwin Kernel Version 19.6.0:
 static char s_spoofed_osversion[64] = "22D63";
 static char s_spoofed_ios_version[32] = "18.3";
 static _Atomic int s_reported_ios_override_mode = PT_REPORTED_IOS_OVERRIDE_NONE;
-static _Atomic BOOL s_reported_ios_override_forced_off = NO;
 static pthread_once_t s_host_kern_once = PTHREAD_ONCE_INIT;
 
 static BOOL pt_is_safe_mode_env_active(void) {
@@ -1222,6 +1343,118 @@ static void pt_synthesize_ios_kernel_version_prefix(const char *release_str, cha
              tz_str, cal_year, xnu_maj, xnu_min, xnu_pat);
 }
 
+static void pt_fallback_ios_version_for_kern_major(int kern_major, char *out_buf, size_t out_size) {
+    if (out_buf == NULL || out_size == 0) {
+        return;
+    }
+    switch (kern_major) {
+        case 19: strlcpy(out_buf, "13.7", out_size); break;
+        case 20: strlcpy(out_buf, "14.8", out_size); break;
+        case 21: strlcpy(out_buf, "15.8", out_size); break;
+        case 22: strlcpy(out_buf, "16.7", out_size); break;
+        case 23: strlcpy(out_buf, "17.6", out_size); break;
+        case 24: strlcpy(out_buf, "18.3", out_size); break;
+        case 25: strlcpy(out_buf, "26.0", out_size); break;
+        default:
+            if (kern_major > 25) {
+                snprintf(out_buf, out_size, "%d.0", kern_major + 1);
+            } else {
+                strlcpy(out_buf, "18.3", out_size);
+            }
+            break;
+    }
+}
+
+static const char *pt_canonical_ios_build_for_prefix(int expected_prefix, char *buf, size_t buf_size) {
+    switch (expected_prefix) {
+        case 17: return "17H35";
+        case 18: return "18H17";
+        case 19: return "19H12";
+        case 20: return "20H19";
+        case 21: return "21G93";
+        case 22: return "22D63";
+        case 23: return "23A341";
+        default:
+            if (buf != NULL && buf_size >= 6 && expected_prefix >= 15 && expected_prefix <= 99) {
+                snprintf(buf, buf_size, "%dA340", expected_prefix);
+                return buf;
+            }
+            return "22D63";
+    }
+}
+
+static BOOL pt_expected_ios_build_prefix_for_major(int ios_major, int *out_expected_prefix) {
+    if (out_expected_prefix == NULL) {
+        return NO;
+    }
+    if (ios_major >= 11 && ios_major <= 18) {
+        *out_expected_prefix = ios_major + 4;
+        return YES;
+    }
+    if (ios_major >= 19 && ios_major <= 25) {
+        *out_expected_prefix = 22;
+        return YES;
+    }
+    if (ios_major >= 26 && ios_major <= 99) {
+        *out_expected_prefix = ios_major - 3;
+        return YES;
+    }
+    return NO;
+}
+
+static BOOL pt_sanitize_ios_build_version_with_kern_major(const char *build_cstr,
+                                                          const char *ios_ver_cstr,
+                                                          int kern_major,
+                                                          char *out_buf,
+                                                          size_t out_size) {
+    if (out_buf == NULL || out_size < 4 || build_cstr == NULL) {
+        return NO;
+    }
+    int expected_prefix = 0;
+    if (ios_ver_cstr != NULL) {
+        while (*ios_ver_cstr == ' ' || *ios_ver_cstr == '\t') {
+            ios_ver_cstr++;
+        }
+        if (*ios_ver_cstr >= '0' && *ios_ver_cstr <= '9') {
+            int pv_major = atoi(ios_ver_cstr);
+            (void)pt_expected_ios_build_prefix_for_major(pv_major, &expected_prefix);
+        }
+    }
+    if (expected_prefix <= 0 && kern_major >= 19) {
+        expected_prefix = kern_major - 2;
+    }
+
+    const char *p = build_cstr;
+    int b_prefix = 0;
+    size_t digit_len = 0;
+    while (*p >= '0' && *p <= '9' && digit_len < 4) {
+        b_prefix = b_prefix * 10 + (*p - '0');
+        p++;
+        digit_len++;
+    }
+    BOOL valid_shape = (digit_len >= 2 && digit_len <= 3 &&
+                        ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z')));
+    if (!valid_shape) {
+        if (expected_prefix > 0) {
+            char cbuf[16];
+            const char *canon = pt_canonical_ios_build_for_prefix(expected_prefix, cbuf, sizeof(cbuf));
+            strlcpy(out_buf, canon, out_size);
+            return (strcmp(out_buf, build_cstr) != 0);
+        }
+        strlcpy(out_buf, build_cstr, out_size);
+        return NO;
+    }
+
+    if (expected_prefix > 0 && b_prefix != expected_prefix) {
+        int n = snprintf(out_buf, out_size, "%d%s", expected_prefix, p);
+        if (n > 0 && (size_t)n < out_size) {
+            return YES;
+        }
+    }
+    strlcpy(out_buf, build_cstr, out_size);
+    return NO;
+}
+
 static void pt_init_host_kernel_info(void) {
     struct utsname real_uts;
     memset(&real_uts, 0, sizeof(real_uts));
@@ -1234,36 +1467,35 @@ static void pt_init_host_kernel_info(void) {
                                             s_spoofed_kern_version_prefix,
                                             sizeof(s_spoofed_kern_version_prefix));
 
-    char osv[64] = {0};
-    size_t osv_len = sizeof(osv);
-    if (sysctlbyname("kern.osversion", osv, &osv_len, NULL, 0) != 0) {
-        osv[0] = '\0';
-    }
-    int major = atoi(s_real_kern_release);
-    if (osv[0] != '\0') {
-        if (major >= 24 &&
-            osv[0] >= '0' && osv[0] <= '9' &&
-            osv[1] >= '0' && osv[1] <= '9') {
-            int b_prefix = (osv[0] - '0') * 10 + (osv[1] - '0');
-            int target_prefix = major - 2;
-            if (b_prefix > target_prefix) {
-                snprintf(s_spoofed_osversion, sizeof(s_spoofed_osversion), "%d%s", target_prefix, osv + 2);
-            } else {
-                strlcpy(s_spoofed_osversion, osv, sizeof(s_spoofed_osversion));
-            }
-        } else {
-            strlcpy(s_spoofed_osversion, osv, sizeof(s_spoofed_osversion));
-        }
-    }
-
+    BOOL has_ios_ver = NO;
     int sv_fd = pt_orig_open_nocancel("/System/Library/CoreServices/SystemVersion.plist", O_RDONLY);
     if (sv_fd >= 0) {
         char ios_ver[32];
         if (pt_read_plist_top_string_from_fd(sv_fd, "iOSSupportVersion", ios_ver, sizeof(ios_ver)) &&
             ios_ver[0] != '\0') {
             strlcpy(s_spoofed_ios_version, ios_ver, sizeof(s_spoofed_ios_version));
+            has_ios_ver = YES;
         }
         close(sv_fd);
+    }
+
+    char osv[64] = {0};
+    size_t osv_len = sizeof(osv);
+    if (sysctlbyname("kern.osversion", osv, &osv_len, NULL, 0) != 0) {
+        osv[0] = '\0';
+    }
+    int major = atoi(s_real_kern_release);
+    if (!has_ios_ver && major >= 19) {
+        pt_fallback_ios_version_for_kern_major(major, s_spoofed_ios_version, sizeof(s_spoofed_ios_version));
+        has_ios_ver = YES;
+    }
+    if (osv[0] != '\0') {
+        (void)pt_sanitize_ios_build_version_with_kern_major(
+            osv,
+            has_ios_ver ? s_spoofed_ios_version : NULL,
+            major,
+            s_spoofed_osversion,
+            sizeof(s_spoofed_osversion));
     }
 
     pt_synthesize_ios_kernel_version_prefix("24.3.0",
@@ -1280,15 +1512,12 @@ static void pt_init_host_kernel_info(void) {
             char rep_mode[32] = {0};
             if (pt_read_plist_top_string_from_fd(settings_fd, "reportedIOSVersion", rep_mode, sizeof(rep_mode)) &&
                 !atomic_load_explicit(&s_reported_ios_override_forced_off, memory_order_acquire)) {
-                if (strcasecmp(rep_mode, "compat18_3") == 0 ||
-                    strcmp(rep_mode, "18.3") == 0 ||
-                    strcasecmp(rep_mode, "ios18_3") == 0) {
+                int parsed_override = pt_parse_reported_ios_override_mode_cstr(rep_mode);
+                if (parsed_override == 1) {
                     atomic_store_explicit(&s_reported_ios_override_mode,
                                           PT_REPORTED_IOS_OVERRIDE_18_3,
                                           memory_order_release);
-                } else if (strcasecmp(rep_mode, "compat13_7") == 0 ||
-                           strcmp(rep_mode, "13.7") == 0 ||
-                           strcasecmp(rep_mode, "ios13_7") == 0) {
+                } else if (parsed_override == 2) {
                     atomic_store_explicit(&s_reported_ios_override_mode,
                                           PT_REPORTED_IOS_OVERRIDE_13_7,
                                           memory_order_release);
@@ -1320,6 +1549,104 @@ static pt_reported_ios_override_t pt_active_reported_ios_override(void) {
 __attribute__((visibility("hidden"))) void pt_disable_reported_ios_override_for_safe_mode(void) {
     atomic_store_explicit(&s_reported_ios_override_forced_off, YES, memory_order_release);
     atomic_store_explicit(&s_reported_ios_override_mode, PT_REPORTED_IOS_OVERRIDE_NONE, memory_order_release);
+    if (atomic_load_explicit(&s_has_uncoerced_device_model, memory_order_acquire) &&
+        s_uncoerced_device_model[0] != '\0') {
+        const pt_device_profile_t *orig_profile = pt_set_cached_device_profile_from_model(
+            s_uncoerced_device_model,
+            s_final_device_model, sizeof(s_final_device_model),
+            s_final_oem_id, sizeof(s_final_oem_id));
+        atomic_store_explicit(&s_active_device_profile, orig_profile, memory_order_release);
+        atomic_store_explicit(&s_active_device_model, orig_profile->model, memory_order_release);
+        atomic_store_explicit(&s_active_oem_id, orig_profile->oem_id, memory_order_release);
+    }
+}
+
+__attribute__((visibility("hidden")))
+BOOL pt_is_compat13_7_active(void) {
+    if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire) ||
+        !pt_is_bypass_enabled()) {
+        return NO;
+    }
+    pt_ensure_host_kernel_info();
+    return (pt_active_reported_ios_override() == PT_REPORTED_IOS_OVERRIDE_13_7);
+}
+
+extern bool pt_orig_availability_version_check(uint32_t count, const pt_dyld_build_version_t versions[])
+    __asm("__availability_version_check") __attribute__((weak_import));
+
+static BOOL pt_is_availability_app_caller(const void *caller, const void *frame_ptr) {
+    if (!pt_is_effective_system_or_playtools_caller(caller)) {
+        return YES;
+    }
+    const void *scaller = pt_strip_return_addr((uintptr_t)caller);
+    const char *img = (scaller != NULL) ? dyld_image_path_containing_address(scaller) : NULL;
+    if (img == NULL || strstr(img, "libswift") == NULL) {
+        return NO;
+    }
+    pthread_t self_thr = pthread_self();
+    uintptr_t stack_top = (uintptr_t)pthread_get_stackaddr_np(self_thr);
+    size_t stack_sz = pthread_get_stacksize_np(self_thr);
+    if (stack_top == 0 || stack_sz < 64 || stack_top < stack_sz) {
+        return NO;
+    }
+    uintptr_t stack_bot = stack_top - stack_sz;
+    uintptr_t fp = (uintptr_t)frame_ptr;
+    for (int depth = 0; depth < 4; depth++) {
+        if (fp < stack_bot || fp + 16U > stack_top || (fp & 0x7U) != 0) {
+            break;
+        }
+        const uintptr_t *frame = (const uintptr_t *)fp;
+        uintptr_t next_fp = frame[0];
+        const void *lr = (const void *)frame[1];
+        if (lr != NULL) {
+            if (!pt_is_effective_system_or_playtools_caller(lr)) {
+                return YES;
+            }
+            const void *slr = pt_strip_return_addr((uintptr_t)lr);
+            const char *pimg = (slr != NULL) ? dyld_image_path_containing_address(slr) : NULL;
+            if (pimg == NULL || strstr(pimg, "libswift") == NULL) {
+                return NO;
+            }
+        }
+        if (next_fp <= fp) {
+            break;
+        }
+        fp = next_fp;
+    }
+    return NO;
+}
+
+__attribute__((visibility("hidden")))
+bool pt_availability_version_check(uint32_t count, const pt_dyld_build_version_t versions[]) {
+    if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire) ||
+        !pt_is_bypass_enabled() ||
+        versions == NULL || count == 0 || count > 32U) {
+        return (pt_orig_availability_version_check != NULL)
+            ? pt_orig_availability_version_check(count, versions)
+            : true;
+    }
+    const void *caller = __builtin_return_address(0);
+    const void *fp = __builtin_frame_address(0);
+    if (pt_is_availability_app_caller(caller, fp)) {
+        pt_ensure_host_kernel_info();
+        pt_reported_ios_override_t mode = pt_active_reported_ios_override();
+        if (mode != PT_REPORTED_IOS_OVERRIDE_NONE) {
+            uint32_t spoofed_ver = (mode == PT_REPORTED_IOS_OVERRIDE_13_7) ? 0x000D0700U : 0x00120300U;
+            for (uint32_t i = 0; i < count; i++) {
+                if (versions[i].platform == 2U) { // PLATFORM_IOS
+                    return (spoofed_ver >= versions[i].version);
+                }
+            }
+            for (uint32_t i = 0; i < count; i++) {
+                if (versions[i].platform == 6U) { // PLATFORM_MACCATALYST
+                    return (spoofed_ver >= versions[i].version);
+                }
+            }
+        }
+    }
+    return (pt_orig_availability_version_check != NULL)
+        ? pt_orig_availability_version_check(count, versions)
+        : true;
 }
 
 __attribute__((visibility("hidden"))) const char *pt_get_reported_ios_version_override(const char **out_build) {
@@ -1423,13 +1750,18 @@ static pt_sysctl_mib_entry_t s_sysctl_mibs[] = {
     { "hw.perflevel0.physicalcpu_max", {0}, 0 },
     { "hw.perflevel0.logicalcpu", {0}, 0 },
     { "hw.perflevel0.logicalcpu_max", {0}, 0 },
+    { "hw.perflevel0.l2cachesize", {0}, 0 },
     { "hw.perflevel0.name", {0}, 0 },
     { "hw.perflevel1.physicalcpu", {0}, 0 },
     { "hw.perflevel1.physicalcpu_max", {0}, 0 },
     { "hw.perflevel1.logicalcpu", {0}, 0 },
     { "hw.perflevel1.logicalcpu_max", {0}, 0 },
+    { "hw.perflevel1.l2cachesize", {0}, 0 },
     { "hw.perflevel1.name", {0}, 0 },
+    { "hw.l2cachesize", {0}, 0 },
+    { "hw.packages", {0}, 0 },
     { "hw.use_kernelmanagerd", {0}, 0 },
+    { "vm.swapusage", {0}, 0 },
     { "kern.iossupportversion", {0}, 0 },
     { "kern.osproductversion", {0}, 0 },
     { "kern.bootargs", {0}, 0 },
@@ -1493,6 +1825,32 @@ static inline BOOL pt_sysctl_resolve_is_sys(const void *caller, int *inout_is_sy
     return (*inout_is_sys_caller != 0);
 }
 
+static void pt_get_spoofed_l2_cache_sizes(const pt_device_profile_t *profile,
+                                          uint64_t *out_p_l2,
+                                          uint64_t *out_e_l2) {
+    uint64_t p_l2 = 16ULL << 20;
+    uint64_t e_l2 = 4ULL << 20;
+    if (profile != NULL) {
+        if (profile->max_apple_gpu_family <= 1003) {
+            p_l2 = 3ULL << 20;
+            e_l2 = 0ULL;
+        } else if (profile->max_apple_gpu_family <= 1006) {
+            p_l2 = 8ULL << 20;
+            e_l2 = 4ULL << 20;
+        } else if (profile->max_apple_gpu_family == 1007 ||
+                   strcmp(profile->model, "iPhone14,3") == 0) {
+            p_l2 = 12ULL << 20;
+            e_l2 = 4ULL << 20;
+        }
+    }
+    if (out_p_l2 != NULL) {
+        *out_p_l2 = p_l2;
+    }
+    if (out_e_l2 != NULL) {
+        *out_e_l2 = e_l2;
+    }
+}
+
 static BOOL pt_handle_sysctl_name(const char *name,
                                   void *oldp,
                                   size_t *oldlenp,
@@ -1505,10 +1863,21 @@ static BOOL pt_handle_sysctl_name(const char *name,
         return NO;
     }
     char c0 = name[0];
-    if (c0 != 'h' && c0 != 'k' && c0 != 'm' && c0 != 's') {
+    if (c0 != 'h' && c0 != 'k' && c0 != 'm' && c0 != 's' && c0 != 'v') {
         return NO;
     }
+    if (c0 == 'v' && strcmp(name, "vm.swapusage") == 0) {
+        if (!pt_is_bypass_enabled() || pt_sysctl_resolve_is_sys(caller, inout_is_sys_caller)) {
+            return NO;
+        }
+        errno = ENOENT;
+        *out_ret = -1;
+        return YES;
+    }
     if (c0 == 'h' && strncmp(name, "hw.", 3) == 0) {
+        if (!pt_is_bypass_enabled() || pt_sysctl_resolve_is_sys(caller, inout_is_sys_caller)) {
+            return NO;
+        }
         const char *sub = name + 3;
         if (strcmp(sub, "machine") == 0 || strcmp(sub, "product") == 0) {
             *out_ret = pt_write_sysctl_string(DEVICE_MODEL, oldp, oldlenp);
@@ -1521,12 +1890,20 @@ static BOOL pt_handle_sysctl_name(const char *name,
             *out_ret = pt_write_sysctl_string(OEM_ID, oldp, oldlenp);
             return YES;
         }
-        if (!pt_is_bypass_enabled() || pt_sysctl_resolve_is_sys(caller, inout_is_sys_caller)) {
-            return NO;
-        }
         const pt_device_profile_t *profile = pt_get_active_device_profile();
         if (strcmp(sub, "use_kernelmanagerd") == 0) {
-            *out_ret = pt_write_sysctl_int(0, oldp, oldlenp);
+            errno = ENOENT;
+            *out_ret = -1;
+            return YES;
+        }
+        if (strcmp(sub, "packages") == 0) {
+            *out_ret = pt_write_sysctl_int(1, oldp, oldlenp);
+            return YES;
+        }
+        if (strcmp(sub, "l2cachesize") == 0) {
+            uint64_t p_l2 = 0;
+            pt_get_spoofed_l2_cache_sizes(profile, &p_l2, NULL);
+            *out_ret = pt_write_sysctl_uint64(oldp, oldlenp, (newlen > 0) ? newp : NULL, p_l2);
             return YES;
         }
         if (strcmp(sub, "ncpu") == 0 ||
@@ -1582,6 +1959,12 @@ static BOOL pt_handle_sysctl_name(const char *name,
                 *out_ret = pt_write_sysctl_int((int)profile->p_cores, oldp, oldlenp);
                 return YES;
             }
+            if (strcmp(psub, "l2cachesize") == 0) {
+                uint64_t p_l2 = 0;
+                pt_get_spoofed_l2_cache_sizes(profile, &p_l2, NULL);
+                *out_ret = pt_write_sysctl_uint64(oldp, oldlenp, (newlen > 0) ? newp : NULL, p_l2);
+                return YES;
+            }
             if (strcmp(psub, "name") == 0) {
                 *out_ret = pt_write_sysctl_string("Performance", oldp, oldlenp);
                 return YES;
@@ -1599,6 +1982,12 @@ static BOOL pt_handle_sysctl_name(const char *name,
                 strcmp(psub, "logicalcpu") == 0 ||
                 strcmp(psub, "logicalcpu_max") == 0) {
                 *out_ret = pt_write_sysctl_int((int)profile->e_cores, oldp, oldlenp);
+                return YES;
+            }
+            if (strcmp(psub, "l2cachesize") == 0) {
+                uint64_t e_l2 = 0;
+                pt_get_spoofed_l2_cache_sizes(profile, NULL, &e_l2);
+                *out_ret = pt_write_sysctl_uint64(oldp, oldlenp, (newlen > 0) ? newp : NULL, e_l2);
                 return YES;
             }
             if (strcmp(psub, "name") == 0) {
@@ -1708,12 +2097,20 @@ static BOOL pt_handle_sysctl_name(const char *name,
 
 static int pt_sysctlnametomib(const char *sname, int *mibp, size_t *sizep) {
     if (sname != NULL &&
-        (strcmp(sname, "kern.iossupportversion") == 0 ||
-         strcmp(sname, "kern.hibernatefile") == 0) &&
         pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        errno = ENOENT;
-        return -1;
+        if (strcmp(sname, "kern.iossupportversion") == 0 ||
+            strcmp(sname, "kern.hibernatefile") == 0 ||
+            strcmp(sname, "hw.use_kernelmanagerd") == 0 ||
+            strcmp(sname, "vm.swapusage") == 0) {
+            errno = ENOENT;
+            return -1;
+        }
+        if (strncmp(sname, "hw.perflevel1.", 14) == 0 &&
+            pt_get_active_device_profile()->e_cores == 0) {
+            errno = ENOENT;
+            return -1;
+        }
     }
     return sysctlnametomib(sname, mibp, sizep);
 }
@@ -1742,16 +2139,116 @@ static BOOL pt_append_procargs_bytes(char **buf, size_t *len, size_t *cap, const
     return YES;
 }
 
-static inline BOOL pt_is_hidden_env_value(const char *val) {
+__attribute__((visibility("hidden")))
+BOOL pt_is_hidden_env_value(const char *val, BOOL has_virtual_container) {
     if (val == NULL || val[0] == '\0') {
         return NO;
     }
-    return (strstr(val, "/Users/") != NULL ||
-            strcasestr(val, "PlayTools") != NULL ||
-            strcasestr(val, "PlayCover") != NULL ||
-            strcasestr(val, "MacOver") != NULL ||
-            strcasestr(val, "app.makedie") != NULL ||
-            strcasestr(val, "AKInterface") != NULL);
+    if (strstr(val, "/Users/") != NULL ||
+        strcasestr(val, "PlayTools") != NULL ||
+        strcasestr(val, "PlayCover") != NULL ||
+        strcasestr(val, "MacOver") != NULL ||
+        strcasestr(val, "app.makedie") != NULL ||
+        strcasestr(val, "AKInterface") != NULL) {
+        return YES;
+    }
+    if (has_virtual_container &&
+        (strstr(val, "/var/folders/") != NULL ||
+         strstr(val, "/private/var/folders/") != NULL)) {
+        return YES;
+    }
+    return NO;
+}
+
+__attribute__((visibility("hidden")))
+pt_env_entry_action_t pt_resolve_env_entry(const char *key,
+                                           const char *raw_val,
+                                           BOOL has_raw_entry,
+                                           BOOL bypass_enabled,
+                                           const char *vh,
+                                           const char *vt,
+                                           const char **out_val) {
+    if (out_val != NULL) {
+        *out_val = NULL;
+    }
+    if (key == NULL || key[0] == '\0') {
+        return PT_ENV_ENTRY_HIDE;
+    }
+    BOOL has_vc = (vh != NULL);
+    if (strcmp(key, "HOME") == 0 || strcmp(key, "CFFIXED_USER_HOME") == 0) {
+        if (vh != NULL) {
+            if (out_val != NULL) {
+                *out_val = vh;
+            }
+            return PT_ENV_ENTRY_REWRITE;
+        }
+        if (!has_raw_entry) {
+            return PT_ENV_ENTRY_HIDE;
+        }
+        if (bypass_enabled && pt_is_hidden_env_value(raw_val, has_vc)) {
+            return PT_ENV_ENTRY_HIDE;
+        }
+        return PT_ENV_ENTRY_KEEP;
+    }
+    if (strcmp(key, "TMPDIR") == 0) {
+        if (vt != NULL) {
+            if (out_val != NULL) {
+                *out_val = vt;
+            }
+            return PT_ENV_ENTRY_REWRITE;
+        }
+        if (!has_raw_entry) {
+            return PT_ENV_ENTRY_HIDE;
+        }
+        if (bypass_enabled && pt_is_hidden_env_value(raw_val, has_vc)) {
+            return PT_ENV_ENTRY_HIDE;
+        }
+        return PT_ENV_ENTRY_KEEP;
+    }
+    if (strcmp(key, "TMP") == 0 || strcmp(key, "TEMP") == 0) {
+        if (!has_raw_entry) {
+            return PT_ENV_ENTRY_HIDE;
+        }
+        if (vt != NULL) {
+            if (out_val != NULL) {
+                *out_val = vt;
+            }
+            return PT_ENV_ENTRY_REWRITE;
+        }
+        if (bypass_enabled && pt_is_hidden_env_value(raw_val, has_vc)) {
+            return PT_ENV_ENTRY_HIDE;
+        }
+        return PT_ENV_ENTRY_KEEP;
+    }
+    if (strcmp(key, "PWD") == 0) {
+        if (!has_raw_entry) {
+            return PT_ENV_ENTRY_HIDE;
+        }
+        if (bypass_enabled) {
+            if (out_val != NULL) {
+                *out_val = "/";
+            }
+            return PT_ENV_ENTRY_REWRITE;
+        }
+        return PT_ENV_ENTRY_KEEP;
+    }
+    if (strcmp(key, "PATH") == 0) {
+        if (bypass_enabled) {
+            if (out_val != NULL) {
+                *out_val = "/usr/bin:/bin:/usr/sbin:/sbin";
+            }
+            return PT_ENV_ENTRY_REWRITE;
+        }
+        return has_raw_entry ? PT_ENV_ENTRY_KEEP : PT_ENV_ENTRY_HIDE;
+    }
+    if (!has_raw_entry) {
+        return PT_ENV_ENTRY_HIDE;
+    }
+    if (bypass_enabled &&
+        (pt_is_hidden_env_key(key) || pt_is_hidden_env_value(raw_val, has_vc))) {
+        return PT_ENV_ENTRY_HIDE;
+    }
+    return PT_ENV_ENTRY_KEEP;
 }
 
 static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *size) {
@@ -1776,6 +2273,7 @@ static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *
         errno = saved;
         return -1;
     }
+    raw[raw_len] = '\0';
 
     char *out = NULL;
     size_t out_len = 0;
@@ -1819,10 +2317,26 @@ static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *
         }
     }
 
+    BOOL bypass = pt_is_bypass_enabled();
     if (is_v2 && argc > 0) {
+        int written_argc = 0;
         for (int i = 0; i < argc && pos < raw_len; i++) {
             const char *arg = raw + pos;
             size_t alen = strnlen(arg, raw_len - pos);
+            size_t next_pos = pos + ((alen < raw_len - pos) ? (alen + 1U) : alen);
+            if (bypass && i > 0) {
+                const char *next_arg = (i + 1 < argc && next_pos < raw_len) ? (raw + next_pos) : NULL;
+                int skip = pt_macos_launch_arg_skip_count(arg, next_arg);
+                if (skip > 0) {
+                    pos = next_pos;
+                    if (skip == 2 && i + 1 < argc && pos < raw_len) {
+                        size_t nlen = strnlen(raw + pos, raw_len - pos);
+                        pos += (nlen < raw_len - pos) ? (nlen + 1U) : nlen;
+                        i++;
+                    }
+                    continue;
+                }
+            }
             const char *out_arg = arg;
             char varg[PATH_MAX];
             if (i == 0) {
@@ -1831,7 +2345,11 @@ static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *
             if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, out_arg, strlen(out_arg) + 1U)) {
                 free(raw); free(out); errno = ENOMEM; return -1;
             }
-            pos += (alen < raw_len - pos) ? (alen + 1U) : alen;
+            written_argc++;
+            pos = next_pos;
+        }
+        if (out != NULL && out_len >= sizeof(int)) {
+            memcpy(out, &written_argc, sizeof(int));
         }
     }
 
@@ -1840,6 +2358,8 @@ static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *
     BOOL wrote_home = NO;
     BOOL wrote_cffixed_home = NO;
     BOOL wrote_tmpdir = NO;
+    BOOL wrote_tmp = NO;
+    BOOL wrote_temp = NO;
     BOOL wrote_pwd = NO;
     BOOL wrote_path = NO;
     while (pos < raw_len) {
@@ -1868,47 +2388,30 @@ static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *
                     kptr = "";
                 }
             }
-            if (strcmp(kptr, "HOME") == 0 && vh != NULL) {
-                if (!wrote_home) {
-                    if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, "HOME=", 5U) ||
-                        !pt_append_procargs_bytes(&out, &out_len, &out_cap, vh, strlen(vh) + 1U)) {
-                        free(heap_key); free(raw); free(out); errno = ENOMEM; return -1;
-                    }
-                    wrote_home = YES;
-                }
-            } else if (strcmp(kptr, "CFFIXED_USER_HOME") == 0 && vh != NULL) {
-                if (!wrote_cffixed_home) {
-                    if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, "CFFIXED_USER_HOME=", 18U) ||
-                        !pt_append_procargs_bytes(&out, &out_len, &out_cap, vh, strlen(vh) + 1U)) {
-                        free(heap_key); free(raw); free(out); errno = ENOMEM; return -1;
-                    }
-                    wrote_cffixed_home = YES;
-                }
-            } else if (strcmp(kptr, "TMPDIR") == 0 && vt != NULL) {
-                if (!wrote_tmpdir) {
-                    if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, "TMPDIR=", 7U) ||
-                        !pt_append_procargs_bytes(&out, &out_len, &out_cap, vt, strlen(vt) + 1U)) {
-                        free(heap_key); free(raw); free(out); errno = ENOMEM; return -1;
-                    }
-                    wrote_tmpdir = YES;
-                }
+            BOOL duplicate_special = NO;
+            if (strcmp(kptr, "HOME") == 0) {
+                duplicate_special = wrote_home;
+                wrote_home = YES;
+            } else if (strcmp(kptr, "CFFIXED_USER_HOME") == 0) {
+                duplicate_special = wrote_cffixed_home;
+                wrote_cffixed_home = YES;
+            } else if (strcmp(kptr, "TMPDIR") == 0) {
+                duplicate_special = wrote_tmpdir;
+                wrote_tmpdir = YES;
+            } else if (strcmp(kptr, "TMP") == 0) {
+                duplicate_special = wrote_tmp;
+                wrote_tmp = YES;
+            } else if (strcmp(kptr, "TEMP") == 0) {
+                duplicate_special = wrote_temp;
+                wrote_temp = YES;
             } else if (strcmp(kptr, "PWD") == 0) {
-                if (!wrote_pwd) {
-                    static const char kSafePwd[] = "PWD=/";
-                    if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, kSafePwd, sizeof(kSafePwd))) {
-                        free(heap_key); free(raw); free(out); errno = ENOMEM; return -1;
-                    }
-                    wrote_pwd = YES;
-                }
+                duplicate_special = wrote_pwd;
+                wrote_pwd = YES;
             } else if (strcmp(kptr, "PATH") == 0) {
-                if (!wrote_path) {
-                    static const char kSafePath[] = "PATH=/usr/bin:/bin:/usr/sbin:/sbin";
-                    if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, kSafePath, sizeof(kSafePath))) {
-                        free(heap_key); free(raw); free(out); errno = ENOMEM; return -1;
-                    }
-                    wrote_path = YES;
-                }
-            } else if (!pt_is_hidden_env_key(kptr)) {
+                duplicate_special = wrote_path;
+                wrote_path = YES;
+            }
+            if (!duplicate_special && kptr[0] != '\0') {
                 size_t vlen = elen - klen - 1U;
                 char val_stack[2048];
                 char *heap_val = NULL;
@@ -1926,9 +2429,17 @@ static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *
                         val_stack[0] = '\0';
                     }
                 }
-                BOOL hide_val = pt_is_hidden_env_value(vptr);
+                const char *rewritten = NULL;
+                pt_env_entry_action_t act = pt_resolve_env_entry(
+                    kptr, vptr, YES, bypass, vh, vt, &rewritten);
                 free(heap_val);
-                if (!hide_val) {
+                if (act == PT_ENV_ENTRY_REWRITE && rewritten != NULL) {
+                    if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, kptr, klen) ||
+                        !pt_append_procargs_bytes(&out, &out_len, &out_cap, "=", 1U) ||
+                        !pt_append_procargs_bytes(&out, &out_len, &out_cap, rewritten, strlen(rewritten) + 1U)) {
+                        free(heap_key); free(raw); free(out); errno = ENOMEM; return -1;
+                    }
+                } else if (act == PT_ENV_ENTRY_KEEP) {
                     if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, entry, elen) ||
                         !pt_append_procargs_bytes(&out, &out_len, &out_cap, "", 1U)) {
                         free(heap_key); free(raw); free(out); errno = ENOMEM; return -1;
@@ -1939,22 +2450,20 @@ static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *
         }
         pos += (elen < raw_len - pos) ? (elen + 1U) : elen;
     }
-    if (!wrote_home && vh != NULL) {
-        if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, "HOME=", 5U) ||
-            !pt_append_procargs_bytes(&out, &out_len, &out_cap, vh, strlen(vh) + 1U)) {
-            free(raw); free(out); errno = ENOMEM; return -1;
-        }
-    }
-    if (!wrote_cffixed_home && vh != NULL) {
-        if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, "CFFIXED_USER_HOME=", 18U) ||
-            !pt_append_procargs_bytes(&out, &out_len, &out_cap, vh, strlen(vh) + 1U)) {
-            free(raw); free(out); errno = ENOMEM; return -1;
-        }
-    }
-    if (!wrote_tmpdir && vt != NULL) {
-        if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, "TMPDIR=", 7U) ||
-            !pt_append_procargs_bytes(&out, &out_len, &out_cap, vt, strlen(vt) + 1U)) {
-            free(raw); free(out); errno = ENOMEM; return -1;
+    const char *const kMandatoryKeys[] = { "HOME", "CFFIXED_USER_HOME", "TMPDIR", "PATH" };
+    const BOOL wroteFlags[] = { wrote_home, wrote_cffixed_home, wrote_tmpdir, wrote_path };
+    for (size_t mi = 0; mi < 4U; mi++) {
+        if (!wroteFlags[mi]) {
+            const char *mkey = kMandatoryKeys[mi];
+            const char *rewritten = NULL;
+            if (pt_resolve_env_entry(mkey, NULL, NO, bypass, vh, vt, &rewritten) == PT_ENV_ENTRY_REWRITE &&
+                rewritten != NULL) {
+                if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, mkey, strlen(mkey)) ||
+                    !pt_append_procargs_bytes(&out, &out_len, &out_cap, "=", 1U) ||
+                    !pt_append_procargs_bytes(&out, &out_len, &out_cap, rewritten, strlen(rewritten) + 1U)) {
+                    free(raw); free(out); errno = ENOMEM; return -1;
+                }
+            }
         }
     }
     free(raw);
@@ -1986,13 +2495,6 @@ static int pt_sysctl(int *name, u_int types, void *buf, size_t *size, void *arg0
     const void *ret_addr = __builtin_return_address(0);
     int is_sys_caller = -1;
     if (name != NULL && types >= 2) {
-        if (name[0] == CTL_HW) {
-            if (name[1] == HW_MACHINE || name[1] == HW_PRODUCT) {
-                return pt_write_sysctl_string(DEVICE_MODEL, buf, size);
-            } else if (name[1] == HW_MODEL || name[1] == HW_TARGET) {
-                return pt_write_sysctl_string(OEM_ID, buf, size);
-            }
-        }
         if (name[0] == CTL_KERN) {
             if (types >= 4 && name[1] == KERN_PROC && name[2] == KERN_PROC_PID &&
                 name[3] != getpid()) {
@@ -2061,6 +2563,18 @@ static int pt_sysctl(int *name, u_int types, void *buf, size_t *size, void *arg0
                 }
             } else if (name[0] == CTL_HW) {
                 switch (name[1]) {
+                    case HW_MACHINE:
+                    case HW_PRODUCT:
+                        if (!pt_sysctl_resolve_is_sys(ret_addr, &is_sys_caller)) {
+                            return pt_write_sysctl_string(DEVICE_MODEL, buf, size);
+                        }
+                        break;
+                    case HW_MODEL:
+                    case HW_TARGET:
+                        if (!pt_sysctl_resolve_is_sys(ret_addr, &is_sys_caller)) {
+                            return pt_write_sysctl_string(OEM_ID, buf, size);
+                        }
+                        break;
                     case HW_NCPU:
                     case HW_AVAILCPU:
                         if (!pt_sysctl_resolve_is_sys(ret_addr, &is_sys_caller)) {
@@ -2142,7 +2656,8 @@ static int pt_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *
     if (name != NULL) {
         int is_sys_caller = -1;
         int sret = 0;
-        if (pt_handle_sysctl_name(name, oldp, oldlenp, newp, newlen, __builtin_return_address(0), &is_sys_caller, &sret)) {
+        if (pt_handle_sysctl_name(name, oldp, oldlenp, newp, newlen,
+                                  __builtin_return_address(0), &is_sys_caller, &sret)) {
             PT_DEBUG_TRACE("spoofer", "spoofed sysctlbyname name=%s ret=%d", name, sret);
             return sret;
         }
@@ -2150,7 +2665,53 @@ static int pt_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *
     return sysctlbyname(name, oldp, oldlenp, newp, newlen);
 }
 
-static void pt_sanitize_system_version_dict(NSMutableDictionary *dict) {
+__attribute__((visibility("hidden")))
+BOOL pt_is_system_version_plist_dict(NSDictionary *dict) {
+    if (![dict isKindOfClass:[NSDictionary class]]) {
+        return NO;
+    }
+    if (![dict[@"ProductBuildVersion"] isKindOfClass:[NSString class]] ||
+        dict[@"CFBundleIdentifier"] != nil ||
+        dict[@"CFBundleExecutable"] != nil) {
+        return NO;
+    }
+    if (dict[@"iOSSupportVersion"] != nil) {
+        return YES;
+    }
+    id prodName = dict[@"ProductName"];
+    if ([prodName isKindOfClass:[NSString class]] &&
+        [dict[@"ProductVersion"] isKindOfClass:[NSString class]]) {
+        NSString *pn = (NSString *)prodName;
+        return ([pn isEqualToString:@"macOS"] ||
+                [pn isEqualToString:@"Mac OS X"] ||
+                [pn isEqualToString:@"iPhone OS"] ||
+                [pn isEqualToString:@"iOS"]);
+    }
+    return NO;
+}
+
+__attribute__((visibility("hidden")))
+BOOL pt_sanitize_ios_build_version_cstr(const char *build_cstr,
+                                        const char *ios_ver_cstr,
+                                        char *out_buf,
+                                        size_t out_size) {
+    pt_ensure_host_kernel_info();
+    return pt_sanitize_ios_build_version_with_kern_major(
+        build_cstr, ios_ver_cstr, atoi(s_real_kern_release), out_buf, out_size);
+}
+
+__attribute__((visibility("hidden")))
+const char *pt_get_spoofed_ios_version_cstr(void) {
+    pt_ensure_host_kernel_info();
+    const char *ov_ver = pt_get_reported_ios_version_override(NULL);
+    if (ov_ver != NULL && ov_ver[0] != '\0') {
+        return ov_ver;
+    }
+    return s_spoofed_ios_version;
+}
+
+__attribute__((visibility("hidden")))
+void pt_sanitize_system_version_dict(NSMutableDictionary *dict) {
     if (dict == nil) {
         return;
     }
@@ -2172,27 +2733,95 @@ static void pt_sanitize_system_version_dict(NSMutableDictionary *dict) {
         dict[@"ProductName"] = @"iPhone OS";
         return;
     }
-    id iosVer = dict[@"iOSSupportVersion"];
-    if ([iosVer isKindOfClass:[NSString class]] && [(NSString *)iosVer length] > 0) {
-        dict[@"ProductVersion"] = iosVer;
-        if (dict[@"ProductUserVisibleVersion"] != nil) {
-            dict[@"ProductUserVisibleVersion"] = iosVer;
-        }
-        [dict removeObjectForKey:@"iOSSupportVersion"];
-    }
     pt_ensure_host_kernel_info();
-    id buildVer = dict[@"ProductBuildVersion"];
-    if ([buildVer isKindOfClass:[NSString class]] && [(NSString *)buildVer length] >= 3) {
-        NSString *bstr = (NSString *)buildVer;
-        unichar c0 = [bstr characterAtIndex:0];
-        unichar c1 = [bstr characterAtIndex:1];
-        int major = atoi(s_real_kern_release);
-        if (major >= 24 && c0 >= '0' && c0 <= '9' && c1 >= '0' && c1 <= '9') {
-            int b_prefix = (int)(c0 - '0') * 10 + (int)(c1 - '0');
-            int target_prefix = major - 2;
-            if (b_prefix > target_prefix) {
-                dict[@"ProductBuildVersion"] = [NSString stringWithFormat:@"%d%@", target_prefix, [bstr substringFromIndex:2]];
+    id origProdName = dict[@"ProductName"];
+    BOOL origWasMac = ([origProdName isKindOfClass:[NSString class]] &&
+                       ([(NSString *)origProdName isEqualToString:@"macOS"] ||
+                        [(NSString *)origProdName isEqualToString:@"Mac OS X"]));
+    id iosVer = dict[@"iOSSupportVersion"];
+    BOOL copiedIOSVer = NO;
+    if ([iosVer isKindOfClass:[NSString class]] && [(NSString *)iosVer length] > 0) {
+        NSString *iosStr = (NSString *)iosVer;
+        int parsedMaj = atoi([iosStr UTF8String]);
+        if (parsedMaj >= 11 && (parsedMaj <= 18 || parsedMaj >= 26)) {
+            dict[@"ProductVersion"] = iosStr;
+            if (dict[@"ProductUserVisibleVersion"] != nil) {
+                dict[@"ProductUserVisibleVersion"] = iosStr;
             }
+            copiedIOSVer = YES;
+        }
+    }
+    [dict removeObjectForKey:@"iOSSupportVersion"];
+
+    if (origWasMac && !copiedIOSVer) {
+        NSString *derivedVer = nil;
+        id macVerObj = dict[@"ProductVersion"];
+        if ([macVerObj isKindOfClass:[NSString class]] && [(NSString *)macVerObj length] > 0) {
+            int macMaj = 0, macMin = 0, macPat = 0;
+            int nscan = sscanf([(NSString *)macVerObj UTF8String], "%d.%d.%d", &macMaj, &macMin, &macPat);
+            if (nscan >= 1 && macMaj >= 11 && macMaj <= 15) {
+                int iosMaj = macMaj + 3;
+                derivedVer = (nscan >= 3 && macPat > 0)
+                    ? [NSString stringWithFormat:@"%d.%d.%d", iosMaj, macMin, macPat]
+                    : [NSString stringWithFormat:@"%d.%d", iosMaj, (nscan >= 2 ? macMin : 0)];
+            } else if (nscan >= 1 && macMaj >= 26) {
+                derivedVer = (NSString *)macVerObj;
+            }
+        }
+        if (derivedVer == nil && dict[@"ProductBuildVersion"] != nil &&
+            [dict[@"ProductBuildVersion"] isKindOfClass:[NSString class]]) {
+            int bPrefix = atoi([(NSString *)dict[@"ProductBuildVersion"] UTF8String]);
+            if (bPrefix >= 19 && bPrefix <= 99) {
+                char fbuf[32];
+                pt_fallback_ios_version_for_kern_major(bPrefix, fbuf, sizeof(fbuf));
+                derivedVer = [NSString stringWithUTF8String:fbuf];
+            }
+        }
+        if (derivedVer == nil && s_spoofed_ios_version[0] != '\0') {
+            derivedVer = [NSString stringWithUTF8String:s_spoofed_ios_version];
+        }
+        if (derivedVer != nil) {
+            dict[@"ProductVersion"] = derivedVer;
+            if (dict[@"ProductUserVisibleVersion"] != nil) {
+                dict[@"ProductUserVisibleVersion"] = derivedVer;
+            }
+        }
+    } else if (!origWasMac) {
+        id curProdVer = dict[@"ProductVersion"];
+        if (![curProdVer isKindOfClass:[NSString class]] || [(NSString *)curProdVer length] == 0) {
+            NSString *fallbackVer = [NSString stringWithUTF8String:s_spoofed_ios_version];
+            if (fallbackVer.length > 0) {
+                dict[@"ProductVersion"] = fallbackVer;
+                if (dict[@"ProductUserVisibleVersion"] != nil) {
+                    dict[@"ProductUserVisibleVersion"] = fallbackVer;
+                }
+            }
+        } else {
+            int pvMaj = atoi([(NSString *)curProdVer UTF8String]);
+            if (pvMaj < 11 || (pvMaj >= 19 && pvMaj <= 25)) {
+                NSString *fallbackVer = [NSString stringWithUTF8String:s_spoofed_ios_version];
+                if (fallbackVer.length > 0) {
+                    dict[@"ProductVersion"] = fallbackVer;
+                    if (dict[@"ProductUserVisibleVersion"] != nil) {
+                        dict[@"ProductUserVisibleVersion"] = fallbackVer;
+                    }
+                }
+            }
+        }
+    }
+
+    id prodVer = dict[@"ProductVersion"];
+    const char *iosVerCStr = [prodVer isKindOfClass:[NSString class]] ? [(NSString *)prodVer UTF8String] : NULL;
+    id buildVer = dict[@"ProductBuildVersion"];
+    const char *rawBuildCStr = [buildVer isKindOfClass:[NSString class]] ? [(NSString *)buildVer UTF8String] : "";
+    char sanitized[64] = {0};
+    if (pt_sanitize_ios_build_version_cstr(rawBuildCStr,
+                                           iosVerCStr,
+                                           sanitized,
+                                           sizeof(sanitized))) {
+        NSString *mapped = [NSString stringWithUTF8String:sanitized];
+        if (mapped != nil) {
+            dict[@"ProductBuildVersion"] = mapped;
         }
     }
     dict[@"ProductName"] = @"iPhone OS";
@@ -2234,71 +2863,17 @@ static NSMutableDictionary *pt_sanitize_code_resources_subdict(NSDictionary *sub
 }
 
 static NSMutableDictionary *pt_maybe_sanitize_info_plist_dict(NSDictionary *dict) {
-    if (dict[@"CFBundleIdentifier"] == nil && dict[@"CFBundleExecutable"] == nil) {
+    if (!pt_is_info_plist_dict(dict) || !pt_info_dict_needs_sanitize(dict)) {
         return nil;
     }
-    BOOL needs_clean = NO;
-    id platforms = dict[@"CFBundleSupportedPlatforms"];
-    if ([platforms isKindOfClass:[NSArray class]]) {
-        for (id p in (NSArray *)platforms) {
-            if ([p isKindOfClass:[NSString class]] &&
-                ([(NSString *)p isEqualToString:@"MacOSX"] ||
-                 [(NSString *)p isEqualToString:@"macOS"])) {
-                needs_clean = YES;
-                break;
-            }
-        }
-    }
-    id dtPlat = dict[@"DTPlatformName"];
-    if ([dtPlat isKindOfClass:[NSString class]] &&
-        ([(NSString *)dtPlat caseInsensitiveCompare:@"macosx"] == NSOrderedSame)) {
-        needs_clean = YES;
-    }
-    id dtSdk = dict[@"DTSDKName"];
-    if ([dtSdk isKindOfClass:[NSString class]] &&
-        ([(NSString *)dtSdk hasPrefix:@"macosx"] || [(NSString *)dtSdk hasPrefix:@"MacOSX"])) {
-        needs_clean = YES;
-    }
-    id prin = dict[@"NSPrincipalClass"];
-    if ([prin isKindOfClass:[NSString class]] &&
-        [(NSString *)prin isEqualToString:@"NSApplication"]) {
-        needs_clean = YES;
-    }
-    if (dict[@"LSMinimumSystemVersion"] != nil || dict[@"LSEnvironment"] != nil) {
-        needs_clean = YES;
-    }
-    if (!needs_clean) {
-        return nil;
-    }
-    NSMutableDictionary *clean = [dict mutableCopy];
-    if ([platforms isKindOfClass:[NSArray class]]) {
-        clean[@"CFBundleSupportedPlatforms"] = [NSMutableArray arrayWithObject:@"iPhoneOS"];
-    }
-    if ([dtPlat isKindOfClass:[NSString class]] &&
-        [(NSString *)dtPlat caseInsensitiveCompare:@"macosx"] == NSOrderedSame) {
-        clean[@"DTPlatformName"] = @"iphoneos";
-    }
-    if ([dtSdk isKindOfClass:[NSString class]] &&
-        ([(NSString *)dtSdk hasPrefix:@"macosx"] || [(NSString *)dtSdk hasPrefix:@"MacOSX"])) {
-        clean[@"DTSDKName"] = @"iphoneos";
-    }
-    if ([prin isKindOfClass:[NSString class]] &&
-        [(NSString *)prin isEqualToString:@"NSApplication"]) {
-        clean[@"NSPrincipalClass"] = @"UIApplication";
-    }
-    [clean removeObjectForKey:@"LSMinimumSystemVersion"];
-    [clean removeObjectForKey:@"LSEnvironment"];
-    return clean;
+    return pt_build_sanitized_mutable_info_dict(dict);
 }
 
 static CFPropertyListRef pt_CFPropertyListCreateWithData(CFAllocatorRef allocator, CFDataRef data, CFOptionFlags options, CFPropertyListFormat *format, CFErrorRef *error) {
     CFPropertyListRef plist = CFPropertyListCreateWithData(allocator, data, options, format, error);
     if (plist != NULL && CFGetTypeID(plist) == CFDictionaryGetTypeID()) {
         NSDictionary *dict = (__bridge NSDictionary *)plist;
-        id prodName = dict[@"ProductName"];
-        BOOL isSysVer = (dict[@"ProductBuildVersion"] != nil &&
-                         (([prodName isKindOfClass:[NSString class]] && [(NSString *)prodName isEqualToString:@"macOS"]) ||
-                          dict[@"iOSSupportVersion"] != nil));
+        BOOL isSysVer = pt_is_system_version_plist_dict(dict);
         BOOL isCodeRes = ([dict[@"files"] isKindOfClass:[NSDictionary class]] ||
                           [dict[@"files2"] isKindOfClass:[NSDictionary class]]);
         BOOL isInfoPlist = (dict[@"CFBundleIdentifier"] != nil || dict[@"CFBundleExecutable"] != nil);
@@ -2660,7 +3235,7 @@ static uint32_t pt_mg_chip_id(const pt_device_profile_t *profile) {
 }
 
 static int32_t pt_mg_product_type_enum(const pt_device_profile_t *profile) {
-    if (profile == NULL || profile->model == NULL) {
+    if (profile == NULL || profile->model == NULL || profile->model[0] == '\0') {
         return (int32_t)3047992373U; // iPad13,8 deterministic code
     }
     if (strcmp(profile->model, "iPad6,7") == 0) return (int32_t)3826259891U;
@@ -2669,12 +3244,18 @@ static int32_t pt_mg_product_type_enum(const pt_device_profile_t *profile) {
     if (strcmp(profile->model, "iPad14,5") == 0) return (int32_t)2959110358U;
     if (strcmp(profile->model, "iPad16,6") == 0) return (int32_t)3482895411U;
     if (strcmp(profile->model, "iPad17,3") == 0) return (int32_t)2739481651U;
+    if (strcmp(profile->model, "iPhone12,5") == 0) return (int32_t)1790878510U;
     if (strcmp(profile->model, "iPhone14,3") == 0) return (int32_t)1179926470U;
     if (strcmp(profile->model, "iPhone15,3") == 0) return (int32_t)2816236405U;
     if (strcmp(profile->model, "iPhone16,2") == 0) return (int32_t)2376455129U;
     if (strcmp(profile->model, "iPhone17,2") == 0) return (int32_t)3104882917U;
     if (strcmp(profile->model, "iPhone18,2") == 0) return (int32_t)4019283745U;
-    return (int32_t)3047992373U;
+    uint32_t h = 2166136261U;
+    for (const unsigned char *p = (const unsigned char *)profile->model; *p != '\0'; ++p) {
+        h ^= (uint32_t)(*p);
+        h *= 16777619U;
+    }
+    return (int32_t)(h != 0U ? h : 1790878510U);
 }
 
 static os_unfair_lock s_mg_str_cache_lock = OS_UNFAIR_LOCK_INIT;
@@ -2941,33 +3522,29 @@ BOOL pt_is_hidden_env_key(const char *name) {
         return NO;
     }
     if (strncmp(name, "XPC_", 4) == 0 ||
+        strncmp(name, "DYLD_", 5) == 0 ||
+        strncmp(name, "__XPC_DYLD_", 11) == 0 ||
+        strncmp(name, "SIMULATOR_", 10) == 0 ||
+        strncmp(name, "METAL_", 6) == 0 ||
+        strncmp(name, "MTL_", 4) == 0 ||
         strcasestr(name, "playcover") != NULL ||
         strcasestr(name, "macover") != NULL ||
         strcasestr(name, "playtools") != NULL) {
         return YES;
     }
     static const char *const kHiddenKeys[] = {
-        "DYLD_INSERT_LIBRARIES",
-        "DYLD_LIBRARY_PATH",
-        "DYLD_FRAMEWORK_PATH",
-        "DYLD_FALLBACK_LIBRARY_PATH",
-        "DYLD_FALLBACK_FRAMEWORK_PATH",
-        "DYLD_ROOT_PATH",
-        "DYLD_SHARED_REGION",
-        "DYLD_PRINT_LIBRARIES",
-        "DYLD_PRINT_OPTS",
-        "DYLD_PRINT_ENV",
-        "DYLD_FORCE_FLAT_NAMESPACE",
         "MallocStackLogging",
         "MallocStackLoggingNoCompact",
         "NSZombieEnabled",
         "CLASSIC",
         "OSSignpostLogging",
-        "METAL_DEVICE_WRAPPER_TYPE",
-        "METAL_DEBUG_ERROR_MODE",
-        "__XPC_DYLD_LIBRARY_PATH",
-        "__XPC_DYLD_FRAMEWORK_PATH",
+        "MTLCaptureEnabled",
         "__CFBundleIdentifier",
+        "__CF_USER_TEXT_ENCODING",
+        "DARWIN_USER_TEMP_DIR",
+        "DARWIN_USER_CACHE_DIR",
+        "DARWIN_USER_DIR",
+        "SQLITE_EXEMPT_PATH_FROM_VNODE_GUARDS",
         "TERM_PROGRAM",
         "TERM_PROGRAM_VERSION",
         "TERM_SESSION_ID",
@@ -2980,6 +3557,8 @@ BOOL pt_is_hidden_env_key(const char *name) {
         "USER",
         "LOGNAME",
         "OLDPWD",
+        "SHLVL",
+        "_",
         "DISABLE_PLAYSHADOW_BYPASS"
     };
     size_t count = sizeof(kHiddenKeys) / sizeof(kHiddenKeys[0]);
@@ -2995,57 +3574,27 @@ static char *pt_getenv(const char *name) {
     if (name == NULL) {
         return NULL;
     }
+    char *raw_val = getenv(name);
+    if (pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return raw_val;
+    }
     BOOL bypass = pt_is_bypass_enabled();
-    const void *caller = NULL;
-    int is_sys = -1;
-    {
-        BOOL is_home = (strcmp(name, "HOME") == 0 || strcmp(name, "CFFIXED_USER_HOME") == 0);
-        BOOL is_tmpdir = (!is_home && strcmp(name, "TMPDIR") == 0);
-        BOOL is_pwd = (!is_home && !is_tmpdir && bypass && strcmp(name, "PWD") == 0);
-        BOOL is_path = (!is_home && !is_tmpdir && !is_pwd && bypass && strcmp(name, "PATH") == 0);
-        BOOL is_hidden = (!is_home && !is_tmpdir && !is_pwd && !is_path && bypass && pt_is_hidden_env_key(name));
-        if (is_home || is_tmpdir || is_pwd || is_path || is_hidden) {
-            caller = __builtin_return_address(0);
-            is_sys = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
-            if (is_sys == 0) {
-                if (is_hidden) {
-                    PT_DEBUG_TRACE("spoofer", "hid getenv key=%s", name);
-                    return NULL;
-                }
-                if (is_pwd) {
-                    PT_DEBUG_TRACE("spoofer", "spoofed getenv PWD");
-                    return (char *)"/";
-                }
-                if (is_path) {
-                    PT_DEBUG_TRACE("spoofer", "spoofed getenv PATH");
-                    return (char *)"/usr/bin:/bin:/usr/sbin:/sbin";
-                }
-                if (is_home) {
-                    const char *vh = pt_get_virtual_home_cstr();
-                    if (vh != NULL) {
-                        PT_DEBUG_TRACE("spoofer", "virtualized getenv %s -> %s", name, vh);
-                        return (char *)vh;
-                    }
-                } else if (is_tmpdir) {
-                    const char *vt = pt_get_virtual_tmpdir_cstr();
-                    if (vt != NULL) {
-                        PT_DEBUG_TRACE("spoofer", "virtualized getenv TMPDIR -> %s", vt);
-                        return (char *)vt;
-                    }
-                }
-            }
-        }
-    }
-    char *val = getenv(name);
-    if (val != NULL && bypass && pt_is_hidden_env_value(val)) {
-        if (is_sys < 0) {
-            is_sys = pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) ? 1 : 0;
-        }
-        if (is_sys == 0) {
+    const char *vh = pt_get_virtual_home_cstr();
+    const char *vt = pt_get_virtual_tmpdir_cstr();
+    const char *rewritten = NULL;
+    pt_env_entry_action_t act = pt_resolve_env_entry(
+        name, raw_val, (raw_val != NULL), bypass, vh, vt, &rewritten);
+    switch (act) {
+        case PT_ENV_ENTRY_HIDE:
+            PT_DEBUG_TRACE("spoofer", "hid getenv key=%s", name);
             return NULL;
-        }
+        case PT_ENV_ENTRY_REWRITE:
+            PT_DEBUG_TRACE("spoofer", "virtualized getenv %s -> %s", name, rewritten != NULL ? rewritten : "");
+            return (char *)rewritten;
+        case PT_ENV_ENTRY_KEEP:
+        default:
+            return raw_val;
     }
-    return val;
 }
 
 static char *pt_alloc_env_kv(const char *key, const char *val) {
@@ -3105,12 +3654,8 @@ static void pt_free_env_snapshot(char **snap, size_t count) {
     free(snap);
 }
 
-static char ***pt_NSGetEnviron(void) {
-    char ***real_envp = _NSGetEnviron();
-    if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire) ||
-        real_envp == NULL || *real_envp == NULL ||
-        pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) ||
-        !pt_is_bypass_enabled()) {
+static char ***pt_refresh_shadow_environ(char ***real_envp) {
+    if (real_envp == NULL || *real_envp == NULL) {
         return real_envp;
     }
     pthread_mutex_lock(&s_shadow_env_mutex);
@@ -3141,7 +3686,8 @@ static char ***pt_NSGetEnviron(void) {
     }
 
     if (needs_rebuild) {
-        char **new_env = (char **)calloc(real_count + 4, sizeof(char *));
+        BOOL bypass = pt_is_bypass_enabled();
+        char **new_env = (char **)calloc(real_count + 6, sizeof(char *));
         char **new_real_snapshot = (char **)calloc(real_count + 1, sizeof(char *));
         char *new_vh = (vh != NULL) ? strdup(vh) : NULL;
         char *new_vt = (vt != NULL) ? strdup(vt) : NULL;
@@ -3153,6 +3699,10 @@ static char ***pt_NSGetEnviron(void) {
             BOOL added_home = NO;
             BOOL added_cffixed_home = NO;
             BOOL added_tmpdir = NO;
+            BOOL added_tmp = NO;
+            BOOL added_temp = NO;
+            BOOL added_pwd = NO;
+            BOOL added_path = NO;
             for (size_t i = 0; i < real_count; i++) {
                 const char *entry = cur_real[i];
                 if (entry == NULL) {
@@ -3186,129 +3736,71 @@ static char ***pt_NSGetEnviron(void) {
                     heap_key[klen] = '\0';
                     key_ptr = heap_key;
                 }
+                BOOL duplicate_special = NO;
                 if (strcmp(key_ptr, "HOME") == 0) {
+                    duplicate_special = added_home;
+                    added_home = YES;
+                } else if (strcmp(key_ptr, "CFFIXED_USER_HOME") == 0) {
+                    duplicate_special = added_cffixed_home;
+                    added_cffixed_home = YES;
+                } else if (strcmp(key_ptr, "TMPDIR") == 0) {
+                    duplicate_special = added_tmpdir;
+                    added_tmpdir = YES;
+                } else if (strcmp(key_ptr, "TMP") == 0) {
+                    duplicate_special = added_tmp;
+                    added_tmp = YES;
+                } else if (strcmp(key_ptr, "TEMP") == 0) {
+                    duplicate_special = added_temp;
+                    added_temp = YES;
+                } else if (strcmp(key_ptr, "PWD") == 0) {
+                    duplicate_special = added_pwd;
+                    added_pwd = YES;
+                } else if (strcmp(key_ptr, "PATH") == 0) {
+                    duplicate_special = added_path;
+                    added_path = YES;
+                }
+                if (duplicate_special) {
                     free(heap_key);
-                    if (vh != NULL) {
-                        if (!added_home) {
-                            char *kv = pt_alloc_env_kv("HOME", vh);
-                            if (kv == NULL) {
-                                alloc_ok = NO;
-                                break;
-                            }
-                            new_env[out_idx++] = kv;
-                            added_home = YES;
-                        }
-                    } else {
-                        char *dup = strdup(snap_dup);
-                        if (dup == NULL) {
-                            alloc_ok = NO;
-                            break;
-                        }
-                        new_env[out_idx++] = dup;
-                        added_home = YES;
-                    }
                     continue;
                 }
-                if (strcmp(key_ptr, "CFFIXED_USER_HOME") == 0) {
+                const char *rewritten = NULL;
+                pt_env_entry_action_t act = pt_resolve_env_entry(
+                    key_ptr, eq + 1, YES, bypass, vh, vt, &rewritten);
+                if (act == PT_ENV_ENTRY_REWRITE && rewritten != NULL) {
+                    char *kv = pt_alloc_env_kv(key_ptr, rewritten);
                     free(heap_key);
-                    if (vh != NULL) {
-                        if (!added_cffixed_home) {
-                            char *kv = pt_alloc_env_kv("CFFIXED_USER_HOME", vh);
-                            if (kv == NULL) {
-                                alloc_ok = NO;
-                                break;
-                            }
-                            new_env[out_idx++] = kv;
-                            added_cffixed_home = YES;
-                        }
-                    } else {
-                        char *dup = strdup(snap_dup);
-                        if (dup == NULL) {
-                            alloc_ok = NO;
-                            break;
-                        }
-                        new_env[out_idx++] = dup;
-                        added_cffixed_home = YES;
+                    if (kv == NULL) {
+                        alloc_ok = NO;
+                        break;
                     }
-                    continue;
-                }
-                if (strcmp(key_ptr, "TMPDIR") == 0) {
+                    new_env[out_idx++] = kv;
+                } else if (act == PT_ENV_ENTRY_KEEP) {
                     free(heap_key);
-                    if (vt != NULL) {
-                        if (!added_tmpdir) {
-                            char *kv = pt_alloc_env_kv("TMPDIR", vt);
-                            if (kv == NULL) {
-                                alloc_ok = NO;
-                                break;
-                            }
-                            new_env[out_idx++] = kv;
-                            added_tmpdir = YES;
-                        }
-                    } else {
-                        char *dup = strdup(snap_dup);
-                        if (dup == NULL) {
-                            alloc_ok = NO;
-                            break;
-                        }
-                        new_env[out_idx++] = dup;
-                        added_tmpdir = YES;
-                    }
-                    continue;
-                }
-                if (strcmp(key_ptr, "PWD") == 0) {
-                    free(heap_key);
-                    char *dup = strdup("PWD=/");
+                    char *dup = strdup(snap_dup);
                     if (dup == NULL) {
                         alloc_ok = NO;
                         break;
                     }
                     new_env[out_idx++] = dup;
-                    continue;
-                }
-                if (strcmp(key_ptr, "PATH") == 0) {
+                } else {
                     free(heap_key);
-                    char *dup = strdup("PATH=/usr/bin:/bin:/usr/sbin:/sbin");
-                    if (dup == NULL) {
-                        alloc_ok = NO;
-                        break;
+                }
+            }
+            const char *const kMandatoryKeys[] = { "HOME", "CFFIXED_USER_HOME", "TMPDIR", "PATH" };
+            const BOOL addedFlags[] = { added_home, added_cffixed_home, added_tmpdir, added_path };
+            for (size_t mi = 0; alloc_ok && mi < 4U; mi++) {
+                if (!addedFlags[mi]) {
+                    const char *mkey = kMandatoryKeys[mi];
+                    const char *rewritten = NULL;
+                    if (pt_resolve_env_entry(mkey, NULL, NO, bypass, vh, vt, &rewritten) == PT_ENV_ENTRY_REWRITE &&
+                        rewritten != NULL) {
+                        char *kv = pt_alloc_env_kv(mkey, rewritten);
+                        if (kv == NULL) {
+                            alloc_ok = NO;
+                            break;
+                        }
+                        new_env[out_idx++] = kv;
                     }
-                    new_env[out_idx++] = dup;
-                    continue;
-                }
-                BOOL hidden = (pt_is_hidden_env_key(key_ptr) || pt_is_hidden_env_value(eq + 1));
-                free(heap_key);
-                if (hidden) {
-                    continue;
-                }
-                char *dup = strdup(snap_dup);
-                if (dup == NULL) {
-                    alloc_ok = NO;
-                    break;
-                }
-                new_env[out_idx++] = dup;
-            }
-            if (alloc_ok && !added_home && vh != NULL) {
-                char *kv = pt_alloc_env_kv("HOME", vh);
-                if (kv == NULL) {
-                    alloc_ok = NO;
-                } else {
-                    new_env[out_idx++] = kv;
-                }
-            }
-            if (alloc_ok && !added_cffixed_home && vh != NULL) {
-                char *kv = pt_alloc_env_kv("CFFIXED_USER_HOME", vh);
-                if (kv == NULL) {
-                    alloc_ok = NO;
-                } else {
-                    new_env[out_idx++] = kv;
-                }
-            }
-            if (alloc_ok && !added_tmpdir && vt != NULL) {
-                char *kv = pt_alloc_env_kv("TMPDIR", vt);
-                if (kv == NULL) {
-                    alloc_ok = NO;
-                } else {
-                    new_env[out_idx++] = kv;
                 }
             }
         }
@@ -3344,6 +3836,216 @@ static char ***pt_NSGetEnviron(void) {
     char ***ret_ptr = (cur_shadow != NULL) ? &s_shadow_environ : real_envp;
     pthread_mutex_unlock(&s_shadow_env_mutex);
     return ret_ptr;
+}
+
+__attribute__((visibility("hidden")))
+char ***pt_get_app_shadow_environ_ptr(void) {
+    char ***real_envp = _NSGetEnviron();
+    if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire) ||
+        real_envp == NULL || *real_envp == NULL) {
+        return real_envp;
+    }
+    return pt_refresh_shadow_environ(real_envp);
+}
+
+static char ***pt_NSGetEnviron(void) {
+    char ***real_envp = _NSGetEnviron();
+    if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire) ||
+        real_envp == NULL || *real_envp == NULL ||
+        pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return real_envp;
+    }
+    return pt_refresh_shadow_environ(real_envp);
+}
+
+static const char *const kPTStrippedMacOSLaunchFlags[] = {
+    "-NSDocumentRevisionsDebugMode",
+    "-ApplePersistenceIgnoreState",
+};
+
+static BOOL pt_is_launch_flag_bool_value(const char *val) {
+    if (val == NULL || val[0] == '\0') {
+        return NO;
+    }
+    return (strcasecmp(val, "YES") == 0 ||
+            strcasecmp(val, "NO") == 0 ||
+            strcasecmp(val, "true") == 0 ||
+            strcasecmp(val, "false") == 0 ||
+            strcmp(val, "1") == 0 ||
+            strcmp(val, "0") == 0);
+}
+
+__attribute__((visibility("hidden")))
+int pt_macos_launch_arg_skip_count(const char *arg, const char *next_arg) {
+    if (arg == NULL || arg[0] != '-') {
+        return 0;
+    }
+    for (size_t i = 0; i < sizeof(kPTStrippedMacOSLaunchFlags) / sizeof(kPTStrippedMacOSLaunchFlags[0]); i++) {
+        if (strcmp(arg, kPTStrippedMacOSLaunchFlags[i]) == 0) {
+            return pt_is_launch_flag_bool_value(next_arg) ? 2 : 1;
+        }
+    }
+    return 0;
+}
+
+#define PT_IMMORTAL_SHADOW_ARGV_SLOTS 64U
+#define PT_RETIRED_SHADOW_ARGV_SLOTS 64U
+
+static pthread_mutex_t s_shadow_argv_mutex = PTHREAD_MUTEX_INITIALIZER;
+static char **s_shadow_argv = NULL;
+static int s_shadow_raw_argc = -1;
+static int s_shadow_filtered_argc = 0;
+static char **s_immortal_shadow_argvs[PT_IMMORTAL_SHADOW_ARGV_SLOTS] = {0};
+static size_t s_immortal_shadow_argv_count = 0;
+static char **s_retired_shadow_argvs[PT_RETIRED_SHADOW_ARGV_SLOTS] = {0};
+static size_t s_retired_shadow_argv_idx = 0;
+static char s_shadow_progname_buf[PATH_MAX];
+static char *s_shadow_progname_ptr = NULL;
+static pthread_once_t s_shadow_progname_once = PTHREAD_ONCE_INIT;
+
+static void pt_refresh_shadow_argv_locked(char **cur_argv, int raw_argc) {
+    char **cur_shadow = __atomic_load_n(&s_shadow_argv, __ATOMIC_RELAXED);
+    if (cur_shadow != NULL && s_shadow_raw_argc == raw_argc) {
+        return;
+    }
+    char **built = (char **)calloc((size_t)raw_argc + 1U, sizeof(char *));
+    if (built == NULL) {
+        return;
+    }
+    BOOL ok = YES;
+    int out_idx = 0;
+    for (int i = 0; i < raw_argc; i++) {
+        const char *arg = cur_argv[i] != NULL ? cur_argv[i] : "";
+        if (i > 0) {
+            const char *next_arg = (i + 1 < raw_argc) ? cur_argv[i + 1] : NULL;
+            int skip = pt_macos_launch_arg_skip_count(arg, next_arg);
+            if (skip > 0) {
+                if (skip == 2 && i + 1 < raw_argc) {
+                    i++;
+                }
+                continue;
+            }
+        }
+        const char *src = arg;
+        if (i == 0 && arg[0] != '\0') {
+            const char *san = pt_sanitize_image_path_for_cstr(arg);
+            if (san != NULL && san[0] != '\0') {
+                src = san;
+            }
+        }
+        built[out_idx] = strdup(src);
+        if (built[out_idx] == NULL) {
+            ok = NO;
+            break;
+        }
+        out_idx++;
+    }
+    if (ok) {
+        built[out_idx] = NULL;
+        if (cur_shadow != NULL) {
+            if (s_immortal_shadow_argv_count < PT_IMMORTAL_SHADOW_ARGV_SLOTS) {
+                s_immortal_shadow_argvs[s_immortal_shadow_argv_count++] = cur_shadow;
+            } else {
+                pt_free_env_array(s_retired_shadow_argvs[s_retired_shadow_argv_idx]);
+                s_retired_shadow_argvs[s_retired_shadow_argv_idx] = cur_shadow;
+                s_retired_shadow_argv_idx = (s_retired_shadow_argv_idx + 1U) % PT_RETIRED_SHADOW_ARGV_SLOTS;
+            }
+        }
+        __atomic_store_n(&s_shadow_filtered_argc, out_idx, __ATOMIC_RELEASE);
+        __atomic_store_n(&s_shadow_argv, built, __ATOMIC_RELEASE);
+        s_shadow_raw_argc = raw_argc;
+    } else {
+        pt_free_env_array(built);
+    }
+}
+
+static int pt_resolve_raw_argc(char **cur_argv) {
+    int *real_argcp = _NSGetArgc();
+    int argc = (real_argcp != NULL && *real_argcp > 0) ? *real_argcp : 0;
+    if (argc == 0 && cur_argv != NULL) {
+        while (cur_argv[argc] != NULL && argc < 4096) {
+            argc++;
+        }
+    }
+    return argc;
+}
+
+static char ***pt_NSGetArgv(void) {
+    char ***real_argvp = _NSGetArgv();
+    if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire) ||
+        real_argvp == NULL || *real_argvp == NULL ||
+        !pt_is_bypass_enabled() ||
+        pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return real_argvp;
+    }
+    char **cur_argv = *real_argvp;
+    int argc = pt_resolve_raw_argc(cur_argv);
+    pthread_mutex_lock(&s_shadow_argv_mutex);
+    pt_refresh_shadow_argv_locked(cur_argv, argc);
+    char **cur_shadow = __atomic_load_n(&s_shadow_argv, __ATOMIC_ACQUIRE);
+    char ***ret = (cur_shadow != NULL) ? &s_shadow_argv : real_argvp;
+    pthread_mutex_unlock(&s_shadow_argv_mutex);
+    return ret;
+}
+
+static int *pt_NSGetArgc(void) {
+    int *real_argcp = _NSGetArgc();
+    char ***real_argvp = _NSGetArgv();
+    if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire) ||
+        real_argcp == NULL || real_argvp == NULL || *real_argvp == NULL ||
+        !pt_is_bypass_enabled() ||
+        pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return real_argcp;
+    }
+    char **cur_argv = *real_argvp;
+    int argc = pt_resolve_raw_argc(cur_argv);
+    pthread_mutex_lock(&s_shadow_argv_mutex);
+    pt_refresh_shadow_argv_locked(cur_argv, argc);
+    char **cur_shadow = __atomic_load_n(&s_shadow_argv, __ATOMIC_ACQUIRE);
+    int *ret = (cur_shadow != NULL) ? &s_shadow_filtered_argc : real_argcp;
+    pthread_mutex_unlock(&s_shadow_argv_mutex);
+    return ret;
+}
+
+static void pt_init_shadow_progname(void) {
+    const char *exec_path = pt_get_main_executable_path();
+    const char *base = NULL;
+    if (exec_path != NULL && exec_path[0] != '\0') {
+        const char *slash = strrchr(exec_path, '/');
+        base = (slash != NULL && slash[1] != '\0') ? (slash + 1) : exec_path;
+    }
+    if (base == NULL || base[0] == '\0') {
+        char **real_pn = _NSGetProgname();
+        if (real_pn != NULL && *real_pn != NULL && (*real_pn)[0] != '\0') {
+            const char *slash = strrchr(*real_pn, '/');
+            base = (slash != NULL && slash[1] != '\0') ? (slash + 1) : *real_pn;
+        }
+    }
+    if (base != NULL && base[0] != '\0') {
+        strlcpy(s_shadow_progname_buf, base, sizeof(s_shadow_progname_buf));
+        s_shadow_progname_ptr = s_shadow_progname_buf;
+    }
+}
+
+static char **pt_NSGetProgname(void) {
+    char **real_pn = _NSGetProgname();
+    if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire) ||
+        !pt_is_bypass_enabled() ||
+        pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return real_pn;
+    }
+    pthread_once(&s_shadow_progname_once, pt_init_shadow_progname);
+    return (s_shadow_progname_ptr != NULL) ? &s_shadow_progname_ptr : real_pn;
+}
+
+static const char *pt_getprogname(void) {
+    if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire) ||
+        !pt_is_bypass_enabled() ||
+        pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return getprogname();
+    }
+    pthread_once(&s_shadow_progname_once, pt_init_shadow_progname);
+    return (s_shadow_progname_ptr != NULL) ? s_shadow_progname_ptr : getprogname();
 }
 
 extern CFURLRef CFCopyHomeDirectoryURL(void);
@@ -3606,6 +4308,55 @@ static BOOL pt_bundle_is_hidden(CFBundleRef bundle, const void *caller) {
     return NO;
 }
 
+static pthread_once_t s_info_min_os_once = PTHREAD_ONCE_INIT;
+static char s_info_main_bundle_id[256];
+static char s_info_orig_min_os_ver[64];
+
+static void pt_init_info_min_os_cache(void) {
+    s_info_main_bundle_id[0] = '\0';
+    s_info_orig_min_os_ver[0] = '\0';
+    (void)pt_read_main_bundle_id_early(s_info_main_bundle_id, sizeof(s_info_main_bundle_id));
+    int sfd = pt_open_early_settings_plist_fd();
+    if (sfd >= 0) {
+        (void)pt_read_plist_top_string_from_fd(
+            sfd, "originalMinimumOSVersion", s_info_orig_min_os_ver, sizeof(s_info_orig_min_os_ver));
+        close(sfd);
+    }
+}
+
+static id pt_restored_min_os_for_info_dict(NSDictionary *dict) {
+    id origVal = dict[@"MinimumOSVersion"];
+    if (origVal == nil) {
+        return nil;
+    }
+    pthread_once(&s_info_min_os_once, pt_init_info_min_os_cache);
+    id bid = dict[@"CFBundleIdentifier"];
+    if (s_info_main_bundle_id[0] != '\0') {
+        if (![bid isKindOfClass:[NSString class]]) {
+            return origVal;
+        }
+        const char *bidC = [(NSString *)bid UTF8String];
+        if (bidC == NULL || strcmp(bidC, s_info_main_bundle_id) != 0) {
+            return origVal;
+        }
+    }
+    if (s_info_orig_min_os_ver[0] != '\0') {
+        return [NSString stringWithUTF8String:s_info_orig_min_os_ver];
+    }
+    if ([origVal isKindOfClass:[NSString class]]) {
+        NSString *s = (NSString *)origVal;
+        if ([s isEqualToString:@"11"] || [s isEqualToString:@"11.0"]) {
+            return @"15.0";
+        }
+    }
+    return origVal;
+}
+
+__attribute__((visibility("hidden"))) BOOL pt_is_info_plist_dict(NSDictionary *dict) {
+    return [dict isKindOfClass:[NSDictionary class]] &&
+           (dict[@"CFBundleIdentifier"] != nil || dict[@"CFBundleExecutable"] != nil);
+}
+
 __attribute__((visibility("hidden"))) BOOL pt_info_dict_needs_sanitize(NSDictionary *dict) {
     if (![dict isKindOfClass:[NSDictionary class]]) {
         return NO;
@@ -3615,12 +4366,27 @@ __attribute__((visibility("hidden"))) BOOL pt_info_dict_needs_sanitize(NSDiction
         dict[@"LSRequiresNativeExecution"] != nil ||
         dict[@"NSSupportsAutomaticTermination"] != nil ||
         dict[@"NSSupportsSuddenTermination"] != nil ||
-        dict[@"LSApplicationCategoryType"] != nil) {
+        dict[@"LSApplicationCategoryType"] != nil ||
+        dict[@"LSEnvironment"] != nil ||
+        dict[@"PCInstallGeneration"] != nil) {
+        return YES;
+    }
+    id minOS = dict[@"MinimumOSVersion"];
+    if (minOS != nil) {
+        id restored = pt_restored_min_os_for_info_dict(dict);
+        if (restored != minOS && restored != nil && ![restored isEqual:minOS]) {
+            return YES;
+        }
+    }
+    id prin = dict[@"NSPrincipalClass"];
+    if ([prin isKindOfClass:[NSString class]] && [(NSString *)prin isEqualToString:@"NSApplication"]) {
         return YES;
     }
     id dtPlatform = dict[@"DTPlatformName"];
     if ([dtPlatform isKindOfClass:[NSString class]]) {
-        if ([dtPlatform isEqualToString:@"macosx"] || [dtPlatform isEqualToString:@"maccatalyst"]) {
+        NSString *dp = (NSString *)dtPlatform;
+        if ([dp caseInsensitiveCompare:@"macosx"] == NSOrderedSame ||
+            [dp caseInsensitiveCompare:@"maccatalyst"] == NSOrderedSame) {
             return YES;
         }
     }
@@ -3634,7 +4400,9 @@ __attribute__((visibility("hidden"))) BOOL pt_info_dict_needs_sanitize(NSDiction
     if ([sup isKindOfClass:[NSArray class]]) {
         for (id p in (NSArray *)sup) {
             if ([p isKindOfClass:[NSString class]] &&
-                ([p isEqualToString:@"MacOSX"] || [p isEqualToString:@"MacCatalyst"])) {
+                ([(NSString *)p isEqualToString:@"MacOSX"] ||
+                 [(NSString *)p isEqualToString:@"macOS"] ||
+                 [(NSString *)p isEqualToString:@"MacCatalyst"])) {
                 return YES;
             }
         }
@@ -3642,7 +4410,10 @@ __attribute__((visibility("hidden"))) BOOL pt_info_dict_needs_sanitize(NSDiction
     return NO;
 }
 
-__attribute__((visibility("hidden"))) NSDictionary *pt_build_sanitized_info_dict(NSDictionary *dict) {
+__attribute__((visibility("hidden"))) NSMutableDictionary *pt_build_sanitized_mutable_info_dict(NSDictionary *dict) {
+    if (![dict isKindOfClass:[NSDictionary class]]) {
+        return nil;
+    }
     NSMutableDictionary *m = [dict mutableCopy];
     [m removeObjectForKey:@"LSMinimumSystemVersion"];
     [m removeObjectForKey:@"LSMinimumSystemVersionByArchitecture"];
@@ -3650,11 +4421,27 @@ __attribute__((visibility("hidden"))) NSDictionary *pt_build_sanitized_info_dict
     [m removeObjectForKey:@"NSSupportsAutomaticTermination"];
     [m removeObjectForKey:@"NSSupportsSuddenTermination"];
     [m removeObjectForKey:@"LSApplicationCategoryType"];
+    [m removeObjectForKey:@"LSEnvironment"];
+    [m removeObjectForKey:@"PCInstallGeneration"];
 
+    id minOS = dict[@"MinimumOSVersion"];
+    if (minOS != nil) {
+        id restored = pt_restored_min_os_for_info_dict(dict);
+        if (restored != minOS && restored != nil && ![restored isEqual:minOS]) {
+            m[@"MinimumOSVersion"] = restored;
+        }
+    }
+    id prin = m[@"NSPrincipalClass"];
+    if ([prin isKindOfClass:[NSString class]] && [(NSString *)prin isEqualToString:@"NSApplication"]) {
+        m[@"NSPrincipalClass"] = @"UIApplication";
+    }
     id dtPlatform = m[@"DTPlatformName"];
-    if ([dtPlatform isKindOfClass:[NSString class]] &&
-        ([dtPlatform isEqualToString:@"macosx"] || [dtPlatform isEqualToString:@"maccatalyst"])) {
-        m[@"DTPlatformName"] = @"iphoneos";
+    if ([dtPlatform isKindOfClass:[NSString class]]) {
+        NSString *dp = (NSString *)dtPlatform;
+        if ([dp caseInsensitiveCompare:@"macosx"] == NSOrderedSame ||
+            [dp caseInsensitiveCompare:@"maccatalyst"] == NSOrderedSame) {
+            m[@"DTPlatformName"] = @"iphoneos";
+        }
     }
     id dtSdk = m[@"DTSDKName"];
     if ([dtSdk isKindOfClass:[NSString class]]) {
@@ -3673,14 +4460,27 @@ __attribute__((visibility("hidden"))) NSDictionary *pt_build_sanitized_info_dict
         BOOL hasMac = NO;
         for (id p in (NSArray *)sup) {
             if ([p isKindOfClass:[NSString class]] &&
-                ([p isEqualToString:@"MacOSX"] || [p isEqualToString:@"MacCatalyst"])) {
+                ([(NSString *)p isEqualToString:@"MacOSX"] ||
+                 [(NSString *)p isEqualToString:@"macOS"] ||
+                 [(NSString *)p isEqualToString:@"MacCatalyst"])) {
                 hasMac = YES;
                 break;
             }
         }
         if (hasMac) {
-            m[@"CFBundleSupportedPlatforms"] = @[ @"iPhoneOS" ];
+            m[@"CFBundleSupportedPlatforms"] = [NSMutableArray arrayWithObject:@"iPhoneOS"];
         }
+    }
+    return m;
+}
+
+__attribute__((visibility("hidden"))) NSDictionary *pt_build_sanitized_info_dict(NSDictionary *dict) {
+    NSMutableDictionary *m = pt_build_sanitized_mutable_info_dict(dict);
+    if (m == nil) {
+        return nil;
+    }
+    if ([m[@"CFBundleSupportedPlatforms"] isKindOfClass:[NSMutableArray class]]) {
+        m[@"CFBundleSupportedPlatforms"] = [m[@"CFBundleSupportedPlatforms"] copy];
     }
     return [m copy];
 }
@@ -3696,7 +4496,9 @@ static CFDictionaryRef pt_sanitize_info_dict_copy(CFDictionaryRef infoDict, cons
     if (!pt_info_dict_needs_sanitize(dict)) {
         return infoDict;
     }
-    NSDictionary *clean = pt_build_sanitized_info_dict(dict);
+    NSDictionary *clean = [dict isKindOfClass:[NSMutableDictionary class]]
+        ? pt_build_sanitized_mutable_info_dict(dict)
+        : pt_build_sanitized_info_dict(dict);
     if (clean != nil) {
         CFRelease(infoDict);
         return (__bridge_retained CFDictionaryRef)clean;
@@ -3720,7 +4522,20 @@ static CFDictionaryRef pt_sanitize_info_dict_cached_get(CFDictionaryRef rawDict,
     }
     os_unfair_lock_lock(&s_bundle_info_cache_lock);
     if (s_bundle_info_cache == NULL) {
-        s_bundle_info_cache = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, NULL, &kCFTypeDictionaryValueCallBacks);
+        static const CFDictionaryKeyCallBacks kPtrRetainKeyCallBacks = {
+            0,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL
+        };
+        CFDictionaryKeyCallBacks keyCB = kPtrRetainKeyCallBacks;
+        keyCB.retain = kCFTypeDictionaryKeyCallBacks.retain;
+        keyCB.release = kCFTypeDictionaryKeyCallBacks.release;
+        keyCB.copyDescription = kCFTypeDictionaryKeyCallBacks.copyDescription;
+        s_bundle_info_cache = CFDictionaryCreateMutable(
+            kCFAllocatorDefault, 0, &keyCB, &kCFTypeDictionaryValueCallBacks);
     }
     CFDictionaryRef cached = (s_bundle_info_cache != NULL)
         ? (CFDictionaryRef)CFDictionaryGetValue(s_bundle_info_cache, rawDict)
@@ -3729,7 +4544,9 @@ static CFDictionaryRef pt_sanitize_info_dict_cached_get(CFDictionaryRef rawDict,
     if (cached != NULL) {
         return cached;
     }
-    NSDictionary *clean = pt_build_sanitized_info_dict(dict);
+    NSDictionary *clean = [dict isKindOfClass:[NSMutableDictionary class]]
+        ? pt_build_sanitized_mutable_info_dict(dict)
+        : pt_build_sanitized_info_dict(dict);
     if (clean == nil) {
         return rawDict;
     }
@@ -3977,26 +4794,21 @@ static CFTypeRef pt_CFBundleGetValueForInfoDictionaryKey(CFBundleRef bundle, CFS
     const void *caller = __builtin_return_address(0);
     if (bundle != NULL && key != NULL && pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(caller)) {
-        CFDictionaryRef sanitized = pt_sanitize_info_dict_cached_get(CFBundleGetLocalInfoDictionary(bundle), caller);
-        if (sanitized != NULL && CFDictionaryContainsKey(sanitized, key)) {
-            return CFDictionaryGetValue(sanitized, key);
+        CFDictionaryRef rawLocal = CFBundleGetLocalInfoDictionary(bundle);
+        CFDictionaryRef localSanitized = pt_sanitize_info_dict_cached_get(rawLocal, caller);
+        if (localSanitized != NULL && CFDictionaryContainsKey(localSanitized, key)) {
+            return CFDictionaryGetValue(localSanitized, key);
         }
-        CFDictionaryRef mainSanitized = pt_sanitize_info_dict_cached_get(CFBundleGetInfoDictionary(bundle), caller);
-        if (mainSanitized != NULL) {
-            NSString *nsKey = (__bridge NSString *)key;
-            if ([nsKey isEqualToString:@"LSMinimumSystemVersion"] ||
-                [nsKey isEqualToString:@"LSMinimumSystemVersionByArchitecture"] ||
-                [nsKey isEqualToString:@"LSRequiresNativeExecution"] ||
-                [nsKey isEqualToString:@"NSSupportsAutomaticTermination"] ||
-                [nsKey isEqualToString:@"NSSupportsSuddenTermination"] ||
-                [nsKey isEqualToString:@"LSApplicationCategoryType"]) {
-                return CFDictionaryGetValue(mainSanitized, key);
-            }
-            if ([nsKey isEqualToString:@"DTPlatformName"] ||
-                [nsKey isEqualToString:@"DTSDKName"] ||
-                [nsKey isEqualToString:@"CFBundleSupportedPlatforms"]) {
-                return CFDictionaryGetValue(mainSanitized, key);
-            }
+        if (rawLocal != NULL && CFDictionaryContainsKey(rawLocal, key)) {
+            return NULL;
+        }
+        CFDictionaryRef rawMain = CFBundleGetInfoDictionary(bundle);
+        CFDictionaryRef mainSanitized = pt_sanitize_info_dict_cached_get(rawMain, caller);
+        if (mainSanitized != NULL && CFDictionaryContainsKey(mainSanitized, key)) {
+            return CFDictionaryGetValue(mainSanitized, key);
+        }
+        if (rawMain != NULL && CFDictionaryContainsKey(rawMain, key)) {
+            return NULL;
         }
     }
     return CFBundleGetValueForInfoDictionaryKey(bundle, key);
@@ -5048,6 +5860,7 @@ static kern_return_t pt_task_info(task_name_t target_task,
 
 
 DYLD_INTERPOSE(pt_uname, uname)
+DYLD_INTERPOSE(pt_availability_version_check, pt_orig_availability_version_check)
 DYLD_INTERPOSE(pt_sysctlbyname, sysctlbyname)
 DYLD_INTERPOSE(pt_sysctlnametomib, sysctlnametomib)
 DYLD_INTERPOSE(pt_sysctl, sysctl)
@@ -5070,6 +5883,10 @@ DYLD_INTERPOSE(pt_MGGetStringAnswer, MGGetStringAnswer)
 DYLD_INTERPOSE(pt_MGGetProductType, MGGetProductType)
 DYLD_INTERPOSE(pt_getenv, getenv)
 DYLD_INTERPOSE(pt_NSGetEnviron, _NSGetEnviron)
+DYLD_INTERPOSE(pt_NSGetArgv, _NSGetArgv)
+DYLD_INTERPOSE(pt_NSGetArgc, _NSGetArgc)
+DYLD_INTERPOSE(pt_NSGetProgname, _NSGetProgname)
+DYLD_INTERPOSE(pt_getprogname, getprogname)
 DYLD_INTERPOSE(pt_gethostname, gethostname)
 DYLD_INTERPOSE(pt_getpwuid, getpwuid)
 DYLD_INTERPOSE(pt_getpwuid_r, getpwuid_r)

@@ -131,6 +131,30 @@ public enum ReportedIOSVersionMode: String, Codable, CaseIterable, Equatable, Se
     public static let compat13_7Version = "13.7"
     public static let compat13_7Build = "17H35"
     public static let compat13_7KernelRelease = "19.6.0"
+    public static let ios13CompatibleModels: Set<String> = ["iPad6,7", "iPad8,6", "iPhone12,5"]
+
+    public static func supportsIOS13(deviceModel: String) -> Bool {
+        let normalized = deviceModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ios13CompatibleModels.contains(normalized)
+    }
+
+    public static func recommendedIOS13Model(isIPhone: Bool) -> String {
+        isIPhone ? "iPhone12,5" : "iPad8,6"
+    }
+
+    public static func recommendedIOS13Model(for deviceModel: String) -> String {
+        let normalized = deviceModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return recommendedIOS13Model(isIPhone: normalized.hasPrefix("iPhone"))
+    }
+
+    public static func effectiveDeviceModel(_ deviceModel: String, for mode: ReportedIOSVersionMode) -> String {
+        let normalized = deviceModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = normalized.isEmpty ? "iPad13,8" : normalized
+        guard mode == .compat13_7, !supportsIOS13(deviceModel: base) else {
+            return base
+        }
+        return recommendedIOS13Model(for: base)
+    }
 
     public init(rawSetting: String?) {
         let normalized = (rawSetting ?? "")
@@ -203,6 +227,8 @@ public enum PlayCoverRestartField: String, CaseIterable, Equatable, Hashable, Se
     case playChain
     case playChainDebugging
     case metalHUD
+    /// Legacy field retained for enum/Codable compatibility; introspection injection uses
+    /// `Info.plist` `LSEnvironment` (`PlayApp.introspection`) rather than `AppSettingsData`.
     case injectIntrospection
     case rootWorkDir
     case hideTitleBar

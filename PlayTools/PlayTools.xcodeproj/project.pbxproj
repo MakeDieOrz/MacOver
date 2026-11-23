@@ -1124,6 +1124,9 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AA71970B287A44D200623C15 /* PlayLoader.m in Sources */,
+				AB7DA47529B85BFB0034ACB2 /* PlayShadow.m in Sources */,
+				AA71986C287A81A000623C15 /* NSObject+Swizzle.m in Sources */,
 				954389CA2B392D7800B063BB /* DraggableButton.swift in Sources */,
 				9562D16D2AB505D4002C329D /* ControllerEventAdapter.swift in Sources */,
 				B444BB0D2F49C1D100ADCC5A /* ControllerFocus.m in Sources */,
@@ -1177,7 +1180,6 @@
 				9562D1752AB52479002C329D /* EditorMouseEventAdapter.swift in Sources */,
 				AA7197AA287A481500623C15 /* Toast.swift in Sources */,
 				AA719789287A480D00623C15 /* PlayInput.swift in Sources */,
-				AA71970B287A44D200623C15 /* PlayLoader.m in Sources */,
 				9555ED332C058E36006E469C /* DebugController.swift in Sources */,
 				9562D1512AB484C7002C329D /* EventAdapters.swift in Sources */,
 				AA7197AF287A481500623C15 /* KeyCodeNames.swift in Sources */,
@@ -1195,13 +1197,11 @@
 				9562D15E2AB4FCB8002C329D /* TouchscreenControllerEventAdapter.swift in Sources */,
 				954389C62B3896E600B063BB /* ChildButton.swift in Sources */,
 				ABCECEE629750BA600746595 /* PlayedApple.swift in Sources */,
-				AA71986C287A81A000623C15 /* NSObject+Swizzle.m in Sources */,
 				AA71970F287A44D200623C15 /* PlayCover.swift in Sources */,
 				B127172528817C040025112B /* DiscordIPC.swift in Sources */,
 				AA719850287A81A000623C15 /* UITouch-KIFAdditions.m in Sources */,
 				AA71985F287A81A000623C15 /* IOHIDEvent+KIF.m in Sources */,
 				B1E8CF8A28BBE2AB004340D3 /* Keymapping.swift in Sources */,
-				AB7DA47529B85BFB0034ACB2 /* PlayShadow.m in Sources */,
 				AA71A0812F00000600623C15 /* PTCoordinateMath.swift in Sources */,
 				AA71A0842F00000600623C15 /* PTPasteboardTextSanitizer.swift in Sources */,
 				AA71A0892F00000600623C15 /* PTCallerAddressMath.c in Sources */,

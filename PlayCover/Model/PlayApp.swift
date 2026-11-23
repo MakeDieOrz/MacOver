@@ -169,6 +169,8 @@ class PlayApp: BaseApp, ObservableObject, Identifiable, Hashable {
 
             settings.sync()
 
+            try Installer.validateOrInvalidateAppBackupsForLaunch(at: appBackupsDir, for: info)
+
             let binaryInfo = try? Macho.inspectBinary(
                 atURL: executable,
                 playToolsPath: PlayTools.playToolsPath.path
@@ -400,10 +402,21 @@ extension PlayApp {
                 var activateObserver: NSObjectProtocol?
                 var deactivateObserver: NSObjectProtocol?
                 var terminateObserver: NSObjectProtocol?
+                var settingsObserver: AnyCancellable?
                 defer {
+                    settingsObserver?.cancel()
                     if let activateObserver { wsCenter.removeObserver(activateObserver) }
                     if let deactivateObserver { wsCenter.removeObserver(deactivateObserver) }
                     if let terminateObserver { wsCenter.removeObserver(terminateObserver) }
+                }
+
+                settingsObserver = self.settings.objectWillChange.sink { [weak self] _ in
+                    guard let self, !runningApp.isTerminated else { return }
+                    if !self.settings.settings.disableTimeout {
+                        self.enableTimeOut()
+                    } else if runningApp.isActive {
+                        self.disableTimeOut()
+                    }
                 }
 
                 await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
@@ -545,8 +558,13 @@ extension PlayApp {
 // MARK: - Management
 extension PlayApp {
     func disableTimeOut() {
+        guard settings.settings.disableTimeout else {
+            enableTimeOut()
+            return
+        }
         assertionLock.lock()
         defer { assertionLock.unlock() }
+        guard let app = runningApplication, !app.isTerminated else { return }
         if displaySleepAssertionID != nil { return }
 
         let reason = "PlayCover: \(info.bundleIdentifier) is disabling sleep" as CFString
@@ -749,8 +767,11 @@ extension PlayApp {
         dependencies?.appsVM.fetchApps()
     }
 
-    func signThrowing() throws {
+    func signThrowing(targetBundleURL: URL? = nil) throws {
         Self.invalidateVerifiedBundleStamp(for: url)
+        if let targetBundleURL {
+            Self.invalidateVerifiedBundleStamp(for: targetBundleURL)
+        }
         let tmpDir = FileManager.default.temporaryDirectory
         let tmpEnts = tmpDir
             .appendingEscapedPathComponent(ProcessInfo().globallyUniqueString)
@@ -760,7 +781,7 @@ extension PlayApp {
                 try? FileManager.default.removeItem(at: tmpEnts)
             }
         }
-        let conf = try Entitlements.composeEntitlements(self)
+        let conf = try Entitlements.composeEntitlements(self, targetBundleURL: targetBundleURL)
         try conf.store(tmpEnts)
         try Shell.signAppWith(executable, entitlements: tmpEnts)
     }

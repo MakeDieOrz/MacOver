@@ -5,11 +5,6 @@
 
 #import "PTInternal.h"
 
-
-static BOOL pt_is_valid_user_pointer(const void *ptr) {
-    return pt_is_valid_user_addr((uintptr_t)ptr) ? YES : NO;
-}
-
 #define PT_HAS_PREFIX_LIT(s, lit) (strncmp((s), (lit), sizeof(lit) - 1) == 0)
 
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_class(const char *name) {
@@ -71,8 +66,8 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_class(const char *n
                 PT_HAS_PREFIX_LIT(name, "NSView") ||
                 PT_HAS_PREFIX_LIT(name, "NSMenu") ||
                 PT_HAS_PREFIX_LIT(name, "NSPanel") ||
-                PT_HAS_PREFIX_LIT(name, "NSTask") ||
-                PT_HAS_PREFIX_LIT(name, "NSConcreteTask") ||
+                strcmp(name, "NSTask") == 0 ||
+                strcmp(name, "NSConcreteTask") == 0 ||
                 PT_HAS_PREFIX_LIT(name, "NSWorkspace") ||
                 PT_HAS_PREFIX_LIT(name, "NSRunningApplication") ||
                 PT_HAS_PREFIX_LIT(name, "NSScreen") ||
@@ -100,6 +95,39 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_class(const char *n
         case '_':
         default:
             break;
+    }
+    if (pt_is_compat13_7_active()) {
+        switch (name[0]) {
+            case 'A':
+                if (strcmp(name, "ATTrackingManager") == 0) {
+                    return YES;
+                }
+                break;
+            case 'D':
+                if (strcmp(name, "DCAppAttestService") == 0) {
+                    return YES;
+                }
+                break;
+            case 'P':
+                if (strcmp(name, "PHPickerViewController") == 0 ||
+                    strcmp(name, "PHPickerConfiguration") == 0) {
+                    return YES;
+                }
+                break;
+            case 'S':
+                if (strcmp(name, "SKOverlay") == 0) {
+                    return YES;
+                }
+                break;
+            case 'U':
+                if (strcmp(name, "UIColorWell") == 0 ||
+                    strcmp(name, "UIColorPickerViewController") == 0) {
+                    return YES;
+                }
+                break;
+            default:
+                break;
+        }
     }
     if (name[0] == '_' || strchr(name, '_') != NULL) {
         if (strstr(name, "Play") != NULL &&
@@ -480,6 +508,59 @@ static const char *pt_dyld_shared_cache_file_path(void) {
     return (dyld_shared_cache_file_path != NULL) ? dyld_shared_cache_file_path() : NULL;
 }
 
+extern bool pt_orig_dyld_shared_cache_contains_path(const char *path)
+    __asm("__dyld_shared_cache_contains_path") __attribute__((weak_import));
+
+static bool pt_dyld_shared_cache_contains_path(const char *path) {
+    if (pt_orig_dyld_shared_cache_contains_path == NULL) {
+        return false;
+    }
+    const void *caller = __builtin_return_address(0);
+    if (path != NULL && pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(caller)) {
+        char lex_buf[PATH_MAX];
+        const char *norm = path;
+        if (norm[0] == '/' && pt_needs_lexical_norm(norm)) {
+            const char *collapsed = pt_normalize_lexical_path(norm, lex_buf, sizeof(lex_buf));
+            if (collapsed != NULL) {
+                norm = collapsed;
+            }
+        }
+        if (strcmp(norm, "/System/iOSSupport") == 0 ||
+            strncmp(norm, "/System/iOSSupport/", 19) == 0) {
+            return false;
+        }
+        if (pt_is_hidden_dyld_image_name(norm) || pt_is_hidden_path(norm, caller)) {
+            return false;
+        }
+        if (pt_orig_dyld_shared_cache_contains_path(norm)) {
+            return true;
+        }
+        if (strncmp(norm, "/System/Library/", 16) == 0 || strncmp(norm, "/usr/lib/", 9) == 0) {
+            char ios_buf[PATH_MAX];
+            int n = snprintf(ios_buf, sizeof(ios_buf), "/System/iOSSupport%s", norm);
+            if (n > 0 && (size_t)n < sizeof(ios_buf) &&
+                pt_orig_dyld_shared_cache_contains_path(ios_buf)) {
+                return true;
+            }
+            const char *slash = strrchr(norm, '/');
+            if (slash != NULL && slash > norm && strstr(norm, ".framework/") != NULL &&
+                strstr(norm, "/Versions/") == NULL) {
+                size_t dir_len = (size_t)(slash - norm);
+                n = snprintf(ios_buf, sizeof(ios_buf),
+                             "/System/iOSSupport%.*s/Versions/A%s",
+                             (int)dir_len, norm, slash);
+                if (n > 0 && (size_t)n < sizeof(ios_buf) &&
+                    pt_orig_dyld_shared_cache_contains_path(ios_buf)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    return pt_orig_dyld_shared_cache_contains_path(path);
+}
+
 
 extern const void *pt_orig_objc_getClass(const char *name) __asm__("_objc_getClass");
 extern const void *pt_orig_objc_lookUpClass(const char *name) __asm__("_objc_lookUpClass");
@@ -497,10 +578,12 @@ static BOOL pt_should_hide_resolved_objc_class(const char *name, Class cls) {
                 pt_match_prefix_modulo_private(img, s_real_app_bundle_dir, s_real_app_bundle_len) != NULL) {
                 return NO;
             }
-            if (strstr(img, "/UIKitCore.framework/") != NULL ||
-                strstr(img, "/UIKit.framework/") != NULL) {
-                return NO;
+            if (strcmp(name, "NSTask") == 0 || strcmp(name, "NSConcreteTask") == 0) {
+                return YES;
             }
+            return (pt_is_hidden_dyld_image_name(img) ||
+                    strstr(img, "/WindowManagement.framework/") != NULL ||
+                    strstr(img, "/Shortcut.framework/") != NULL);
         }
     }
     return YES;
@@ -718,11 +801,11 @@ static const char **pt_objc_copyClassNamesForImage(const char *image, unsigned i
     return objc_copyClassNamesForImage(image, outCount);
 }
 
-static Class *pt_objc_copyClassList(unsigned int *outCount) {
+static Class *pt_objc_copy_class_list_for_caller(unsigned int *outCount, const void *caller) {
     unsigned int count = 0;
     Class *classes = objc_copyClassList(&count);
     if (classes != NULL && pt_is_bypass_enabled() &&
-        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        !pt_is_effective_system_or_playtools_caller(caller)) {
         unsigned int writeIdx = 0;
         for (unsigned int i = 0; i < count; i++) {
             Class cls = classes[i];
@@ -743,13 +826,18 @@ static Class *pt_objc_copyClassList(unsigned int *outCount) {
     return classes;
 }
 
+static Class *pt_objc_copyClassList(unsigned int *outCount) {
+    return pt_objc_copy_class_list_for_caller(outCount, __builtin_return_address(0));
+}
+
 static int pt_objc_getClassList(Class *buffer, int bufferCount) {
+    const void *caller = __builtin_return_address(0);
     if (!pt_is_bypass_enabled() ||
-        pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        pt_is_effective_system_or_playtools_caller(caller)) {
         return objc_getClassList(buffer, bufferCount);
     }
     unsigned int count = 0;
-    Class *classes = pt_objc_copyClassList(&count);
+    Class *classes = pt_objc_copy_class_list_for_caller(&count, caller);
     if (classes == NULL) {
         return 0;
     }
@@ -1388,6 +1476,100 @@ static char *pt_dlerror(void) {
     return s_tls_dlerror_buf;
 }
 
+static BOOL pt_has_blocked_jailbreak_dlopen_component(const char *path) {
+    if (path == NULL || path[0] == '\0') {
+        return NO;
+    }
+    static const struct {
+        const char *name;
+        size_t len;
+    } s_dir_or_fw_components[] = {
+        PT_STR_ENTRY("MobileSubstrate"),
+        PT_STR_ENTRY("TweakInject"),
+        PT_STR_ENTRY("CydiaSubstrate.framework"),
+        PT_STR_ENTRY("ElleKit.framework"),
+        PT_STR_ENTRY("libhooker.framework"),
+        PT_STR_ENTRY("Substitute.framework"),
+        PT_STR_ENTRY("FridaGadget.framework"),
+        PT_STR_ENTRY("SubstrateBootstrap.framework")
+    };
+#define PT_DLOPEN_PREFIX_ENTRY(lit, req_delim) { (lit), sizeof(lit) - 1, (req_delim) }
+    static const struct {
+        const char *prefix;
+        size_t len;
+        BOOL require_delim;
+    } s_basename_prefixes[] = {
+        PT_DLOPEN_PREFIX_ENTRY("MobileSubstrate", YES),
+        PT_DLOPEN_PREFIX_ENTRY("libMobileSubstrate", YES),
+        PT_DLOPEN_PREFIX_ENTRY("CydiaSubstrate", YES),
+        PT_DLOPEN_PREFIX_ENTRY("libCydiaSubstrate", YES),
+        PT_DLOPEN_PREFIX_ENTRY("SubstrateInserter", YES),
+        PT_DLOPEN_PREFIX_ENTRY("libSubstrateInserter", YES),
+        PT_DLOPEN_PREFIX_ENTRY("SubstrateBootstrap", YES),
+        PT_DLOPEN_PREFIX_ENTRY("libSubstrateBootstrap", YES),
+        PT_DLOPEN_PREFIX_ENTRY("TweakInject", YES),
+        PT_DLOPEN_PREFIX_ENTRY("libTweakInject", YES),
+        PT_DLOPEN_PREFIX_ENTRY("ellekit", YES),
+        PT_DLOPEN_PREFIX_ENTRY("libellekit", YES),
+        PT_DLOPEN_PREFIX_ENTRY("libhooker", YES),
+        PT_DLOPEN_PREFIX_ENTRY("libsubstitute", YES),
+        PT_DLOPEN_PREFIX_ENTRY("fridagadget", YES),
+        PT_DLOPEN_PREFIX_ENTRY("libfridagadget", YES),
+        PT_DLOPEN_PREFIX_ENTRY("frida", YES),
+        PT_DLOPEN_PREFIX_ENTRY("libfrida", YES),
+        PT_DLOPEN_PREFIX_ENTRY("cycript", YES),
+        PT_DLOPEN_PREFIX_ENTRY("libcycript", YES),
+        PT_DLOPEN_PREFIX_ENTRY("SSLKillSwitch2", YES),
+        PT_DLOPEN_PREFIX_ENTRY("libSSLKillSwitch2", YES),
+        PT_DLOPEN_PREFIX_ENTRY("Choicy", YES),
+        PT_DLOPEN_PREFIX_ENTRY("libChoicy", YES)
+    };
+#undef PT_DLOPEN_PREFIX_ENTRY
+
+    const char *last_seg = NULL;
+    size_t last_seg_len = 0;
+    const char *p = path;
+    while (*p != '\0') {
+        while (*p == '/') {
+            p++;
+        }
+        if (*p == '\0') {
+            break;
+        }
+        const char *seg_start = p;
+        while (*p != '\0' && *p != '/') {
+            p++;
+        }
+        size_t seg_len = (size_t)(p - seg_start);
+        last_seg = seg_start;
+        last_seg_len = seg_len;
+        for (size_t i = 0; i < sizeof(s_dir_or_fw_components) / sizeof(s_dir_or_fw_components[0]); ++i) {
+            if (seg_len == s_dir_or_fw_components[i].len &&
+                strncasecmp(seg_start, s_dir_or_fw_components[i].name, seg_len) == 0) {
+                return YES;
+            }
+        }
+    }
+
+    if (last_seg != NULL && last_seg_len > 0) {
+        for (size_t i = 0; i < sizeof(s_basename_prefixes) / sizeof(s_basename_prefixes[0]); ++i) {
+            size_t plen = s_basename_prefixes[i].len;
+            if (last_seg_len >= plen &&
+                strncasecmp(last_seg, s_basename_prefixes[i].prefix, plen) == 0) {
+                if (!s_basename_prefixes[i].require_delim || last_seg_len == plen) {
+                    return YES;
+                }
+                char delim = last_seg[plen];
+                if (delim == '.' || delim == '-' || delim == '_' ||
+                    (delim >= '0' && delim <= '9')) {
+                    return YES;
+                }
+            }
+        }
+    }
+    return NO;
+}
+
 static BOOL pt_should_block_dlopen_path(const char *path, const void *caller) {
     if (path == NULL || !pt_is_bypass_enabled()) {
         return NO;
@@ -1397,12 +1579,7 @@ static BOOL pt_should_block_dlopen_path(const char *path, const void *caller) {
     }
     return (pt_is_hidden_path(path, caller) ||
             pt_is_hidden_dyld_image_name(path) ||
-            strstr(path, "MobileSubstrate") != NULL ||
-            strstr(path, "SubstrateInserter") != NULL ||
-            strstr(path, "SubstrateBootstrap") != NULL ||
-            strstr(path, "TweakInject") != NULL ||
-            strstr(path, "frida") != NULL ||
-            strstr(path, "cycript") != NULL);
+            pt_has_blocked_jailbreak_dlopen_component(path));
 }
 
 static BOOL pt_should_block_resolved_dlopen_path(const char *orig_path,
@@ -1576,7 +1753,11 @@ static void *pt_dlopen(const char *path, int mode) {
         pt_set_synthetic_dlerror(msg);
         return NULL;
     }
-    return (caller != NULL) ? dlopen_from(path, mode, (void *)caller) : dlopen(path, mode);
+    void *handle = (caller != NULL) ? dlopen_from(path, mode, (void *)caller) : dlopen(path, mode);
+    if (handle != NULL && orig_path != NULL) {
+        ps_notify_dynamic_image_loaded();
+    }
+    return handle;
 }
 
 static bool pt_dlopen_preflight(const char *path) {
@@ -1669,6 +1850,21 @@ static void *pt_dlsym(void *handle, const char *symbol) {
                 PT_DEBUG_TRACE("dyld", "hid dlsym symbol=%s", symbol);
                 pt_set_synthetic_dlerror("symbol not found");
                 return NULL;
+            }
+        } else if (strncmp(symbol, "SecCode", 7) == 0 ||
+                   strncmp(symbol, "SecStaticCode", 13) == 0 ||
+                   strncmp(symbol, "SecRequirementCreate", 20) == 0) {
+            PT_DEBUG_TRACE("dyld", "hid macOS-only Security symbol=%s", symbol);
+            pt_set_synthetic_dlerror("symbol not found");
+            return NULL;
+        } else if (strcmp(symbol, "_dyld_shared_cache_contains_path") == 0) {
+            return (void *)&pt_dyld_shared_cache_contains_path;
+        } else if (strcmp(symbol, "_availability_version_check") == 0) {
+            return (void *)&pt_availability_version_check;
+        } else if (strcmp(symbol, "environ") == 0) {
+            char ***shadow_envp = pt_get_app_shadow_environ_ptr();
+            if (shadow_envp != NULL) {
+                return (void *)shadow_envp;
             }
         } else if (symbol[0] == 'M' && symbol[1] == 'G') {
             if (strcmp(symbol, "MGCopyAnswer") == 0) {
@@ -1772,6 +1968,7 @@ static void *pt_dlsym(void *handle, const char *symbol) {
 DYLD_INTERPOSE(pt_dyld_get_active_platform, dyld_get_active_platform)
 DYLD_INTERPOSE(pt_dyld_get_base_platform, dyld_get_base_platform)
 DYLD_INTERPOSE(pt_dyld_shared_cache_file_path, dyld_shared_cache_file_path)
+DYLD_INTERPOSE(pt_dyld_shared_cache_contains_path, pt_orig_dyld_shared_cache_contains_path)
 DYLD_INTERPOSE(pt_objc_getClass, objc_getClass)
 DYLD_INTERPOSE(pt_objc_lookUpClass, objc_lookUpClass)
 DYLD_INTERPOSE(pt_NSClassFromString, NSClassFromString)
