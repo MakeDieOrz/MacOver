@@ -2265,7 +2265,8 @@ static int pt_dlopen_preflight_search_rpaths(const struct mach_header *mh,
                                              const char *loader_dir,
                                              const char *exec_dir,
                                              const void *caller) {
-    if (mh == NULL || rpath_rel == NULL || mh->magic != MH_MAGIC_64) {
+    if (mh == NULL || !pt_is_valid_user_pointer((const void *)mh) ||
+        rpath_rel == NULL || mh->magic != MH_MAGIC_64) {
         return 0;
     }
     const struct mach_header_64 *mh64 = (const struct mach_header_64 *)mh;
