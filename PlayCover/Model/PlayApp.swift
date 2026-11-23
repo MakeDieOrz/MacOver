@@ -169,7 +169,13 @@ class PlayApp: BaseApp, ObservableObject, Identifiable, Hashable {
 
             settings.sync()
 
-            try Installer.validateOrInvalidateAppBackupsForLaunch(at: appBackupsDir, for: info)
+            let launchInfo = AppInfo(
+                contentsOf: url.appendingPathComponent("Info").appendingPathExtension("plist")
+            )
+            let launchBackupsDir = launchInfo.bundleIdentifier.isEmpty
+                ? appBackupsDir
+                : BaseApp.appBackupsRoot.appendingPathComponent(launchInfo.bundleIdentifier)
+            try Installer.validateOrInvalidateAppBackupsForLaunch(at: launchBackupsDir, for: launchInfo)
 
             let binaryInfo = try? Macho.inspectBinary(
                 atURL: executable,

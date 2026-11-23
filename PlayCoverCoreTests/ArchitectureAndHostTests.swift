@@ -1414,4 +1414,45 @@ final class ArchitectureAndHostTests: XCTestCase {
         )
         XCTAssertTrue(fm.fileExists(atPath: unreadableFile.path))
     }
+
+    func testAppsVMInvalidatesCachedPlayAppWhenOnDiskInfoChanges() throws {
+        let dir = try XCTUnwrap(tempDir)
+        let appURL = dir.appendingPathComponent("Sample.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: appURL, withIntermediateDirectories: true)
+
+        let plistURL = appURL.appendingPathComponent("Info.plist")
+        var plistDict: [String: Any] = [
+            "CFBundleIdentifier": "com.example.overwrite",
+            "CFBundleName": "Sample",
+            "CFBundleDisplayName": "Sample",
+            "CFBundleExecutable": "Sample",
+            "CFBundleShortVersionString": "1.0.0",
+            "CFBundleVersion": "100",
+            Installer.installGenerationInfoKey: "gen-1"
+        ]
+        try PropertyListSerialization.data(fromPropertyList: plistDict, format: .xml, options: 0)
+            .write(to: plistURL, options: .atomic)
+
+        let existing = PlayApp(appUrl: appURL)
+        XCTAssertTrue(AppsVM.shouldReuseExistingApp(existing, at: appURL))
+
+        // Overwrite-reinstall with a new PCInstallGeneration must invalidate cached PlayApp.
+        plistDict[Installer.installGenerationInfoKey] = "gen-2"
+        try PropertyListSerialization.data(fromPropertyList: plistDict, format: .xml, options: 0)
+            .write(to: plistURL, options: .atomic)
+        XCTAssertFalse(AppsVM.shouldReuseExistingApp(existing, at: appURL))
+
+        // Reset generation, then bump CFBundleVersion / CFBundleShortVersionString -> also invalidates.
+        plistDict[Installer.installGenerationInfoKey] = "gen-1"
+        plistDict["CFBundleVersion"] = "101"
+        try PropertyListSerialization.data(fromPropertyList: plistDict, format: .xml, options: 0)
+            .write(to: plistURL, options: .atomic)
+        XCTAssertFalse(AppsVM.shouldReuseExistingApp(existing, at: appURL))
+
+        plistDict["CFBundleVersion"] = "100"
+        plistDict["CFBundleShortVersionString"] = "1.0.1"
+        try PropertyListSerialization.data(fromPropertyList: plistDict, format: .xml, options: 0)
+            .write(to: plistURL, options: .atomic)
+        XCTAssertFalse(AppsVM.shouldReuseExistingApp(existing, at: appURL))
+    }
 }

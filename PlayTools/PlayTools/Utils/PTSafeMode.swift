@@ -28,7 +28,7 @@ public enum PTDiagnosticLogger {
     }
 
     public static func defaultLogURL(bundleIdentifier: String? = nil) -> URL {
-        URL(fileURLWithPath: "/tmp")
+        FileManager.default.temporaryDirectory
             .appendingPathComponent("PlayTools-\(sanitizedBundleID(bundleIdentifier)).log")
     }
 
@@ -52,7 +52,9 @@ public enum PTDiagnosticLogger {
             if append(data, to: primary) {
                 return
             }
-            if let fallbackDir = fallbackDirectory {
+            let effectiveFallbackDir = fallbackDirectory
+                ?? (explicitLogURL == nil ? PTSafeMode.defaultStateDirectory() : nil)
+            if let fallbackDir = effectiveFallbackDir {
                 let fallbackURL = fallbackDir.appendingPathComponent("PlayTools.log")
                 _ = append(data, to: fallbackURL)
             }

@@ -270,4 +270,77 @@ final class PTPluginContainerTests: XCTestCase {
         safeMode.markGracefulTermination()
         XCTAssertFalse(FileManager.default.fileExists(atPath: safeMode.breadcrumbURL.path))
     }
+
+    func testDiagnosticLoggerDefaultLogURLUsesProcessTemporaryDirectory() throws {
+        let logURL = PTDiagnosticLogger.defaultLogURL(bundleIdentifier: "com.example.app")
+        let expectedDir = FileManager.default.temporaryDirectory.standardizedFileURL
+        XCTAssertEqual(logURL.deletingLastPathComponent().standardizedFileURL, expectedDir)
+        XCTAssertEqual(logURL.lastPathComponent, "PlayTools-com.example.app.log")
+
+        let globalTmp = URL(fileURLWithPath: "/private/tmp").standardizedFileURL
+        if expectedDir != globalTmp {
+            XCTAssertNotEqual(logURL.deletingLastPathComponent().standardizedFileURL, globalTmp)
+        }
+    }
+
+    func testMacOverVersionCompatibilityAcceptsPlayCoverEraPluginsAndRejectsHigherVersions() throws {
+        let root = try XCTUnwrap(tempDir)
+        let pluginsDir = root.appendingPathComponent("UserPluginsCompat", isDirectory: true)
+        let logURL = root.appendingPathComponent("compat-diag.log")
+        try FileManager.default.createDirectory(at: pluginsDir, withIntermediateDirectories: true)
+
+        let cases: [(id: String, minVer: String, shouldLoad: Bool)] = [
+            ("com.example.macover100", "1.0.0", true),
+            ("com.example.pc420", "4.2.0", true),
+            ("com.example.pc500", "5.0.0", true),
+            ("com.example.pc510", "5.1.0", true),
+            ("com.example.macover110", "1.1.0", false),
+            ("com.example.pc520", "5.2.0", false),
+            ("com.example.future900", "9.0.0", false)
+        ]
+
+        for (index, item) in cases.enumerated() {
+            let dylibName = "CompatPlugin\(index).dylib"
+            try Data().write(to: pluginsDir.appendingPathComponent(dylibName))
+            let manifest = """
+            {
+              "manifestVersion": "1.0",
+              "identifier": "\(item.id)",
+              "name": "\(item.id)",
+              "version": "1.0.0",
+              "minPlayToolsVersion": "\(item.minVer)",
+              "targetBundleIdentifiers": ["*"],
+              "entrypoint": "\(dylibName)"
+            }
+            """
+            try Data(manifest.utf8).write(
+                to: pluginsDir.appendingPathComponent("CompatPlugin\(index).manifest.json")
+            )
+        }
+
+        let container = PTPluginContainer(
+            dlopenHandler: { _, _ in UnsafeMutableRawPointer(bitPattern: 0xCAFE_BABE) },
+            dlerrorHandler: { nil }
+        )
+        let records = container.loadPlugins(
+            in: pluginsDir,
+            currentBundleIdentifier: "com.example.app",
+            currentPlayToolsVersion: "1.0.2",
+            isSafeModeActive: false,
+            diagnosticLogURL: logURL
+        )
+
+        for item in cases {
+            guard let record = records.first(where: { $0.identifier == item.id }) else {
+                return XCTFail("Missing record for \(item.id)")
+            }
+            if item.shouldLoad {
+                XCTAssertEqual(record.status, .loaded, "Expected \(item.id) (\(item.minVer)) to load on 1.0.2")
+            } else if case .validationFailed = record.status {
+                // Expected rejection
+            } else {
+                XCTFail("Expected \(item.id) (\(item.minVer)) to fail validation on 1.0.2, got \(record.status)")
+            }
+        }
+    }
 }

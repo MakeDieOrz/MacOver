@@ -43,6 +43,20 @@ class AppsVM: ObservableObject {
         filteredApps = nextFiltered.sorted { $0.name.lowercased() < $1.name.lowercased() }
     }
 
+    static func shouldReuseExistingApp(_ existing: PlayApp, at appURL: URL) -> Bool {
+        let plistURL = appURL.appendingPathComponent("Info").appendingPathExtension("plist")
+        let freshInfo = AppInfo(contentsOf: plistURL)
+        let existingInfo = existing.info
+        let generationKey = Installer.installGenerationInfoKey
+        return freshInfo.bundleIdentifier == existingInfo.bundleIdentifier
+            && freshInfo.bundleVersion == existingInfo.bundleVersion
+            && freshInfo[object: "CFBundleVersion"] == existingInfo[object: "CFBundleVersion"]
+            && freshInfo.executableName == existingInfo.executableName
+            && freshInfo.displayName == existingInfo.displayName
+            && freshInfo.bundleName == existingInfo.bundleName
+            && freshInfo[string: generationKey] == existingInfo[string: generationKey]
+    }
+
     func fetchApps() {
         fetchTask?.cancel()
         let deps = self.dependencies
@@ -72,7 +86,13 @@ class AppsVM: ObservableObject {
                             fm.fileExists(atPath: sub.appendingPathComponent("Info")
                                 .appendingPathExtension("plist")
                                 .path) {
-                            let app = existingByURL[sub] ?? PlayApp(appUrl: sub, dependencies: deps)
+                            let app: PlayApp
+                            if let existing = existingByURL[sub],
+                               AppsVM.shouldReuseExistingApp(existing, at: sub) {
+                                app = existing
+                            } else {
+                                app = PlayApp(appUrl: sub, dependencies: deps)
+                            }
                             app.dependencies = deps
                             app.ensureAliasUpToDate()
                             print("Application installed under:", sub.path)

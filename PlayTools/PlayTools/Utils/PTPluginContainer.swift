@@ -407,6 +407,23 @@ public final class PTPluginContainer {
         case invalid(String)
     }
 
+    public static func isCompatiblePlayToolsVersion(
+        required minVer: PTSemanticVersion,
+        current curVer: PTSemanticVersion
+    ) -> Bool {
+        if minVer <= curVer {
+            return true
+        }
+        // MacOver rebranded PlayTools versions from 4.x/5.x to 1.x while preserving 4.0.0...5.1.0 plugin ABI.
+        let macOverBase = PTSemanticVersion(major: 1, minor: 0, patch: 0)
+        let playCoverEraFloor = PTSemanticVersion(major: 4, minor: 0, patch: 0)
+        let playCoverEraCeiling = PTSemanticVersion(major: 5, minor: 1, patch: 0)
+        return curVer >= macOverBase
+            && curVer < playCoverEraFloor
+            && minVer >= playCoverEraFloor
+            && minVer <= playCoverEraCeiling
+    }
+
     private func validate(
         manifest: PTPluginManifest,
         pluginRoot: URL,
@@ -440,7 +457,7 @@ public final class PTPluginContainer {
               let curVer = PTSemanticVersion(currentPlayToolsVersion) else {
             return .invalid("Invalid version string '\(manifest.minPlayToolsVersion)'")
         }
-        guard minVer <= curVer else {
+        guard Self.isCompatiblePlayToolsVersion(required: minVer, current: curVer) else {
             return .invalid(
                 "Requires PlayTools >= \(manifest.minPlayToolsVersion), current is \(currentPlayToolsVersion)"
             )
