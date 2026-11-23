@@ -5,7 +5,15 @@ on:
     branches:
       - master
       - main
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+      - ".github/ISSUE_TEMPLATE/**"
   pull_request:
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+      - ".github/ISSUE_TEMPLATE/**"
   workflow_dispatch:
 
 concurrency:
@@ -13,14 +21,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test-and-harness:
-    name: Build, Unit Tests & Runtime Harness (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - macos-26
+  ci:
+    name: Lint, Static Analysis, Tests & Runtime Harness (macos-26)
+    runs-on: macos-26
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -30,8 +34,18 @@ jobs:
           xcodebuild -version
           xcrun clang --version
 
+      - name: Run SwiftLint (strict)
+        run: |
+          command -v swiftlint >/dev/null || brew install swiftlint
+          swiftlint lint --strict
+
       - name: Run PlayCoverModules SwiftPM tests
         run: swift test --package-path Packages/PlayCoverModules
+
+      - name: Run PlayTools Clang Static Analyzer & Format Check
+        run: |
+          chmod +x ci/run_static_analysis.sh
+          ./ci/run_static_analysis.sh --check-format --derived-data "${RUNNER_TEMP}/dd-analyze"
 
       - name: Run PlayCoverTests suite
         run: |
@@ -101,15 +115,3 @@ jobs:
           python3 Tests/RuntimeHarness/run_runtime_harness.py \
             --playtools-framework "${RUNNER_TEMP}/dd-release/Build/Products/Release/MacOver.app/Contents/Frameworks/PlayTools.framework" \
             --verbose
-
-  static-analysis:
-    name: Clang Static Analyzer & Format Config Check
-    runs-on: macos-26
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Run PlayTools Clang Static Analyzer
-        run: |
-          chmod +x ci/run_static_analysis.sh
-          ./ci/run_static_analysis.sh --check-format --derived-data "${RUNNER_TEMP}/dd-analyze"
