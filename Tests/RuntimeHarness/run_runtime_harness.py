@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import plistlib
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -224,6 +226,43 @@ static const void *pt_harness_strip_ptr(const void *p) {
     return p;
 #endif
 }
+
+#if defined(__arm64__) || defined(__aarch64__)
+__attribute__((noinline))
+static int64_t pt_harness_raw_svc(int64_t sysno,
+                                  uintptr_t a0,
+                                  uintptr_t a1,
+                                  uintptr_t a2,
+                                  uintptr_t a3,
+                                  uintptr_t a4,
+                                  uintptr_t a5,
+                                  int *outErrno) {
+    register uintptr_t x0 __asm("x0") = a0;
+    register uintptr_t x1 __asm("x1") = a1;
+    register uintptr_t x2 __asm("x2") = a2;
+    register uintptr_t x3 __asm("x3") = a3;
+    register uintptr_t x4 __asm("x4") = a4;
+    register uintptr_t x5 __asm("x5") = a5;
+    register int64_t x16 __asm("x16") = sysno;
+    uint32_t carry = 0;
+    __asm__ volatile(
+        "svc #0x80\n\t"
+        "cset %w[c], cs"
+        : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x16), [c] "=r"(carry)
+        :
+        : "cc", "memory");
+    if (carry != 0) {
+        if (outErrno != NULL) {
+            *outErrno = (int)x0;
+        }
+        return -1;
+    }
+    if (outErrno != NULL) {
+        *outErrno = 0;
+    }
+    return (int64_t)x0;
+}
+#endif
 
 static NSString *pt_state_dir(void) {
     NSArray<NSURL *> *caches = [[NSFileManager defaultManager] URLsForDirectory:NSCachesDirectory
@@ -1085,6 +1124,89 @@ int main(int argc, const char *argv[]) {
             }
         }
 
+        // P2: Optional inline ARM64 svc #0x80 interception tests
+        NSString *inlineSvcMachine = @"";
+        BOOL inlineSvcStatHidSysApps = NO;
+        BOOL inlineSvcSysVerIsIOS = NO;
+        BOOL inlineSvcCodeReadRestored = NO;
+        const char *testInlineSvcEnv = getenv("HARNESS_TEST_INLINE_SVC");
+        if (testInlineSvcEnv != NULL && strcmp(testInlineSvcEnv, "1") == 0) {
+#if defined(__arm64__) || defined(__aarch64__)
+            char svcMach[64] = {0};
+            size_t svcMachLen = sizeof(svcMach);
+            int svcErr = 0;
+            if (pt_harness_raw_svc(274 /* SYS_sysctlbyname */,
+                                   (uintptr_t)"hw.machine",
+                                   10,
+                                   (uintptr_t)svcMach,
+                                   (uintptr_t)&svcMachLen,
+                                   0,
+                                   0,
+                                   &svcErr) == 0) {
+                inlineSvcMachine = [NSString stringWithUTF8String:svcMach] ?: @"";
+            }
+
+            struct stat svcSt = {0};
+            svcErr = 0;
+            int64_t stRc = pt_harness_raw_svc(338 /* SYS_stat64 */,
+                                              (uintptr_t)"/System/Applications",
+                                              (uintptr_t)&svcSt,
+                                              0, 0, 0, 0,
+                                              &svcErr);
+            inlineSvcStatHidSysApps = (stRc == -1 && svcErr == ENOENT);
+
+            svcErr = 0;
+            int64_t svFd = pt_harness_raw_svc(398 /* SYS_open_nocancel */,
+                                              (uintptr_t)"/System/Library/CoreServices/SystemVersion.plist",
+                                              O_RDONLY,
+                                              0, 0, 0, 0,
+                                              &svcErr);
+            if (svFd >= 0) {
+                NSMutableData *plistBytes = [NSMutableData data];
+                uint8_t chunk[2048];
+                ssize_t nr = 0;
+                while ((nr = read((int)svFd, chunk, sizeof(chunk))) > 0) {
+                    [plistBytes appendBytes:chunk length:(NSUInteger)nr];
+                }
+                close((int)svFd);
+                id plistObj = [NSPropertyListSerialization propertyListWithData:plistBytes
+                                                                        options:NSPropertyListImmutable
+                                                                         format:NULL
+                                                                          error:nil];
+                if ([plistObj isKindOfClass:[NSDictionary class]]) {
+                    NSString *prodName = ((NSDictionary *)plistObj)[@"ProductName"];
+                    inlineSvcSysVerIsIOS = [prodName isEqualToString:@"iPhone OS"];
+                }
+            }
+
+            uint8_t codeBuf[256] = {0};
+            vm_size_t codeCopied = 0;
+            uintptr_t fnAddr = (uintptr_t)pt_harness_strip_ptr((const void *)&pt_harness_raw_svc);
+            if (vm_read_overwrite(mach_task_self(),
+                                  (vm_address_t)fnAddr,
+                                  sizeof(codeBuf),
+                                  (vm_address_t)codeBuf,
+                                  &codeCopied) == KERN_SUCCESS &&
+                codeCopied >= 16) {
+                uint32_t expectedSvc = (0xD4000001U | (0x80U << 5));
+                uint32_t expectedBrk = (0xD4200000U | (0x5074U << 5));
+                BOOL sawSvc = NO;
+                BOOL sawBrk = NO;
+                for (vm_size_t off = 0; off + 4 <= codeCopied; off += 4) {
+                    uint32_t w = 0;
+                    memcpy(&w, codeBuf + off, sizeof(w));
+                    if (w == expectedSvc) {
+                        sawSvc = YES;
+                    }
+                    if (w == expectedBrk) {
+                        sawBrk = YES;
+                    }
+                }
+                inlineSvcCodeReadRestored = (sawSvc && !sawBrk);
+            }
+#endif
+        }
+
         NSString *stateDir = pt_state_dir();
         NSString *crumbPath = [stateDir stringByAppendingPathComponent:@".launching_in_progress"];
         NSString *triggeredPath = [stateDir stringByAppendingPathComponent:@".safe_mode_last_triggered"];
@@ -1172,6 +1294,10 @@ int main(int argc, const char *argv[]) {
             @"dlsymCOwnersClean": dlsymCOwnersClean ? @YES : @NO,
             @"ifaddrsClean": ifaddrsClean ? @YES : @NO,
             @"ifaddrsCount": @(ifaddrsCount),
+            @"inlineSvcMachine": inlineSvcMachine,
+            @"inlineSvcStatHidSysApps": inlineSvcStatHidSysApps ? @YES : @NO,
+            @"inlineSvcSysVerIsIOS": inlineSvcSysVerIsIOS ? @YES : @NO,
+            @"inlineSvcCodeReadRestored": inlineSvcCodeReadRestored ? @YES : @NO,
             @"provPath": provPath,
             @"hidPCInstallGen": (hidPCInstallGenNS && hidPCInstallGenCF) ? @YES : @NO,
             @"provURLPath": provURLPath,
@@ -2066,6 +2192,180 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
     ))
     if verbose:
         print("  Scenario 8 payload:", info8a)
+
+    # Scenario 9: Opt-in inline ARM64 svc #0x80 brk patching + EXC_BREAKPOINT dispatch + Safe Mode passthrough.
+    t8 = time.monotonic()
+    patched_app_dir = work_dir / "MockTargetPatched.app"
+    shutil.copytree(target_bin.parent, patched_app_dir, symlinks=True)
+    patched_bin = patched_app_dir / "MockTarget"
+
+    raw_bytes = bytearray(patched_bin.read_bytes())
+    orig_sha = hashlib.sha256(raw_bytes).hexdigest()
+    SVC_INSN = 0xD4001001
+    BRK_INSN = 0xD42A0E80
+    S_ZEROFILL = 0x1
+    S_GB_ZEROFILL = 0xC
+    S_ATTR_PURE_INSTRUCTIONS = 0x80000000
+    S_ATTR_SOME_INSTRUCTIONS = 0x00000400
+
+    mh_magic, _, _, _, ncmds, sizeofcmds, _, _ = struct.unpack_from("<IIIIIIII", raw_bytes, 0)
+    assert mh_magic == 0xFEEDFACF
+    cmd_off = 32
+    cmds_end = 32 + sizeofcmds
+    text_vmaddr = 0
+    inst_sections: list[tuple[int, int, int]] = []
+    dic_ranges: list[tuple[int, int]] = []
+    for _ in range(ncmds):
+        if cmd_off + 8 > cmds_end:
+            break
+        cmd, cmdsize = struct.unpack_from("<II", raw_bytes, cmd_off)
+        if cmd == 0x19 and cmdsize >= 72:  # LC_SEGMENT_64
+            segname_raw, vmaddr, _, _, _, _, _, nsects, _ = struct.unpack_from("<16sQQQQIIII", raw_bytes, cmd_off + 8)
+            segname = segname_raw.split(b"\x00", 1)[0].decode("utf-8", errors="replace")
+            if segname == "__TEXT":
+                text_vmaddr = vmaddr
+            sec_off = cmd_off + 72
+            for _ in range(nsects):
+                if sec_off + 80 > cmd_off + cmdsize:
+                    break
+                _, _, s_addr, s_size, s_off, _, _, _, s_flags, _, _, _ = struct.unpack_from(
+                    "<16s16sQQIIIIIIII", raw_bytes, sec_off
+                )
+                sec_off += 80
+                stype = s_flags & 0xFF
+                if stype not in (S_ZEROFILL, S_GB_ZEROFILL) and (
+                    s_flags & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)
+                ) != 0 and s_off > 0 and s_size >= 4:
+                    inst_sections.append((s_off, s_off + s_size, s_addr))
+        elif cmd == 0x29 and cmdsize >= 16:  # LC_DATA_IN_CODE
+            dataoff, datasize = struct.unpack_from("<II", raw_bytes, cmd_off + 8)
+            for eo in range(dataoff, dataoff + datasize, 8):
+                if eo + 8 <= len(raw_bytes):
+                    d_off, d_len, _ = struct.unpack_from("<IHH", raw_bytes, eo)
+                    if d_len > 0:
+                        dic_ranges.append((d_off, d_off + d_len))
+        cmd_off += cmdsize
+
+    svc_sites: list[dict[str, int]] = []
+    for s_start, s_end, s_vm in inst_sections:
+        for foff in range(s_start, s_end - 3, 4):
+            if any(foff + 4 > r0 and foff < r1 for r0, r1 in dic_ranges):
+                continue
+            word = struct.unpack_from("<I", raw_bytes, foff)[0]
+            if word == SVC_INSN:
+                struct.pack_into("<I", raw_bytes, foff, BRK_INSN)
+                vm_addr = s_vm + (foff - s_start)
+                svc_sites.append({
+                    "sliceOffset": 0,
+                    "fileOffset": foff,
+                    "vmAddress": vm_addr,
+                    "vmOffset": vm_addr - text_vmaddr,
+                })
+
+    assert len(svc_sites) > 0, "Expected at least one inline svc #0x80 site in MockTarget"
+    patched_sha = hashlib.sha256(raw_bytes).hexdigest()
+    patched_bin.write_bytes(bytes(raw_bytes))
+    os.chmod(patched_bin, 0o755)
+    tool_env = os.environ.copy()
+    if "DEVELOPER_DIR" not in tool_env and Path("/Applications/Xcode.app/Contents/Developer").exists():
+        tool_env["DEVELOPER_DIR"] = "/Applications/Xcode.app/Contents/Developer"
+    run_cmd(["codesign", "--force", "--deep", "--sign", "-", str(patched_app_dir)], env=tool_env)
+
+    isolated_home_9 = work_dir / "IsolatedHome9"
+    isolated_home_9.mkdir(parents=True, exist_ok=True)
+    plist9 = write_test_settings_plist(isolated_home_9, "app.makedie.harness.mockapp")
+    manifest_dir_9 = isolated_home_9 / "Library/Containers/app.makedie.MacOver/SVCPatches"
+    manifest_dir_9.mkdir(parents=True, exist_ok=True)
+    manifest_path_9 = manifest_dir_9 / "app.makedie.harness.mockapp.json"
+    manifest_path_9.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "bundleIdentifier": "app.makedie.harness.mockapp",
+                "originalInstruction": SVC_INSN,
+                "patchInstruction": BRK_INSN,
+                "files": [
+                    {
+                        "relativePath": "MockTarget",
+                        "originalSHA256": orig_sha,
+                        "patchedSHA256": patched_sha,
+                        "sites": svc_sites,
+                    }
+                ],
+            },
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
+    )
+
+    def env9(marker_path: Path, **extra: str) -> dict[str, str]:
+        env = base_env(marker_path, **extra)
+        env["HOME"] = str(isolated_home_9)
+        env["CFFIXED_USER_HOME"] = str(isolated_home_9)
+        env["PLAYTOOLS_SETTINGS_PLIST"] = str(plist9)
+        env["PLAYTOOLS_TEST_SVC_MANIFEST"] = str(manifest_path_9)
+        return env
+
+    marker9a = work_dir / "marker_9a.txt"
+    svc_probe_b64 = base64.b64encode(str(manifest_path_9).encode("utf-8")).decode("ascii")
+    proc9a = run_cmd(
+        [str(patched_bin)],
+        env=env9(
+            marker9a,
+            HARNESS_TEST_INLINE_SVC="1",
+            HARNESS_DIRECT_PROBE_B64=svc_probe_b64,
+            HARNESS_GRACEFUL_EXIT="1",
+        ),
+        check=False,
+    )
+    marker9b = work_dir / "marker_9b.txt"
+    proc9b = run_cmd(
+        [str(patched_bin)],
+        env=env9(
+            marker9b,
+            HARNESS_TEST_INLINE_SVC="1",
+            PLAYTOOLS_SAFE_MODE="1",
+            HARNESS_GRACEFUL_EXIT="1",
+        ),
+        check=False,
+    )
+    if proc9a.returncode != 0 or proc9b.returncode != 0:
+        results.append(ScenarioResult(
+            name="9. Opt-in inline svc #0x80 interception & Safe Mode passthrough",
+            passed=False,
+            duration_sec=time.monotonic() - t8,
+            details=(
+                f"Sub-run rc=({proc9a.returncode}, {proc9b.returncode})\n"
+                f"9a stdout={proc9a.stdout}\n9a stderr={proc9a.stderr}\n"
+                f"9b stdout={proc9b.stdout}\n9b stderr={proc9b.stderr}"
+            ),
+        ))
+        return results
+
+    info9a = parse_harness_json(proc9a.stdout)
+    info9b = parse_harness_json(proc9b.stdout)
+    checks9 = [
+        info9a["safeModeActive"] is False,
+        info9a["inlineSvcMachine"] == info9a["sysctlMachine"] and len(info9a["inlineSvcMachine"]) > 0,
+        info9a["inlineSvcStatHidSysApps"] is True,
+        info9a["inlineSvcSysVerIsIOS"] is True,
+        info9a["inlineSvcCodeReadRestored"] is True,
+        info9a["directBackupStatBlocked"] is True,
+        info9a["directBackupOpenBlocked"] is True,
+        info9a["directBackupFMBlocked"] is True,
+        info9b["safeModeActive"] is True,
+        info9b["inlineSvcStatHidSysApps"] is False,
+        len(info9b["inlineSvcMachine"]) > 0 and info9b["inlineSvcMachine"] != info9a["sysctlMachine"],
+    ]
+    results.append(ScenarioResult(
+        name="9. Opt-in inline svc #0x80 interception & Safe Mode passthrough",
+        passed=all(checks9),
+        duration_sec=time.monotonic() - t8,
+        details=json.dumps({"siteCount": len(svc_sites), "normal": info9a, "safeMode": info9b}, sort_keys=True),
+    ))
+    if verbose:
+        print("  Scenario 9 normal:", info9a)
+        print("  Scenario 9 safeMode:", info9b)
 
     return results
 

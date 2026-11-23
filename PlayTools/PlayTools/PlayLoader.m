@@ -22,6 +22,7 @@ __attribute__((visibility("hidden"))) void pt_ensure_playloader_early_init(void)
             pt_disable_reported_ios_override_for_safe_mode();
             pt_disable_app_backups_for_safe_mode();
         }
+        pt_svc_interceptor_init_early();
 
         BOOL prev_tls = s_tls_initializing_device_info;
         s_tls_initializing_device_info = YES;

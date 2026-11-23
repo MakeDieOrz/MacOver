@@ -53,6 +53,7 @@ struct AppSettingsData: Codable, Equatable {
     var resizableAspectRatioHeight = 0
     var blockSleepSpamming = false
     var ignoreUnityKeyboardInitializationError = false
+    var interceptInlineSyscalls = false
     var enableNetworkRules = false
     var networkBlockMock200 = true
     var blockedURLPatterns: [String] = []
@@ -113,6 +114,9 @@ struct AppSettingsData: Codable, Equatable {
         blockSleepSpamming = (try? container.decodeIfPresent(Bool.self, forKey: .blockSleepSpamming)) ?? false
         ignoreUnityKeyboardInitializationError = (try? container.decodeIfPresent(
             Bool.self, forKey: .ignoreUnityKeyboardInitializationError
+        )) ?? false
+        interceptInlineSyscalls = (try? container.decodeIfPresent(
+            Bool.self, forKey: .interceptInlineSyscalls
         )) ?? false
         enableNetworkRules = (try? container.decodeIfPresent(Bool.self, forKey: .enableNetworkRules)) ?? false
         networkBlockMock200 = (try? container.decodeIfPresent(Bool.self, forKey: .networkBlockMock200)) ?? true
@@ -226,6 +230,9 @@ struct AppSettingsData: Codable, Equatable {
         if blockSleepSpamming != snapshot.blockSleepSpamming { changed.append(.blockSleepSpamming) }
         if ignoreUnityKeyboardInitializationError != snapshot.ignoreUnityKeyboardInitializationError {
             changed.append(.ignoreUnityKeyboardInitializationError)
+        }
+        if interceptInlineSyscalls != snapshot.interceptInlineSyscalls {
+            changed.append(.interceptInlineSyscalls)
         }
         return changed
     }

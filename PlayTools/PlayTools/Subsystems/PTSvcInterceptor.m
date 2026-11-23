@@ -1,0 +1,1262 @@
+//
+//  PTSvcInterceptor.m
+//  PlayTools
+//
+
+#import "PTInternal.h"
+
+#include <dlfcn.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <mach-o/dyld.h>
+#include <mach-o/loader.h>
+#include <mach/arm/thread_status.h>
+#include <mach/mach.h>
+#include <os/lock.h>
+#include <pthread.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#if __has_include(<ptrauth.h>)
+#include <ptrauth.h>
+#endif
+
+extern const char *dyld_image_path_containing_address(const void *addr);
+extern kern_return_t pt_orig_task_set_exception_ports(task_t task,
+                                                     exception_mask_t exception_mask,
+                                                     mach_port_t new_port,
+                                                     exception_behavior_t behavior,
+                                                     thread_state_flavor_t new_flavor)
+    __asm("_task_set_exception_ports");
+extern kern_return_t pt_orig_task_swap_exception_ports(task_t task,
+                                                      exception_mask_t exception_mask,
+                                                      mach_port_t new_port,
+                                                      exception_behavior_t behavior,
+                                                      thread_state_flavor_t new_flavor,
+                                                      exception_mask_array_t masks,
+                                                      mach_msg_type_number_t *masksCnt,
+                                                      exception_handler_array_t old_handlers,
+                                                      exception_behavior_array_t old_behaviors,
+                                                      exception_flavor_array_t old_flavors)
+    __asm("_task_swap_exception_ports");
+extern kern_return_t pt_orig_thread_set_exception_ports(thread_act_t thread,
+                                                       exception_mask_t exception_mask,
+                                                       mach_port_t new_port,
+                                                       exception_behavior_t behavior,
+                                                       thread_state_flavor_t new_flavor)
+    __asm("_thread_set_exception_ports");
+
+#define PT_ARM64_SVC80_INSN 0xD4001001U
+#define PT_ARM64_BRK_SVC_INSN 0xD42A0E80U
+#define PT_ARM64_CPSR_C (1U << 29)
+#define PT_SVC_MANIFEST_MAX_BYTES (4U * 1024U * 1024U)
+#define PT_SVC_MAX_MANIFEST_FILES 1024U
+#define PT_SVC_MAX_MANIFEST_SITES 262144U
+#define PT_SVC_JSON_MAX_DEPTH 32U
+
+#if __DARWIN_UNIX03
+#define PT_TS_X(s) ((s).__x)
+#define PT_TS_CPSR(s) ((s).__cpsr)
+#else
+#define PT_TS_X(s) ((s).x)
+#define PT_TS_CPSR(s) ((s).cpsr)
+#endif
+
+typedef struct {
+    char *relative_path;
+    uint64_t *vm_offsets;
+    size_t vm_offset_count;
+    size_t vm_offset_cap;
+} pt_svc_manifest_file_t;
+
+typedef struct {
+    pt_svc_manifest_file_t *files;
+    size_t file_count;
+    size_t file_cap;
+    size_t total_sites;
+    int64_t schema_version;
+} pt_svc_manifest_t;
+
+static _Atomic bool s_svc_interceptor_active = false;
+static _Atomic bool s_svc_has_registered_sites = false;
+static _Atomic bool s_svc_safe_mode_passthrough = false;
+
+static pt_svc_manifest_t s_manifest = {0};
+static os_unfair_lock s_svc_sites_lock = OS_UNFAIR_LOCK_INIT;
+static uintptr_t *s_registered_pcs = NULL;
+static size_t s_registered_pc_count = 0;
+static size_t s_registered_pc_cap = 0;
+
+static mach_port_t s_svc_exc_port = MACH_PORT_NULL;
+static pthread_t s_svc_exc_thread;
+
+static BOOL pt_svc_env_flag_true(const char *val) {
+    if (val == NULL) {
+        return NO;
+    }
+    return (strcmp(val, "1") == 0 || strcasecmp(val, "true") == 0 || strcasecmp(val, "yes") == 0);
+}
+
+static void pt_svc_free_manifest(pt_svc_manifest_t *manifest) {
+    if (manifest == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < manifest->file_count; i++) {
+        free(manifest->files[i].relative_path);
+        free(manifest->files[i].vm_offsets);
+    }
+    free(manifest->files);
+    memset(manifest, 0, sizeof(*manifest));
+}
+
+static BOOL pt_svc_manifest_file_add_offset(pt_svc_manifest_file_t *file,
+                                            pt_svc_manifest_t *manifest,
+                                            uint64_t vm_offset) {
+    if (manifest->total_sites >= PT_SVC_MAX_MANIFEST_SITES) {
+        return NO;
+    }
+    if (file->vm_offset_count == file->vm_offset_cap) {
+        size_t next_cap = (file->vm_offset_cap == 0) ? 16U : (file->vm_offset_cap * 2U);
+        if (next_cap > PT_SVC_MAX_MANIFEST_SITES) {
+            next_cap = PT_SVC_MAX_MANIFEST_SITES;
+        }
+        uint64_t *next = (uint64_t *)realloc(file->vm_offsets, next_cap * sizeof(uint64_t));
+        if (next == NULL) {
+            return NO;
+        }
+        file->vm_offsets = next;
+        file->vm_offset_cap = next_cap;
+    }
+    file->vm_offsets[file->vm_offset_count++] = vm_offset;
+    manifest->total_sites++;
+    return YES;
+}
+
+static BOOL pt_svc_is_safe_relative_path(const char *rel) {
+    if (rel == NULL || rel[0] == '\0' || rel[0] == '/') {
+        return NO;
+    }
+    if (strcmp(rel, ".") == 0 || strcmp(rel, "..") == 0 ||
+        strncmp(rel, "../", 3) == 0 || strncmp(rel, "./", 2) == 0 ||
+        strstr(rel, "/../") != NULL || strstr(rel, "/./") != NULL) {
+        return NO;
+    }
+    size_t len = strlen(rel);
+    if ((len >= 3 && strcmp(rel + len - 3, "/..") == 0) ||
+        (len >= 2 && strcmp(rel + len - 2, "/.") == 0)) {
+        return NO;
+    }
+    return YES;
+}
+
+static BOOL pt_svc_manifest_add_file(pt_svc_manifest_t *manifest,
+                                     const char *rel_path,
+                                     uint64_t *offsets,
+                                     size_t count) {
+    if (!pt_svc_is_safe_relative_path(rel_path) || count == 0 ||
+        manifest->file_count >= PT_SVC_MAX_MANIFEST_FILES) {
+        return NO;
+    }
+    if (manifest->file_count == manifest->file_cap) {
+        size_t next_cap = (manifest->file_cap == 0) ? 8U : (manifest->file_cap * 2U);
+        pt_svc_manifest_file_t *next = (pt_svc_manifest_file_t *)realloc(
+            manifest->files, next_cap * sizeof(pt_svc_manifest_file_t));
+        if (next == NULL) {
+            return NO;
+        }
+        manifest->files = next;
+        manifest->file_cap = next_cap;
+    }
+    char *copy = strdup(rel_path);
+    if (copy == NULL) {
+        return NO;
+    }
+    uint64_t *offs_copy = (uint64_t *)malloc(count * sizeof(uint64_t));
+    if (offs_copy == NULL) {
+        free(copy);
+        return NO;
+    }
+    memcpy(offs_copy, offsets, count * sizeof(uint64_t));
+    pt_svc_manifest_file_t *dst = &manifest->files[manifest->file_count++];
+    dst->relative_path = copy;
+    dst->vm_offsets = offs_copy;
+    dst->vm_offset_count = count;
+    dst->vm_offset_cap = count;
+    return YES;
+}
+
+// MARK: - Minimal Bounded JSON Parser for SVCPatchManifest
+
+typedef struct {
+    const char *buf;
+    size_t len;
+    size_t pos;
+} pt_json_cur_t;
+
+static void pt_json_skip_ws(pt_json_cur_t *c) {
+    while (c->pos < c->len) {
+        char ch = c->buf[c->pos];
+        if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') {
+            c->pos++;
+        } else {
+            break;
+        }
+    }
+}
+
+static BOOL pt_json_consume(pt_json_cur_t *c, char expected) {
+    pt_json_skip_ws(c);
+    if (c->pos < c->len && c->buf[c->pos] == expected) {
+        c->pos++;
+        return YES;
+    }
+    return NO;
+}
+
+static BOOL pt_json_parse_string(pt_json_cur_t *c, char *out, size_t out_cap) {
+    pt_json_skip_ws(c);
+    if (c->pos >= c->len || c->buf[c->pos] != '"') {
+        return NO;
+    }
+    c->pos++;
+    size_t w = 0;
+    BOOL overflowed = NO;
+    while (c->pos < c->len) {
+        char ch = c->buf[c->pos++];
+        if (ch == '"') {
+            if (out != NULL && out_cap > 0) {
+                out[(w < out_cap) ? w : (out_cap - 1U)] = '\0';
+            }
+            return !overflowed;
+        }
+        if (ch == '\\') {
+            if (c->pos >= c->len) {
+                return NO;
+            }
+            char esc = c->buf[c->pos++];
+            switch (esc) {
+                case '"':
+                case '\\':
+                case '/':
+                    ch = esc;
+                    break;
+                case 'b':
+                    ch = '\b';
+                    break;
+                case 'f':
+                    ch = '\f';
+                    break;
+                case 'n':
+                    ch = '\n';
+                    break;
+                case 'r':
+                    ch = '\r';
+                    break;
+                case 't':
+                    ch = '\t';
+                    break;
+                case 'u': {
+                    if (c->pos + 4U > c->len) {
+                        return NO;
+                    }
+                    c->pos += 4U;
+                    ch = '?';
+                    break;
+                }
+                default:
+                    return NO;
+            }
+        }
+        if (out != NULL && out_cap > 0) {
+            if (w + 1U < out_cap) {
+                out[w++] = ch;
+            } else {
+                overflowed = YES;
+            }
+        }
+    }
+    return NO;
+}
+
+static BOOL pt_json_parse_uint64(pt_json_cur_t *c, uint64_t *out_val) {
+    pt_json_skip_ws(c);
+    if (c->pos >= c->len) {
+        return NO;
+    }
+    char first = c->buf[c->pos];
+    if (first < '0' || first > '9') {
+        return NO;
+    }
+    uint64_t val = 0;
+    while (c->pos < c->len) {
+        char ch = c->buf[c->pos];
+        if (ch < '0' || ch > '9') {
+            break;
+        }
+        uint64_t digit = (uint64_t)(ch - '0');
+        if (val > (UINT64_MAX - digit) / 10ULL) {
+            return NO;
+        }
+        val = val * 10ULL + digit;
+        c->pos++;
+    }
+    if (out_val != NULL) {
+        *out_val = val;
+    }
+    return YES;
+}
+
+static BOOL pt_json_skip_value(pt_json_cur_t *c, unsigned depth) {
+    if (depth > PT_SVC_JSON_MAX_DEPTH) {
+        return NO;
+    }
+    pt_json_skip_ws(c);
+    if (c->pos >= c->len) {
+        return NO;
+    }
+    char ch = c->buf[c->pos];
+    if (ch == '"') {
+        return pt_json_parse_string(c, NULL, 0);
+    }
+    if (ch == '{') {
+        c->pos++;
+        pt_json_skip_ws(c);
+        if (pt_json_consume(c, '}')) {
+            return YES;
+        }
+        while (c->pos < c->len) {
+            if (!pt_json_parse_string(c, NULL, 0) || !pt_json_consume(c, ':') ||
+                !pt_json_skip_value(c, depth + 1U)) {
+                return NO;
+            }
+            if (pt_json_consume(c, ',')) {
+                continue;
+            }
+            return pt_json_consume(c, '}');
+        }
+        return NO;
+    }
+    if (ch == '[') {
+        c->pos++;
+        pt_json_skip_ws(c);
+        if (pt_json_consume(c, ']')) {
+            return YES;
+        }
+        while (c->pos < c->len) {
+            if (!pt_json_skip_value(c, depth + 1U)) {
+                return NO;
+            }
+            if (pt_json_consume(c, ',')) {
+                continue;
+            }
+            return pt_json_consume(c, ']');
+        }
+        return NO;
+    }
+    if (ch == 't' && c->pos + 4U <= c->len && strncmp(c->buf + c->pos, "true", 4) == 0) {
+        c->pos += 4U;
+        return YES;
+    }
+    if (ch == 'f' && c->pos + 5U <= c->len && strncmp(c->buf + c->pos, "false", 5) == 0) {
+        c->pos += 5U;
+        return YES;
+    }
+    if (ch == 'n' && c->pos + 4U <= c->len && strncmp(c->buf + c->pos, "null", 4) == 0) {
+        c->pos += 4U;
+        return YES;
+    }
+    if (ch == '-' || (ch >= '0' && ch <= '9')) {
+        if (ch == '-') {
+            c->pos++;
+        }
+        if (c->pos >= c->len || c->buf[c->pos] < '0' || c->buf[c->pos] > '9') {
+            return NO;
+        }
+        while (c->pos < c->len && c->buf[c->pos] >= '0' && c->buf[c->pos] <= '9') {
+            c->pos++;
+        }
+        if (c->pos < c->len && c->buf[c->pos] == '.') {
+            c->pos++;
+            while (c->pos < c->len && c->buf[c->pos] >= '0' && c->buf[c->pos] <= '9') {
+                c->pos++;
+            }
+        }
+        if (c->pos < c->len && (c->buf[c->pos] == 'e' || c->buf[c->pos] == 'E')) {
+            c->pos++;
+            if (c->pos < c->len && (c->buf[c->pos] == '+' || c->buf[c->pos] == '-')) {
+                c->pos++;
+            }
+            while (c->pos < c->len && c->buf[c->pos] >= '0' && c->buf[c->pos] <= '9') {
+                c->pos++;
+            }
+        }
+        return YES;
+    }
+    return NO;
+}
+
+static BOOL pt_json_parse_site_object(pt_json_cur_t *c, BOOL *out_has_vmoff, uint64_t *out_vmoff) {
+    *out_has_vmoff = NO;
+    *out_vmoff = 0;
+    if (!pt_json_consume(c, '{')) {
+        return NO;
+    }
+    if (pt_json_consume(c, '}')) {
+        return YES;
+    }
+    char key[64];
+    while (c->pos < c->len) {
+        if (!pt_json_parse_string(c, key, sizeof(key)) || !pt_json_consume(c, ':')) {
+            return NO;
+        }
+        if (strcmp(key, "vmOffset") == 0) {
+            if (!pt_json_parse_uint64(c, out_vmoff)) {
+                return NO;
+            }
+            *out_has_vmoff = YES;
+        } else {
+            if (!pt_json_skip_value(c, 1U)) {
+                return NO;
+            }
+        }
+        if (pt_json_consume(c, ',')) {
+            continue;
+        }
+        return pt_json_consume(c, '}');
+    }
+    return NO;
+}
+
+static BOOL pt_json_parse_file_object(pt_json_cur_t *c, pt_svc_manifest_t *manifest) {
+    if (!pt_json_consume(c, '{')) {
+        return NO;
+    }
+    char rel_path[PATH_MAX];
+    rel_path[0] = '\0';
+
+    pt_svc_manifest_file_t temp_file = {0};
+    if (pt_json_consume(c, '}')) {
+        return YES;
+    }
+    char key[64];
+    while (c->pos < c->len) {
+        if (!pt_json_parse_string(c, key, sizeof(key)) || !pt_json_consume(c, ':')) {
+            free(temp_file.vm_offsets);
+            return NO;
+        }
+        if (strcmp(key, "relativePath") == 0) {
+            if (!pt_json_parse_string(c, rel_path, sizeof(rel_path))) {
+                free(temp_file.vm_offsets);
+                return NO;
+            }
+        } else if (strcmp(key, "sites") == 0) {
+            if (!pt_json_consume(c, '[')) {
+                free(temp_file.vm_offsets);
+                return NO;
+            }
+            if (!pt_json_consume(c, ']')) {
+                while (c->pos < c->len) {
+                    BOOL has_vmoff = NO;
+                    uint64_t vmoff = 0;
+                    if (!pt_json_parse_site_object(c, &has_vmoff, &vmoff)) {
+                        free(temp_file.vm_offsets);
+                        return NO;
+                    }
+                    if (has_vmoff && !pt_svc_manifest_file_add_offset(&temp_file, manifest, vmoff)) {
+                        free(temp_file.vm_offsets);
+                        return NO;
+                    }
+                    if (pt_json_consume(c, ',')) {
+                        continue;
+                    }
+                    if (!pt_json_consume(c, ']')) {
+                        free(temp_file.vm_offsets);
+                        return NO;
+                    }
+                    break;
+                }
+            }
+        } else {
+            if (!pt_json_skip_value(c, 1U)) {
+                free(temp_file.vm_offsets);
+                return NO;
+            }
+        }
+        if (pt_json_consume(c, ',')) {
+            continue;
+        }
+        if (!pt_json_consume(c, '}')) {
+            free(temp_file.vm_offsets);
+            return NO;
+        }
+        break;
+    }
+
+    if (rel_path[0] != '\0' && temp_file.vm_offset_count > 0) {
+        (void)pt_svc_manifest_add_file(manifest, rel_path, temp_file.vm_offsets, temp_file.vm_offset_count);
+    }
+    free(temp_file.vm_offsets);
+    return YES;
+}
+
+static BOOL pt_svc_parse_manifest_json(const char *json, size_t len, pt_svc_manifest_t *out_manifest) {
+    memset(out_manifest, 0, sizeof(*out_manifest));
+    pt_json_cur_t cur = {.buf = json, .len = len, .pos = 0};
+    if (!pt_json_consume(&cur, '{')) {
+        return NO;
+    }
+    if (pt_json_consume(&cur, '}')) {
+        return NO;
+    }
+    char key[64];
+    while (cur.pos < cur.len) {
+        if (!pt_json_parse_string(&cur, key, sizeof(key)) || !pt_json_consume(&cur, ':')) {
+            pt_svc_free_manifest(out_manifest);
+            return NO;
+        }
+        if (strcmp(key, "schemaVersion") == 0) {
+            uint64_t ver = 0;
+            if (!pt_json_parse_uint64(&cur, &ver)) {
+                pt_svc_free_manifest(out_manifest);
+                return NO;
+            }
+            out_manifest->schema_version = (int64_t)ver;
+        } else if (strcmp(key, "files") == 0) {
+            if (!pt_json_consume(&cur, '[')) {
+                pt_svc_free_manifest(out_manifest);
+                return NO;
+            }
+            if (!pt_json_consume(&cur, ']')) {
+                while (cur.pos < cur.len) {
+                    if (!pt_json_parse_file_object(&cur, out_manifest)) {
+                        pt_svc_free_manifest(out_manifest);
+                        return NO;
+                    }
+                    if (pt_json_consume(&cur, ',')) {
+                        continue;
+                    }
+                    if (!pt_json_consume(&cur, ']')) {
+                        pt_svc_free_manifest(out_manifest);
+                        return NO;
+                    }
+                    break;
+                }
+            }
+        } else {
+            if (!pt_json_skip_value(&cur, 1U)) {
+                pt_svc_free_manifest(out_manifest);
+                return NO;
+            }
+        }
+        if (pt_json_consume(&cur, ',')) {
+            continue;
+        }
+        if (!pt_json_consume(&cur, '}')) {
+            pt_svc_free_manifest(out_manifest);
+            return NO;
+        }
+        break;
+    }
+
+    if (out_manifest->schema_version != 1 || out_manifest->file_count == 0 || out_manifest->total_sites == 0) {
+        pt_svc_free_manifest(out_manifest);
+        return NO;
+    }
+    return YES;
+}
+
+static BOOL pt_svc_resolve_manifest_path(char *out_path, size_t out_size) {
+    if (out_path == NULL || out_size == 0) {
+        return NO;
+    }
+    out_path[0] = '\0';
+
+    const char *override_manifest = pt_raw_getenv("PLAYTOOLS_TEST_SVC_MANIFEST");
+    if (override_manifest != NULL && override_manifest[0] == '/') {
+        return (strlcpy(out_path, override_manifest, out_size) < out_size);
+    }
+
+    const char *user_root = pt_get_host_user_root_cstr();
+    if (user_root == NULL || user_root[0] != '/') {
+        return NO;
+    }
+
+    char bid[256];
+    bid[0] = '\0';
+    if (!pt_read_main_bundle_id_early(bid, sizeof(bid)) || bid[0] == '\0') {
+        const char *home = pt_raw_getenv("CFFIXED_USER_HOME");
+        const char *marker = (home != NULL) ? strstr(home, "/Library/Containers/") : NULL;
+        if (marker != NULL) {
+            const char *cid_start = marker + 20;
+            const char *cid_end = strchr(cid_start, '/');
+            size_t clen = (cid_end != NULL) ? (size_t)(cid_end - cid_start) : strlen(cid_start);
+            if (clen > 0 && clen < sizeof(bid)) {
+                memcpy(bid, cid_start, clen);
+                bid[clen] = '\0';
+            }
+        }
+    }
+    if (bid[0] == '\0') {
+        return NO;
+    }
+
+    int n = snprintf(out_path,
+                     out_size,
+                     "%s/Library/Containers/app.makedie.MacOver/SVCPatches/%s.json",
+                     user_root,
+                     bid);
+    return (n > 0 && (size_t)n < out_size);
+}
+
+static BOOL pt_svc_load_manifest_from_disk(pt_svc_manifest_t *out_manifest) {
+    char path[PATH_MAX];
+    if (!pt_svc_resolve_manifest_path(path, sizeof(path))) {
+        return NO;
+    }
+
+    pt_enter_internal_scope();
+    int fd = pt_orig_open_nocancel(path, O_RDONLY | O_CLOEXEC, 0);
+    if (fd < 0) {
+        pt_leave_internal_scope();
+        return NO;
+    }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
+        (uint64_t)st.st_size > PT_SVC_MANIFEST_MAX_BYTES) {
+        close(fd);
+        pt_leave_internal_scope();
+        return NO;
+    }
+
+    size_t sz = (size_t)st.st_size;
+    char *buf = (char *)malloc(sz + 1U);
+    if (buf == NULL) {
+        close(fd);
+        pt_leave_internal_scope();
+        return NO;
+    }
+    size_t total = 0;
+    while (total < sz) {
+        ssize_t r = read(fd, buf + total, sz - total);
+        if (r < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            free(buf);
+            close(fd);
+            pt_leave_internal_scope();
+            return NO;
+        }
+        if (r == 0) {
+            break;
+        }
+        total += (size_t)r;
+    }
+    close(fd);
+    pt_leave_internal_scope();
+
+    buf[total] = '\0';
+    BOOL ok = pt_svc_parse_manifest_json(buf, total, out_manifest);
+    free(buf);
+    return ok;
+}
+
+// MARK: - Registered Patched PC Set & Dyld Binding
+
+static uint64_t pt_svc_get_text_segment_vmsize(const struct mach_header *mh) {
+    if (mh == NULL || mh->magic != MH_MAGIC_64) {
+        return 0;
+    }
+    const struct mach_header_64 *mh64 = (const struct mach_header_64 *)mh;
+    if (mh64->sizeofcmds == 0 || mh64->sizeofcmds > (1U << 20)) {
+        return 0;
+    }
+    const uint8_t *base = (const uint8_t *)mh64;
+    size_t total = sizeof(struct mach_header_64) + (size_t)mh64->sizeofcmds;
+    size_t off = sizeof(struct mach_header_64);
+    for (uint32_t i = 0; i < mh64->ncmds && off + sizeof(struct load_command) <= total; i++) {
+        const struct load_command *lc = (const struct load_command *)(base + off);
+        if (lc->cmdsize < sizeof(struct load_command) || off + lc->cmdsize > total) {
+            break;
+        }
+        if (lc->cmd == LC_SEGMENT_64 && lc->cmdsize >= sizeof(struct segment_command_64)) {
+            const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+            if (strncmp(seg->segname, "__TEXT", 16) == 0) {
+                return seg->vmsize;
+            }
+        }
+        off += lc->cmdsize;
+    }
+    return 0;
+}
+
+static void pt_svc_insert_pc_locked(uintptr_t pc) {
+    size_t lo = 0;
+    size_t hi = s_registered_pc_count;
+    while (lo < hi) {
+        size_t mid = lo + ((hi - lo) / 2U);
+        if (s_registered_pcs[mid] < pc) {
+            lo = mid + 1U;
+        } else {
+            hi = mid;
+        }
+    }
+    if (lo < s_registered_pc_count && s_registered_pcs[lo] == pc) {
+        return;
+    }
+    if (s_registered_pc_count == s_registered_pc_cap) {
+        size_t next_cap = (s_registered_pc_cap == 0) ? 64U : (s_registered_pc_cap * 2U);
+        if (next_cap > PT_SVC_MAX_MANIFEST_SITES) {
+            next_cap = PT_SVC_MAX_MANIFEST_SITES;
+        }
+        if (s_registered_pc_count >= next_cap) {
+            return;
+        }
+        uintptr_t *next = (uintptr_t *)realloc(s_registered_pcs, next_cap * sizeof(uintptr_t));
+        if (next == NULL) {
+            return;
+        }
+        s_registered_pcs = next;
+        s_registered_pc_cap = next_cap;
+    }
+    if (lo < s_registered_pc_count) {
+        memmove(&s_registered_pcs[lo + 1U],
+                &s_registered_pcs[lo],
+                (s_registered_pc_count - lo) * sizeof(uintptr_t));
+    }
+    s_registered_pcs[lo] = pc;
+    s_registered_pc_count++;
+}
+
+static const pt_svc_manifest_file_t *pt_svc_match_manifest_file_for_image_path(const char *raw_path) {
+    if (raw_path == NULL || raw_path[0] == '\0') {
+        return NULL;
+    }
+    const char *p = raw_path;
+    if (strncmp(p, "/System/Volumes/Data/", 21) == 0) {
+        p += 20;
+    }
+    const char *bundle_rel = NULL;
+    if (s_real_app_bundle_dir[0] != '\0') {
+        size_t b_len = strlen(s_real_app_bundle_dir);
+        const char *sub = pt_match_prefix_modulo_private(p, s_real_app_bundle_dir, b_len);
+        if (sub != NULL && sub[0] == '/') {
+            bundle_rel = sub + 1;
+        }
+    }
+    if (bundle_rel != NULL) {
+        for (size_t i = 0; i < s_manifest.file_count; i++) {
+            if (strcmp(bundle_rel, s_manifest.files[i].relative_path) == 0) {
+                return &s_manifest.files[i];
+            }
+        }
+        return NULL;
+    }
+    size_t plen = strlen(p);
+    for (size_t i = 0; i < s_manifest.file_count; i++) {
+        const char *rp = s_manifest.files[i].relative_path;
+        size_t rlen = strlen(rp);
+        if (plen > rlen && p[plen - rlen - 1U] == '/' &&
+            strcmp(p + (plen - rlen), rp) == 0) {
+            return &s_manifest.files[i];
+        }
+    }
+    return NULL;
+}
+
+static void pt_svc_on_dyld_image_added(const struct mach_header *mh, intptr_t vmaddr_slide) {
+    (void)vmaddr_slide;
+    if (mh == NULL || mh->magic != MH_MAGIC_64) {
+        return;
+    }
+    const char *img_name = dyld_image_path_containing_address(mh);
+    const pt_svc_manifest_file_t *mfile = pt_svc_match_manifest_file_for_image_path(img_name);
+    if (mfile == NULL) {
+        return;
+    }
+    uint64_t text_vmsize = pt_svc_get_text_segment_vmsize(mh);
+    if (text_vmsize < sizeof(struct mach_header_64)) {
+        return;
+    }
+
+    uintptr_t mh_base = (uintptr_t)mh;
+    BOOL added = NO;
+    os_unfair_lock_lock(&s_svc_sites_lock);
+    for (size_t i = 0; i < mfile->vm_offset_count; i++) {
+        uint64_t off = mfile->vm_offsets[i];
+        if (off < sizeof(struct mach_header_64) || off + 4ULL > text_vmsize) {
+            continue;
+        }
+        uintptr_t pc = mh_base + (uintptr_t)off;
+        uint32_t word = 0;
+        memcpy(&word, (const void *)pc, sizeof(word));
+        if (word == PT_ARM64_BRK_SVC_INSN) {
+            pt_svc_insert_pc_locked(pc);
+            added = YES;
+        }
+    }
+    if (added) {
+        atomic_store_explicit(&s_svc_has_registered_sites, true, memory_order_release);
+    }
+    os_unfair_lock_unlock(&s_svc_sites_lock);
+}
+
+static BOOL pt_svc_is_registered_pc(uintptr_t pc) {
+    if (!atomic_load_explicit(&s_svc_has_registered_sites, memory_order_acquire)) {
+        return NO;
+    }
+    BOOL found = NO;
+    os_unfair_lock_lock(&s_svc_sites_lock);
+    size_t lo = 0;
+    size_t hi = s_registered_pc_count;
+    while (lo < hi) {
+        size_t mid = lo + ((hi - lo) / 2U);
+        uintptr_t cur = s_registered_pcs[mid];
+        if (cur == pc) {
+            found = YES;
+            break;
+        }
+        if (cur < pc) {
+            lo = mid + 1U;
+        } else {
+            hi = mid;
+        }
+    }
+    os_unfair_lock_unlock(&s_svc_sites_lock);
+    return found;
+}
+
+__attribute__((visibility("hidden")))
+void pt_svc_restore_patched_bytes_in_buffer(uintptr_t read_start, uint8_t *dst, size_t copied) {
+    if (!atomic_load_explicit(&s_svc_has_registered_sites, memory_order_acquire) ||
+        dst == NULL || copied == 0 || read_start > UINTPTR_MAX - copied) {
+        return;
+    }
+    static const uint8_t kOrigSvcBytes[4] = {0x01U, 0x10U, 0x00U, 0xD4U};
+    uintptr_t read_end = read_start + copied;
+
+    os_unfair_lock_lock(&s_svc_sites_lock);
+    size_t lo = 0;
+    size_t hi = s_registered_pc_count;
+    uintptr_t first_target = (read_start >= 3U) ? (read_start - 3U) : 0U;
+    while (lo < hi) {
+        size_t mid = lo + ((hi - lo) / 2U);
+        if (s_registered_pcs[mid] < first_target) {
+            lo = mid + 1U;
+        } else {
+            hi = mid;
+        }
+    }
+    for (size_t i = lo; i < s_registered_pc_count; i++) {
+        uintptr_t site_start = s_registered_pcs[i];
+        if (site_start >= read_end) {
+            break;
+        }
+        uintptr_t site_end = (site_start <= UINTPTR_MAX - 4U) ? (site_start + 4U) : UINTPTR_MAX;
+        uintptr_t ov_start = (site_start > read_start) ? site_start : read_start;
+        uintptr_t ov_end = (site_end < read_end) ? site_end : read_end;
+        if (ov_start < ov_end) {
+            size_t site_off = (size_t)(ov_start - site_start);
+            size_t dst_off = (size_t)(ov_start - read_start);
+            size_t ov_len = (size_t)(ov_end - ov_start);
+            memcpy(dst + dst_off, kOrigSvcBytes + site_off, ov_len);
+        }
+    }
+    os_unfair_lock_unlock(&s_svc_sites_lock);
+}
+
+// MARK: - Mach EXC_BREAKPOINT Server
+
+#if defined(__arm64__) || defined(__aarch64__)
+
+static void pt_raw_arm64_svc80(int64_t x16,
+                                const uint64_t in_x[8],
+                                uint64_t out_x[2],
+                                bool *out_carry) {
+    if (x16 == SYS_exit) {
+        _exit((int)in_x[0]);
+    }
+    register uint64_t r0 __asm("x0") = in_x[0];
+    register uint64_t r1 __asm("x1") = in_x[1];
+    register uint64_t r2 __asm("x2") = in_x[2];
+    register uint64_t r3 __asm("x3") = in_x[3];
+    register uint64_t r4 __asm("x4") = in_x[4];
+    register uint64_t r5 __asm("x5") = in_x[5];
+    register uint64_t r6 __asm("x6") = in_x[6];
+    register uint64_t r7 __asm("x7") = in_x[7];
+    register int64_t r16 __asm("x16") = x16;
+    uint32_t carry = 0;
+    __asm__ volatile(
+        "svc #0x80\n\t"
+        "cset %w[c], cs"
+        : "+r"(r0), "+r"(r1), "+r"(r2), "+r"(r3),
+          "+r"(r4), "+r"(r5), "+r"(r6), "+r"(r7),
+          "+r"(r16), [c] "=&r"(carry)
+        :
+        : "cc", "memory");
+    out_x[0] = r0;
+    out_x[1] = r1;
+    *out_carry = (carry != 0);
+}
+
+#pragma pack(push, 4)
+typedef struct {
+    mach_msg_header_t Head;
+    mach_msg_body_t msgh_body;
+    mach_msg_port_descriptor_t thread;
+    mach_msg_port_descriptor_t task;
+    NDR_record_t NDR;
+    exception_type_t exception;
+    mach_msg_type_number_t codeCnt;
+    int64_t code[2];
+    int flavor;
+    mach_msg_type_number_t old_stateCnt;
+    natural_t old_state[1296];
+    mach_msg_trailer_t trailer;
+} pt_mach_exc_req_t;
+
+typedef struct {
+    mach_msg_header_t Head;
+    NDR_record_t NDR;
+    kern_return_t RetCode;
+    int flavor;
+    mach_msg_type_number_t new_stateCnt;
+    natural_t new_state[1296];
+} pt_mach_exc_reply_t;
+#pragma pack(pop)
+
+static BOOL pt_svc_handle_exception_msg(const pt_mach_exc_req_t *req, pt_mach_exc_reply_t *reply) {
+    memset(reply, 0, sizeof(*reply));
+    reply->Head.msgh_bits = MACH_MSGH_BITS(MACH_MSGH_BITS_REMOTE(req->Head.msgh_bits), 0);
+    reply->Head.msgh_remote_port = req->Head.msgh_remote_port;
+    reply->Head.msgh_local_port = MACH_PORT_NULL;
+    reply->Head.msgh_id = req->Head.msgh_id + 100;
+    reply->Head.msgh_reserved = 0;
+    reply->Head.msgh_size = (mach_msg_size_t)sizeof(mig_reply_error_t);
+    reply->NDR = NDR_record;
+    reply->RetCode = KERN_FAILURE;
+
+    if ((req->Head.msgh_bits & MACH_MSGH_BITS_COMPLEX) != 0) {
+        if (req->Head.msgh_size >= offsetof(pt_mach_exc_req_t, thread) + sizeof(req->thread) &&
+            req->thread.type == MACH_MSG_PORT_DESCRIPTOR &&
+            MACH_PORT_VALID(req->thread.name)) {
+            mach_port_deallocate(mach_task_self(), req->thread.name);
+        }
+        if (req->Head.msgh_size >= offsetof(pt_mach_exc_req_t, task) + sizeof(req->task) &&
+            req->task.type == MACH_MSG_PORT_DESCRIPTOR &&
+            MACH_PORT_VALID(req->task.name)) {
+            mach_port_deallocate(mach_task_self(), req->task.name);
+        }
+    }
+
+    if (req->Head.msgh_id != 2407) {
+        reply->RetCode = MIG_BAD_ID;
+        return YES;
+    }
+
+    size_t req_prefix = offsetof(pt_mach_exc_req_t, code);
+    if (req->Head.msgh_size < req_prefix || req->codeCnt > 2U) {
+        reply->RetCode = MIG_BAD_ARGUMENTS;
+        return YES;
+    }
+    size_t code_bytes = (size_t)req->codeCnt * sizeof(int64_t);
+    size_t tail_off = req_prefix + code_bytes;
+    size_t min_tail = sizeof(int) + sizeof(mach_msg_type_number_t);
+    if (req->Head.msgh_size < tail_off + min_tail) {
+        reply->RetCode = MIG_BAD_ARGUMENTS;
+        return YES;
+    }
+
+    const uint8_t *tail = (const uint8_t *)req + tail_off;
+    int flavor = 0;
+    mach_msg_type_number_t old_stateCnt = 0;
+    memcpy(&flavor, tail, sizeof(flavor));
+    memcpy(&old_stateCnt, tail + sizeof(flavor), sizeof(old_stateCnt));
+
+    if (flavor != ARM_THREAD_STATE64 || old_stateCnt < ARM_THREAD_STATE64_COUNT ||
+        old_stateCnt > 1296U ||
+        req->Head.msgh_size < tail_off + min_tail + (size_t)old_stateCnt * sizeof(natural_t)) {
+        reply->RetCode = KERN_FAILURE;
+        return YES;
+    }
+
+    arm_thread_state64_t state;
+    memcpy(&state, tail + min_tail, sizeof(state));
+
+    uintptr_t pc = (uintptr_t)arm_thread_state64_get_pc(state);
+    if (!pt_svc_is_registered_pc(pc)) {
+        // Real debugger breakpoint / __builtin_trap / non-PlayTools brk: pass through unmodified.
+        reply->RetCode = KERN_FAILURE;
+        return YES;
+    }
+
+    int64_t x16 = (int64_t)PT_TS_X(state)[16];
+    uint64_t in_x[8];
+    for (int i = 0; i < 8; i++) {
+        in_x[i] = PT_TS_X(state)[i];
+    }
+
+    BOOL passthrough = atomic_load_explicit(&s_svc_safe_mode_passthrough, memory_order_acquire) ||
+                       !pt_is_bypass_enabled() ||
+                       (x16 < 0);
+    if (passthrough) {
+        uint64_t out_x[2] = {0, 0};
+        bool carry = false;
+        pt_raw_arm64_svc80(x16, in_x, out_x, &carry);
+        PT_TS_X(state)[0] = out_x[0];
+        PT_TS_X(state)[1] = out_x[1];
+        if (x16 > 0) {
+            if (carry) {
+                PT_TS_CPSR(state) |= PT_ARM64_CPSR_C;
+            } else {
+                PT_TS_CPSR(state) &= ~PT_ARM64_CPSR_C;
+            }
+        }
+    } else {
+        uintptr_t args[8];
+        for (size_t i = 0; i < 8U; i++) {
+            args[i] = (uintptr_t)in_x[i];
+        }
+        BOOL handled = NO;
+        errno = 0;
+        intptr_t ret = pt_syscall_dispatch_with_caller((int)x16, args, (const void *)pc, &handled);
+        if (handled) {
+            if (ret == -1 && errno != 0) {
+                PT_TS_X(state)[0] = (uint64_t)(unsigned int)errno;
+                PT_TS_CPSR(state) |= PT_ARM64_CPSR_C;
+            } else {
+                PT_TS_X(state)[0] = (uint64_t)ret;
+                PT_TS_CPSR(state) &= ~PT_ARM64_CPSR_C;
+            }
+        } else {
+            uint64_t out_x[2] = {0, 0};
+            bool carry = false;
+            pt_raw_arm64_svc80(x16, in_x, out_x, &carry);
+            PT_TS_X(state)[0] = out_x[0];
+            PT_TS_X(state)[1] = out_x[1];
+            if (carry) {
+                PT_TS_CPSR(state) |= PT_ARM64_CPSR_C;
+            } else {
+                PT_TS_CPSR(state) &= ~PT_ARM64_CPSR_C;
+            }
+        }
+    }
+
+    uintptr_t next_pc = pc + 4U;
+#if __has_feature(ptrauth_calls)
+    void *next_fptr = ptrauth_sign_unauthenticated((void *)next_pc, ptrauth_key_function_pointer, 0);
+#else
+    void *next_fptr = (void *)next_pc;
+#endif
+    arm_thread_state64_set_pc_fptr(state, next_fptr);
+
+    reply->RetCode = KERN_SUCCESS;
+    reply->flavor = flavor;
+    reply->new_stateCnt = old_stateCnt;
+    memcpy(reply->new_state, tail + min_tail, (size_t)old_stateCnt * sizeof(natural_t));
+    memcpy(reply->new_state, &state, sizeof(state));
+    reply->Head.msgh_size = (mach_msg_size_t)(offsetof(pt_mach_exc_reply_t, new_state) +
+                                              (size_t)old_stateCnt * sizeof(natural_t));
+    return YES;
+}
+
+static void *pt_svc_exc_server_thread(void *arg) {
+    (void)arg;
+    pthread_setname_np("app.makedie.playtools.svc_exc");
+
+    pt_mach_exc_req_t req;
+    pt_mach_exc_reply_t reply;
+    for (;;) {
+        memset(&req, 0, sizeof(req));
+        mach_msg_return_t mr = mach_msg(&req.Head,
+                                        MACH_RCV_MSG | MACH_RCV_LARGE,
+                                        0,
+                                        (mach_msg_size_t)sizeof(req),
+                                        s_svc_exc_port,
+                                        MACH_MSG_TIMEOUT_NONE,
+                                        MACH_PORT_NULL);
+        if (mr != MACH_MSG_SUCCESS) {
+            if (mr == MACH_RCV_PORT_DIED || mr == MACH_RCV_PORT_CHANGED || mr == MACH_RCV_INVALID_NAME) {
+                break;
+            }
+            continue;
+        }
+        if (pt_svc_handle_exception_msg(&req, &reply) &&
+            MACH_PORT_VALID(reply.Head.msgh_remote_port)) {
+            mach_msg_return_t sr = mach_msg(&reply.Head,
+                                            MACH_SEND_MSG,
+                                            reply.Head.msgh_size,
+                                            0,
+                                            MACH_PORT_NULL,
+                                            MACH_MSG_TIMEOUT_NONE,
+                                            MACH_PORT_NULL);
+            if (sr != MACH_MSG_SUCCESS) {
+                mach_msg_destroy(&reply.Head);
+            }
+        }
+    }
+    return NULL;
+}
+
+static BOOL pt_svc_install_exception_handler(void) {
+    mach_port_t port = MACH_PORT_NULL;
+    kern_return_t kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
+    if (kr != KERN_SUCCESS || !MACH_PORT_VALID(port)) {
+        return NO;
+    }
+    kr = mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND);
+    if (kr != KERN_SUCCESS) {
+        mach_port_destroy(mach_task_self(), port);
+        return NO;
+    }
+
+    s_svc_exc_port = port;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    int prc = pthread_create(&s_svc_exc_thread, &attr, pt_svc_exc_server_thread, NULL);
+    pthread_attr_destroy(&attr);
+    if (prc != 0) {
+        s_svc_exc_port = MACH_PORT_NULL;
+        mach_port_destroy(mach_task_self(), port);
+        return NO;
+    }
+
+    exception_mask_t old_masks[EXC_TYPES_COUNT] = {0};
+    mach_msg_type_number_t old_count = EXC_TYPES_COUNT;
+    exception_handler_t old_handlers[EXC_TYPES_COUNT] = {0};
+    exception_behavior_t old_behaviors[EXC_TYPES_COUNT] = {0};
+    thread_state_flavor_t old_flavors[EXC_TYPES_COUNT] = {0};
+
+    kr = pt_orig_task_swap_exception_ports(
+        mach_task_self(),
+        EXC_MASK_BREAKPOINT,
+        port,
+        (exception_behavior_t)((unsigned int)EXCEPTION_STATE_IDENTITY | (unsigned int)MACH_EXCEPTION_CODES),
+        ARM_THREAD_STATE64,
+        old_masks,
+        &old_count,
+        old_handlers,
+        old_behaviors,
+        old_flavors);
+    for (mach_msg_type_number_t i = 0; i < old_count && i < EXC_TYPES_COUNT; i++) {
+        if (MACH_PORT_VALID(old_handlers[i]) && old_handlers[i] != port) {
+            mach_port_deallocate(mach_task_self(), old_handlers[i]);
+        }
+    }
+    if (kr != KERN_SUCCESS) {
+        s_svc_exc_port = MACH_PORT_NULL;
+        mach_port_destroy(mach_task_self(), port);
+        return NO;
+    }
+    return YES;
+}
+
+#endif /* defined(__arm64__) || defined(__aarch64__) */
+
+// MARK: - Exception Port Preservation Interposers
+
+static kern_return_t pt_task_set_exception_ports(task_t task,
+                                                 exception_mask_t exception_mask,
+                                                 mach_port_t new_port,
+                                                 exception_behavior_t behavior,
+                                                 thread_state_flavor_t new_flavor) {
+    if (atomic_load_explicit(&s_svc_interceptor_active, memory_order_acquire) &&
+        task == mach_task_self() &&
+        (exception_mask & EXC_MASK_BREAKPOINT) != 0 &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        exception_mask_t filtered = exception_mask & ~((exception_mask_t)EXC_MASK_BREAKPOINT);
+        if (filtered == 0) {
+            return KERN_SUCCESS;
+        }
+        exception_mask = filtered;
+    }
+    return pt_orig_task_set_exception_ports(task, exception_mask, new_port, behavior, new_flavor);
+}
+
+static kern_return_t pt_task_swap_exception_ports(task_t task,
+                                                  exception_mask_t exception_mask,
+                                                  mach_port_t new_port,
+                                                  exception_behavior_t behavior,
+                                                  thread_state_flavor_t new_flavor,
+                                                  exception_mask_array_t masks,
+                                                  mach_msg_type_number_t *masksCnt,
+                                                  exception_handler_array_t old_handlers,
+                                                  exception_behavior_array_t old_behaviors,
+                                                  exception_flavor_array_t old_flavors) {
+    if (atomic_load_explicit(&s_svc_interceptor_active, memory_order_acquire) &&
+        task == mach_task_self() &&
+        (exception_mask & EXC_MASK_BREAKPOINT) != 0 &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        exception_mask_t filtered = exception_mask & ~((exception_mask_t)EXC_MASK_BREAKPOINT);
+        if (filtered == 0) {
+            if (masksCnt != NULL) {
+                *masksCnt = 0;
+            }
+            return KERN_SUCCESS;
+        }
+        exception_mask = filtered;
+    }
+    return pt_orig_task_swap_exception_ports(task,
+                                             exception_mask,
+                                             new_port,
+                                             behavior,
+                                             new_flavor,
+                                             masks,
+                                             masksCnt,
+                                             old_handlers,
+                                             old_behaviors,
+                                             old_flavors);
+}
+
+static kern_return_t pt_thread_set_exception_ports(thread_act_t thread,
+                                                   exception_mask_t exception_mask,
+                                                   mach_port_t new_port,
+                                                   exception_behavior_t behavior,
+                                                   thread_state_flavor_t new_flavor) {
+    if (atomic_load_explicit(&s_svc_interceptor_active, memory_order_acquire) &&
+        (exception_mask & EXC_MASK_BREAKPOINT) != 0 &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        exception_mask_t filtered = exception_mask & ~((exception_mask_t)EXC_MASK_BREAKPOINT);
+        if (filtered == 0) {
+            return KERN_SUCCESS;
+        }
+        exception_mask = filtered;
+    }
+    return pt_orig_thread_set_exception_ports(thread, exception_mask, new_port, behavior, new_flavor);
+}
+
+DYLD_INTERPOSE(pt_task_set_exception_ports, task_set_exception_ports)
+DYLD_INTERPOSE(pt_task_swap_exception_ports, task_swap_exception_ports)
+DYLD_INTERPOSE(pt_thread_set_exception_ports, thread_set_exception_ports)
+
+// MARK: - Initialization
+
+__attribute__((visibility("hidden"))) void pt_svc_interceptor_init_early(void) {
+    static _Atomic bool s_inited = false;
+    if (atomic_exchange_explicit(&s_inited, true, memory_order_acq_rel)) {
+        return;
+    }
+
+#if defined(__arm64__) || defined(__aarch64__)
+    BOOL safe_mode = [PTSafeMode isActive] || pt_svc_env_flag_true(pt_raw_getenv("PLAYTOOLS_SAFE_MODE"));
+    atomic_store_explicit(&s_svc_safe_mode_passthrough, safe_mode, memory_order_release);
+
+    if (!pt_svc_load_manifest_from_disk(&s_manifest)) {
+        return;
+    }
+
+    _dyld_register_func_for_add_image(pt_svc_on_dyld_image_added);
+    if (pt_svc_install_exception_handler()) {
+        atomic_store_explicit(&s_svc_interceptor_active, true, memory_order_release);
+        PT_DEBUG_TRACE("svc", "inline svc interceptor active (sites=%zu safemode=%d)",
+                       s_registered_pc_count, safe_mode ? 1 : 0);
+    }
+#endif
+}

@@ -386,3 +386,8 @@
 "alert.open.appstore" = "Open Mac App Store";
 "macos.version" = "This app can be installed from Mac App Store";
 "alert.install.anyway" = "Install Anyway";
+
+"settings.toggle.interceptInlineSyscalls" = "インラインシステムコールをインターセプト（実験的）";
+"settings.toggle.interceptInlineSyscalls.help" = "起動時にアプリバイナリ内のインライン ARM64 svc #0x80 命令を可逆的にパッチし、メモリ読み取り時に元のバイト列を復元します。変更にはアプリの再起動が必要です。";
+"settings.toggle.interceptInlineSyscalls.warning" = "実験的機能: 起動時にコード署名ページを変更してローカルで再署名するため、厳格な整合性検証やアンチチートでクラッシュや検知が発生する可能性があります。無効化またはセーフモード起動時に自動で元のバイトへ復元されます。";
+"restart.field.interceptInlineSyscalls" = "インライン syscall インターセプト";

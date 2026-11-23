@@ -48,6 +48,19 @@ struct ConfigAdvancedPane: View {
                 Toggle("settings.toggle.jbBypass", isOn: $settings.settings.bypass)
                     .help("settings.toggle.jbBypass.help")
                     .disabled(!hasPlayTools)
+
+                rowWithRestartBadge {
+                    Toggle("settings.toggle.interceptInlineSyscalls",
+                           isOn: $settings.settings.interceptInlineSyscalls)
+                        .help("settings.toggle.interceptInlineSyscalls.help")
+                        .disabled(!hasPlayTools)
+                }
+
+                if settings.settings.interceptInlineSyscalls {
+                    Text("settings.toggle.interceptInlineSyscalls.warning")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Section("settings.toggle.discord") {

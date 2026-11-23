@@ -275,6 +275,7 @@ class Installer {
                                     quarantinedDir: quarantinedAppBackups?.quarantinedDir
                                 )
                                 quarantinedAppBackups = nil
+                                try? FileManager.default.removeItem(at: installedApp.svcPatchManifestURL)
                             }
                             try? ipa.removeQuarantine(publishedURL)
                         },

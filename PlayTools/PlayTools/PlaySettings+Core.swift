@@ -214,6 +214,7 @@ public final class PTUnfairLock {
         self.disableBuiltinMouse = decoded.disableBuiltinMouse
         self.blockSleepSpamming = decoded.blockSleepSpamming
         self.ignoreUnityKeyboardInitializationError = decoded.ignoreUnityKeyboardInitializationError
+        self.configuredInterceptInlineSyscalls = decoded.interceptInlineSyscalls
 
         super.init()
     }
@@ -247,6 +248,11 @@ public final class PTUnfairLock {
     private let configuredInverseScreenValues: Bool
     @objc public var inverseScreenValues: Bool {
         PTSafeMode.isActive ? false : configuredInverseScreenValues
+    }
+
+    private let configuredInterceptInlineSyscalls: Bool
+    @objc public var interceptInlineSyscalls: Bool {
+        PTSafeMode.isActive ? false : configuredInterceptInlineSyscalls
     }
 
     @objc public let adaptiveDisplay: Bool
@@ -467,6 +473,7 @@ struct AppSettingsData: Codable, Equatable {
     var resizableAspectRatioHeight = 0
     var blockSleepSpamming = false
     var ignoreUnityKeyboardInitializationError = false
+    var interceptInlineSyscalls = false
     var enableNetworkRules = false
     var networkBlockMock200 = true
     var blockedURLPatterns: [String] = []
@@ -554,6 +561,10 @@ struct AppSettingsData: Codable, Equatable {
         ignoreUnityKeyboardInitializationError = (try? container.decodeIfPresent(
             Bool.self,
             forKey: .ignoreUnityKeyboardInitializationError
+        )) ?? false
+        interceptInlineSyscalls = (try? container.decodeIfPresent(
+            Bool.self,
+            forKey: .interceptInlineSyscalls
         )) ?? false
         enableNetworkRules = (try? container.decodeIfPresent(Bool.self, forKey: .enableNetworkRules)) ?? false
         networkBlockMock200 = (try? container.decodeIfPresent(Bool.self, forKey: .networkBlockMock200)) ?? true

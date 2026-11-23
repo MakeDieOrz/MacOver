@@ -498,6 +498,13 @@ static BOOL pt_is_hidden_normalized_path_cached_caller(const char *norm, const v
             }
             return (*inout_is_sys_caller == 0);
         }
+        if (strstr(norm, "/app.makedie.MacOver/SVCPatches") != NULL ||
+            strstr(norm, "/io.playcover.PlayCover/SVCPatches") != NULL) {
+            if (*inout_is_sys_caller < 0) {
+                *inout_is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
+            }
+            return (*inout_is_sys_caller == 0);
+        }
     }
 
     if (norm[0] == '/') {

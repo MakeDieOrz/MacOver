@@ -171,9 +171,10 @@ final class PlayCoverCoreSPMTests: XCTestCase {
         XCTAssertFalse(ReportedIOSVersionMode.isMinimumOSVersion("12.4", higherThan: 13, minor: 7))
         XCTAssertFalse(ReportedIOSVersionMode.isMinimumOSVersion("", higherThan: 13, minor: 7))
 
-        XCTAssertEqual(PlayCoverRestartField.allCases.count, 23)
+        XCTAssertEqual(PlayCoverRestartField.allCases.count, 24)
         XCTAssertTrue(PlayCoverRestartField.allCases.contains(.windowCompatibility))
         XCTAssertTrue(PlayCoverRestartField.allCases.contains(.frameRateTarget))
         XCTAssertTrue(PlayCoverRestartField.allCases.contains(.reportedIOSVersion))
+        XCTAssertTrue(PlayCoverRestartField.allCases.contains(.interceptInlineSyscalls))
     }
 }

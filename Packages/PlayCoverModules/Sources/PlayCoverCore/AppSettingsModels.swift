@@ -239,4 +239,5 @@ public enum PlayCoverRestartField: String, CaseIterable, Equatable, Hashable, Se
     case disableBuiltinMouse
     case blockSleepSpamming
     case ignoreUnityKeyboardInitializationError
+    case interceptInlineSyscalls
 }

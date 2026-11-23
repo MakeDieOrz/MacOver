@@ -452,6 +452,9 @@
 "settings.toggle.blockSleepSpamming.help" = "防止应用高频调用 usleep() 系统调用导致资源耗尽";
 "settings.toggle.ignoreUnityKeyboardInitializationError" = "忽略 Unity 键盘初始化错误";
 "settings.toggle.ignoreUnityKeyboardInitializationError.help" = "防止因断言失败 \"[KeyboardDelegate Initialize] called after creating keyboard\" 导致的闪退";
+"settings.toggle.interceptInlineSyscalls" = "拦截内联系统调用（试验性）";
+"settings.toggle.interceptInlineSyscalls.help" = "在启动时可逆地将应用二进制中的内联 ARM64 svc #0x80 替换为内部拦截陷阱，并在内存读取检测时还原原始指令。更改需重启应用后生效。";
+"settings.toggle.interceptInlineSyscalls.warning" = "试验性功能：会在启动时修改并重新本地签名应用二进制，部分强完整性校验或防作弊仍可能崩溃或触发检测；关闭开关或以安全模式启动会自动无损还原。";
 "keymap.title" = "%@ 按键映射";
 "keymap.title.import" = "导入按键映射名称";
 "keymap.title.rename" = "重命名按键映射";
@@ -593,6 +596,7 @@
 "restart.field.disableBuiltinMouse" = "禁用原生鼠标";
 "restart.field.blockSleepSpamming" = "限制 usleep";
 "restart.field.ignoreUnityKeyboardInitializationError" = "Unity 键盘修复";
+"restart.field.interceptInlineSyscalls" = "内联系统调用拦截";
 
 "library.dropTitle" = "拖放 IPA 文件以安装";
 "library.dropSubtitle" = "MacOver 将自动解压、注入 PlayTools、签名并加入应用库。";

@@ -189,6 +189,34 @@ class PlayApp: BaseApp, ObservableObject, Identifiable, Hashable {
             }
 
             let binaryModified = try Macho.fixLibrariesIfNeeded(atURL: executable)
+            let svcBundleID = launchInfo.bundleIdentifier.isEmpty ? info.bundleIdentifier : launchInfo.bundleIdentifier
+            let shouldInterceptSVC = usesPlayTools
+                && !safeModeOneShot
+                && settings.settings.interceptInlineSyscalls
+            let svcResult: InlineSyscallPatcher.ReconcileResult
+            if !svcBundleID.isEmpty {
+                svcResult = try InlineSyscallPatcher.reconcile(
+                    appBundleURL: url,
+                    bundleIdentifier: svcBundleID,
+                    manifestURL: BaseApp.svcPatchManifestURL(forBundleIdentifier: svcBundleID),
+                    enabled: shouldInterceptSVC
+                )
+            } else {
+                svcResult = InlineSyscallPatcher.ReconcileResult(
+                    modified: false,
+                    modifiedBinaryURLs: [],
+                    patchedSiteCount: 0
+                )
+            }
+
+            if svcResult.modified {
+                let execCanonical = executable.standardizedFileURL.resolvingSymlinksInPath()
+                for modifiedURL in svcResult.modifiedBinaryURLs where
+                    modifiedURL.standardizedFileURL.resolvingSymlinksInPath() != execCanonical {
+                    try Shell.signMacho(modifiedURL)
+                }
+            }
+
             let entitlementsInvalid = try !Entitlements.areEntitlementsValid(app: self)
 
             if entitlementsInvalid {
@@ -199,7 +227,7 @@ class PlayApp: BaseApp, ObservableObject, Identifiable, Hashable {
                 Self.verifiedBundleLock.lock()
                 Self.verifiedBundleStamps[url.path] = stamp
                 Self.verifiedBundleLock.unlock()
-            } else if binaryModified || pluginsModified || !isBundleSignatureStrictlyValid() {
+            } else if binaryModified || pluginsModified || svcResult.modified || !isBundleSignatureStrictlyValid() {
                 Self.invalidateVerifiedBundleStamp(for: url)
                 do {
                     try Shell.signApp(executable)

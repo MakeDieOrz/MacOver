@@ -27,8 +27,20 @@ public class BaseApp {
         PlayTools.playCoverContainer.appendingPathComponent("AppBackups")
     }
 
+    public static var svcPatchesRoot: URL {
+        PlayTools.playCoverContainer.appendingPathComponent("SVCPatches")
+    }
+
+    public static func svcPatchManifestURL(forBundleIdentifier bundleIdentifier: String) -> URL {
+        svcPatchesRoot.appendingPathComponent("\(bundleIdentifier).json")
+    }
+
     public var appBackupsDir: URL {
         Self.appBackupsRoot.appendingPathComponent(info.bundleIdentifier)
+    }
+
+    public var svcPatchManifestURL: URL {
+        Self.svcPatchManifestURL(forBundleIdentifier: info.bundleIdentifier)
     }
 
     public var provisioningProfileBackup: URL {

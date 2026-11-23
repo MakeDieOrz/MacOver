@@ -6072,6 +6072,7 @@ static void pt_sanitize_vm_read_buffer(uintptr_t read_start, uint8_t *dst, size_
     if (dst == NULL || copied == 0 || read_start > UINTPTR_MAX - copied) {
         return;
     }
+    pt_svc_restore_patched_bytes_in_buffer(read_start, dst, copied);
     const struct mach_header *mh = dyld_image_header_containing_address((const void *)read_start);
     if (mh == NULL || !pt_is_valid_user_pointer((const void *)mh)) {
         return;

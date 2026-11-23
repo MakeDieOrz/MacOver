@@ -913,6 +913,7 @@
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/URLExtensions.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverKeymapping/KeyCodeNames.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverKeymapping/KeymapData.swift",
+				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverMachO/InlineSyscallPatcher.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverMachO/Macho.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverMachO/PlayTools.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverSandbox/DualTrackPrivilegeEscalator.swift",

@@ -119,6 +119,7 @@
 		AA71A11C2F00000700623C15 /* PTGraphicsVirtualizer.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A1092F00000700623C15 /* PTGraphicsVirtualizer.m */; };
 		AA71A11D2F00000700623C15 /* PTNetworkVirtualizer.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A10A2F00000700623C15 /* PTNetworkVirtualizer.m */; };
 		AA71A11E2F00000700623C15 /* PTEntitlements.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A10B2F00000700623C15 /* PTEntitlements.m */; };
+		AA71A1482F00000A00623C15 /* PTSvcInterceptor.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A1472F00000A00623C15 /* PTSvcInterceptor.m */; };
 		AA71A11F2F00000700623C15 /* PTRegistration.c in Sources */ = {isa = PBXBuildFile; fileRef = AA71A1032F00000700623C15 /* PTRegistration.c */; };
 		AA71A1202F00000700623C15 /* PTSafeMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA71A10C2F00000700623C15 /* PTSafeMode.swift */; };
 		AA71A1212F00000700623C15 /* PTPluginContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA71A10D2F00000700623C15 /* PTPluginContainer.swift */; };
@@ -274,6 +275,7 @@
 		AA71A1092F00000700623C15 /* PTGraphicsVirtualizer.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTGraphicsVirtualizer.m; sourceTree = "<group>"; };
 		AA71A10A2F00000700623C15 /* PTNetworkVirtualizer.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTNetworkVirtualizer.m; sourceTree = "<group>"; };
 		AA71A10B2F00000700623C15 /* PTEntitlements.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTEntitlements.m; sourceTree = "<group>"; };
+		AA71A1472F00000A00623C15 /* PTSvcInterceptor.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTSvcInterceptor.m; sourceTree = "<group>"; };
 		AA71A10C2F00000700623C15 /* PTSafeMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PTSafeMode.swift; sourceTree = "<group>"; };
 		AA71A10D2F00000700623C15 /* PTPluginContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PTPluginContainer.swift; sourceTree = "<group>"; };
 		AA71A10E2F00000700623C15 /* PTRegistrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PTRegistrationTests.swift; sourceTree = "<group>"; };
@@ -643,6 +645,7 @@
 				AA71A1092F00000700623C15 /* PTGraphicsVirtualizer.m */,
 				AA71A10A2F00000700623C15 /* PTNetworkVirtualizer.m */,
 				AA71A10B2F00000700623C15 /* PTEntitlements.m */,
+				AA71A1472F00000A00623C15 /* PTSvcInterceptor.m */,
 			);
 			path = Subsystems;
 			sourceTree = "<group>";
@@ -1094,6 +1097,7 @@
 				"$(SRCROOT)/PlayTools/Subsystems/PTGraphicsVirtualizer.m",
 				"$(SRCROOT)/PlayTools/Subsystems/PTNetworkVirtualizer.m",
 				"$(SRCROOT)/PlayTools/Subsystems/PTEntitlements.m",
+				"$(SRCROOT)/PlayTools/Subsystems/PTSvcInterceptor.m",
 			);
 			name = "Build PlayTools XCFramework";
 			outputFileListPaths = (
@@ -1168,6 +1172,7 @@
 				AA71A11C2F00000700623C15 /* PTGraphicsVirtualizer.m in Sources */,
 				AA71A11D2F00000700623C15 /* PTNetworkVirtualizer.m in Sources */,
 				AA71A11E2F00000700623C15 /* PTEntitlements.m in Sources */,
+				AA71A1482F00000A00623C15 /* PTSvcInterceptor.m in Sources */,
 				9562D16F2AB50D34002C329D /* ActionDispatcher.swift in Sources */,
 				2847AE48298EFC0F00B0F983 /* PlayScreen.swift in Sources */,
 				9562D1532AB484FD002C329D /* EventAdapter.swift in Sources */,

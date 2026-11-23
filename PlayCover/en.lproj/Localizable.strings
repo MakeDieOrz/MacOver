@@ -278,6 +278,9 @@
 "settings.toggle.blockSleepSpamming.help" = "Prevent the app from spamming the usleep() syscall which may cause resource exhaustion";
 "settings.toggle.ignoreUnityKeyboardInitializationError" = "Ignore Unity keyboard initialization error";
 "settings.toggle.ignoreUnityKeyboardInitializationError.help" = "Prevent a crash caused by the assertion failure \"[KeyboardDelegate Initialize] called after creating keyboard\"";
+"settings.toggle.interceptInlineSyscalls" = "Intercept inline syscalls (Experimental)";
+"settings.toggle.interceptInlineSyscalls.help" = "Reversibly patches inline ARM64 svc #0x80 instructions in app binaries on launch and restores original bytes in memory queries. Requires restarting the app.";
+"settings.toggle.interceptInlineSyscalls.warning" = "Experimental: Modifies signed code pages on launch and re-signs locally; anti-cheat integrity checks or strict code signing may crash or trigger detections. Toggling off or launching in Safe Mode automatically restores original bytes.";
 
 
 "configSigning.header" = "Configure Package Signing";
@@ -498,6 +501,7 @@
 "restart.field.disableBuiltinMouse" = "Built-in Mouse";
 "restart.field.blockSleepSpamming" = "Block usleep";
 "restart.field.ignoreUnityKeyboardInitializationError" = "Unity Keyboard Fix";
+"restart.field.interceptInlineSyscalls" = "Inline Syscall Interception";
 
 "library.dropTitle" = "Drop IPA to Install";
 "library.dropSubtitle" = "MacOver will unpack, inject PlayTools, sign, and add it to your library.";

@@ -20,7 +20,8 @@ class Uninstaller {
         PlayTools.playCoverContainer.appendingPathComponent("AppBackups"),
         PlayTools.playCoverContainer.appendingPathComponent("Entitlements"),
         PlayTools.playCoverContainer.appendingPathComponent("Keymapping"),
-        PlayTools.playCoverContainer.appendingPathComponent("PlayChain")
+        PlayTools.playCoverContainer.appendingPathComponent("PlayChain"),
+        PlayTools.playCoverContainer.appendingPathComponent("SVCPatches")
     ]
     private static let cacheURLs: [URL] = [
         Uninstaller.libraryUrl.appendingPathComponent("Containers"),
@@ -181,6 +182,7 @@ class Uninstaller {
 
         app.removeAlias()
         FileManager.default.delete(at: app.appBackupsDir)
+        FileManager.default.delete(at: app.svcPatchManifestURL)
         app.deleteApp()
 
         if uninstallNum >= 5 || FileManager.default.fileExists(atPath: PlayApp.bundleIDCacheURL.path) {

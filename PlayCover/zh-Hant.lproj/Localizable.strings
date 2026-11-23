@@ -368,3 +368,8 @@
 "macos.version" = "This app can be installed from Mac App Store";
 "ipaLibrary.AlphabeticalSort" = "Sort source apps alphabetically";
 "alert.install.anyway" = "Install Anyway";
+
+"settings.toggle.interceptInlineSyscalls" = "攔截內聯系統呼叫（實驗性）";
+"settings.toggle.interceptInlineSyscalls.help" = "在啟動時可逆地修補應用二進位檔案中的內聯 ARM64 svc #0x80 指令，並在記憶體讀取檢查時還原原始位元組。變更需重新啟動應用。";
+"settings.toggle.interceptInlineSyscalls.warning" = "實驗性功能：會在啟動時修改並重新本機簽章應用二進位檔案，嚴格完整性驗證或防作弊可能導致閃退或觸發偵測；關閉開關或安全模式啟動時會自動還原原始位元組。";
+"restart.field.interceptInlineSyscalls" = "內聯系統呼叫攔截";
