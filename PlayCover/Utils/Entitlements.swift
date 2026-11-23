@@ -301,7 +301,7 @@ class Entitlements {
 
         var deniedPaths = PlayRules.buildRules(rules: Entitlements.critical, bundleID: bundleID)
 
-        if app.settings.settings.bypass {
+        if app.settings.settings.effectiveBypass {
             sandboxProfile.append("(deny process-fork)")
             sandboxProfile.append(
                 "(deny file-read-data (with errno ENOENT) (with no-report) " +

@@ -8,9 +8,18 @@ import SwiftUI
 
 struct ConfigDevicePane: View {
     @ObservedObject var settings: AppSettings
+    var onOpenStrictMode: (() -> Void)?
 
     private var currentModel: String {
         settings.settings.iosDeviceModel
+    }
+
+    private var effectiveModel: String {
+        settings.settings.effectiveIOSDeviceModel
+    }
+
+    private var isStrictMode: Bool {
+        settings.settings.strictEmulationMode
     }
 
     private var isLegacy: Bool {
@@ -79,6 +88,12 @@ struct ConfigDevicePane: View {
                 }
 
                 layoutComparisonRow
+
+                if DeviceProfileOption.isMSeriesIPad(effectiveModel) {
+                    Label("device.mSeriesNotice", systemImage: "cpu")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Section {
@@ -128,7 +143,33 @@ struct ConfigDevicePane: View {
                     }
                 }
 
-                Toggle("Notch", isOn: $settings.settings.notch)
+                Toggle(
+                    "Notch",
+                    isOn: Binding(
+                        get: { settings.settings.effectiveNotch },
+                        set: { newValue in
+                            guard !isStrictMode else { return }
+                            settings.settings.notch = newValue
+                        }
+                    )
+                )
+                .disabled(isStrictMode)
+
+                if isStrictMode {
+                    HStack(spacing: 8) {
+                        Label("strict.notchLockedNote", systemImage: "lock.fill")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        if let onOpenStrictMode {
+                            Button("strict.openAdvanced") {
+                                onOpenStrictMode()
+                            }
+                            .buttonStyle(.link)
+                            .font(.caption)
+                        }
+                    }
+                }
             }
         }
         .formStyle(.grouped)

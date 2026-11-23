@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import PlayCoverCore
 import XCTest
 @testable import PlayCover
 
@@ -16,12 +17,18 @@ final class AppSettingsDataTests: XCTestCase {
         XCTAssertTrue(original.playChain)
         XCTAssertTrue(original.networkBlockMock200)
         XCTAssertFalse(original.enableNetworkRules)
+        XCTAssertFalse(original.strictEmulationMode)
+        XCTAssertEqual(original.strictViewportOrientation, .landscape)
+        XCTAssertEqual(original.strictViewportScaleMode, .fitScreen)
 
         original.bundleIdentifier = "com.example.game"
         original.sensitivity = 72.5
         original.customScaler = 1.5
         original.enableNetworkRules = true
         original.blockedURLPatterns = ["ads.example.com", "@@cdn.example.com"]
+        original.strictEmulationMode = true
+        original.strictViewportOrientation = .portrait
+        original.strictViewportScaleMode = .native1x
         original.discordActivity = DiscordActivity()
         original.discordActivity.enable = true
         original.discordActivity.applicationID = "123456"
@@ -58,6 +65,9 @@ final class AppSettingsDataTests: XCTestCase {
         XCTAssertEqual(decoded.notch, NSScreen.hasNotch())
         XCTAssertTrue(decoded.networkBlockMock200)
         XCTAssertEqual(decoded.blockedURLPatterns, [])
+        XCTAssertFalse(decoded.strictEmulationMode)
+        XCTAssertEqual(decoded.strictViewportOrientation, .landscape)
+        XCTAssertEqual(decoded.strictViewportScaleMode, .fitScreen)
 
         let emptyDecoded = try JSONDecoder().decode(AppSettingsData.self, from: Data("{}".utf8))
         XCTAssertEqual(emptyDecoded, AppSettingsData())
@@ -93,7 +103,10 @@ final class AppSettingsDataTests: XCTestCase {
           "windowWidth": "wide",
           "windowHeight": -100,
           "keymappingDisabledAt": 999999.5,
-          "version": "99.0.0-future"
+          "version": "99.0.0-future",
+          "strictEmulationMode": "yes",
+          "strictViewportOrientation": 42,
+          "strictViewportScaleMode": "bogus"
         }
         """
         let decoded = try JSONDecoder().decode(AppSettingsData.self, from: Data(malformedJSON.utf8))
@@ -106,5 +119,102 @@ final class AppSettingsDataTests: XCTestCase {
         XCTAssertEqual(decoded.windowHeight, -100)
         XCTAssertEqual(decoded.keymappingDisabledAt, 999999.5)
         XCTAssertEqual(decoded.version, "99.0.0-future")
+        XCTAssertFalse(decoded.strictEmulationMode)
+        XCTAssertEqual(decoded.strictViewportOrientation, .landscape)
+        XCTAssertEqual(decoded.strictViewportScaleMode, .fitScreen)
+    }
+
+    func testStrictEmulationDerivedSettingsAreNonDestructive() {
+        var data = AppSettingsData()
+        data.bypass = false
+        data.interceptInlineSyscalls = false
+        data.rootWorkDir = false
+        data.metalHUD = true
+        data.playChainDebugging = true
+        data.notch = true
+        data.resolution = 6
+        data.windowWidth = 1920
+        data.windowHeight = 1080
+        data.customScaler = 1.25
+        data.windowCompatibility = .invertedMetrics
+        data.displayRotation = 2
+        data.iosDeviceModel = "iPad16,6"
+
+        data.strictEmulationMode = true
+        data.strictViewportOrientation = .portrait
+        data.strictViewportScaleMode = .native1x
+
+        // Stored non-strict values remain intact.
+        XCTAssertFalse(data.bypass)
+        XCTAssertFalse(data.interceptInlineSyscalls)
+        XCTAssertFalse(data.rootWorkDir)
+        XCTAssertTrue(data.metalHUD)
+        XCTAssertTrue(data.playChainDebugging)
+        XCTAssertTrue(data.notch)
+        XCTAssertEqual(data.resolution, 6)
+        XCTAssertEqual(data.windowWidth, 1920)
+        XCTAssertEqual(data.windowHeight, 1080)
+        XCTAssertEqual(data.customScaler, 1.25)
+        XCTAssertEqual(data.windowCompatibility, .invertedMetrics)
+        XCTAssertEqual(data.displayRotation, 2)
+
+        // Effective strict values enforce hardware & security parity.
+        XCTAssertTrue(data.effectiveBypass)
+        XCTAssertTrue(data.effectiveInterceptInlineSyscalls)
+        XCTAssertTrue(data.effectiveRootWorkDir)
+        XCTAssertFalse(data.effectiveMetalHUD)
+        XCTAssertFalse(data.effectivePlayChainDebugging)
+        XCTAssertFalse(data.effectiveNotch)
+        XCTAssertFalse(data.effectiveHasIntrospection(true))
+        XCTAssertFalse(data.effectiveOpenWithLLDB(true))
+        XCTAssertEqual(data.effectiveResolution, 5)
+        XCTAssertEqual(data.effectiveWindowCompatibility, .standard)
+        XCTAssertEqual(data.effectiveCustomScaler, 2.0)
+        XCTAssertEqual(data.effectiveWindowWidth, 1032)
+        XCTAssertEqual(data.effectiveWindowHeight, 1376)
+        XCTAssertEqual(data.effectiveDisplayRotation, 1)
+        XCTAssertEqual(
+            data.activeTroubleshootingCount(hasIntrospection: true, hasIosFrameworks: false, openWithLLDB: true),
+            0
+        )
+        XCTAssertFalse(PlayAppSettingsPreset.balanced.matches(data))
+
+        data.strictViewportOrientation = .landscape
+        XCTAssertEqual(data.effectiveWindowWidth, 1376)
+        XCTAssertEqual(data.effectiveWindowHeight, 1032)
+        XCTAssertEqual(data.effectiveDisplayRotation, 0)
+
+        data.iosDeviceModel = "iPhone18,2"
+        data.strictViewportOrientation = .portrait
+        XCTAssertEqual(data.effectiveCustomScaler, 3.0)
+        XCTAssertEqual(data.effectiveWindowWidth, 440)
+        XCTAssertEqual(data.effectiveWindowHeight, 956)
+        let gib: UInt64 = 1_073_741_824
+        let strictBudget = data.effectivePixelBudget(physicalMemoryBytes: 8 * gib)
+        XCTAssertEqual(strictBudget.renderedWidth, 1320)
+        XCTAssertEqual(strictBudget.renderedHeight, 2868)
+        XCTAssertEqual(strictBudget.weightedPixels, 3_785_760, accuracy: 0.5)
+        XCTAssertEqual(strictBudget.level, .caution)
+
+        // Disabling strict mode restores effective accessors immediately to stored values.
+        data.strictEmulationMode = false
+        XCTAssertFalse(data.effectiveBypass)
+        XCTAssertFalse(data.effectiveInterceptInlineSyscalls)
+        XCTAssertFalse(data.effectiveRootWorkDir)
+        XCTAssertTrue(data.effectiveMetalHUD)
+        XCTAssertTrue(data.effectivePlayChainDebugging)
+        XCTAssertTrue(data.effectiveNotch)
+        XCTAssertTrue(data.effectiveHasIntrospection(true))
+        XCTAssertTrue(data.effectiveOpenWithLLDB(true))
+        XCTAssertEqual(data.effectiveResolution, 6)
+        XCTAssertEqual(data.effectiveWindowWidth, 1920)
+        XCTAssertEqual(data.effectiveWindowHeight, 1080)
+        XCTAssertEqual(data.effectiveCustomScaler, 1.25)
+        XCTAssertEqual(data.effectiveWindowCompatibility, .invertedMetrics)
+        XCTAssertEqual(data.effectiveDisplayRotation, 2)
+        XCTAssertEqual(
+            data.activeTroubleshootingCount(hasIntrospection: true, hasIosFrameworks: false, openWithLLDB: true),
+            5
+        )
     }
 }

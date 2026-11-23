@@ -3,6 +3,8 @@
 //  PlayCover
 //
 
+import AppKit
+import PlayCoverCore
 import SwiftUI
 
 struct ConfigAdvancedPane: View {
@@ -14,6 +16,10 @@ struct ConfigAdvancedPane: View {
     @State private var hasIntrospection: Bool
     @State private var hasIosFrameworks: Bool
     @State private var troubleshootingExpanded = false
+
+    private var isStrictMode: Bool {
+        settings.settings.strictEmulationMode
+    }
 
     init(
         app: PlayApp,
@@ -40,24 +46,43 @@ struct ConfigAdvancedPane: View {
 
     var body: some View {
         Form {
+            strictEmulationSection
+
             Section("settings.tab.bypasses") {
                 Toggle("settings.playChain.enable", isOn: $settings.settings.playChain)
                     .help("settings.playChain.help")
                     .disabled(!hasPlayTools)
 
-                Toggle("settings.toggle.jbBypass", isOn: $settings.settings.bypass)
+                Toggle(
+                    "settings.toggle.jbBypass",
+                    isOn: effectiveLockedBinding(
+                        effective: settings.settings.effectiveBypass,
+                        stored: $settings.settings.bypass
+                    )
+                )
                     .help("settings.toggle.jbBypass.help")
-                    .disabled(!hasPlayTools)
+                    .disabled(!hasPlayTools || isStrictMode)
 
                 rowWithRestartBadge {
-                    Toggle("settings.toggle.interceptInlineSyscalls",
-                           isOn: $settings.settings.interceptInlineSyscalls)
+                    Toggle(
+                        "settings.toggle.interceptInlineSyscalls",
+                        isOn: effectiveLockedBinding(
+                            effective: settings.settings.effectiveInterceptInlineSyscalls,
+                            stored: $settings.settings.interceptInlineSyscalls
+                        )
+                    )
                         .help("settings.toggle.interceptInlineSyscalls.help")
-                        .disabled(!hasPlayTools)
+                        .disabled(!hasPlayTools || isStrictMode)
                 }
 
-                if settings.settings.interceptInlineSyscalls {
+                if settings.settings.effectiveInterceptInlineSyscalls {
                     Text("settings.toggle.interceptInlineSyscalls.warning")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if isStrictMode {
+                    Label("strict.lockedByMode.bypasses", systemImage: "lock.fill")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -134,24 +159,153 @@ struct ConfigAdvancedPane: View {
     }
 
     @ViewBuilder
+    private var strictEmulationSection: some View {
+        let data = settings.settings
+        Section("strict.section.title") {
+            rowWithRestartBadge {
+                Toggle("strict.mode.toggle", isOn: $settings.settings.strictEmulationMode)
+                    .disabled(!hasPlayTools)
+            }
+
+            Text("strict.mode.desc")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if isStrictMode {
+                rowWithRestartBadge {
+                    Picker("strict.orientation.title", selection: $settings.settings.strictViewportOrientation) {
+                        Text("strict.orientation.landscape").tag(StrictViewportOrientation.landscape)
+                        Text("strict.orientation.portrait").tag(StrictViewportOrientation.portrait)
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(!hasPlayTools)
+                }
+
+                rowWithRestartBadge {
+                    Picker("strict.scaleMode.title", selection: $settings.settings.strictViewportScaleMode) {
+                        Text("strict.scaleMode.fitScreen").tag(StrictViewportScaleMode.fitScreen)
+                        Text("strict.scaleMode.native1x").tag(StrictViewportScaleMode.native1x)
+                    }
+                    .disabled(!hasPlayTools)
+                }
+
+                strictViewportDiagnostics(for: data)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func strictViewportDiagnostics(for data: AppSettingsData) -> some View {
+        let spec = data.strictDeviceDisplaySpec
+        let logical = data.effectiveLogicalWindowSize
+        let pixels = spec.pixelSize(orientation: data.strictViewportOrientation)
+        let visibleSize = NSScreen.main?.visibleFrame.size ?? CGSize(width: 1440, height: 900)
+        let titleBarReserve: CGFloat = data.hideTitleBar ? 0 : 28
+        let usableWidth = max(1, Int(visibleSize.width.rounded(.down)))
+        let usableHeight = max(1, Int((visibleSize.height - titleBarReserve).rounded(.down)))
+        let fitsAt1x = logical.width <= usableWidth && logical.height <= usableHeight
+
+        LabeledContent("strict.display.targetHardware") {
+            Text(
+                "\(spec.model) · \(logical.width)×\(logical.height) pt @ "
+                + "\(Int(spec.nativeScale))× (\(pixels.width)×\(pixels.height) px · \(spec.maxFrameRateHz) Hz)"
+            )
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
+        }
+
+        if fitsAt1x {
+            Label(
+                String(
+                    format: NSLocalizedString("strict.fitStatus.fitsNative", comment: ""),
+                    logical.width, logical.height, usableWidth, usableHeight
+                ),
+                systemImage: "checkmark.circle.fill"
+            )
+            .font(.caption)
+            .foregroundStyle(.green)
+        } else if data.strictViewportScaleMode == .fitScreen {
+            let ratio = min(
+                Double(usableWidth) / Double(max(logical.width, 1)),
+                Double(usableHeight) / Double(max(logical.height, 1))
+            )
+            let fittedW = max(1, Int((Double(logical.width) * ratio).rounded()))
+            let fittedH = max(1, Int((Double(logical.height) * ratio).rounded()))
+            let pct = max(1, Int((ratio * 100.0).rounded()))
+            Label(
+                String(
+                    format: NSLocalizedString("strict.fitStatus.fitScreenActive", comment: ""),
+                    logical.width, logical.height, fittedW, fittedH, pct, usableWidth, usableHeight
+                ),
+                systemImage: "arrow.up.left.and.arrow.down.right.circle.fill"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        } else {
+            Label(
+                String(
+                    format: NSLocalizedString("strict.fitStatus.nativeExceeds", comment: ""),
+                    logical.width, logical.height, usableWidth, usableHeight
+                ),
+                systemImage: "exclamationmark.triangle.fill"
+            )
+            .font(.caption)
+            .foregroundStyle(.orange)
+        }
+    }
+
+    private func effectiveLockedBinding(
+        effective: Bool,
+        stored: Binding<Bool>
+    ) -> Binding<Bool> {
+        Binding(
+            get: { isStrictMode ? effective : stored.wrappedValue },
+            set: { newValue in
+                guard !isStrictMode else { return }
+                stored.wrappedValue = newValue
+            }
+        )
+    }
+
+    @ViewBuilder
     private var troubleshootingRows: some View {
+        if isStrictMode {
+            Label("strict.lockedByMode.troubleshooting", systemImage: "lock.fill")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+
         rowWithRestartBadge {
-            Toggle("settings.playChain.debugging", isOn: $settings.settings.playChainDebugging)
-                .disabled(!settings.settings.playChain || !hasPlayTools)
+            Toggle(
+                "settings.playChain.debugging",
+                isOn: effectiveLockedBinding(
+                    effective: settings.settings.effectivePlayChainDebugging,
+                    stored: $settings.settings.playChainDebugging
+                )
+            )
+                .disabled(!settings.settings.playChain || !hasPlayTools || isStrictMode)
         }
 
         rowWithRestartBadge {
             Toggle(
                 "settings.toggle.introspection",
-                isOn: dyldBinding(
-                    for: PlayApp.introspection,
-                    role: .introspection,
-                    value: $hasIntrospection
+                isOn: Binding(
+                    get: {
+                        settings.settings.effectiveHasIntrospection(hasIntrospection)
+                    },
+                    set: { enabled in
+                        guard !isStrictMode else { return }
+                        dyldBinding(
+                            for: PlayApp.introspection,
+                            role: .introspection,
+                            value: $hasIntrospection
+                        ).wrappedValue = enabled
+                    }
                 )
             )
             .help("settings.toggle.introspection.help")
             .toggleStyle(ConfigAsyncToggleStyle(activeTask: $blockingTask, role: .introspection))
-            .disabled(!hasPlayTools)
+            .disabled(!hasPlayTools || isStrictMode)
         }
 
         rowWithRestartBadge {
@@ -179,9 +333,15 @@ struct ConfigAdvancedPane: View {
         }
 
         rowWithRestartBadge {
-            Toggle("settings.toggle.rootWorkDir", isOn: $settings.settings.rootWorkDir)
+            Toggle(
+                "settings.toggle.rootWorkDir",
+                isOn: effectiveLockedBinding(
+                    effective: settings.settings.effectiveRootWorkDir,
+                    stored: $settings.settings.rootWorkDir
+                )
+            )
                 .help("settings.toggle.rootWorkDir.help")
-                .disabled(!hasPlayTools)
+                .disabled(!hasPlayTools || isStrictMode)
         }
 
         Toggle("settings.toggle.limitMotionUpdateFrequency", isOn: $settings.settings.limitMotionUpdateFrequency)
@@ -196,12 +356,30 @@ struct ConfigAdvancedPane: View {
         }
 
         rowWithRestartBadge {
-            Toggle("settings.toggle.hud", isOn: $settings.settings.metalHUD)
+            Toggle(
+                "settings.toggle.hud",
+                isOn: effectiveLockedBinding(
+                    effective: settings.settings.effectiveMetalHUD,
+                    stored: $settings.settings.metalHUD
+                )
+            )
+            .disabled(isStrictMode)
         }
 
-        Toggle("settings.toggle.lldb", isOn: $settings.openWithLLDB)
+        Toggle(
+            "settings.toggle.lldb",
+            isOn: Binding(
+                get: { settings.effectiveOpenWithLLDB },
+                set: { newValue in
+                    guard !isStrictMode else { return }
+                    settings.openWithLLDB = newValue
+                }
+            )
+        )
+        .disabled(isStrictMode)
+
         Toggle("settings.toggle.lldbWithTerminal", isOn: $settings.openLLDBWithTerminal)
-            .disabled(!settings.openWithLLDB)
+            .disabled(!settings.effectiveOpenWithLLDB || isStrictMode)
     }
 
     private func rowWithRestartBadge<Content: View>(@ViewBuilder content: () -> Content) -> some View {

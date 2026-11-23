@@ -542,3 +542,38 @@
 
 "menubar.openWindow" = "Show MacOver Window";
 "menubar.importIPA" = "Import IPA…";
+
+"budget.renderedDetails" = "%d × %d px · %@";
+"budget.textureEdgeWarning" = "> 4096 px";
+"budget.textureEdgeWarning.help" = "Rendered resolution exceeds 4096 px on one edge, which may exceed legacy Metal texture limits.";
+
+"device.mSeriesNotice" = "Apple M-series iPad profiles expose a desktop-class Metal GPU profile (applegpu_g13g–g18g). For apps expecting A-series iPad or iPhone GPU parity, choose iPad Pro A12X or an iPhone profile.";
+
+"restart.field.strictEmulationMode" = "Strict Mode";
+"restart.field.strictViewportOrientation" = "Strict Orientation";
+"restart.field.strictViewportScaleMode" = "Strict Scale";
+
+"strict.section.title" = "Strict Emulation Mode";
+"strict.mode.toggle" = "Strict Emulation Mode (One-Click)";
+"strict.mode.desc" = "Enforces authentic iOS/iPadOS runtime parity: locks Jailbreak Bypass, Inline Syscall Interception, Root WorkDir, and native device display metrics while disabling debug hooks and notch simulation.";
+"strict.orientation.title" = "Viewport Orientation";
+"strict.orientation.landscape" = "Landscape";
+"strict.orientation.portrait" = "Portrait";
+"strict.scaleMode.title" = "Window Scale Mode";
+"strict.scaleMode.fitScreen" = "Fit Screen (Proportional)";
+"strict.scaleMode.native1x" = "Native 1:1 Points";
+"strict.scaleMode.fitScreenShort" = "Fit Screen";
+"strict.scaleMode.native1xShort" = "1:1 Native";
+"strict.display.targetHardware" = "Native Hardware Spec";
+"strict.display.logicalPoints" = "Logical UIKit Viewport";
+"strict.display.nativePixels" = "Native Device Pixels";
+"strict.fitStatus.fitsNative" = "1:1 native size (%d×%d pt) fits within this Mac display (%d×%d pt usable).";
+"strict.fitStatus.fitScreenActive" = "Option B proportional fit active: %d×%d pt UIKit viewport scales to %d×%d pt (%d%%) inside %d×%d pt usable area.";
+"strict.fitStatus.nativeExceeds" = "1:1 native size (%d×%d pt) exceeds usable Mac display (%d×%d pt); window will clamp proportionally to fit screen bounds.";
+"strict.banner.title" = "Strict Emulation Mode Active";
+"strict.banner.overviewNote" = "Presets are locked while Strict Emulation Mode enforces authentic device display and anti-detection settings.";
+"strict.banner.displayNote" = "Resolution, scaler, window compatibility, and rotation are locked to the selected device profile.";
+"strict.openAdvanced" = "Configure Strict Mode…";
+"strict.notchLockedNote" = "Notch simulation is locked off while Strict Emulation Mode is active.";
+"strict.lockedByMode.bypasses" = "Jailbreak Bypass and Inline Syscall Interception are locked ON by Strict Emulation Mode.";
+"strict.lockedByMode.troubleshooting" = "Root WorkDir is locked ON, while PlayChain Debug, Introspection, Metal HUD, and LLDB are locked OFF by Strict Emulation Mode.";

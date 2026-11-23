@@ -482,7 +482,15 @@ final class ArchitectureAndHostTests: XCTestCase {
         XCTAssertEqual(legacy.reportedIOSVersion, "automatic")
         XCTAssertEqual(legacy.frameRateTargetMode, .adaptive)
         XCTAssertEqual(legacy.reportedIOSVersionMode, .automatic)
-        XCTAssertEqual(legacy.pixelBudget.level, .caution)
+        let gib: UInt64 = 1_073_741_824
+        XCTAssertEqual(legacy.effectivePixelBudget(physicalMemoryBytes: 8 * gib).level, .over)
+        XCTAssertEqual(legacy.effectivePixelBudget(physicalMemoryBytes: 16 * gib).level, .over)
+        XCTAssertEqual(legacy.effectivePixelBudget(physicalMemoryBytes: 24 * gib).level, .caution)
+        XCTAssertEqual(legacy.effectivePixelBudget(physicalMemoryBytes: 32 * gib).level, .ok)
+        XCTAssertEqual(
+            legacy.pixelBudget,
+            legacy.effectivePixelBudget(physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory)
+        )
 
         var configured = legacy
         configured.frameRateTarget = "fixed60"
@@ -534,6 +542,16 @@ final class ArchitectureAndHostTests: XCTestCase {
             updated.restartRequiredChanges(comparedTo: legacy),
             [.windowSize, .windowCompatibility, .frameRateTarget, .reportedIOSVersion]
         )
+
+        var strictUpdated = legacy
+        strictUpdated.strictEmulationMode = true
+        strictUpdated.strictViewportOrientation = .portrait
+        strictUpdated.strictViewportScaleMode = .native1x
+        let strictDiff = strictUpdated.restartRequiredChanges(comparedTo: legacy)
+        XCTAssertTrue(strictDiff.contains(.strictEmulationMode))
+        XCTAssertTrue(strictDiff.contains(.strictViewportOrientation))
+        XCTAssertTrue(strictDiff.contains(.strictViewportScaleMode))
+        XCTAssertTrue(strictDiff.contains(.interceptInlineSyscalls))
     }
 
     func testAppSettingsObservableAndPresetsAndDeviceOptions() throws {
@@ -631,6 +649,54 @@ final class ArchitectureAndHostTests: XCTestCase {
         appSettings.update { $0.reportedIOSVersionMode = .compat18_3 }
         XCTAssertEqual(appSettings.settings.iosDeviceModel, "iPhone18,2")
         XCTAssertEqual(appSettings.settings.effectiveIOSDeviceModel, "iPhone18,2")
+
+        appSettings.update {
+            $0.resolution = 1
+            $0.windowWidth = 1234
+            $0.windowHeight = 567
+            $0.strictEmulationMode = true
+        }
+        appSettings.sync()
+        XCTAssertEqual(appSettings.settings.windowWidth, 1234)
+        XCTAssertEqual(appSettings.settings.windowHeight, 567)
+
+        let defaultRules = try Entitlements.getDefaultRules()
+        XCTAssertTrue(defaultRules.blocklist?.contains("/System/Library/CoreServices/Finder.app") ?? false)
+
+        let sandboxAppDir = dir.appendingPathComponent("StrictSandboxProbe.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: sandboxAppDir, withIntermediateDirectories: true)
+        let probeBundleID = "com.example.strictprobe.\(UUID().uuidString.lowercased())"
+        let probeInfo: [String: Any] = [
+            "CFBundleIdentifier": probeBundleID,
+            "CFBundleExecutable": "StrictSandboxProbe",
+            "CFBundleShortVersionString": "1.0"
+        ]
+        try PropertyListSerialization.data(fromPropertyList: probeInfo, format: .xml, options: 0)
+            .write(to: sandboxAppDir.appendingPathComponent("Info.plist"))
+        let probeApp = PlayApp(appUrl: sandboxAppDir)
+        let probeSettingsURL = AppSettings.settingsURL(forBundleIdentifier: probeBundleID)
+        defer {
+            _ = probeApp.settings.flush()
+            try? FileManager.default.removeItem(at: probeSettingsURL)
+        }
+
+        probeApp.settings.update {
+            $0.bypass = false
+            $0.strictEmulationMode = false
+        }
+        let nonStrictEnts = try Entitlements.composeEntitlements(probeApp)
+        let nonStrictSBPL = (nonStrictEnts["com.apple.security.temporary-exception.sbpl"] as? [String] ?? [])
+            .joined(separator: "\n")
+        XCTAssertFalse(nonStrictSBPL.contains("/System/Library/CoreServices/Finder.app"))
+
+        probeApp.settings.update {
+            $0.bypass = false
+            $0.strictEmulationMode = true
+        }
+        let strictEnts = try Entitlements.composeEntitlements(probeApp)
+        let strictSBPL = (strictEnts["com.apple.security.temporary-exception.sbpl"] as? [String] ?? [])
+            .joined(separator: "\n")
+        XCTAssertTrue(strictSBPL.contains("/System/Library/CoreServices/Finder.app"))
     }
 
     func testCommitAppBackupsReplacesOrInvalidatesStaleBackups() throws {

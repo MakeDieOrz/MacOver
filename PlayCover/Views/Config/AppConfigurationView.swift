@@ -56,12 +56,23 @@ struct AppConfigurationView: View {
             Group {
                 switch navState.activeConfigPane {
                 case .overview:
-                    ConfigOverviewPane(app: app, settings: settings, hasPlayTools: hasPlayTools)
+                    ConfigOverviewPane(
+                        app: app,
+                        settings: settings,
+                        hasPlayTools: hasPlayTools,
+                        onOpenStrictMode: { navState.activeConfigPane = .advanced }
+                    )
                 case .display:
-                    ConfigDisplayPane(settings: settings)
+                    ConfigDisplayPane(
+                        settings: settings,
+                        onOpenStrictMode: { navState.activeConfigPane = .advanced }
+                    )
                         .disabled(!hasPlayTools)
                 case .device:
-                    ConfigDevicePane(settings: settings)
+                    ConfigDevicePane(
+                        settings: settings,
+                        onOpenStrictMode: { navState.activeConfigPane = .advanced }
+                    )
                         .disabled(!hasPlayTools)
                 case .input:
                     ConfigInputPane(app: app, settings: settings)

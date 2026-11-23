@@ -1,6 +1,7 @@
 blacklist:
     - /Applications
     - /System/Applications
+    - /System/Library/CoreServices/Finder.app
     - /Developer
     - /Library/Application Support/MacOver
     - /Library/Application Support/PlayCover

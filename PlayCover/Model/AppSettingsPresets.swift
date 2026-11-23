@@ -64,6 +64,7 @@ enum PlayAppSettingsPreset: String, CaseIterable, Identifiable {
     }
 
     func matches(_ data: AppSettingsData) -> Bool {
+        guard !data.strictEmulationMode else { return false }
         var sample = data
         apply(to: &sample)
         return data.resolution == sample.resolution &&
@@ -127,6 +128,11 @@ struct DeviceProfileOption: Identifiable, Hashable {
         model.hasPrefix("iPhone")
     }
 
+    static func isMSeriesIPad(_ model: String) -> Bool {
+        let normalized = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        return StrictDeviceDisplaySpec.mSeriesIPadModels.contains(normalized)
+    }
+
     static func displayName(for model: String) -> String {
         if let modern = allModern.first(where: { $0.model == model }) {
             return modern.label
@@ -177,16 +183,16 @@ extension AppSettingsData {
         openWithLLDB: Bool
     ) -> Int {
         let flags: [Bool] = [
-            playChainDebugging,
+            effectivePlayChainDebugging,
             checkMicPermissionSync,
             blockSleepSpamming,
-            !rootWorkDir,
+            !effectiveRootWorkDir,
             limitMotionUpdateFrequency,
             ignoreUnityKeyboardInitializationError,
-            metalHUD,
-            hasIntrospection,
+            effectiveMetalHUD,
+            effectiveHasIntrospection(hasIntrospection),
             hasIosFrameworks,
-            openWithLLDB
+            effectiveOpenWithLLDB(openWithLLDB)
         ]
         return flags.filter { $0 }.count
     }

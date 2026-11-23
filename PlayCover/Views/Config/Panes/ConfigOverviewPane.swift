@@ -10,6 +10,7 @@ struct ConfigOverviewPane: View {
     @ObservedObject var app: PlayApp
     @ObservedObject var settings: AppSettings
     let hasPlayTools: Bool
+    var onOpenStrictMode: (() -> Void)?
 
     @State private var showResetConfirm = false
 
@@ -37,7 +38,7 @@ struct ConfigOverviewPane: View {
     }
 
     private var windowCompatKey: String {
-        switch settings.settings.windowCompatibility {
+        switch settings.settings.effectiveWindowCompatibility {
         case .standard: return "display.windowCompat.standard"
         case .invertedMetrics: return "display.windowCompat.invertedMetrics"
         case .invertedLegacyResize: return "display.windowCompat.invertedLegacyResize"
@@ -48,6 +49,30 @@ struct ConfigOverviewPane: View {
         Form {
             Section {
                 heroBanner
+            }
+
+            if settings.settings.strictEmulationMode {
+                Section {
+                    HStack(spacing: 10) {
+                        Image(systemName: "lock.shield.fill")
+                            .foregroundStyle(Color.accentColor)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("strict.banner.title")
+                                .font(.callout.weight(.semibold))
+                            Text("strict.banner.overviewNote")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if let onOpenStrictMode {
+                            Button("strict.openAdvanced") {
+                                onOpenStrictMode()
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                    }
+                }
             }
 
             Section("preset.section") {
@@ -64,16 +89,30 @@ struct ConfigOverviewPane: View {
                 }
                 .padding(.vertical, 4)
             }
-            .disabled(!hasPlayTools)
+            .disabled(!hasPlayTools || settings.settings.strictEmulationMode)
 
             Section("config.overview.summary") {
                 let data = settings.settings
+                if data.strictEmulationMode {
+                    LabeledContent("strict.mode.toggle") {
+                        let orientKey = data.strictViewportOrientation == .portrait
+                            ? "strict.orientation.portrait"
+                            : "strict.orientation.landscape"
+                        let scaleKey = data.strictViewportScaleMode == .native1x
+                            ? "strict.scaleMode.native1xShort"
+                            : "strict.scaleMode.fitScreenShort"
+                        Text("\(NSLocalizedString(orientKey, comment: "")) · "
+                             + "\(NSLocalizedString(scaleKey, comment: ""))")
+                            .foregroundStyle(Color.accentColor)
+                    }
+                }
                 LabeledContent("settings.picker.iosDevice") {
                     Text(DeviceProfileOption.displayName(for: data.effectiveIOSDeviceModel))
                         .foregroundStyle(.secondary)
                 }
                 LabeledContent("settings.picker.adaptiveRes") {
-                    Text("\(data.windowWidth)×\(data.windowHeight) · \(String(format: "%.1f×", data.customScaler))")
+                    let scalerStr = String(format: "%.1f×", data.effectiveCustomScaler)
+                    Text("\(data.effectiveWindowWidth)×\(data.effectiveWindowHeight) · \(scalerStr)")
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }

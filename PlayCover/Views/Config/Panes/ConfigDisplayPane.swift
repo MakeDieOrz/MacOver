@@ -8,9 +8,14 @@ import SwiftUI
 
 struct ConfigDisplayPane: View {
     @ObservedObject var settings: AppSettings
+    var onOpenStrictMode: (() -> Void)?
 
     @State private var customWidth = 1920
     @State private var customHeight = 1080
+
+    private var isStrictMode: Bool {
+        settings.settings.strictEmulationMode
+    }
 
     private static let integerFormatter: NumberFormatter = {
         let formatter = NumberFormatter()
@@ -29,6 +34,9 @@ struct ConfigDisplayPane: View {
 
     var body: some View {
         Form {
+            if isStrictMode {
+                strictModeBannerSection
+            }
             resolutionSection
             scalerAndBudgetSection
             frameRateAndCompatSection
@@ -57,12 +65,12 @@ struct ConfigDisplayPane: View {
             applyComputedDimensions()
         }
         .onChange(of: customWidth) { _, newWidth in
-            if settings.settings.resolution == 5, settings.settings.windowWidth != newWidth {
+            if !isStrictMode, settings.settings.resolution == 5, settings.settings.windowWidth != newWidth {
                 applyComputedDimensions()
             }
         }
         .onChange(of: customHeight) { _, newHeight in
-            if settings.settings.resolution == 5, settings.settings.windowHeight != newHeight {
+            if !isStrictMode, settings.settings.resolution == 5, settings.settings.windowHeight != newHeight {
                 applyComputedDimensions()
             }
         }
@@ -71,9 +79,42 @@ struct ConfigDisplayPane: View {
         }
     }
 
+    private var strictModeBannerSection: some View {
+        Section {
+            HStack(spacing: 10) {
+                Image(systemName: "lock.shield.fill")
+                    .foregroundStyle(Color.accentColor)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("strict.banner.title")
+                        .font(.callout.weight(.semibold))
+                    Text("strict.banner.displayNote")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if let onOpenStrictMode {
+                    Button("strict.openAdvanced") {
+                        onOpenStrictMode()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+        }
+    }
+
     private var resolutionSection: some View {
         Section {
-            Picker("settings.picker.adaptiveRes", selection: $settings.settings.resolution) {
+            Picker(
+                "settings.picker.adaptiveRes",
+                selection: Binding(
+                    get: { settings.settings.effectiveResolution },
+                    set: { newValue in
+                        guard !isStrictMode else { return }
+                        settings.settings.resolution = newValue
+                    }
+                )
+            ) {
                 Text("settings.picker.adaptiveRes.0").tag(0)
                 Text("settings.picker.adaptiveRes.1").tag(1)
                 Text("1080p").tag(2)
@@ -83,8 +124,30 @@ struct ConfigDisplayPane: View {
                 Text("settings.picker.adaptiveRes.6").tag(6)
             }
             .help("settings.picker.adaptiveRes.help")
+            .disabled(isStrictMode)
 
-            if settings.settings.resolution == 1 {
+            if isStrictMode {
+                let data = settings.settings
+                let spec = data.strictDeviceDisplaySpec
+                let px = spec.pixelSize(orientation: data.strictViewportOrientation)
+                LabeledContent("strict.display.logicalPoints") {
+                    Text("\(data.effectiveWindowWidth) × \(data.effectiveWindowHeight) pt")
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                LabeledContent("strict.display.nativePixels") {
+                    Text("\(px.width) × \(px.height) px · \(spec.maxFrameRateHz) Hz")
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                LabeledContent("strict.scaleMode.title") {
+                    let key = data.strictViewportScaleMode == .native1x
+                        ? "strict.scaleMode.native1x"
+                        : "strict.scaleMode.fitScreen"
+                    Text(LocalizedStringKey(key))
+                        .foregroundStyle(.secondary)
+                }
+            } else if settings.settings.resolution == 1 {
                 let autoRes = AppSettings.autoResolution()
                 LabeledContent("settings.text.detectedResolution") {
                     Text("\(autoRes.width) × \(autoRes.height)")
@@ -151,24 +214,40 @@ struct ConfigDisplayPane: View {
     }
 
     private var scalerAndBudgetSection: some View {
-        Section {
+        let scalerBinding = Binding<Double>(
+            get: { settings.settings.effectiveCustomScaler },
+            set: { newValue in
+                guard !isStrictMode else { return }
+                settings.settings.customScaler = newValue
+            }
+        )
+        let budget = settings.settings.pixelBudget
+        return Section {
             LabeledContent("settings.picker.scaler") {
                 HStack(spacing: 6) {
-                    TextField("", value: $settings.settings.customScaler, formatter: Self.scalerFormatter)
+                    TextField("", value: scalerBinding, formatter: Self.scalerFormatter)
                         .labelsHidden()
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 72)
                         .multilineTextAlignment(.trailing)
-                    Stepper("", value: $settings.settings.customScaler, in: 0.5...3.0, step: 0.1)
+                    Stepper("", value: scalerBinding, in: 0.5...3.0, step: 0.1)
                         .labelsHidden()
                 }
             }
+            .disabled(isStrictMode)
+
             PixelBudgetMeter(
-                budget: settings.settings.pixelBudget,
-                onFitToBudget: { fitted in
+                budget: budget,
+                onFitToBudget: isStrictMode ? nil : { fitted in
                     settings.update { $0.customScaler = fitted }
                 }
             )
+
+            if budget.exceedsMaxTextureEdge {
+                Label("budget.textureEdgeWarning.help", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
         }
     }
 
@@ -182,21 +261,41 @@ struct ConfigDisplayPane: View {
             }
             .help("display.frameRate.help")
 
-            Picker("display.windowCompat.title", selection: $settings.settings.windowCompatibility) {
+            Picker(
+                "display.windowCompat.title",
+                selection: Binding(
+                    get: { settings.settings.effectiveWindowCompatibility },
+                    set: { newValue in
+                        guard !isStrictMode else { return }
+                        settings.settings.windowCompatibility = newValue
+                    }
+                )
+            ) {
                 Text("display.windowCompat.standard").tag(WindowCompatibilityMode.standard)
                 Text("display.windowCompat.invertedMetrics").tag(WindowCompatibilityMode.invertedMetrics)
                 Text("display.windowCompat.invertedLegacyResize")
                     .tag(WindowCompatibilityMode.invertedLegacyResize)
             }
             .help("display.windowCompat.help")
+            .disabled(isStrictMode)
 
-            Picker("settings.settings.displayRotation", selection: $settings.settings.displayRotation) {
+            Picker(
+                "settings.settings.displayRotation",
+                selection: Binding(
+                    get: { settings.settings.effectiveDisplayRotation },
+                    set: { newValue in
+                        guard !isStrictMode else { return }
+                        settings.settings.displayRotation = newValue
+                    }
+                )
+            ) {
                 Text("settings.settings.displayRotation.default").tag(0)
                 Text("settings.settings.displayRotation.portrait").tag(1)
                 Text("settings.settings.displayRotation.landscapeRight").tag(2)
                 Text("settings.settings.displayRotation.portraitUpsideDown").tag(3)
                 Text("settings.settings.displayRotation.flipFix").tag(4)
             }
+            .disabled(isStrictMode)
         }
     }
 
@@ -210,6 +309,7 @@ struct ConfigDisplayPane: View {
     }
 
     private func applyComputedDimensions() {
+        guard !isStrictMode else { return }
         let dims = AppSettingsData.computedDimensions(
             resolution: settings.settings.resolution,
             aspectRatio: settings.settings.aspectRatio,
@@ -223,6 +323,7 @@ struct ConfigDisplayPane: View {
     }
 
     private func syncResizableRatioPresets() {
+        guard !isStrictMode else { return }
         let pair: (width: Int, height: Int)
         switch settings.settings.resizableAspectRatioType {
         case 0: pair = (0, 0)

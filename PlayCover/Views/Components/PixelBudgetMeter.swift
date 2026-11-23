@@ -36,7 +36,7 @@ struct PixelBudgetMeter: View {
     }
 
     private var limitMegapixels: Double {
-        PixelBudget.limit / 1_000_000.0
+        budget.adaptiveLimit / 1_000_000.0
     }
 
     var body: some View {
@@ -61,6 +61,30 @@ struct PixelBudgetMeter: View {
 
             ProgressView(value: normalizedProgress)
                 .tint(tintColor)
+
+            HStack(spacing: 6) {
+                Text(String(
+                    format: NSLocalizedString("budget.renderedDetails", comment: ""),
+                    budget.renderedWidth,
+                    budget.renderedHeight,
+                    budget.memoryTier.label
+                ))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+
+                Spacer(minLength: 4)
+
+                if budget.exceedsMaxTextureEdge {
+                    Label("budget.textureEdgeWarning", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.orange)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.orange.opacity(0.16)))
+                        .help("budget.textureEdgeWarning.help")
+                }
+            }
 
             if budget.level == .over, let onFitToBudget {
                 HStack {

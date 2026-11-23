@@ -637,3 +637,38 @@
 
 "menubar.openWindow" = "显示 MacOver 主窗口";
 "menubar.importIPA" = "导入 IPA…";
+
+"budget.renderedDetails" = "%d × %d px · 内存档位 %@";
+"budget.textureEdgeWarning" = "> 4096 px";
+"budget.textureEdgeWarning.help" = "渲染像素单边超过 4096 px，可能触发旧版 Metal 纹理尺寸上限导致异常或闪退。";
+
+"device.mSeriesNotice" = "M 系列 iPad 机型会暴露桌面级 Metal GPU 配置（applegpu_g13g–g18g）；若应用严格校验 A 系列 iPad 或 iPhone GPU，可改选 A12X iPad 或 iPhone 机型。";
+
+"restart.field.strictEmulationMode" = "严格仿真模式";
+"restart.field.strictViewportOrientation" = "严格仿真方向";
+"restart.field.strictViewportScaleMode" = "严格仿真缩放";
+
+"strict.section.title" = "严格仿真模式";
+"strict.mode.toggle" = "一键严格仿真模式";
+"strict.mode.desc" = "一键开启真实 iOS/iPadOS 运行时仿真：强制开启环境伪装、内联系统调用拦截与根目录兼容，锁定设备原生逻辑分辨率与倍率，并禁用调试钩子与刘海适配。";
+"strict.orientation.title" = "视口屏幕方向";
+"strict.orientation.landscape" = "横屏";
+"strict.orientation.portrait" = "竖屏";
+"strict.scaleMode.title" = "窗口缩放策略";
+"strict.scaleMode.fitScreen" = "等比适配屏幕（Option B）";
+"strict.scaleMode.native1x" = "原生 1:1 点对点";
+"strict.scaleMode.fitScreenShort" = "等比适配";
+"strict.scaleMode.native1xShort" = "1:1 原生";
+"strict.display.targetHardware" = "原生硬件规格";
+"strict.display.logicalPoints" = "UIKit 逻辑视口";
+"strict.display.nativePixels" = "设备原生像素";
+"strict.fitStatus.fitsNative" = "原生 1:1 尺寸（%d×%d pt）可直接完整显示在当前 Mac 屏幕内（可用 %d×%d pt）。";
+"strict.fitStatus.fitScreenActive" = "已启用 Option B 等比缩放：%d×%d pt UIKit 视口将缩放为 %d×%d pt（%d%%），以适配 %d×%d pt 可用屏幕。";
+"strict.fitStatus.nativeExceeds" = "原生 1:1 尺寸（%d×%d pt）超出当前 Mac 可用屏幕（%d×%d pt），窗口将按屏幕边界等比钳制。";
+"strict.banner.title" = "严格仿真模式已启用";
+"strict.banner.overviewNote" = "严格仿真模式正在强制接管设备显示与环境伪装参数，场景预设已锁定。";
+"strict.banner.displayNote" = "分辨率、倍率、窗口兼容模式与屏幕方向已锁定为所选设备的原生规格。";
+"strict.openAdvanced" = "前往高级设置…";
+"strict.notchLockedNote" = "严格仿真模式下已强制关闭刘海适配（设备机型与系统版本仍可自由选择）。";
+"strict.lockedByMode.bypasses" = "环境伪装与内联系统调用拦截已被严格仿真模式强制锁定开启。";
+"strict.lockedByMode.troubleshooting" = "严格仿真模式下已强制锁定开启根目录兼容，并锁定关闭 PlayChain 调试、内省库、Metal HUD 与 LLDB。";

@@ -192,7 +192,7 @@ class PlayApp: BaseApp, ObservableObject, Identifiable, Hashable {
             let svcBundleID = launchInfo.bundleIdentifier.isEmpty ? info.bundleIdentifier : launchInfo.bundleIdentifier
             let shouldInterceptSVC = usesPlayTools
                 && !safeModeOneShot
-                && settings.settings.interceptInlineSyscalls
+                && settings.settings.effectiveInterceptInlineSyscalls
             let svcResult: InlineSyscallPatcher.ReconcileResult
             if !svcBundleID.isEmpty {
                 svcResult = try InlineSyscallPatcher.reconcile(
@@ -217,6 +217,11 @@ class PlayApp: BaseApp, ObservableObject, Identifiable, Hashable {
                 }
             }
 
+            let introspectionModifiedForStrict = usesPlayTools
+                && !safeModeOneShot
+                && settings.settings.strictEmulationMode
+                && stripIntrospectionForStrictLaunch(launchInfo: launchInfo)
+
             let entitlementsInvalid = try !Entitlements.areEntitlementsValid(app: self)
 
             if entitlementsInvalid {
@@ -227,7 +232,11 @@ class PlayApp: BaseApp, ObservableObject, Identifiable, Hashable {
                 Self.verifiedBundleLock.lock()
                 Self.verifiedBundleStamps[url.path] = stamp
                 Self.verifiedBundleLock.unlock()
-            } else if binaryModified || pluginsModified || svcResult.modified || !isBundleSignatureStrictlyValid() {
+            } else if binaryModified
+                        || pluginsModified
+                        || svcResult.modified
+                        || introspectionModifiedForStrict
+                        || !isBundleSignatureStrictlyValid() {
                 Self.invalidateVerifiedBundleStamp(for: url)
                 do {
                     try Shell.signApp(executable)
@@ -279,8 +288,11 @@ class PlayApp: BaseApp, ObservableObject, Identifiable, Hashable {
             }
 
             do {
+                if !safeModeOneShot && settings.settings.strictEmulationMode && !svcBundleID.isEmpty {
+                    try? Shell.setMetalHUD(svcBundleID, enabled: false)
+                }
                 settings.flush()
-                if settings.openWithLLDB {
+                if !safeModeOneShot && settings.effectiveOpenWithLLDB {
                     try Shell.lldb(executable, withTerminalWindow: settings.openLLDBWithTerminal)
                 } else {
                     ensureAliasUpToDate()
@@ -679,6 +691,27 @@ extension PlayApp {
             PlayCoverDiagnostics.reportError(error)
             return true
         }
+    }
+
+    private func stripIntrospectionForStrictLaunch(launchInfo: AppInfo) -> Bool {
+        var env = launchInfo.lsEnvironment
+        var entries = (env["DYLD_LIBRARY_PATH"] ?? "")
+            .split(separator: ":")
+            .map(String.init)
+            .filter { !$0.isEmpty }
+        guard entries.contains(Self.introspection) else {
+            return false
+        }
+        entries.removeAll { $0 == Self.introspection }
+        if entries.isEmpty {
+            env.removeValue(forKey: "DYLD_LIBRARY_PATH")
+        } else {
+            env["DYLD_LIBRARY_PATH"] = entries.joined(separator: ":")
+        }
+        launchInfo.lsEnvironment = env
+        info.lsEnvironment = env
+        Self.invalidateVerifiedBundleStamp(for: url)
+        return true
     }
 
     func changeDyldLibraryPath(set: Bool? = nil, path: String) async -> Bool {

@@ -60,6 +60,9 @@ struct AppSettingsData: Codable, Equatable {
     var keymappingDisabledAt: Float = 0
     var frameRateTarget: String = FrameRateTarget.adaptive.rawValue
     var reportedIOSVersion: String = ReportedIOSVersionMode.automatic.rawValue
+    var strictEmulationMode = false
+    var strictViewportOrientation: StrictViewportOrientation = .landscape
+    var strictViewportScaleMode: StrictViewportScaleMode = .fitScreen
 
     init() {}
 
@@ -128,6 +131,13 @@ struct AppSettingsData: Codable, Equatable {
         reportedIOSVersion = ReportedIOSVersionMode(
             rawSetting: try? container.decodeIfPresent(String.self, forKey: .reportedIOSVersion)
         ).rawValue
+        strictEmulationMode = (try? container.decodeIfPresent(Bool.self, forKey: .strictEmulationMode)) ?? false
+        strictViewportOrientation = StrictViewportOrientation(
+            rawSetting: try? container.decodeIfPresent(String.self, forKey: .strictViewportOrientation)
+        )
+        strictViewportScaleMode = StrictViewportScaleMode(
+            rawSetting: try? container.decodeIfPresent(String.self, forKey: .strictViewportScaleMode)
+        )
     }
 
     private static func decodeFloat<K: CodingKey>(
@@ -192,33 +202,130 @@ struct AppSettingsData: Codable, Equatable {
         ReportedIOSVersionMode.effectiveDeviceModel(iosDeviceModel, for: reportedIOSVersionMode)
     }
 
+    var strictDeviceDisplaySpec: StrictDeviceDisplaySpec {
+        StrictDeviceDisplaySpec.resolve(for: effectiveIOSDeviceModel)
+    }
+
+    var effectiveBypass: Bool {
+        strictEmulationMode ? true : bypass
+    }
+
+    var effectiveInterceptInlineSyscalls: Bool {
+        strictEmulationMode ? true : interceptInlineSyscalls
+    }
+
+    var effectiveRootWorkDir: Bool {
+        strictEmulationMode ? true : rootWorkDir
+    }
+
+    var effectiveMetalHUD: Bool {
+        strictEmulationMode ? false : metalHUD
+    }
+
+    var effectivePlayChainDebugging: Bool {
+        strictEmulationMode ? false : playChainDebugging
+    }
+
+    var effectiveNotch: Bool {
+        strictEmulationMode ? false : notch
+    }
+
+    func effectiveHasIntrospection(_ storedHasIntrospection: Bool) -> Bool {
+        strictEmulationMode ? false : storedHasIntrospection
+    }
+
+    func effectiveOpenWithLLDB(_ storedOpenWithLLDB: Bool) -> Bool {
+        strictEmulationMode ? false : storedOpenWithLLDB
+    }
+
+    var effectiveCustomScaler: Double {
+        strictEmulationMode ? strictDeviceDisplaySpec.nativeScale : customScaler
+    }
+
+    var effectiveLogicalWindowSize: (width: Int, height: Int) {
+        if strictEmulationMode {
+            return strictDeviceDisplaySpec.logicalSize(orientation: strictViewportOrientation)
+        }
+        return (windowWidth, windowHeight)
+    }
+
+    var effectiveWindowWidth: Int {
+        effectiveLogicalWindowSize.width
+    }
+
+    var effectiveWindowHeight: Int {
+        effectiveLogicalWindowSize.height
+    }
+
+    var effectiveResolution: Int {
+        strictEmulationMode ? 5 : resolution
+    }
+
+    var effectiveWindowCompatibility: WindowCompatibilityMode {
+        strictEmulationMode ? .standard : windowCompatibility
+    }
+
+    var effectiveDisplayRotation: Int {
+        strictEmulationMode ? strictViewportOrientation.displayRotationTag : displayRotation
+    }
+
+    func effectivePixelBudget(
+        physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory
+    ) -> PixelBudget {
+        PixelBudget(
+            width: effectiveWindowWidth,
+            height: effectiveWindowHeight,
+            scaler: effectiveCustomScaler,
+            physicalMemoryBytes: physicalMemoryBytes
+        )
+    }
+
     var pixelBudget: PixelBudget {
-        PixelBudget(width: windowWidth, height: windowHeight, scaler: customScaler)
+        effectivePixelBudget()
     }
 
     func restartRequiredChanges(comparedTo snapshot: AppSettingsData) -> [PlayCoverRestartField] {
         var changed: [PlayCoverRestartField] = []
         if iosDeviceModel != snapshot.iosDeviceModel { changed.append(.iosDeviceModel) }
-        if resolution != snapshot.resolution { changed.append(.resolution) }
-        if windowWidth != snapshot.windowWidth ||
-            windowHeight != snapshot.windowHeight ||
-            resizableAspectRatioType != snapshot.resizableAspectRatioType ||
-            resizableAspectRatioWidth != snapshot.resizableAspectRatioWidth ||
-            resizableAspectRatioHeight != snapshot.resizableAspectRatioHeight {
+        if effectiveResolution != snapshot.effectiveResolution { changed.append(.resolution) }
+        if strictEmulationMode != snapshot.strictEmulationMode {
+            changed.append(.strictEmulationMode)
+        }
+        if strictEmulationMode || snapshot.strictEmulationMode {
+            if strictViewportOrientation != snapshot.strictViewportOrientation {
+                changed.append(.strictViewportOrientation)
+            }
+            if strictViewportScaleMode != snapshot.strictViewportScaleMode {
+                changed.append(.strictViewportScaleMode)
+            }
+        }
+        if effectiveWindowWidth != snapshot.effectiveWindowWidth ||
+            effectiveWindowHeight != snapshot.effectiveWindowHeight ||
+            (!strictEmulationMode && !snapshot.strictEmulationMode && (
+                resizableAspectRatioType != snapshot.resizableAspectRatioType ||
+                resizableAspectRatioWidth != snapshot.resizableAspectRatioWidth ||
+                resizableAspectRatioHeight != snapshot.resizableAspectRatioHeight
+            )) {
             changed.append(.windowSize)
         }
-        if aspectRatio != snapshot.aspectRatio { changed.append(.aspectRatio) }
-        if customScaler != snapshot.customScaler { changed.append(.customScaler) }
-        if windowCompatibility != snapshot.windowCompatibility { changed.append(.windowCompatibility) }
+        if !strictEmulationMode && !snapshot.strictEmulationMode && aspectRatio != snapshot.aspectRatio {
+            changed.append(.aspectRatio)
+        }
+        if effectiveCustomScaler != snapshot.effectiveCustomScaler { changed.append(.customScaler) }
+        if effectiveWindowCompatibility != snapshot.effectiveWindowCompatibility {
+            changed.append(.windowCompatibility)
+        }
         if frameRateTargetMode != snapshot.frameRateTargetMode { changed.append(.frameRateTarget) }
         if reportedIOSVersionMode != snapshot.reportedIOSVersionMode { changed.append(.reportedIOSVersion) }
-        if notch != snapshot.notch { changed.append(.notch) }
-        if bypass != snapshot.bypass { changed.append(.bypass) }
+        if effectiveNotch != snapshot.effectiveNotch { changed.append(.notch) }
+        if effectiveBypass != snapshot.effectiveBypass { changed.append(.bypass) }
         if playChain != snapshot.playChain { changed.append(.playChain) }
-        if playChainDebugging != snapshot.playChainDebugging { changed.append(.playChainDebugging) }
-        if metalHUD != snapshot.metalHUD { changed.append(.metalHUD) }
+        if effectivePlayChainDebugging != snapshot.effectivePlayChainDebugging {
+            changed.append(.playChainDebugging)
+        }
+        if effectiveMetalHUD != snapshot.effectiveMetalHUD { changed.append(.metalHUD) }
         // `injectIntrospection` is a deprecated/unused legacy plist field with no runtime consumer.
-        if rootWorkDir != snapshot.rootWorkDir { changed.append(.rootWorkDir) }
+        if effectiveRootWorkDir != snapshot.effectiveRootWorkDir { changed.append(.rootWorkDir) }
         if hideTitleBar != snapshot.hideTitleBar { changed.append(.hideTitleBar) }
         if floatingWindow != snapshot.floatingWindow { changed.append(.floatingWindow) }
         if enableNetworkRules != snapshot.enableNetworkRules { changed.append(.enableNetworkRules) }
@@ -231,7 +338,7 @@ struct AppSettingsData: Codable, Equatable {
         if ignoreUnityKeyboardInitializationError != snapshot.ignoreUnityKeyboardInitializationError {
             changed.append(.ignoreUnityKeyboardInitializationError)
         }
-        if interceptInlineSyscalls != snapshot.interceptInlineSyscalls {
+        if effectiveInterceptInlineSyscalls != snapshot.effectiveInterceptInlineSyscalls {
             changed.append(.interceptInlineSyscalls)
         }
         return changed
@@ -261,6 +368,9 @@ class AppSettings: ObservableObject {
     }
     var openLLDBWithTerminal: Bool = true {
         didSet { notifyChangedOnMain() }
+    }
+    var effectiveOpenWithLLDB: Bool {
+        settings.effectiveOpenWithLLDB(openWithLLDB)
     }
     private let lock = NSLock()
     private let ioQueue = DispatchQueue(label: "app.makedie.MacOver.AppSettings.io", qos: .utility)
@@ -296,8 +406,8 @@ class AppSettings: ObservableObject {
             if newValue != previous {
                 didChange = true
                 if !suppressPersistence {
-                    if previous.metalHUD != newValue.metalHUD && !newValue.bundleIdentifier.isEmpty {
-                        metalHUDToApply = (newValue.bundleIdentifier, newValue.metalHUD)
+                    if previous.effectiveMetalHUD != newValue.effectiveMetalHUD && !newValue.bundleIdentifier.isEmpty {
+                        metalHUDToApply = (newValue.bundleIdentifier, newValue.effectiveMetalHUD)
                     }
                     scheduleDebouncedWriteLocked()
                 }
@@ -363,8 +473,8 @@ class AppSettings: ObservableObject {
         }
         _settings = updated
         if !suppressPersistence {
-            if previous.metalHUD != updated.metalHUD && !updated.bundleIdentifier.isEmpty {
-                metalHUDToApply = (updated.bundleIdentifier, updated.metalHUD)
+            if previous.effectiveMetalHUD != updated.effectiveMetalHUD && !updated.bundleIdentifier.isEmpty {
+                metalHUDToApply = (updated.bundleIdentifier, updated.effectiveMetalHUD)
             }
             scheduleDebouncedWriteLocked()
         }
@@ -418,6 +528,7 @@ class AppSettings: ObservableObject {
         let hasNotch = NSScreen.hasNotch()
         let autoRes = AppSettings.autoResolution()
         update { updatedSettings in
+            guard !updatedSettings.strictEmulationMode else { return }
             updatedSettings.notch = hasNotch
             if updatedSettings.resolution == 1 {
                 updatedSettings.windowWidth = autoRes.width
@@ -450,8 +561,8 @@ class AppSettings: ObservableObject {
         isResetting = true
         defer { isResetting = false }
         _settings = defaults
-        if previous.metalHUD != defaults.metalHUD && !defaults.bundleIdentifier.isEmpty {
-            metalHUDToApply = (defaults.bundleIdentifier, defaults.metalHUD)
+        if previous.effectiveMetalHUD != defaults.effectiveMetalHUD && !defaults.bundleIdentifier.isEmpty {
+            metalHUDToApply = (defaults.bundleIdentifier, defaults.effectiveMetalHUD)
         }
         _ = encodeLocked()
         lock.unlock()

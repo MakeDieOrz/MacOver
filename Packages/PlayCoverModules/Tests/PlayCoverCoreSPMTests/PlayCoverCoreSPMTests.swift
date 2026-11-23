@@ -109,23 +109,119 @@ final class PlayCoverCoreSPMTests: XCTestCase {
         XCTAssertEqual(WindowCompatibilityMode.invertedLegacyResize.legacyValues.windowFixMethod, 1)
         XCTAssertTrue(WindowCompatibilityMode.invertedLegacyResize.requiresAdaptiveResolutionOff)
 
-        let okBudget = PixelBudget(width: 1920, height: 1080, scaler: 1.5)
-        XCTAssertEqual(okBudget.weightedPixels, 3_110_400, accuracy: 0.5)
+        let gib: UInt64 = 1_073_741_824
+        XCTAssertEqual(PixelBudget.limit, 2_621_440.0 * 2.0)
+        XCTAssertEqual(PixelBudget.adaptiveLimit(forPhysicalMemoryBytes: 8 * gib), 4_500_000)
+        XCTAssertEqual(PixelBudget.adaptiveLimit(forPhysicalMemoryBytes: 16 * gib), 6_000_000)
+        XCTAssertEqual(PixelBudget.adaptiveLimit(forPhysicalMemoryBytes: 24 * gib), 9_000_000)
+        XCTAssertEqual(PixelBudget.adaptiveLimit(forPhysicalMemoryBytes: 32 * gib), 12_000_000)
+
+        let okBudget = PixelBudget(width: 1920, height: 1080, scaler: 1.0, physicalMemoryBytes: 8 * gib)
+        XCTAssertEqual(okBudget.weightedPixels, 2_073_600, accuracy: 0.5)
+        XCTAssertEqual(okBudget.renderedWidth, 1920)
+        XCTAssertEqual(okBudget.renderedHeight, 1080)
+        XCTAssertFalse(okBudget.exceedsMaxTextureEdge)
         XCTAssertEqual(okBudget.level, .ok)
 
-        let cautionBudget = PixelBudget(width: 1920, height: 1080, scaler: 2.0)
-        XCTAssertEqual(cautionBudget.weightedPixels, 4_147_200, accuracy: 0.5)
+        let cautionBudget = PixelBudget(width: 1920, height: 1080, scaler: 2.0, physicalMemoryBytes: 24 * gib)
+        XCTAssertEqual(cautionBudget.weightedPixels, 8_294_400, accuracy: 0.5)
+        XCTAssertEqual(cautionBudget.renderedWidth, 3840)
+        XCTAssertEqual(cautionBudget.renderedHeight, 2160)
+        XCTAssertFalse(cautionBudget.exceedsMaxTextureEdge)
         XCTAssertEqual(cautionBudget.level, .caution)
 
-        let overBudget = PixelBudget(width: 2560, height: 1440, scaler: 2.0)
-        XCTAssertEqual(overBudget.weightedPixels, 7_372_800, accuracy: 0.5)
+        let highMemBudget = PixelBudget(width: 1920, height: 1080, scaler: 2.0, physicalMemoryBytes: 32 * gib)
+        XCTAssertEqual(highMemBudget.level, .ok)
+
+        let edge4096Exact = PixelBudget(width: 2048, height: 1536, scaler: 2.0, physicalMemoryBytes: 32 * gib)
+        XCTAssertEqual(edge4096Exact.renderedWidth, 4096)
+        XCTAssertEqual(edge4096Exact.renderedHeight, 3072)
+        XCTAssertFalse(edge4096Exact.exceedsMaxTextureEdge)
+
+        let edgeOver4096 = PixelBudget(width: 1920, height: 1080, scaler: 2.2, physicalMemoryBytes: 32 * gib)
+        XCTAssertEqual(edgeOver4096.renderedWidth, 4224)
+        XCTAssertEqual(edgeOver4096.renderedHeight, 2376)
+        XCTAssertTrue(edgeOver4096.exceedsMaxTextureEdge)
+
+        let overBudget = PixelBudget(width: 2560, height: 1440, scaler: 2.0, physicalMemoryBytes: 16 * gib)
+        XCTAssertEqual(overBudget.weightedPixels, 14_745_600, accuracy: 0.5)
         XCTAssertEqual(overBudget.level, .over)
-        XCTAssertEqual(overBudget.fittedScaler, 1.4, accuracy: 0.001)
-        XCTAssertNotEqual(PixelBudget(width: 2560, height: 1440, scaler: overBudget.fittedScaler).level, .over)
+        XCTAssertTrue(overBudget.exceedsMaxTextureEdge)
+        XCTAssertEqual(overBudget.fittedScaler, 1.2, accuracy: 0.001)
+        let fitted = PixelBudget(
+            width: 2560, height: 1440, scaler: overBudget.fittedScaler, physicalMemoryBytes: 16 * gib
+        )
+        XCTAssertNotEqual(fitted.level, .over)
+
+        let over8GB = PixelBudget(width: 1920, height: 1080, scaler: 2.0, physicalMemoryBytes: 8 * gib)
+        XCTAssertEqual(over8GB.level, .over)
+        XCTAssertEqual(over8GB.fittedScaler, 1.4, accuracy: 0.001)
+        XCTAssertNotEqual(
+            PixelBudget(width: 1920, height: 1080, scaler: over8GB.fittedScaler, physicalMemoryBytes: 8 * gib).level,
+            .over
+        )
 
         XCTAssertEqual(PixelBudget(width: 0, height: 1080, scaler: 2.0).weightedPixels, 0)
+        XCTAssertEqual(PixelBudget(width: 0, height: 1080, scaler: 2.0).renderedWidth, 0)
         XCTAssertEqual(PixelBudget(width: 0, height: 1080, scaler: 2.0).fittedScaler, 1.0)
         XCTAssertEqual(PixelBudget(width: 1920, height: 1080, scaler: -1.0).weightedPixels, 0)
+        XCTAssertFalse(PixelBudget(width: 1920, height: 1080, scaler: -1.0).exceedsMaxTextureEdge)
+    }
+
+    func testStrictEmulationEnumsAndDeviceDisplaySpecs() {
+        XCTAssertEqual(StrictViewportOrientation(rawSetting: nil), .landscape)
+        XCTAssertEqual(StrictViewportOrientation(rawSetting: " Portrait \n"), .portrait)
+        XCTAssertEqual(StrictViewportOrientation(rawSetting: "bogus"), .landscape)
+        XCTAssertEqual(StrictViewportOrientation.landscape.displayRotationTag, 0)
+        XCTAssertEqual(StrictViewportOrientation.portrait.displayRotationTag, 1)
+
+        XCTAssertEqual(StrictViewportScaleMode(rawSetting: nil), .fitScreen)
+        XCTAssertEqual(StrictViewportScaleMode(rawSetting: "native1x"), .native1x)
+        XCTAssertEqual(StrictViewportScaleMode(rawSetting: "NATIVE"), .native1x)
+        XCTAssertEqual(StrictViewportScaleMode(rawSetting: "unknown"), .fitScreen)
+
+        let expectedSpecs: [(String, Int, Int, Double, Int, Bool)] = [
+            ("iPad6,7", 2048, 2732, 2.0, 60, true),
+            ("iPad8,6", 2048, 2732, 2.0, 120, true),
+            ("iPad13,8", 2048, 2732, 2.0, 120, true),
+            ("iPad14,5", 2048, 2732, 2.0, 120, true),
+            ("iPad16,6", 2064, 2752, 2.0, 120, true),
+            ("iPad17,3", 2064, 2752, 2.0, 120, true),
+            ("iPhone12,5", 1242, 2688, 3.0, 60, false),
+            ("iPhone14,3", 1284, 2778, 3.0, 120, false),
+            ("iPhone15,3", 1290, 2796, 3.0, 120, false),
+            ("iPhone16,2", 1290, 2796, 3.0, 120, false),
+            ("iPhone17,2", 1320, 2868, 3.0, 120, false),
+            ("iPhone18,2", 1320, 2868, 3.0, 120, false)
+        ]
+        for (model, pxW, pxH, scale, fps, isIPad) in expectedSpecs {
+            let spec = StrictDeviceDisplaySpec.resolve(for: model)
+            XCTAssertEqual(spec.portraitPixelWidth, pxW)
+            XCTAssertEqual(spec.portraitPixelHeight, pxH)
+            XCTAssertEqual(spec.nativeScale, scale)
+            XCTAssertEqual(spec.maxFrameRateHz, fps)
+            XCTAssertEqual(spec.isIPad, isIPad)
+        }
+
+        let m4Pad = StrictDeviceDisplaySpec.resolve(for: "iPad16,6")
+        XCTAssertTrue(m4Pad.isMSeriesIPad)
+        XCTAssertEqual(m4Pad.logicalSize(orientation: .portrait).width, 1032)
+        XCTAssertEqual(m4Pad.logicalSize(orientation: .portrait).height, 1376)
+        XCTAssertEqual(m4Pad.logicalSize(orientation: .landscape).width, 1376)
+        XCTAssertEqual(m4Pad.logicalSize(orientation: .landscape).height, 1032)
+
+        let a12xPad = StrictDeviceDisplaySpec.resolve(for: "iPad8,6")
+        XCTAssertFalse(a12xPad.isMSeriesIPad)
+
+        let unknownPhone = StrictDeviceDisplaySpec.resolve(for: "iPhone99,1")
+        XCTAssertFalse(unknownPhone.isIPad)
+        XCTAssertEqual(unknownPhone.nativeScale, 3.0)
+        XCTAssertEqual(unknownPhone.portraitPixelWidth, 1320)
+
+        let unknownPad = StrictDeviceDisplaySpec.resolve(for: "")
+        XCTAssertTrue(unknownPad.isIPad)
+        XCTAssertEqual(unknownPad.nativeScale, 2.0)
+        XCTAssertEqual(unknownPad.portraitPixelWidth, 2048)
     }
 
     func testFrameRateTargetReportedIOSVersionAndRestartFields() {
@@ -171,10 +267,13 @@ final class PlayCoverCoreSPMTests: XCTestCase {
         XCTAssertFalse(ReportedIOSVersionMode.isMinimumOSVersion("12.4", higherThan: 13, minor: 7))
         XCTAssertFalse(ReportedIOSVersionMode.isMinimumOSVersion("", higherThan: 13, minor: 7))
 
-        XCTAssertEqual(PlayCoverRestartField.allCases.count, 24)
+        XCTAssertEqual(PlayCoverRestartField.allCases.count, 27)
         XCTAssertTrue(PlayCoverRestartField.allCases.contains(.windowCompatibility))
         XCTAssertTrue(PlayCoverRestartField.allCases.contains(.frameRateTarget))
         XCTAssertTrue(PlayCoverRestartField.allCases.contains(.reportedIOSVersion))
         XCTAssertTrue(PlayCoverRestartField.allCases.contains(.interceptInlineSyscalls))
+        XCTAssertTrue(PlayCoverRestartField.allCases.contains(.strictEmulationMode))
+        XCTAssertTrue(PlayCoverRestartField.allCases.contains(.strictViewportOrientation))
+        XCTAssertTrue(PlayCoverRestartField.allCases.contains(.strictViewportScaleMode))
     }
 }
