@@ -59,8 +59,11 @@ static void mock_plugin_init(void) {
 MOCK_TARGET_M = r"""
 @import Foundation;
 @import CoreMotion;
+@import CoreText;
 @import QuartzCore;
+@import Security;
 @import UIKit;
+@import WebKit;
 @import PlayTools;
 #include <arpa/inet.h>
 #include <dlfcn.h>
@@ -86,14 +89,18 @@ MOCK_TARGET_M = r"""
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
+#include <sys/un.h>
 #include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
 
 extern bool pt_is_registered_hidden_module(const char *name);
 extern bool pt_is_registered_hidden_class(const char *name);
+extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
+extern bool _dyld_shared_cache_contains_path(const char *path) __attribute__((weak_import));
 extern intptr_t pt_harness_syscall(int, ...) __asm("_syscall");
 extern int pt_harness_csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize) __asm("_csops");
 extern void pt_harness_dyld_get_image_versions(
@@ -269,6 +276,46 @@ static NSString *pt_state_dir(void) {
                                                                       inDomains:NSUserDomainMask];
     NSURL *base = caches.firstObject ?: [NSURL fileURLWithPath:NSTemporaryDirectory()];
     return [[base URLByAppendingPathComponent:@"app.makedie.PlayTools" isDirectory:YES] path];
+}
+
+__attribute__((noinline))
+static BOOL pt_harness_deep_file_exists(NSFileManager *fm, NSString *path) {
+    SEL existsSel = @selector(fileExistsAtPath:);
+    NSMethodSignature *sig1 = [fm methodSignatureForSelector:existsSel];
+    NSInvocation *inv1 = [NSInvocation invocationWithMethodSignature:sig1];
+    [inv1 setTarget:fm];
+    [inv1 setSelector:existsSel];
+    [inv1 setArgument:&path atIndex:2];
+    [inv1 retainArguments];
+
+    NSInvocation *chain = inv1;
+    NSMethodSignature *invokeSig = [NSInvocation instanceMethodSignatureForSelector:@selector(invoke)];
+    for (int depth = 0; depth < 4; depth++) {
+        NSInvocation *wrapper = [NSInvocation invocationWithMethodSignature:invokeSig];
+        [wrapper setTarget:chain];
+        [wrapper setSelector:@selector(invoke)];
+        [wrapper retainArguments];
+        chain = wrapper;
+    }
+    NSArray<NSInvocation *> *arr = @[chain];
+    [arr makeObjectsPerformSelector:@selector(invoke)];
+    BOOL exists = NO;
+    [inv1 getReturnValue:&exists];
+    return exists;
+}
+
+static BOOL pt_harness_contains_desktop_font(NSArray<NSString *> *names) {
+    NSSet<NSString *> *exact = [NSSet setWithObjects:@"monaco", @"geneva", @"lucida grande", @"herculanum", nil];
+    for (id item in names) {
+        if (![item isKindOfClass:[NSString class]]) {
+            continue;
+        }
+        NSString *lower = [(NSString *)item lowercaseString];
+        if ([exact containsObject:lower] || [lower hasPrefix:@"lucidagrande"]) {
+            return YES;
+        }
+    }
+    return NO;
 }
 
 int main(int argc, const char *argv[]) {
@@ -1207,6 +1254,370 @@ int main(int argc, const char *argv[]) {
 #endif
         }
 
+        // Scenario 10: 99-check anti-detection & contract hardening checks
+        BOOL s10StrictBypassEarlyOK = NO;
+        BOOL s10DeepUnwindHidMacPaths = NO;
+        BOOL s10PlayChainOpaqueRefOK = NO;
+        BOOL s10PlayChainForeignGroupBlocked = NO;
+        BOOL s10PlayChainSEExportBlocked = NO;
+        BOOL s10WebKitVFileHidden = NO;
+        BOOL s10DesktopFontsHidden = NO;
+        BOOL s10DscVersionedHidden = NO;
+        BOOL s10FinderHidden = NO;
+        BOOL s10ProcArgsHidSandboxId = NO;
+        BOOL s10SelfPidpathVirtual = NO;
+        NSString *s10SelfPidpathValue = @"";
+        BOOL s10CoreMotionGenuineAndEpochOK = NO;
+        BOOL s10AltimeterContractOK = NO;
+        BOOL s10UnixRelativeSocketOK = NO;
+        BOOL s10ExceptionPortsHidden = NO;
+        BOOL s10SysctlCacheTopologyOK = NO;
+        const char *testS10Env = getenv("HARNESS_TEST_SCENARIO10");
+        if (testS10Env != NULL && strcmp(testS10Env, "1") == 0) {
+            // 1. Strict Mode keeps early bypass active even when stored bypass=false
+            s10StrictBypassEarlyOK = ([[PlaySettings shared] strictEmulationMode] &&
+                                      !safeModeActive &&
+                                      vmNonIosImages == 0 &&
+                                      vmHiddenMachOCount == 0);
+
+            // 2. A02: Deep NSInvocation/Foundation wrapper chain (14+ system frames) hides Safari/Finder
+            s10DeepUnwindHidMacPaths = (!pt_harness_deep_file_exists(fm, @"/Applications/Safari.app") &&
+                                        !pt_harness_deep_file_exists(fm, @"/System/Library/CoreServices/Finder.app"));
+
+            // 3. A03: PlayChain opaque 20-byte ref, foreign access group -34018, SE export block
+            {
+                NSString *svc = [NSString stringWithFormat:@"sc10.svc.%d", getpid()];
+                NSString *acct = @"sc10-acct";
+                NSDictionary *addQ = @{
+                    (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+                    (__bridge id)kSecAttrService: svc,
+                    (__bridge id)kSecAttrAccount: acct,
+                    (__bridge id)kSecValueData: [@"sc10-secret" dataUsingEncoding:NSUTF8StringEncoding],
+                    (__bridge id)kSecReturnPersistentRef: @YES,
+                };
+                CFTypeRef prefObj = NULL;
+                OSStatus addSt = SecItemAdd((__bridge CFDictionaryRef)addQ, &prefObj);
+                if (addSt == errSecSuccess && prefObj != NULL) {
+                    if (CFGetTypeID(prefObj) == CFDataGetTypeID()) {
+                        NSData *prefData = (__bridge NSData *)prefObj;
+                        const uint8_t *b = (const uint8_t *)prefData.bytes;
+                        if (prefData.length == 20 && b[0] >= 0x80 && b[1] >= 0x80 && b[2] >= 0x80 &&
+                            memcmp(b, "PCPR1:", 6) != 0) {
+                            s10PlayChainOpaqueRefOK = YES;
+                        }
+                    }
+                    CFRelease(prefObj);
+                }
+                SecItemDelete((__bridge CFDictionaryRef)@{
+                    (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+                    (__bridge id)kSecAttrService: svc,
+                    (__bridge id)kSecAttrAccount: acct,
+                });
+
+                NSDictionary *foreignQ = @{
+                    (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+                    (__bridge id)kSecAttrService: [svc stringByAppendingString:@".foreign"],
+                    (__bridge id)kSecAttrAccount: acct,
+                    (__bridge id)kSecAttrAccessGroup: @"ZZZZZZZZZZ.com.foreign.unauthorized",
+                    (__bridge id)kSecValueData: [@"x" dataUsingEncoding:NSUTF8StringEncoding],
+                };
+                CFTypeRef foreignRef = NULL;
+                OSStatus foreignSt = SecItemAdd((__bridge CFDictionaryRef)foreignQ, &foreignRef);
+                if (foreignRef != NULL) {
+                    CFRelease(foreignRef);
+                }
+                s10PlayChainForeignGroupBlocked = (foreignSt == errSecMissingEntitlement);
+
+                NSDictionary *seParams = @{
+                    (__bridge id)kSecAttrKeyType: (__bridge id)kSecAttrKeyTypeECSECPrimeRandom,
+                    (__bridge id)kSecAttrKeySizeInBits: @256,
+                    (__bridge id)kSecAttrTokenID: (__bridge id)kSecAttrTokenIDSecureEnclave,
+                    (__bridge id)kSecPrivateKeyAttrs: @{
+                        (__bridge id)kSecAttrIsPermanent: @NO,
+                    },
+                };
+                CFErrorRef keyErr = NULL;
+                SecKeyRef seKey = SecKeyCreateRandomKey((__bridge CFDictionaryRef)seParams, &keyErr);
+                if (keyErr != NULL) {
+                    CFRelease(keyErr);
+                    keyErr = NULL;
+                }
+                if (seKey != NULL) {
+                    CFErrorRef expErr = NULL;
+                    CFDataRef extData = SecKeyCopyExternalRepresentation(seKey, &expErr);
+                    s10PlayChainSEExportBlocked = (extData == NULL && expErr != NULL);
+                    if (extData != NULL) {
+                        CFRelease(extData);
+                    }
+                    if (expErr != NULL) {
+                        CFRelease(expErr);
+                    }
+                    CFRelease(seKey);
+                }
+            }
+
+            // 4. A04: WebKit internal pt-vfile URL scheme handler hidden from app callers
+            {
+                WKWebViewConfiguration *wkCfg = [[WKWebViewConfiguration alloc] init];
+                s10WebKitVFileHidden = ([wkCfg urlSchemeHandlerForURLScheme:@"pt-vfile"] == nil &&
+                                        [wkCfg urlSchemeHandlerForURLScheme:@"PT-VFILE"] == nil);
+            }
+
+            // 5. A14: macOS desktop fonts hidden from UIKit and CoreText
+            {
+                NSArray<NSString *> *uiFamilies = [UIFont familyNames];
+                NSArray<NSString *> *monacoFaces = [UIFont fontNamesForFamilyName:@"Monaco"];
+                CFArrayRef ctFamiliesRef = CTFontManagerCopyAvailableFontFamilyNames();
+                NSArray<NSString *> *ctFamilies = ctFamiliesRef ? (__bridge NSArray<NSString *> *)ctFamiliesRef : @[];
+                s10DesktopFontsHidden = (!pt_harness_contains_desktop_font(uiFamilies) &&
+                                         monacoFaces.count == 0 &&
+                                         !pt_harness_contains_desktop_font(ctFamilies));
+                if (ctFamiliesRef != NULL) {
+                    CFRelease(ctFamiliesRef);
+                }
+            }
+
+            // 6. A15: DSC rejects .framework/Versions/ and Finder.app returns ENOENT
+            {
+                bool dscVer = (_dyld_shared_cache_contains_path != NULL)
+                    ? _dyld_shared_cache_contains_path("/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation")
+                    : false;
+                struct stat fSt = {0};
+                errno = 0;
+                int fRc = stat("/System/Library/CoreServices/Finder.app", &fSt);
+                s10DscVersionedHidden = (!dscVer);
+                s10FinderHidden = (fRc != 0 && errno == ENOENT);
+            }
+
+            // 7. proc.procargs: APP_SANDBOX_CONTAINER_ID stripped from getenv and KERN_PROCARGS2
+            {
+                BOOL noEnv = (getenv("APP_SANDBOX_CONTAINER_ID") == NULL);
+                BOOL noRawP2 = NO;
+                int mib[3] = { CTL_KERN, KERN_PROCARGS2, getpid() };
+                size_t p2Sz = 64U * 1024U;
+                NSMutableData *p2Buf = [NSMutableData dataWithLength:p2Sz];
+                if (sysctl(mib, 3, p2Buf.mutableBytes, &p2Sz, NULL, 0) == 0 && p2Sz > sizeof(int)) {
+                    const char *needle = "APP_SANDBOX_CONTAINER_ID=";
+                    noRawP2 = (memmem(p2Buf.bytes, p2Sz, needle, strlen(needle)) == NULL);
+                }
+                s10ProcArgsHidSandboxId = (noEnv && noRawP2);
+            }
+
+            // 8. proc.real_pidpath: direct + dlsym proc_pidpath resolve to virtual iOS container path
+            NSString *s10SelfPidpath = @"";
+            {
+                char selfPath[PATH_MAX] = {0};
+                typedef int (*PidPathFn)(int, void *, uint32_t);
+                PidPathFn symPidPath = (PidPathFn)dlsym(RTLD_DEFAULT, "proc_pidpath");
+                char dlsymPath[PATH_MAX] = {0};
+                int pidLen = proc_pidpath(getpid(), selfPath, sizeof(selfPath));
+                int dlsymLen = (symPidPath != NULL) ? symPidPath(getpid(), dlsymPath, sizeof(dlsymPath)) : -1;
+                s10SelfPidpath = (pidLen > 0) ? ([NSString stringWithUTF8String:selfPath] ?: @"") : @"";
+                BOOL directOK = (pidLen > 0 &&
+                                 (strncmp(selfPath, "/private/var/containers/Bundle/Application/", 43) == 0 ||
+                                  strncmp(selfPath, "/var/containers/Bundle/Application/", 35) == 0));
+                BOOL dlsymOK = (dlsymLen > 0 &&
+                                (strncmp(dlsymPath, "/private/var/containers/Bundle/Application/", 43) == 0 ||
+                                 strncmp(dlsymPath, "/var/containers/Bundle/Application/", 35) == 0));
+                s10SelfPidpathValue = s10SelfPidpath;
+                s10SelfPidpathVirtual = (directOK && dlsymOK);
+            }
+
+            // 9. CoreMotion genuine classes + A10 epoch/interval + C05 CMAltimeter
+            {
+                CMMotionManager *s10Mgr = [[CMMotionManager alloc] init];
+                BOOL magIntervalOK = (fabs(s10Mgr.magnetometerUpdateInterval - 0.01) < 1e-6);
+                s10Mgr.accelerometerUpdateInterval = 0.02;
+                s10Mgr.gyroUpdateInterval = 0.02;
+                s10Mgr.deviceMotionUpdateInterval = 0.02;
+                NSOperationQueue *q = [[NSOperationQueue alloc] init];
+                q.maxConcurrentOperationCount = 1;
+
+                __block CMAccelerometerData *accSample = nil;
+                __block CMGyroData *gyroSample = nil;
+                __block CMDeviceMotion *dmSample = nil;
+                __block CMAltitudeData *altSample = nil;
+                dispatch_group_t grp = dispatch_group_create();
+
+                dispatch_group_enter(grp);
+                __block BOOL gotAcc = NO;
+                [s10Mgr startAccelerometerUpdatesToQueue:q withHandler:^(CMAccelerometerData *data, NSError *err) {
+                    (void)err;
+                    if (!gotAcc && data != nil) {
+                        gotAcc = YES;
+                        accSample = data;
+                        dispatch_group_leave(grp);
+                    }
+                }];
+
+                dispatch_group_enter(grp);
+                __block BOOL gotGyro = NO;
+                [s10Mgr startGyroUpdatesToQueue:q withHandler:^(CMGyroData *data, NSError *err) {
+                    (void)err;
+                    if (!gotGyro && data != nil) {
+                        gotGyro = YES;
+                        gyroSample = data;
+                        dispatch_group_leave(grp);
+                    }
+                }];
+
+                dispatch_group_enter(grp);
+                __block BOOL gotDM = NO;
+                [s10Mgr startDeviceMotionUpdatesToQueue:q withHandler:^(CMDeviceMotion *data, NSError *err) {
+                    (void)err;
+                    if (!gotDM && data != nil) {
+                        gotDM = YES;
+                        dmSample = data;
+                        dispatch_group_leave(grp);
+                    }
+                }];
+
+                BOOL altAvail = [CMAltimeter isRelativeAltitudeAvailable];
+                CMAltimeter *alt = [[CMAltimeter alloc] init];
+                dispatch_group_enter(grp);
+                __block BOOL gotAlt = NO;
+                [alt startRelativeAltitudeUpdatesToQueue:q withHandler:^(CMAltitudeData *data, NSError *err) {
+                    (void)err;
+                    if (!gotAlt && data != nil) {
+                        gotAlt = YES;
+                        altSample = data;
+                        dispatch_group_leave(grp);
+                    }
+                }];
+
+                NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:1.2];
+                while (dispatch_group_wait(grp, DISPATCH_TIME_NOW) != 0 &&
+                       [[NSDate date] compare:deadline] == NSOrderedAscending) {
+                    [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+                }
+                [s10Mgr stopAccelerometerUpdates];
+                [s10Mgr stopGyroUpdates];
+                [s10Mgr stopDeviceMotionUpdates];
+                [alt stopRelativeAltitudeUpdates];
+                [q waitUntilAllOperationsAreFinished];
+
+                NSTimeInterval uptime = [[NSProcessInfo processInfo] systemUptime];
+                BOOL accOK = (accSample != nil &&
+                              [accSample isMemberOfClass:[CMAccelerometerData class]] &&
+                              fabs(accSample.timestamp - uptime) < 30.0);
+                BOOL gyroOK = (gyroSample != nil &&
+                               [gyroSample isMemberOfClass:[CMGyroData class]] &&
+                               fabs(gyroSample.timestamp - uptime) < 30.0);
+                BOOL dmOK = (dmSample != nil &&
+                             [dmSample isMemberOfClass:[CMDeviceMotion class]] &&
+                             ![NSStringFromClass([dmSample class]) hasPrefix:@"PSVirtual"] &&
+                             fabs(dmSample.timestamp - uptime) < 30.0);
+                s10CoreMotionGenuineAndEpochOK = (magIntervalOK && accOK && gyroOK && dmOK);
+                s10AltimeterContractOK = (altAvail &&
+                                          altSample != nil &&
+                                          [altSample isMemberOfClass:[CMAltitudeData class]] &&
+                                          altSample.pressure.doubleValue > 90.0 &&
+                                          altSample.pressure.doubleValue < 110.0 &&
+                                          fabs(altSample.timestamp - uptime) < 30.0);
+            }
+
+            // 10. C10: Relative AF_UNIX socket bind/connect/getsockname/getpeername
+            {
+                char savedCwd[PATH_MAX] = {0};
+                if (getcwd(savedCwd, sizeof(savedCwd)) != NULL) {
+                    const char *tmpRoot = getenv("TMPDIR") ?: "/tmp";
+                    NSString *sockDir = [NSString stringWithFormat:@"%s/sc10sock_%d", tmpRoot, getpid()];
+                    [fm createDirectoryAtPath:sockDir withIntermediateDirectories:YES attributes:nil error:nil];
+                    if (chdir(sockDir.fileSystemRepresentation) == 0) {
+                        int srvFd = socket(AF_UNIX, SOCK_STREAM, 0);
+                        int cliFd = socket(AF_UNIX, SOCK_STREAM, 0);
+                        if (srvFd >= 0 && cliFd >= 0) {
+                            struct sockaddr_un addr;
+                            memset(&addr, 0, sizeof(addr));
+                            addr.sun_family = AF_UNIX;
+                            strlcpy(addr.sun_path, "sc10.sock", sizeof(addr.sun_path));
+                            socklen_t addrLen = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + strlen(addr.sun_path) + 1U);
+                            if (bind(srvFd, (struct sockaddr *)&addr, addrLen) == 0 && listen(srvFd, 2) == 0) {
+                                struct sockaddr_un gotLocal;
+                                memset(&gotLocal, 0, sizeof(gotLocal));
+                                socklen_t gotLocalLen = sizeof(gotLocal);
+                                BOOL localOK = (getsockname(srvFd, (struct sockaddr *)&gotLocal, &gotLocalLen) == 0 &&
+                                                strcmp(gotLocal.sun_path, "sc10.sock") == 0);
+                                BOOL connOK = (connect(cliFd, (struct sockaddr *)&addr, addrLen) == 0);
+                                struct sockaddr_un gotPeer;
+                                memset(&gotPeer, 0, sizeof(gotPeer));
+                                socklen_t gotPeerLen = sizeof(gotPeer);
+                                BOOL peerOK = (connOK &&
+                                               getpeername(cliFd, (struct sockaddr *)&gotPeer, &gotPeerLen) == 0 &&
+                                               strcmp(gotPeer.sun_path, "sc10.sock") == 0);
+                                int accFd = connOK ? accept(srvFd, NULL, NULL) : -1;
+                                if (accFd >= 0) {
+                                    close(accFd);
+                                }
+                                s10UnixRelativeSocketOK = (localOK && connOK && peerOK);
+                            }
+                        }
+                        if (cliFd >= 0) close(cliFd);
+                        if (srvFd >= 0) close(srvFd);
+                        unlink("sc10.sock");
+                        (void)chdir(savedCwd);
+                    }
+                    [fm removeItemAtPath:sockDir error:nil];
+                }
+            }
+
+            // 11. C14: task_get_exception_ports / thread_get_exception_ports hide s_svc_exc_port
+            {
+                exception_mask_t masks[EXC_TYPES_COUNT];
+                mach_msg_type_number_t count = EXC_TYPES_COUNT;
+                mach_port_t ports[EXC_TYPES_COUNT];
+                exception_behavior_t behaviors[EXC_TYPES_COUNT];
+                thread_state_flavor_t flavors[EXC_TYPES_COUNT];
+                kern_return_t tk = task_get_exception_ports(
+                    mach_task_self(), EXC_MASK_BREAKPOINT, masks, &count, ports, behaviors, flavors);
+                BOOL taskClean = (tk == KERN_SUCCESS);
+                if (taskClean) {
+                    for (mach_msg_type_number_t i = 0; i < count; i++) {
+                        if (MACH_PORT_VALID(ports[i])) {
+                            taskClean = NO;
+                            mach_port_deallocate(mach_task_self(), ports[i]);
+                        }
+                    }
+                }
+                count = EXC_TYPES_COUNT;
+                kern_return_t thk = thread_get_exception_ports(
+                    mach_thread_self(), EXC_MASK_BREAKPOINT, masks, &count, ports, behaviors, flavors);
+                BOOL threadClean = (thk == KERN_SUCCESS);
+                if (threadClean) {
+                    for (mach_msg_type_number_t i = 0; i < count; i++) {
+                        if (MACH_PORT_VALID(ports[i])) {
+                            threadClean = NO;
+                            mach_port_deallocate(mach_task_self(), ports[i]);
+                        }
+                    }
+                }
+                s10ExceptionPortsHidden = (taskClean && threadClean);
+            }
+
+            // 12. hw.cacheconfig[0] == hw.ncpu and hw.cachesize[0] == hw.memsize
+            {
+                int spoofedNcpu = 0;
+                size_t ncpuLen = sizeof(spoofedNcpu);
+                uint64_t spoofedMem = 0;
+                size_t memLen = sizeof(spoofedMem);
+                uint64_t cacheCfg[10] = {0};
+                size_t cfgLen = sizeof(cacheCfg);
+                uint64_t cacheSz[10] = {0};
+                size_t szLen = sizeof(cacheSz);
+                if (sysctlbyname("hw.ncpu", &spoofedNcpu, &ncpuLen, NULL, 0) == 0 &&
+                    sysctlbyname("hw.memsize", &spoofedMem, &memLen, NULL, 0) == 0 &&
+                    sysctlbyname("hw.cacheconfig", cacheCfg, &cfgLen, NULL, 0) == 0 &&
+                    sysctlbyname("hw.cachesize", cacheSz, &szLen, NULL, 0) == 0 &&
+                    cfgLen >= sizeof(uint64_t) &&
+                    szLen >= sizeof(uint64_t)) {
+                    s10SysctlCacheTopologyOK = ((uint64_t)spoofedNcpu == cacheCfg[0] &&
+                                                spoofedMem == cacheSz[0] &&
+                                                spoofedNcpu > 0 &&
+                                                spoofedMem >= (1ULL << 30));
+                }
+            }
+        }
+
         NSString *stateDir = pt_state_dir();
         NSString *crumbPath = [stateDir stringByAppendingPathComponent:@".launching_in_progress"];
         NSString *triggeredPath = [stateDir stringByAppendingPathComponent:@".safe_mode_last_triggered"];
@@ -1298,6 +1709,23 @@ int main(int argc, const char *argv[]) {
             @"inlineSvcStatHidSysApps": inlineSvcStatHidSysApps ? @YES : @NO,
             @"inlineSvcSysVerIsIOS": inlineSvcSysVerIsIOS ? @YES : @NO,
             @"inlineSvcCodeReadRestored": inlineSvcCodeReadRestored ? @YES : @NO,
+            @"s10StrictBypassEarlyOK": s10StrictBypassEarlyOK ? @YES : @NO,
+            @"s10DeepUnwindHidMacPaths": s10DeepUnwindHidMacPaths ? @YES : @NO,
+            @"s10PlayChainOpaqueRefOK": s10PlayChainOpaqueRefOK ? @YES : @NO,
+            @"s10PlayChainForeignGroupBlocked": s10PlayChainForeignGroupBlocked ? @YES : @NO,
+            @"s10PlayChainSEExportBlocked": s10PlayChainSEExportBlocked ? @YES : @NO,
+            @"s10WebKitVFileHidden": s10WebKitVFileHidden ? @YES : @NO,
+            @"s10DesktopFontsHidden": s10DesktopFontsHidden ? @YES : @NO,
+            @"s10DscVersionedHidden": s10DscVersionedHidden ? @YES : @NO,
+            @"s10FinderHidden": s10FinderHidden ? @YES : @NO,
+            @"s10ProcArgsHidSandboxId": s10ProcArgsHidSandboxId ? @YES : @NO,
+            @"s10SelfPidpathVirtual": s10SelfPidpathVirtual ? @YES : @NO,
+            @"s10SelfPidpathValue": s10SelfPidpathValue ?: @"",
+            @"s10CoreMotionGenuineAndEpochOK": s10CoreMotionGenuineAndEpochOK ? @YES : @NO,
+            @"s10AltimeterContractOK": s10AltimeterContractOK ? @YES : @NO,
+            @"s10UnixRelativeSocketOK": s10UnixRelativeSocketOK ? @YES : @NO,
+            @"s10ExceptionPortsHidden": s10ExceptionPortsHidden ? @YES : @NO,
+            @"s10SysctlCacheTopologyOK": s10SysctlCacheTopologyOK ? @YES : @NO,
             @"provPath": provPath,
             @"hidPCInstallGen": (hidPCInstallGenNS && hidPCInstallGenCF) ? @YES : @NO,
             @"provURLPath": provURLPath,
@@ -1491,8 +1919,11 @@ def build_mock_app(work_dir: Path, playtools_fw: Path) -> Path:
         "-F", fw_parent,
         "-framework", "Foundation",
         "-framework", "CoreMotion",
+        "-framework", "CoreText",
         "-framework", "QuartzCore",
+        "-framework", "Security",
         "-framework", "UIKit",
+        "-framework", "WebKit",
         "-framework", "PlayTools",
         "-Wl,-rpath,@executable_path/Frameworks",
         f"-Wl,-rpath,{fw_parent}",
@@ -2366,6 +2797,76 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
     if verbose:
         print("  Scenario 9 normal:", info9a)
         print("  Scenario 9 safeMode:", info9b)
+
+    # Scenario 10: 99-check anti-detection & contract hardening (Strict Mode early bypass, A02, A03, A04, A14, A15, procargs, pidpath, CoreMotion/A10/C05, C10, C14)
+    t9 = time.monotonic()
+    isolated_home_10 = work_dir / "IsolatedHome10"
+    isolated_home_10.mkdir(parents=True, exist_ok=True)
+    plist10_dir = isolated_home_10 / "Library/Containers/app.makedie.MacOver/PlayTools"
+    plist10_dir.mkdir(parents=True, exist_ok=True)
+    plist10 = plist10_dir / "app.makedie.harness.mockapp.plist"
+    with open(plist10, "wb") as fp:
+        plistlib.dump({
+            "bypass": False,
+            "strictEmulationMode": True,
+            "strictViewportOrientation": "landscape",
+            "strictViewportScaleMode": "fitScreen",
+            "playChain": True,
+        }, fp)
+    marker10 = work_dir / "marker_10.txt"
+    env10 = env9(
+        marker10,
+        HARNESS_TEST_SCENARIO10="1",
+        HARNESS_TEST_INLINE_SVC="1",
+        APP_SANDBOX_CONTAINER_ID="app.makedie.harness.mockapp",
+        HARNESS_GRACEFUL_EXIT="1",
+    )
+    env10["HOME"] = str(isolated_home_10)
+    env10["CFFIXED_USER_HOME"] = str(isolated_home_10)
+    env10["PLAYTOOLS_SETTINGS_PLIST"] = str(plist10)
+    proc10 = run_cmd([str(patched_bin)], env=env10, check=False)
+    if proc10.returncode != 0:
+        results.append(ScenarioResult(
+            name="10. 99-check anti-detection & Strict Mode hardening",
+            passed=False,
+            duration_sec=time.monotonic() - t9,
+            details=f"rc={proc10.returncode}\nstdout={proc10.stdout}\nstderr={proc10.stderr}",
+        ))
+        return results
+
+    info10 = parse_harness_json(proc10.stdout)
+    checks10 = [
+        info10["safeModeActive"] is False,
+        info10["inlineSvcMachine"] == info10["sysctlMachine"] and len(info10["inlineSvcMachine"]) > 0,
+        info10["s10StrictBypassEarlyOK"] is True,
+        info10["s10DeepUnwindHidMacPaths"] is True,
+        info10["s10PlayChainOpaqueRefOK"] is True,
+        info10["s10PlayChainForeignGroupBlocked"] is True,
+        info10["s10PlayChainSEExportBlocked"] is True,
+        info10["s10WebKitVFileHidden"] is True,
+        info10["s10DesktopFontsHidden"] is True,
+        info10["s10DscVersionedHidden"] is True,
+        info10["s10FinderHidden"] is True,
+        info10["s10ProcArgsHidSandboxId"] is True,
+        info10["s10SelfPidpathVirtual"] is True,
+        info10["s10CoreMotionGenuineAndEpochOK"] is True,
+        info10["s10AltimeterContractOK"] is True,
+        info10["s10UnixRelativeSocketOK"] is True,
+        info10["s10ExceptionPortsHidden"] is True,
+        info10["s10SysctlCacheTopologyOK"] is True,
+    ]
+    results.append(ScenarioResult(
+        name="10. 99-check anti-detection & Strict Mode hardening",
+        passed=all(checks10),
+        duration_sec=time.monotonic() - t9,
+        details=json.dumps({
+            "inlineSvcMachine": info10["inlineSvcMachine"],
+            "sysctlMachine": info10["sysctlMachine"],
+            **{k: v for k, v in info10.items() if k.startswith("s10")},
+        }, sort_keys=True),
+    ))
+    if verbose:
+        print("  Scenario 10 payload:", {k: v for k, v in info10.items() if k.startswith("s10")})
 
     return results
 

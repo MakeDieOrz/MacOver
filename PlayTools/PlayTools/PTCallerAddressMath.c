@@ -204,9 +204,7 @@ bool pt_is_nonsensitive_app_or_tmp_path(const char *norm_path, const char *bundl
     return false;
 }
 
-bool pt_classify_bounded_frame_kinds_ex(const uint8_t *frame_kinds,
-                                        size_t count,
-                                        bool initial_seen_wrapper,
+bool pt_classify_bounded_frame_kinds_ex(const uint8_t *frame_kinds, size_t count, bool initial_seen_wrapper,
                                         bool *out_cacheable_3frame) {
     if (out_cacheable_3frame != NULL) {
         *out_cacheable_3frame = false;

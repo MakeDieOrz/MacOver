@@ -106,8 +106,13 @@ __attribute__((visibility("hidden"))) void pt_init_early_bypass(void) {
     }
     int fd = pt_open_early_settings_plist_fd();
     if (fd >= 0) {
+        BOOL strict_val = NO;
+        BOOL has_strict = pt_read_plist_top_bool_from_fd(fd, "strictEmulationMode", &strict_val) && strict_val;
+        const char *safe_mode_env = pt_raw_getenv("PLAYTOOLS_SAFE_MODE");
+        BOOL safe_mode_active = (safe_mode_env != NULL && strcmp(safe_mode_env, "1") == 0);
         BOOL bypass_val = YES;
-        if (pt_read_plist_top_bool_from_fd(fd, "bypass", &bypass_val) && !bypass_val) {
+        if (!(has_strict && !safe_mode_active) &&
+            pt_read_plist_top_bool_from_fd(fd, "bypass", &bypass_val) && !bypass_val) {
             atomic_store_explicit(&s_bypass_enabled, NO, memory_order_relaxed);
         }
         close(fd);
@@ -1242,6 +1247,36 @@ static int pt_write_sysctl_uint64(void *oldp, size_t *oldlenp, void *newp, uint6
     return 0;
 }
 
+static int pt_write_sysctl_uint64_array(void *oldp,
+                                        size_t *oldlenp,
+                                        void *newp,
+                                        const uint64_t *vals,
+                                        size_t count) {
+    if (newp != NULL) {
+        errno = EPERM;
+        return -1;
+    }
+    size_t required = count * sizeof(uint64_t);
+    if (oldp == NULL) {
+        if (oldlenp != NULL) {
+            *oldlenp = required;
+        }
+        return 0;
+    }
+    if (oldlenp == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (*oldlenp < required) {
+        *oldlenp = required;
+        errno = ENOMEM;
+        return -1;
+    }
+    memcpy(oldp, vals, required);
+    *oldlenp = required;
+    return 0;
+}
+
 
 static CFDataRef pt_create_compatible_cfdata(CFAllocatorRef allocator) {
     const char *oem = OEM_ID;
@@ -1785,6 +1820,8 @@ static pt_sysctl_mib_entry_t s_sysctl_mibs[] = {
     { "hw.perflevel1.l2cachesize", {0}, 0 },
     { "hw.perflevel1.name", {0}, 0 },
     { "hw.l2cachesize", {0}, 0 },
+    { "hw.cacheconfig", {0}, 0 },
+    { "hw.cachesize", {0}, 0 },
     { "hw.packages", {0}, 0 },
     { "hw.use_kernelmanagerd", {0}, 0 },
     { "vm.swapusage", {0}, 0 },
@@ -1930,6 +1967,25 @@ static BOOL pt_handle_sysctl_name(const char *name,
             uint64_t p_l2 = 0;
             pt_get_spoofed_l2_cache_sizes(profile, &p_l2, NULL);
             *out_ret = pt_write_sysctl_uint64(oldp, oldlenp, (newlen > 0) ? newp : NULL, p_l2);
+            return YES;
+        }
+        if (strcmp(sub, "cacheconfig") == 0) {
+            uint64_t vals[10] = {0};
+            vals[0] = (uint64_t)profile->cores;
+            vals[1] = 1ULL;
+            vals[2] = (uint64_t)(profile->e_cores > 0 ? profile->e_cores : profile->cores);
+            *out_ret = pt_write_sysctl_uint64_array(oldp, oldlenp, (newlen > 0) ? newp : NULL, vals, 10U);
+            return YES;
+        }
+        if (strcmp(sub, "cachesize") == 0) {
+            uint64_t vals[10] = {0};
+            uint64_t p_l2 = 0;
+            uint64_t e_l2 = 0;
+            pt_get_spoofed_l2_cache_sizes(profile, &p_l2, &e_l2);
+            vals[0] = profile->ram_bytes;
+            vals[1] = 65536ULL;
+            vals[2] = (e_l2 > 0ULL) ? e_l2 : p_l2;
+            *out_ret = pt_write_sysctl_uint64_array(oldp, oldlenp, (newlen > 0) ? newp : NULL, vals, 10U);
             return YES;
         }
         if (strcmp(sub, "ncpu") == 0 ||

@@ -169,9 +169,7 @@ void pt_enter_internal_scope(void);
 void pt_leave_internal_scope(void);
 bool pt_is_in_internal_scope(void);
 
-bool pt_classify_bounded_frame_kinds_ex(const uint8_t *frame_kinds,
-                                        size_t count,
-                                        bool initial_seen_wrapper,
+bool pt_classify_bounded_frame_kinds_ex(const uint8_t *frame_kinds, size_t count, bool initial_seen_wrapper,
                                         bool *out_cacheable_3frame);
 bool pt_classify_bounded_frame_kinds(const uint8_t *frame_kinds, size_t count, bool initial_seen_wrapper);
 
