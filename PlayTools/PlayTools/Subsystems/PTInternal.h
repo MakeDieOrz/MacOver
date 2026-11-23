@@ -498,6 +498,7 @@ extern __attribute__((visibility("hidden"))) size_t s_virtual_private_data_len;
 
 // SystemSpoofer exports
 __attribute__((visibility("hidden"))) void pt_init_early_bypass(void);
+__attribute__((visibility("hidden"))) const char *pt_raw_getenv(const char *name);
 __attribute__((visibility("hidden"))) void pt_ensure_early_device_info_safe(void);
 __attribute__((visibility("hidden"))) void pt_init_device_info(void);
 __attribute__((visibility("hidden"))) BOOL pt_is_bypass_enabled(void);
@@ -551,6 +552,7 @@ __attribute__((visibility("hidden"))) CFStringRef pt_MGGetStringAnswer(CFStringR
 __attribute__((visibility("hidden"))) int32_t pt_MGGetProductType(void);
 __attribute__((visibility("hidden"))) int pt_sysctl_with_caller(int *name, u_int types, void *buf, size_t *size, void *arg0, size_t arg1, const void *caller);
 __attribute__((visibility("hidden"))) int pt_sysctlbyname_with_caller(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen, const void *caller);
+__attribute__((visibility("hidden"))) intptr_t pt_syscall_dispatch_with_caller(int number, const uintptr_t args[8], const void *caller, BOOL *out_handled);
 __attribute__((visibility("hidden"))) char ***pt_get_app_shadow_environ_ptr(void);
 
 // Entitlements exports
@@ -584,6 +586,7 @@ __attribute__((visibility("hidden"))) void pt_disable_app_backups_for_safe_mode(
 __attribute__((visibility("hidden"))) BOOL pt_has_backup_mobileprovision(void);
 __attribute__((visibility("hidden"))) const char *pt_copy_virtual_mobileprovision_path(char *buf, size_t bufsize);
 __attribute__((visibility("hidden"))) const char *pt_lookup_app_backup_redirect_for_caller(const char *raw_path, const void *caller, char *vbuf, size_t vbuf_size, int *inout_is_sys_caller);
+__attribute__((visibility("hidden"))) const uint8_t *pt_get_cached_backup_main_mach_header(size_t *out_len);
 __attribute__((visibility("hidden"))) int pt_fs_open_with_caller(const char *filename, int oflag, mode_t mode, const void *caller);
 __attribute__((visibility("hidden"))) int pt_fs_openat_with_caller(int fd, const char *path, int oflag, mode_t mode, const void *caller);
 __attribute__((visibility("hidden"))) int pt_fs_stat_with_caller(const char *path, struct stat *buf, BOOL follow_symlinks, const void *caller);
@@ -605,6 +608,7 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_dyld_image_header(const 
 __attribute__((visibility("hidden"))) const char *pt_fallback_system_image_path(void);
 __attribute__((visibility("hidden"))) const struct mach_header *pt_maybe_shadow_mach_header(const struct mach_header *real_mh);
 __attribute__((visibility("hidden"))) const struct mach_header *pt_uncloak_shadow_mach_header(const struct mach_header *mh);
+__attribute__((visibility("hidden"))) BOOL pt_build_sanitized_mach_header_copy(const struct mach_header_64 *src_mh, uint8_t *dst_buf, size_t dst_cap, size_t *out_sanitized_len);
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_vm_region_range(uintptr_t addr, uintptr_t size);
 __attribute__((visibility("hidden"))) void pt_register_swizzled_imp(const void *hook_imp, const void *orig_imp);
 __attribute__((visibility("hidden"))) void pt_register_hidden_swizzle_selector(SEL sel);

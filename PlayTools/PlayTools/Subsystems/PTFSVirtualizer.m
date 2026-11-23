@@ -11,6 +11,18 @@ extern const struct mach_header *dyld_image_header_containing_address(const void
 // Lock-free BSS caller-address cache (safe during dyld/libSystem bootstrap before TLV/malloc init).
 // ARM64 instructions are 4-byte aligned ((addr & 3) == 0); bits [1:0] store (kind - 1), entry 0 = empty.
 static _Atomic uint64_t s_caller_addr_cache[PT_CALLER_ADDR_CACHE_SIZE];
+static _Atomic(const struct mach_header *) s_playtools_self_mh = NULL;
+
+static inline const struct mach_header *pt_get_self_playtools_mh(void) {
+    const struct mach_header *mh = atomic_load_explicit(&s_playtools_self_mh, memory_order_acquire);
+    if (mh == NULL) {
+        mh = dyld_image_header_containing_address((const void *)&pt_is_system_or_playtools_caller);
+        if (mh != NULL) {
+            atomic_store_explicit(&s_playtools_self_mh, mh, memory_order_release);
+        }
+    }
+    return mh;
+}
 
 static inline uint8_t pt_classify_caller_addr(const void *ret_addr) {
     if (ret_addr == NULL) {
@@ -33,6 +45,13 @@ static inline uint8_t pt_classify_caller_addr(const void *ret_addr) {
 
     bool cacheable = false;
     uint8_t kind = pt_classify_caller_image_path(fname, &cacheable);
+    if (kind == PT_CALLER_APP) {
+        const struct mach_header *self_mh = pt_get_self_playtools_mh();
+        if (self_mh != NULL && dyld_image_header_containing_address(ret_addr) == self_mh) {
+            kind = PT_CALLER_PLAYTOOLS;
+            cacheable = true;
+        }
+    }
 
     if (cacheable) {
         uint64_t packed = 0ULL;
@@ -600,8 +619,10 @@ static BOOL pt_is_hidden_normalized_path_cached_caller(const char *norm, const v
                 if ((strncmp(norm, "/System/iOSSupport", 18) == 0 &&
                      (norm[18] == '\0' || norm[18] == '/')) ||
                     (check_bypass_artifacts &&
-                     strncmp(norm, "/System/Applications", 20) == 0 &&
-                     (norm[20] == '\0' || norm[20] == '/'))) {
+                     ((strncmp(norm, "/System/Applications", 20) == 0 &&
+                       (norm[20] == '\0' || norm[20] == '/')) ||
+                      strcmp(norm, "/System/Volumes") == 0 ||
+                      strcmp(norm, "/System/Volumes/Data") == 0))) {
                     is_candidate = YES;
                 }
                 break;
@@ -919,7 +940,7 @@ static void pt_init_bundle_path_map(void) {
         }
     }
     if (bundle_src == NULL || bundle_len == 0) {
-        const char *test_bundle = getenv("PLAYTOOLS_TEST_BUNDLE_DIR");
+        const char *test_bundle = pt_raw_getenv("PLAYTOOLS_TEST_BUNDLE_DIR");
         if (test_bundle != NULL && test_bundle[0] == '/') {
             if (strncmp(test_bundle, "/System/Volumes/Data/", 21) == 0) {
                 test_bundle += 20;
@@ -1069,7 +1090,7 @@ static void pt_init_app_backup_map(void) {
         pt_ensure_bundle_path_map();
 
         char raw_dir[PATH_MAX] = {0};
-        const char *test_dir = getenv("PLAYTOOLS_TEST_APP_BACKUPS_DIR");
+        const char *test_dir = pt_raw_getenv("PLAYTOOLS_TEST_APP_BACKUPS_DIR");
         if (test_dir != NULL && test_dir[0] == '/') {
             strlcpy(raw_dir, test_dir, sizeof(raw_dir));
         } else {
@@ -1078,7 +1099,7 @@ static void pt_init_app_backup_map(void) {
                 char bid[256];
                 bid[0] = '\0';
                 if (!pt_read_main_bundle_id_early(bid, sizeof(bid)) || bid[0] == '\0') {
-                    const char *home = getenv("CFFIXED_USER_HOME");
+                    const char *home = pt_raw_getenv("CFFIXED_USER_HOME");
                     const char *marker = (home != NULL) ? strstr(home, "/Library/Containers/") : NULL;
                     if (marker != NULL) {
                         const char *cid_start = marker + 20;
@@ -1331,6 +1352,114 @@ const char *pt_lookup_app_backup_redirect_for_caller(const char *raw_path,
     return (n < vbuf_size) ? vbuf : NULL;
 }
 
+static os_unfair_lock s_backup_main_hdr_lock = OS_UNFAIR_LOCK_INIT;
+static BOOL s_backup_main_hdr_loaded = NO;
+static uint8_t *s_backup_main_hdr_bytes = NULL;
+static size_t s_backup_main_hdr_len = 0;
+
+static off_t pt_find_arm64_slice_offset_in_fd(int fd, cpu_subtype_t wanted_subtype) {
+    struct fat_header fh;
+    if (pread(fd, &fh, sizeof(fh), 0) != (ssize_t)sizeof(fh)) {
+        return -1;
+    }
+    if (fh.magic == MH_MAGIC_64) {
+        return 0;
+    }
+    uint32_t magic = ntohl(fh.magic);
+    uint32_t count = ntohl(fh.nfat_arch);
+    if ((magic != FAT_MAGIC && magic != FAT_MAGIC_64) || count == 0 || count > 128U) {
+        return -1;
+    }
+    BOOL is_fat64 = (magic == FAT_MAGIC_64);
+    size_t stride = is_fat64 ? sizeof(struct fat_arch_64) : sizeof(struct fat_arch);
+    off_t fallback = -1;
+    for (uint32_t i = 0; i < count; i++) {
+        union {
+            struct fat_arch a32;
+            struct fat_arch_64 a64;
+        } entry;
+        off_t eoff = (off_t)(sizeof(fh) + (size_t)i * stride);
+        if (pread(fd, &entry, stride, eoff) != (ssize_t)stride) {
+            return -1;
+        }
+        uint32_t cpu = ntohl(is_fat64 ? (uint32_t)entry.a64.cputype : (uint32_t)entry.a32.cputype);
+        uint32_t sub = ntohl(is_fat64 ? (uint32_t)entry.a64.cpusubtype : (uint32_t)entry.a32.cpusubtype);
+        uint64_t off = is_fat64 ? __builtin_bswap64(entry.a64.offset) : (uint64_t)ntohl(entry.a32.offset);
+        if (cpu != (uint32_t)CPU_TYPE_ARM64 || off > (uint64_t)(INT64_MAX - 2 * 1024 * 1024)) {
+            continue;
+        }
+        if ((sub & ~(uint32_t)CPU_SUBTYPE_MASK) == ((uint32_t)wanted_subtype & ~(uint32_t)CPU_SUBTYPE_MASK)) {
+            return (off_t)off;
+        }
+        if (fallback < 0) {
+            fallback = (off_t)off;
+        }
+    }
+    return fallback;
+}
+
+__attribute__((visibility("hidden")))
+const uint8_t *pt_get_cached_backup_main_mach_header(size_t *out_len) {
+    if (out_len != NULL) {
+        *out_len = 0;
+    }
+    if (atomic_load_explicit(&s_app_backups_disabled_for_safe_mode, memory_order_acquire) ||
+        !pt_is_bypass_enabled()) {
+        return NULL;
+    }
+    pt_ensure_app_backup_map();
+    if (!atomic_load_explicit(&s_app_backup_ready, memory_order_acquire) ||
+        !s_has_backup_executable ||
+        !pt_verify_pinned_backup_file(s_backup_executable_path, s_backup_executable_dev, s_backup_executable_ino)) {
+        return NULL;
+    }
+
+    os_unfair_lock_lock(&s_backup_main_hdr_lock);
+    if (!s_backup_main_hdr_loaded) {
+        s_backup_main_hdr_loaded = YES;
+        pt_enter_internal_scope();
+        int fd = pt_orig_open_nocancel(s_backup_executable_path, O_RDONLY | O_CLOEXEC);
+        if (fd >= 0) {
+            cpu_subtype_t wanted = CPU_SUBTYPE_ARM64_ALL;
+            const struct mach_header *live_mh = pt_get_main_executable_header();
+            if (live_mh != NULL && pt_is_valid_user_pointer(live_mh)) {
+                wanted = live_mh->cpusubtype;
+            }
+            off_t slice_off = pt_find_arm64_slice_offset_in_fd(fd, wanted);
+            struct mach_header_64 mh64;
+            if (slice_off >= 0 &&
+                pread(fd, &mh64, sizeof(mh64), slice_off) == (ssize_t)sizeof(mh64) &&
+                mh64.magic == MH_MAGIC_64 &&
+                mh64.sizeofcmds > 0 &&
+                mh64.sizeofcmds <= (1U << 20)) {
+                size_t total = sizeof(mh64) + (size_t)mh64.sizeofcmds;
+                uint8_t *buf = (uint8_t *)malloc(total);
+                if (buf != NULL) {
+                    if (pread(fd, buf, total, slice_off) == (ssize_t)total) {
+                        s_backup_main_hdr_bytes = buf;
+                        s_backup_main_hdr_len = total;
+                    } else {
+                        free(buf);
+                    }
+                }
+            }
+            close(fd);
+        }
+        pt_leave_internal_scope();
+    }
+    const uint8_t *res = s_backup_main_hdr_bytes;
+    size_t res_len = s_backup_main_hdr_len;
+    os_unfair_lock_unlock(&s_backup_main_hdr_lock);
+
+    if (res == NULL || res_len < sizeof(struct mach_header_64)) {
+        return NULL;
+    }
+    if (out_len != NULL) {
+        *out_len = res_len;
+    }
+    return res;
+}
+
 static BOOL pt_is_active_app_backup_file_path(const char *p) {
     if (p == NULL || p[0] != '/' ||
         atomic_load_explicit(&s_app_backups_disabled_for_safe_mode, memory_order_acquire) ||
@@ -1395,7 +1524,7 @@ static void pt_maybe_init_test_group_root_locked(void) {
     if (s_real_group_containers_root_len > 0) {
         return;
     }
-    const char *test_group_root = getenv("PLAYTOOLS_TEST_GROUP_CONTAINERS_ROOT");
+    const char *test_group_root = pt_raw_getenv("PLAYTOOLS_TEST_GROUP_CONTAINERS_ROOT");
     if (test_group_root != NULL && test_group_root[0] == '/') {
         if (strncmp(test_group_root, "/System/Volumes/Data/", 21) == 0) {
             test_group_root += 20;
@@ -1426,16 +1555,16 @@ __attribute__((visibility("hidden"))) BOOL pt_ensure_data_container_map(void) {
 
     pt_maybe_init_test_group_root_locked();
 
-    const char *test_data = getenv("PLAYTOOLS_TEST_DATA_CONTAINER");
+    const char *test_data = pt_raw_getenv("PLAYTOOLS_TEST_DATA_CONTAINER");
     const char *raw_home = NULL;
     BOOL is_test_override = NO;
     if (test_data != NULL && test_data[0] != '\0') {
         raw_home = test_data;
         is_test_override = YES;
     } else {
-        raw_home = getenv("CFFIXED_USER_HOME");
+        raw_home = pt_raw_getenv("CFFIXED_USER_HOME");
         if (raw_home == NULL || raw_home[0] == '\0') {
-            raw_home = getenv("HOME");
+            raw_home = pt_raw_getenv("HOME");
         }
     }
 
@@ -1851,6 +1980,10 @@ const char *pt_virtualize_path_for_app(const char *path, char *buf, size_t bufsi
     const char *group_virt = pt_group_try_virtualize_known_or_root(p, buf, bufsize, use_private_prefix);
     if (group_virt != NULL) {
         return group_virt;
+    }
+    if (strcmp(p, "/System/Library/CoreServices/iOSSystemVersion.plist") == 0) {
+        size_t n = strlcpy(buf, "/System/Library/CoreServices/SystemVersion.plist", bufsize);
+        return (n < bufsize) ? buf : path;
     }
     if (p != path) {
         size_t n = strlcpy(buf, p, bufsize);
@@ -2300,6 +2433,18 @@ static void pt_compute_escaped_virtual_ancestor(const char *real_base,
     }
 }
 
+static _Atomic int s_has_ios_sysver_plist = -1;
+
+static BOOL pt_has_ios_system_version_plist(void) {
+    int cached = atomic_load_explicit(&s_has_ios_sysver_plist, memory_order_acquire);
+    if (cached >= 0) {
+        return cached == 1;
+    }
+    BOOL exists = (access("/System/Library/CoreServices/iOSSystemVersion.plist", F_OK) == 0);
+    atomic_store_explicit(&s_has_ios_sysver_plist, exists ? 1 : 0, memory_order_release);
+    return exists;
+}
+
 static pt_fs_path_disposition_t pt_prepare_fs_path_abs_cached_caller(const char *cleaned,
                                                                       const void *caller,
                                                                       char *vbuf,
@@ -2401,6 +2546,23 @@ static pt_fs_path_disposition_t pt_prepare_fs_path_abs_cached_caller(const char 
 
     if (pt_is_hidden_normalized_path_cached_caller(norm, caller, inout_is_sys_caller)) {
         return PT_FS_PATH_HIDDEN;
+    }
+
+    if (for_readonly && pt_is_bypass_enabled() && vbuf != NULL && vbuf_size > 0) {
+        const char *sv_norm = norm;
+        if (strncmp(sv_norm, "/System/Volumes/Data/", 21) == 0) {
+            sv_norm += 20;
+        }
+        if (strcmp(sv_norm, "/System/Library/CoreServices/SystemVersion.plist") == 0) {
+            if (*inout_is_sys_caller < 0) {
+                *inout_is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
+            }
+            if (*inout_is_sys_caller == 0 && pt_has_ios_system_version_plist()) {
+                strlcpy(vbuf, "/System/Library/CoreServices/iOSSystemVersion.plist", vbuf_size);
+                *out_path = vbuf;
+                return PT_FS_PATH_NORMAL;
+            }
+        }
     }
 
     if (norm[0] == '/' && norm[1] == 'S' && strncmp(norm, "/System/Library/", 16) == 0) {

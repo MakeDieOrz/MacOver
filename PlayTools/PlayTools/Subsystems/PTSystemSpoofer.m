@@ -68,9 +68,35 @@ static const pt_device_profile_t *pt_device_profile_for_model(const char *model)
 __attribute__((visibility("hidden"))) int pt_open_early_settings_plist_fd(void);
 static BOOL pt_read_plist_top_bool_from_fd(int fd, const char *key, BOOL *out_val);
 
+__attribute__((visibility("hidden")))
+const char *pt_raw_getenv(const char *name) {
+    if (name == NULL || name[0] == '\0') {
+        return NULL;
+    }
+    char ***envpp = _NSGetEnviron();
+    if (envpp == NULL || !pt_is_valid_user_pointer(envpp)) {
+        return NULL;
+    }
+    char **envp = *envpp;
+    if (envp == NULL || !pt_is_valid_user_pointer(envp)) {
+        return NULL;
+    }
+    size_t nlen = strlen(name);
+    for (char **ep = envp; pt_is_valid_user_pointer(ep) && *ep != NULL; ep++) {
+        const char *entry = *ep;
+        if (!pt_is_valid_user_pointer(entry)) {
+            continue;
+        }
+        if (strncmp(entry, name, nlen) == 0 && entry[nlen] == '=') {
+            return entry + nlen + 1U;
+        }
+    }
+    return NULL;
+}
+
 __attribute__((visibility("hidden"))) void pt_init_early_bypass(void) {
     pt_enter_internal_scope();
-    const char *dis = getenv("DISABLE_PLAYSHADOW_BYPASS");
+    const char *dis = pt_raw_getenv("DISABLE_PLAYSHADOW_BYPASS");
     if (dis != NULL && strcmp(dis, "1") == 0) {
         atomic_store_explicit(&s_bypass_enabled, NO, memory_order_relaxed);
         atomic_store_explicit(&s_pt_bypass_inited, YES, memory_order_release);
@@ -724,10 +750,10 @@ static BOOL pt_extract_host_user_root_from_env_val(const char *env_val, char *ou
 }
 
 static void pt_init_host_user_root(void) {
-    if (pt_extract_host_user_root_from_env_val(getenv("HOME"), s_cached_host_user_root, sizeof(s_cached_host_user_root))) {
+    if (pt_extract_host_user_root_from_env_val(pt_raw_getenv("HOME"), s_cached_host_user_root, sizeof(s_cached_host_user_root))) {
         return;
     }
-    if (pt_extract_host_user_root_from_env_val(getenv("CFFIXED_USER_HOME"), s_cached_host_user_root, sizeof(s_cached_host_user_root))) {
+    if (pt_extract_host_user_root_from_env_val(pt_raw_getenv("CFFIXED_USER_HOME"), s_cached_host_user_root, sizeof(s_cached_host_user_root))) {
         return;
     }
     if (atomic_load_explicit(&s_libsystem_ready, memory_order_acquire) &&
@@ -751,8 +777,8 @@ const char *pt_get_host_user_root_cstr(void) {
         }
         // Compute directly into stack or return without calling getpwuid inside early pthread_once
         static _Thread_local char tls_early_root[256];
-        if (pt_extract_host_user_root_from_env_val(getenv("HOME"), tls_early_root, sizeof(tls_early_root)) ||
-            pt_extract_host_user_root_from_env_val(getenv("CFFIXED_USER_HOME"), tls_early_root, sizeof(tls_early_root))) {
+        if (pt_extract_host_user_root_from_env_val(pt_raw_getenv("HOME"), tls_early_root, sizeof(tls_early_root)) ||
+            pt_extract_host_user_root_from_env_val(pt_raw_getenv("CFFIXED_USER_HOME"), tls_early_root, sizeof(tls_early_root))) {
             return tls_early_root;
         }
         return NULL;
@@ -817,7 +843,7 @@ __attribute__((visibility("hidden"))) int pt_open_early_settings_plist_fd(void) 
     char plist_path[PATH_MAX];
     plist_path[0] = '\0';
 
-    const char *override_plist = getenv("PLAYTOOLS_SETTINGS_PLIST");
+    const char *override_plist = pt_raw_getenv("PLAYTOOLS_SETTINGS_PLIST");
     if (override_plist != NULL && override_plist[0] == '/') {
         return pt_orig_open_nocancel(override_plist, O_RDONLY);
     }
@@ -831,7 +857,7 @@ __attribute__((visibility("hidden"))) int pt_open_early_settings_plist_fd(void) 
             fd = pt_orig_open_nocancel(plist_path, O_RDONLY);
         }
         if (fd < 0) {
-            const char *home = getenv("CFFIXED_USER_HOME");
+            const char *home = pt_raw_getenv("CFFIXED_USER_HOME");
             const char *containers_marker = (home != NULL) ? strstr(home, "/Library/Containers/") : NULL;
             if (containers_marker != NULL) {
                 const char *cid_start = containers_marker + 20;
@@ -1253,7 +1279,7 @@ static _Atomic int s_reported_ios_override_mode = PT_REPORTED_IOS_OVERRIDE_NONE;
 static pthread_once_t s_host_kern_once = PTHREAD_ONCE_INIT;
 
 static BOOL pt_is_safe_mode_env_active(void) {
-    const char *raw = getenv("PLAYTOOLS_SAFE_MODE");
+    const char *raw = pt_raw_getenv("PLAYTOOLS_SAFE_MODE");
     if (raw == NULL) {
         return NO;
     }
@@ -2365,8 +2391,12 @@ static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *
     BOOL wrote_temp = NO;
     BOOL wrote_pwd = NO;
     BOOL wrote_path = NO;
+    BOOL seen_env_entry = NO;
     while (pos < raw_len) {
         if (raw[pos] == '\0') {
+            if (is_v2 || seen_env_entry) {
+                break;
+            }
             pos++;
             continue;
         }
@@ -2374,6 +2404,7 @@ static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *
         size_t elen = strnlen(entry, raw_len - pos);
         const char *eq = (const char *)memchr(entry, '=', elen);
         if (eq != NULL && eq > entry) {
+            seen_env_entry = YES;
             size_t klen = (size_t)(eq - entry);
             char stack_key[256];
             char *heap_key = NULL;
@@ -2468,6 +2499,9 @@ static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *
                 }
             }
         }
+    }
+    if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, "", 1U)) {
+        free(raw); free(out); errno = ENOMEM; return -1;
     }
     free(raw);
 
@@ -5958,6 +5992,182 @@ extern kern_return_t pt_orig_mach_vm_region_recurse(
     vm_region_recurse_info_t info,
     mach_msg_type_number_t *infoCnt) __asm("_mach_vm_region_recurse");
 
+extern kern_return_t pt_orig_vm_read_overwrite(
+    vm_map_read_t target_task,
+    vm_address_t address,
+    vm_size_t size,
+    vm_address_t data,
+    vm_size_t *outsize) __asm("_vm_read_overwrite");
+
+extern kern_return_t pt_orig_mach_vm_read_overwrite(
+    vm_map_read_t target_task,
+    mach_vm_address_t address,
+    mach_vm_size_t size,
+    mach_vm_address_t data,
+    mach_vm_size_t *outsize) __asm("_mach_vm_read_overwrite");
+
+static vm_prot_t pt_extract_vm_region_prot(vm_region_flavor_t flavor,
+                                           const void *info,
+                                           mach_msg_type_number_t infoCnt,
+                                           BOOL is_recurse) {
+    if (info == NULL) {
+        return 0;
+    }
+    if (is_recurse) {
+        if (infoCnt >= VM_REGION_SUBMAP_SHORT_INFO_COUNT_64) {
+            return ((const vm_region_submap_short_info_data_64_t *)info)->protection;
+        }
+        return 0;
+    }
+    switch (flavor) {
+        case VM_REGION_BASIC_INFO_64:
+            if (infoCnt >= VM_REGION_BASIC_INFO_COUNT_64) {
+                return ((const vm_region_basic_info_data_64_t *)info)->protection;
+            }
+            return 0;
+        case VM_REGION_BASIC_INFO:
+            if (infoCnt >= VM_REGION_BASIC_INFO_COUNT) {
+                return ((const vm_region_basic_info_data_t *)info)->protection;
+            }
+            return 0;
+        case VM_REGION_EXTENDED_INFO:
+            if (infoCnt >= VM_REGION_EXTENDED_INFO_COUNT) {
+                return ((const vm_region_extended_info_data_t *)info)->protection;
+            }
+            return 0;
+        default:
+            return 0;
+    }
+}
+
+static BOOL pt_is_hidden_unregistered_macho_region(uintptr_t addr, uintptr_t size, vm_prot_t prot) {
+    if ((prot & (VM_PROT_READ | VM_PROT_EXECUTE)) != (VM_PROT_READ | VM_PROT_EXECUTE) ||
+        addr == 0 ||
+        size < sizeof(struct mach_header_64)) {
+        return NO;
+    }
+    if (dyld_image_header_containing_address((const void *)addr) != NULL) {
+        return NO;
+    }
+    struct mach_header_64 hdr;
+    memset(&hdr, 0, sizeof(hdr));
+    mach_vm_size_t out_sz = 0;
+    kern_return_t kr = pt_orig_mach_vm_read_overwrite(
+        mach_task_self(),
+        (mach_vm_address_t)addr,
+        sizeof(hdr),
+        (mach_vm_address_t)(uintptr_t)&hdr,
+        &out_sz);
+    if (kr != KERN_SUCCESS || out_sz != sizeof(hdr)) {
+        return NO;
+    }
+    return (hdr.magic == MH_MAGIC_64 &&
+            hdr.cputype == CPU_TYPE_ARM64 &&
+            hdr.sizeofcmds > 0 &&
+            hdr.sizeofcmds <= (1U << 20) &&
+            (hdr.filetype == MH_DYLIB || hdr.filetype == MH_BUNDLE || hdr.filetype == MH_DYLINKER));
+}
+
+static void pt_sanitize_vm_read_buffer(uintptr_t read_start, uint8_t *dst, size_t copied) {
+    if (dst == NULL || copied == 0 || read_start > UINTPTR_MAX - copied) {
+        return;
+    }
+    const struct mach_header *mh = dyld_image_header_containing_address((const void *)read_start);
+    if (mh == NULL || !pt_is_valid_user_pointer((const void *)mh)) {
+        return;
+    }
+    const struct mach_header_64 *mh64 = (const struct mach_header_64 *)mh;
+    if (mh64->magic != MH_MAGIC_64 ||
+        mh64->sizeofcmds == 0 ||
+        mh64->sizeofcmds > (1U << 20)) {
+        return;
+    }
+    uintptr_t mh_base = (uintptr_t)mh64;
+    size_t real_hdr_total = sizeof(struct mach_header_64) + (size_t)mh64->sizeofcmds;
+    if (mh_base > UINTPTR_MAX - real_hdr_total) {
+        return;
+    }
+    uintptr_t mh_end = mh_base + real_hdr_total;
+    if (read_start >= mh_base && read_start < mh_end) {
+        uintptr_t read_end = read_start + copied;
+        uintptr_t ov_end = (read_end < mh_end) ? read_end : mh_end;
+        size_t rel_off = (size_t)(read_start - mh_base);
+        size_t ov_len = (size_t)(ov_end - read_start);
+        BOOL handled_hdr = NO;
+
+        if (mh == pt_get_main_executable_header()) {
+            size_t backup_len = 0;
+            const uint8_t *backup_hdr = pt_get_cached_backup_main_mach_header(&backup_len);
+            if (backup_hdr != NULL && backup_len >= sizeof(struct mach_header_64)) {
+                if (rel_off < backup_len) {
+                    size_t copy_len = ov_len;
+                    if (copy_len > backup_len - rel_off) {
+                        copy_len = backup_len - rel_off;
+                    }
+                    memcpy(dst, backup_hdr + rel_off, copy_len);
+                    if (copy_len < ov_len) {
+                        memset(dst + copy_len, 0, ov_len - copy_len);
+                    }
+                } else {
+                    memset(dst, 0, ov_len);
+                }
+                handled_hdr = YES;
+            }
+        }
+
+        if (!handled_hdr) {
+            uint8_t stack_buf[16384];
+            uint8_t *heap_buf = NULL;
+            uint8_t *work_buf = stack_buf;
+            if (real_hdr_total > sizeof(stack_buf)) {
+                heap_buf = (uint8_t *)malloc(real_hdr_total);
+                work_buf = heap_buf;
+            }
+            if (work_buf != NULL &&
+                pt_build_sanitized_mach_header_copy(mh64, work_buf, real_hdr_total, NULL)) {
+                memcpy(dst, work_buf + rel_off, ov_len);
+            }
+            free(heap_buf);
+        }
+    }
+}
+
+static kern_return_t pt_vm_read_overwrite(vm_map_read_t target_task,
+                                          vm_address_t address,
+                                          vm_size_t size,
+                                          vm_address_t data,
+                                          vm_size_t *outsize) {
+    kern_return_t kr = pt_orig_vm_read_overwrite(target_task, address, size, data, outsize);
+    if (kr == KERN_SUCCESS &&
+        outsize != NULL &&
+        *outsize > 0 &&
+        data != 0 &&
+        target_task == mach_task_self() &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        pt_sanitize_vm_read_buffer((uintptr_t)address, (uint8_t *)(uintptr_t)data, (size_t)*outsize);
+    }
+    return kr;
+}
+
+static kern_return_t pt_mach_vm_read_overwrite(vm_map_read_t target_task,
+                                               mach_vm_address_t address,
+                                               mach_vm_size_t size,
+                                               mach_vm_address_t data,
+                                               mach_vm_size_t *outsize) {
+    kern_return_t kr = pt_orig_mach_vm_read_overwrite(target_task, address, size, data, outsize);
+    if (kr == KERN_SUCCESS &&
+        outsize != NULL &&
+        *outsize > 0 &&
+        data != 0 &&
+        target_task == mach_task_self() &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        pt_sanitize_vm_read_buffer((uintptr_t)address, (uint8_t *)(uintptr_t)data, (size_t)*outsize);
+    }
+    return kr;
+}
+
 #define PT_VM_REGION_MAX_SKIPS 4096
 
 static kern_return_t pt_vm_region_64(vm_map_read_t target_task,
@@ -5979,7 +6189,9 @@ static kern_return_t pt_vm_region_64(vm_map_read_t target_task,
         }
         vm_address_t cur_addr = *address;
         vm_size_t cur_size = *size;
-        if (!pt_is_hidden_vm_region_range((uintptr_t)cur_addr, (uintptr_t)cur_size)) {
+        vm_prot_t prot = pt_extract_vm_region_prot(flavor, info, *infoCnt, NO);
+        if (!pt_is_hidden_vm_region_range((uintptr_t)cur_addr, (uintptr_t)cur_size) &&
+            !pt_is_hidden_unregistered_macho_region((uintptr_t)cur_addr, (uintptr_t)cur_size, prot)) {
             return kr;
         }
         if (object_name != NULL && MACH_PORT_VALID(*object_name)) {
@@ -6014,7 +6226,9 @@ static kern_return_t pt_vm_region_recurse_64(vm_map_read_t target_task,
         }
         vm_address_t cur_addr = *address;
         vm_size_t cur_size = *size;
-        if (!pt_is_hidden_vm_region_range((uintptr_t)cur_addr, (uintptr_t)cur_size)) {
+        vm_prot_t prot = pt_extract_vm_region_prot(0, info, *infoCnt, YES);
+        if (!pt_is_hidden_vm_region_range((uintptr_t)cur_addr, (uintptr_t)cur_size) &&
+            !pt_is_hidden_unregistered_macho_region((uintptr_t)cur_addr, (uintptr_t)cur_size, prot)) {
             return kr;
         }
         if (cur_size == 0 || cur_addr + cur_size <= cur_addr) {
@@ -6048,7 +6262,9 @@ static kern_return_t pt_mach_vm_region(vm_map_read_t target_task,
         }
         mach_vm_address_t cur_addr = *address;
         mach_vm_size_t cur_size = *size;
-        if (!pt_is_hidden_vm_region_range((uintptr_t)cur_addr, (uintptr_t)cur_size)) {
+        vm_prot_t prot = pt_extract_vm_region_prot(flavor, info, *infoCnt, NO);
+        if (!pt_is_hidden_vm_region_range((uintptr_t)cur_addr, (uintptr_t)cur_size) &&
+            !pt_is_hidden_unregistered_macho_region((uintptr_t)cur_addr, (uintptr_t)cur_size, prot)) {
             return kr;
         }
         if (object_name != NULL && MACH_PORT_VALID(*object_name)) {
@@ -6083,7 +6299,9 @@ static kern_return_t pt_mach_vm_region_recurse(vm_map_read_t target_task,
         }
         mach_vm_address_t cur_addr = *address;
         mach_vm_size_t cur_size = *size;
-        if (!pt_is_hidden_vm_region_range((uintptr_t)cur_addr, (uintptr_t)cur_size)) {
+        vm_prot_t prot = pt_extract_vm_region_prot(0, info, *infoCnt, YES);
+        if (!pt_is_hidden_vm_region_range((uintptr_t)cur_addr, (uintptr_t)cur_size) &&
+            !pt_is_hidden_unregistered_macho_region((uintptr_t)cur_addr, (uintptr_t)cur_size, prot)) {
             return kr;
         }
         if (cur_size == 0 || cur_addr + cur_size <= cur_addr) {
@@ -6168,64 +6386,44 @@ static inline BOOL pt_fcntl_cmd_has_no_arg(int cmd) {
     }
 }
 
-static intptr_t pt_syscall(int number, ...) {
-    pthread_t self_thr = pthread_self();
-    uintptr_t stack_top = (self_thr != NULL) ? (uintptr_t)pthread_get_stackaddr_np(self_thr) : 0;
-    size_t stack_sz = (self_thr != NULL) ? pthread_get_stacksize_np(self_thr) : 0;
-    uintptr_t stack_bot = (stack_top >= stack_sz && stack_sz > 0) ? (stack_top - stack_sz) : 0;
-
-    va_list ap;
-    va_start(ap, number);
-
-    if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire)) {
-        uintptr_t early_args[PT_XNU_SYSCALL_MAX_ARGS] = {0};
-        for (int i = 0; i < PT_XNU_SYSCALL_MAX_ARGS; i++) {
-            if (!pt_va_can_pop_uintptr(ap, stack_bot, stack_top)) {
-                break;
-            }
-            early_args[i] = va_arg(ap, uintptr_t);
-        }
-        va_end(ap);
-        return pt_orig_syscall(number,
-                               early_args[0], early_args[1], early_args[2], early_args[3],
-                               early_args[4], early_args[5], early_args[6], early_args[7]);
+__attribute__((visibility("hidden")))
+intptr_t pt_syscall_dispatch_with_caller(int number,
+                                         const uintptr_t args[PT_XNU_SYSCALL_MAX_ARGS],
+                                         const void *caller,
+                                         BOOL *out_handled) {
+    if (out_handled != NULL) {
+        *out_handled = YES;
     }
-
-    const void *caller = __builtin_return_address(0);
-
     if (number == 0 || number == 198) {
-        if (!pt_va_can_pop_uintptr(ap, stack_bot, stack_top)) {
-            va_end(ap);
-            errno = EFAULT;
-            return -1;
-        }
-        number = (int)va_arg(ap, uintptr_t);
+        number = (int)args[0];
         if (number == 0 || number == 198) {
-            va_end(ap);
             errno = ENOSYS;
             return -1;
         }
+        uintptr_t shifted[PT_XNU_SYSCALL_MAX_ARGS] = {0};
+        for (int i = 0; i < PT_XNU_SYSCALL_MAX_ARGS - 1; i++) {
+            shifted[i] = args[i + 1];
+        }
+        return pt_syscall_dispatch_with_caller(number, shifted, caller, out_handled);
     }
 
     switch (number) {
         case 202: { // SYS___sysctl
-            int *name = (int *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            u_int namelen = (u_int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            void *oldp = (void *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            size_t *oldlenp = (size_t *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            void *newp = (void *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            size_t newlen = (size_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            va_end(ap);
+            int *name = (int *)args[0];
+            u_int namelen = (u_int)args[1];
+            void *oldp = (void *)args[2];
+            size_t *oldlenp = (size_t *)args[3];
+            void *newp = (void *)args[4];
+            size_t newlen = (size_t)args[5];
             return (intptr_t)pt_sysctl_with_caller(name, namelen, oldp, oldlenp, newp, newlen, caller);
         }
         case 274: { // SYS_sysctlbyname (XNU 6-arg ABI: name, namelen, oldp, oldlenp, newp, newlen)
-            const char *name = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            size_t namelen = (size_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            void *oldp = (void *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            size_t *oldlenp = (size_t *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            void *newp = (void *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            size_t newlen = (size_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            va_end(ap);
+            const char *name = (const char *)args[0];
+            size_t namelen = (size_t)args[1];
+            void *oldp = (void *)args[2];
+            size_t *oldlenp = (size_t *)args[3];
+            void *newp = (void *)args[4];
+            size_t newlen = (size_t)args[5];
             if (name != NULL && namelen > 0 && namelen < 256U && pt_is_valid_user_pointer(name)) {
                 char nbuf[256];
                 size_t slen = strnlen(name, namelen);
@@ -6237,102 +6435,90 @@ static intptr_t pt_syscall(int number, ...) {
         }
         case 169: // SYS_csops
         case 170: { // SYS_csops_audittoken
-            pid_t pid = (pid_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            unsigned int ops = (unsigned int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            void *useraddr = (void *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            size_t usersize = (size_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            pid_t pid = (pid_t)args[0];
+            unsigned int ops = (unsigned int)args[1];
+            void *useraddr = (void *)args[2];
+            size_t usersize = (size_t)args[3];
             if (number == 169 || pid == 0 || pid == getpid()) {
-                va_end(ap);
                 return (intptr_t)pt_csops_with_caller(pid, ops, useraddr, usersize, caller);
             }
-            uintptr_t autok = PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            va_end(ap);
-            return pt_orig_syscall(number, (uintptr_t)pid, (uintptr_t)ops,
-                                   (uintptr_t)useraddr, (uintptr_t)usersize, autok,
-                                   (uintptr_t)0, (uintptr_t)0, (uintptr_t)0);
+            if (out_handled != NULL) {
+                *out_handled = NO;
+            }
+            return 0;
         }
         case 5: // SYS_open
-        case 399: { // SYS_open_nocancel
-            const char *path = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            int oflag = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            mode_t mode = (oflag & O_CREAT) ? (mode_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top) : 0;
-            va_end(ap);
+        case 398: { // SYS_open_nocancel
+            const char *path = (const char *)args[0];
+            int oflag = (int)args[1];
+            mode_t mode = (oflag & O_CREAT) ? (mode_t)args[2] : 0;
             return (intptr_t)pt_fs_open_with_caller(path, oflag, mode, caller);
         }
         case 463: // SYS_openat
         case 464: { // SYS_openat_nocancel
-            int fd = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            const char *path = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            int oflag = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            mode_t mode = (oflag & O_CREAT) ? (mode_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top) : 0;
-            va_end(ap);
+            int fd = (int)args[0];
+            const char *path = (const char *)args[1];
+            int oflag = (int)args[2];
+            mode_t mode = (oflag & O_CREAT) ? (mode_t)args[3] : 0;
             return (intptr_t)pt_fs_openat_with_caller(fd, path, oflag, mode, caller);
         }
         case 188: // SYS_stat
         case 338: { // SYS_stat64
-            const char *path = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            struct stat *ub = (struct stat *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            va_end(ap);
+            const char *path = (const char *)args[0];
+            struct stat *ub = (struct stat *)args[1];
             return (intptr_t)pt_fs_stat_with_caller(path, ub, YES, caller);
         }
         case 190: // SYS_lstat
         case 340: { // SYS_lstat64
-            const char *path = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            struct stat *ub = (struct stat *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            va_end(ap);
+            const char *path = (const char *)args[0];
+            struct stat *ub = (struct stat *)args[1];
             return (intptr_t)pt_fs_stat_with_caller(path, ub, NO, caller);
         }
-        case 469: { // SYS_fstatat64
-            int fd = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            const char *path = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            struct stat *ub = (struct stat *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            int flag = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            va_end(ap);
+        case 469: // SYS_fstatat
+        case 470: { // SYS_fstatat64
+            int fd = (int)args[0];
+            const char *path = (const char *)args[1];
+            struct stat *ub = (struct stat *)args[2];
+            int flag = (int)args[3];
             return (intptr_t)pt_fs_fstatat_with_caller(fd, path, ub, flag, caller);
         }
         case 33: { // SYS_access
-            const char *path = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            int mode = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            va_end(ap);
+            const char *path = (const char *)args[0];
+            int mode = (int)args[1];
             return (intptr_t)pt_fs_access_with_caller(path, mode, caller);
         }
         case 466: { // SYS_faccessat
-            int fd = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            const char *path = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            int mode = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            int flag = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            va_end(ap);
+            int fd = (int)args[0];
+            const char *path = (const char *)args[1];
+            int mode = (int)args[2];
+            int flag = (int)args[3];
             return (intptr_t)pt_fs_faccessat_with_caller(fd, path, mode, flag, caller);
         }
         case 58: { // SYS_readlink
-            const char *path = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            char *buf = (char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            size_t count = (size_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            va_end(ap);
+            const char *path = (const char *)args[0];
+            char *buf = (char *)args[1];
+            size_t count = (size_t)args[2];
             return (intptr_t)pt_fs_readlink_with_caller(path, buf, count, caller);
         }
         case 473: { // SYS_readlinkat
-            int fd = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            const char *path = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            char *buf = (char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            size_t count = (size_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            va_end(ap);
+            int fd = (int)args[0];
+            const char *path = (const char *)args[1];
+            char *buf = (char *)args[2];
+            size_t count = (size_t)args[3];
             return (intptr_t)pt_fs_readlinkat_with_caller(fd, path, buf, count, caller);
         }
         case 92: // SYS_fcntl
         case 406: { // SYS_fcntl_nocancel
-            int fd = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            int cmd = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            uintptr_t arg = pt_fcntl_cmd_has_no_arg(cmd) ? 0 : PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            va_end(ap);
+            int fd = (int)args[0];
+            int cmd = (int)args[1];
+            uintptr_t arg = pt_fcntl_cmd_has_no_arg(cmd) ? 0 : args[2];
             return (intptr_t)pt_fs_fcntl_with_caller(fd, cmd, arg, caller);
         }
         case 26: { // SYS_ptrace
-            int req = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            pid_t pid = (pid_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            caddr_t addr = (caddr_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            int data = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            va_end(ap);
+            int req = (int)args[0];
+            pid_t pid = (pid_t)args[1];
+            caddr_t addr = (caddr_t)args[2];
+            int data = (int)args[3];
             return (intptr_t)pt_ptrace_with_caller(req, pid, addr, data, caller);
         }
         case 2: // SYS_fork
@@ -6340,7 +6526,6 @@ static intptr_t pt_syscall(int number, ...) {
         case 59: // SYS_execve
         case 244: { // SYS_posix_spawn
             if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller)) {
-                va_end(ap);
                 errno = EPERM;
                 return -1;
             }
@@ -6348,29 +6533,40 @@ static intptr_t pt_syscall(int number, ...) {
         }
         case 39: { // SYS_getppid
             if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller)) {
-                va_end(ap);
                 return 1;
             }
             break;
         }
         case 336: { // SYS_proc_info
-            int32_t callnum = (int32_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            int32_t pid = (int32_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            uint32_t flavor = (uint32_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            uint64_t arg = (uint64_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            void *buffer = (void *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            int32_t buffersize = (int32_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
-            va_end(ap);
+            int32_t callnum = (int32_t)args[0];
+            int32_t pid = (int32_t)args[1];
+            uint32_t flavor = (uint32_t)args[2];
+            uint64_t arg = (uint64_t)args[3];
+            void *buffer = (void *)args[4];
+            int32_t buffersize = (int32_t)args[5];
             if (callnum == 2) { // PROC_INFO_CALL_PIDINFO
                 return (intptr_t)pt_fs_proc_pidinfo_with_caller(pid, (int)flavor, arg, buffer, buffersize, caller);
             }
-            return pt_orig_syscall(number, (uintptr_t)callnum, (uintptr_t)pid, (uintptr_t)flavor,
-                                   (uintptr_t)arg, (uintptr_t)buffer, (uintptr_t)buffersize,
-                                   (uintptr_t)0, (uintptr_t)0);
+            break;
         }
         default:
             break;
     }
+
+    if (out_handled != NULL) {
+        *out_handled = NO;
+    }
+    return 0;
+}
+
+static intptr_t pt_syscall(int number, ...) {
+    pthread_t self_thr = pthread_self();
+    uintptr_t stack_top = (self_thr != NULL) ? (uintptr_t)pthread_get_stackaddr_np(self_thr) : 0;
+    size_t stack_sz = (self_thr != NULL) ? pthread_get_stacksize_np(self_thr) : 0;
+    uintptr_t stack_bot = (stack_top >= stack_sz && stack_sz > 0) ? (stack_top - stack_sz) : 0;
+
+    va_list ap;
+    va_start(ap, number);
 
     uintptr_t args[PT_XNU_SYSCALL_MAX_ARGS] = {0};
     for (int i = 0; i < PT_XNU_SYSCALL_MAX_ARGS; i++) {
@@ -6380,6 +6576,24 @@ static intptr_t pt_syscall(int number, ...) {
         args[i] = va_arg(ap, uintptr_t);
     }
     va_end(ap);
+
+    if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire)) {
+        return pt_orig_syscall(number, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]);
+    }
+
+    const void *caller = __builtin_return_address(0);
+    if (number == 0 || number == 198) {
+        if (args[0] == 0 && stack_top > 0 && stack_bot == stack_top) {
+            errno = EFAULT;
+            return -1;
+        }
+    }
+
+    BOOL handled = NO;
+    intptr_t res = pt_syscall_dispatch_with_caller(number, args, caller, &handled);
+    if (handled) {
+        return res;
+    }
     return pt_orig_syscall(number, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]);
 }
 
@@ -6392,6 +6606,8 @@ DYLD_INTERPOSE(pt_vm_region_64, pt_orig_vm_region_64)
 DYLD_INTERPOSE(pt_vm_region_recurse_64, pt_orig_vm_region_recurse_64)
 DYLD_INTERPOSE(pt_mach_vm_region, pt_orig_mach_vm_region)
 DYLD_INTERPOSE(pt_mach_vm_region_recurse, pt_orig_mach_vm_region_recurse)
+DYLD_INTERPOSE(pt_vm_read_overwrite, pt_orig_vm_read_overwrite)
+DYLD_INTERPOSE(pt_mach_vm_read_overwrite, pt_orig_mach_vm_read_overwrite)
 DYLD_INTERPOSE(pt_sysctlbyname, sysctlbyname)
 DYLD_INTERPOSE(pt_sysctlnametomib, sysctlnametomib)
 DYLD_INTERPOSE(pt_sysctl, sysctl)

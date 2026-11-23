@@ -1247,20 +1247,46 @@ static BOOL pt_mach_header_64_needs_shadow(const struct mach_header_64 *mh) {
     return NO;
 }
 
-static const struct mach_header *pt_build_shadow_mach_header_locked(const struct mach_header_64 *src_mh,
-                                                                    vm_size_t *out_alloc_size) {
-    size_t total = sizeof(struct mach_header_64) + (size_t)src_mh->sizeofcmds;
-    vm_size_t page_sz = (vm_page_size > 0) ? (vm_size_t)vm_page_size : 16384U;
-    vm_size_t alloc_sz = ((vm_size_t)total + page_sz - 1U) & ~(page_sz - 1U);
-    vm_address_t vm_addr = 0;
-    if (vm_allocate(mach_task_self(), &vm_addr, alloc_sz, VM_FLAGS_ANYWHERE) != KERN_SUCCESS || vm_addr == 0) {
-        return NULL;
+static BOOL pt_header_has_ios_or_catalyst_build_version(const struct mach_header_64 *mh) {
+    const uint8_t *base = (const uint8_t *)mh;
+    size_t total = sizeof(struct mach_header_64) + (size_t)mh->sizeofcmds;
+    size_t off = sizeof(struct mach_header_64);
+    for (uint32_t i = 0; i < mh->ncmds && off + sizeof(struct load_command) <= total; i++) {
+        const struct load_command *lc = (const struct load_command *)(base + off);
+        if (lc->cmdsize < sizeof(struct load_command) || off + lc->cmdsize > total) {
+            break;
+        }
+        if (lc->cmd == LC_BUILD_VERSION && lc->cmdsize >= sizeof(struct build_version_command)) {
+            const struct build_version_command *bv = (const struct build_version_command *)lc;
+            if (bv->platform == PLATFORM_IOS || bv->platform == PLATFORM_MACCATALYST) {
+                return YES;
+            }
+        }
+        off += lc->cmdsize;
     }
-    uint8_t *dst = (uint8_t *)(uintptr_t)vm_addr;
-    memset(dst, 0, (size_t)alloc_sz);
+    return NO;
+}
+
+__attribute__((visibility("hidden")))
+BOOL pt_build_sanitized_mach_header_copy(const struct mach_header_64 *src_mh,
+                                         uint8_t *dst_buf,
+                                         size_t dst_cap,
+                                         size_t *out_sanitized_len) {
+    if (src_mh == NULL || dst_buf == NULL || !pt_is_valid_user_pointer(src_mh) ||
+        src_mh->magic != MH_MAGIC_64 ||
+        src_mh->sizeofcmds == 0 || src_mh->sizeofcmds > (1U << 20)) {
+        return NO;
+    }
+    size_t total = sizeof(struct mach_header_64) + (size_t)src_mh->sizeofcmds;
+    if (dst_cap < total) {
+        return NO;
+    }
+    memset(dst_buf, 0, total);
 
     const uint8_t *src = (const uint8_t *)src_mh;
     struct mach_header_64 new_hdr = *src_mh;
+    BOOL prefer_ios_or_catalyst = pt_header_has_ios_or_catalyst_build_version(src_mh);
+    BOOL emitted_build_version = NO;
     size_t write_off = sizeof(struct mach_header_64);
     uint32_t new_ncmds = 0;
     size_t read_off = sizeof(struct mach_header_64);
@@ -1275,18 +1301,35 @@ static const struct mach_header *pt_build_shadow_mach_header_locked(const struct
         read_off += cmdsize;
 
         if (cmd == LC_BUILD_VERSION && cmdsize >= sizeof(struct build_version_command)) {
-            memcpy(dst + write_off, lc, cmdsize);
-            struct build_version_command *bv = (struct build_version_command *)(dst + write_off);
-            if (bv->platform == PLATFORM_MACCATALYST || bv->platform == 1U) {
-                bv->platform = PLATFORM_IOS;
+            const struct build_version_command *src_bv = (const struct build_version_command *)lc;
+            uint32_t plat = src_bv->platform;
+            if (plat == 1U || plat == 7U || plat == PLATFORM_MACCATALYST || plat == PLATFORM_IOS) {
+                if (prefer_ios_or_catalyst && (plat == 1U || plat == 7U)) {
+                    continue;
+                }
+                if (emitted_build_version) {
+                    continue;
+                }
+                if (write_off + cmdsize > total) {
+                    return NO;
+                }
+                memcpy(dst_buf + write_off, lc, cmdsize);
+                struct build_version_command *bv = (struct build_version_command *)(dst_buf + write_off);
+                if (bv->platform != PLATFORM_IOS) {
+                    bv->platform = PLATFORM_IOS;
+                }
+                emitted_build_version = YES;
+                write_off += cmdsize;
+                new_ncmds++;
+                continue;
             }
-            write_off += cmdsize;
-            new_ncmds++;
-            continue;
         }
         if (cmd == LC_VERSION_MIN_MACOSX && cmdsize >= sizeof(struct version_min_command)) {
-            memcpy(dst + write_off, lc, cmdsize);
-            struct version_min_command *vmc = (struct version_min_command *)(dst + write_off);
+            if (write_off + cmdsize > total) {
+                return NO;
+            }
+            memcpy(dst_buf + write_off, lc, cmdsize);
+            struct version_min_command *vmc = (struct version_min_command *)(dst_buf + write_off);
             vmc->cmd = LC_VERSION_MIN_IPHONEOS;
             write_off += cmdsize;
             new_ncmds++;
@@ -1330,8 +1373,8 @@ static const struct mach_header *pt_build_shadow_mach_header_locked(const struct
                     struct dylib_command ndc = *dc;
                     ndc.cmdsize = (uint32_t)aligned_sz;
                     ndc.dylib.name.offset = (uint32_t)sizeof(struct dylib_command);
-                    memcpy(dst + write_off, &ndc, sizeof(ndc));
-                    memcpy(dst + write_off + sizeof(ndc), replacement, rlen + 1U);
+                    memcpy(dst_buf + write_off, &ndc, sizeof(ndc));
+                    memcpy(dst_buf + write_off + sizeof(ndc), replacement, rlen + 1U);
                     write_off += aligned_sz;
                     new_ncmds++;
                 }
@@ -1361,17 +1404,37 @@ static const struct mach_header *pt_build_shadow_mach_header_locked(const struct
             }
         }
         if (write_off + cmdsize > total) {
-            (void)vm_deallocate(mach_task_self(), vm_addr, alloc_sz);
-            return NULL;
+            return NO;
         }
-        memcpy(dst + write_off, lc, cmdsize);
+        memcpy(dst_buf + write_off, lc, cmdsize);
         write_off += cmdsize;
         new_ncmds++;
     }
 
     new_hdr.ncmds = new_ncmds;
     new_hdr.sizeofcmds = (uint32_t)(write_off - sizeof(struct mach_header_64));
-    memcpy(dst, &new_hdr, sizeof(new_hdr));
+    memcpy(dst_buf, &new_hdr, sizeof(new_hdr));
+    if (out_sanitized_len != NULL) {
+        *out_sanitized_len = write_off;
+    }
+    return YES;
+}
+
+static const struct mach_header *pt_build_shadow_mach_header_locked(const struct mach_header_64 *src_mh,
+                                                                    vm_size_t *out_alloc_size) {
+    size_t total = sizeof(struct mach_header_64) + (size_t)src_mh->sizeofcmds;
+    vm_size_t page_sz = (vm_page_size > 0) ? (vm_size_t)vm_page_size : 16384U;
+    vm_size_t alloc_sz = ((vm_size_t)total + page_sz - 1U) & ~(page_sz - 1U);
+    vm_address_t vm_addr = 0;
+    if (vm_allocate(mach_task_self(), &vm_addr, alloc_sz, VM_FLAGS_ANYWHERE) != KERN_SUCCESS || vm_addr == 0) {
+        return NULL;
+    }
+    uint8_t *dst = (uint8_t *)(uintptr_t)vm_addr;
+    memset(dst, 0, (size_t)alloc_sz);
+    if (!pt_build_sanitized_mach_header_copy(src_mh, dst, (size_t)alloc_sz, NULL)) {
+        (void)vm_deallocate(mach_task_self(), vm_addr, alloc_sz);
+        return NULL;
+    }
     (void)vm_protect(mach_task_self(), vm_addr, alloc_sz, FALSE, VM_PROT_READ);
     if (out_alloc_size != NULL) {
         *out_alloc_size = alloc_sz;

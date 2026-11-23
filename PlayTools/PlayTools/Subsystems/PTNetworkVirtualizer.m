@@ -4,6 +4,8 @@
 //
 
 #import "PSInternal.h"
+#include <ctype.h>
+#include <ifaddrs.h>
 
 
 typedef NS_ENUM(NSInteger, PSNetRuleAction) {
@@ -1932,6 +1934,118 @@ static int pt_getpeername(int socket, struct sockaddr * __restrict address, sock
     return ret;
 }
 
+#define PT_IFADDRS_HEAD_MAP_CAP 64
+
+typedef struct {
+    struct ifaddrs *returned_head;
+    struct ifaddrs *orig_head;
+} pt_ifaddrs_head_entry_t;
+
+static os_unfair_lock s_ifaddrs_lock = OS_UNFAIR_LOCK_INIT;
+static pt_ifaddrs_head_entry_t s_ifaddrs_head_map[PT_IFADDRS_HEAD_MAP_CAP];
+
+static BOOL pt_is_hidden_ifname(const char *name) {
+    if (name == NULL || name[0] == '\0') {
+        return NO;
+    }
+    if (strncmp(name, "vmenet", 6) == 0 && isdigit((unsigned char)name[6])) {
+        return YES;
+    }
+    if (strncmp(name, "vmnet", 5) == 0 && isdigit((unsigned char)name[5])) {
+        return YES;
+    }
+    if (strncmp(name, "bridge", 6) == 0 && isdigit((unsigned char)name[6])) {
+        return YES;
+    }
+    return NO;
+}
+
+static BOOL pt_record_ifaddrs_head_remap(struct ifaddrs *returned_head, struct ifaddrs *orig_head) {
+    BOOL stored = NO;
+    os_unfair_lock_lock(&s_ifaddrs_lock);
+    for (size_t i = 0; i < PT_IFADDRS_HEAD_MAP_CAP; i++) {
+        if (s_ifaddrs_head_map[i].returned_head == NULL) {
+            s_ifaddrs_head_map[i].returned_head = returned_head;
+            s_ifaddrs_head_map[i].orig_head = orig_head;
+            stored = YES;
+            break;
+        }
+    }
+    os_unfair_lock_unlock(&s_ifaddrs_lock);
+    return stored;
+}
+
+static struct ifaddrs *pt_consume_ifaddrs_head_remap(struct ifaddrs *ifa) {
+    struct ifaddrs *orig = ifa;
+    os_unfair_lock_lock(&s_ifaddrs_lock);
+    for (size_t i = 0; i < PT_IFADDRS_HEAD_MAP_CAP; i++) {
+        if (s_ifaddrs_head_map[i].returned_head == ifa) {
+            orig = s_ifaddrs_head_map[i].orig_head;
+            s_ifaddrs_head_map[i].returned_head = NULL;
+            s_ifaddrs_head_map[i].orig_head = NULL;
+            break;
+        }
+    }
+    os_unfair_lock_unlock(&s_ifaddrs_lock);
+    return orig;
+}
+
+static int pt_getifaddrs(struct ifaddrs **ifap) {
+    int ret = getifaddrs(ifap);
+    if (ret != 0 || ifap == NULL || *ifap == NULL) {
+        return ret;
+    }
+    if (!pt_is_bypass_enabled() ||
+        pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return 0;
+    }
+
+    struct ifaddrs *orig_head = *ifap;
+    struct ifaddrs *new_head = NULL;
+    struct ifaddrs *tail = NULL;
+    for (struct ifaddrs *cur = orig_head; cur != NULL; cur = cur->ifa_next) {
+        if (pt_is_hidden_ifname(cur->ifa_name)) {
+            continue;
+        }
+        if (new_head == NULL) {
+            new_head = cur;
+        } else {
+            tail->ifa_next = cur;
+        }
+        tail = cur;
+    }
+    if (tail != NULL) {
+        tail->ifa_next = NULL;
+    }
+    if (new_head == NULL) {
+        freeifaddrs(orig_head);
+        *ifap = NULL;
+        return 0;
+    }
+    if (new_head != orig_head && !pt_record_ifaddrs_head_remap(new_head, orig_head)) {
+        // Restore original chain rather than risking an untracked freeifaddrs pointer.
+        struct ifaddrs *kept_tail = orig_head;
+        for (struct ifaddrs *cur = orig_head->ifa_next; cur != NULL; cur = cur->ifa_next) {
+            if (!pt_is_hidden_ifname(cur->ifa_name)) {
+                kept_tail->ifa_next = cur;
+                kept_tail = cur;
+            }
+        }
+        kept_tail->ifa_next = NULL;
+        *ifap = orig_head;
+        return 0;
+    }
+    *ifap = new_head;
+    return 0;
+}
+
+static void pt_freeifaddrs(struct ifaddrs *ifa) {
+    if (ifa == NULL) {
+        return;
+    }
+    freeifaddrs(pt_consume_ifaddrs_head_remap(ifa));
+}
+
 
 DYLD_INTERPOSE(pt_getaddrinfo, getaddrinfo)
 DYLD_INTERPOSE(pt_gethostbyname, gethostbyname)
@@ -1947,3 +2061,5 @@ DYLD_INTERPOSE(pt_accept, accept)
 DYLD_INTERPOSE(pt_sendto, sendto)
 DYLD_INTERPOSE(pt_getsockname, getsockname)
 DYLD_INTERPOSE(pt_getpeername, getpeername)
+DYLD_INTERPOSE(pt_getifaddrs, getifaddrs)
+DYLD_INTERPOSE(pt_freeifaddrs, freeifaddrs)

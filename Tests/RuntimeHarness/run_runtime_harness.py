@@ -65,16 +65,25 @@ MOCK_TARGET_M = r"""
 #include <crt_externs.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <ifaddrs.h>
 #include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <mach-o/dyld.h>
+#include <mach-o/fat.h>
 #include <mach-o/getsect.h>
 #include <mach-o/loader.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
+#include <pthread.h>
+#if __has_include(<ptrauth.h>)
+#include <ptrauth.h>
+#endif
+#include <pwd.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <sys/utsname.h>
@@ -89,6 +98,132 @@ extern void pt_harness_dyld_get_image_versions(
     const struct mach_header *mh,
     void (^callback)(uint32_t platform, uint32_t sdk, uint32_t minos))
     __asm("_dyld_get_image_versions") __attribute__((weak_import));
+
+static struct utsname g_earlyUts;
+static int g_earlyUtsRC = -1;
+
+__attribute__((constructor))
+static void pt_harness_early_uname_ctor(void) {
+    memset(&g_earlyUts, 0, sizeof(g_earlyUts));
+    g_earlyUtsRC = uname(&g_earlyUts);
+}
+
+typedef struct {
+    char expectedMachine[64];
+    int failures;
+} pt_uname_stress_ctx_t;
+
+static void *pt_harness_uname_stress_worker(void *arg) {
+    pt_uname_stress_ctx_t *ctx = (pt_uname_stress_ctx_t *)arg;
+    for (int i = 0; i < 25; i++) {
+        struct utsname u;
+        memset(&u, 0, sizeof(u));
+        if (uname(&u) != 0) {
+            __sync_fetch_and_add(&ctx->failures, 1);
+            continue;
+        }
+        char buf[64] = {0};
+        size_t len = sizeof(buf);
+        if (sysctlbyname("hw.machine", buf, &len, NULL, 0) != 0 ||
+            strcmp(buf, ctx->expectedMachine) != 0 ||
+            strcmp(u.machine, ctx->expectedMachine) != 0) {
+            __sync_fetch_and_add(&ctx->failures, 1);
+        }
+    }
+    return NULL;
+}
+
+static BOOL pt_harness_read_self(uint64_t addr, void *out, size_t bytes) {
+    vm_size_t copied = 0;
+    return (vm_read_overwrite(mach_task_self(), (vm_address_t)addr, bytes,
+                              (vm_address_t)out, &copied) == KERN_SUCCESS &&
+            copied == bytes);
+}
+
+static NSData *pt_harness_memory_header(const struct mach_header *p) {
+    struct mach_header_64 h;
+    if (p == NULL ||
+        !pt_harness_read_self((uintptr_t)p, &h, sizeof(h)) ||
+        h.magic != MH_MAGIC_64 ||
+        h.sizeofcmds > (1U << 20)) {
+        return nil;
+    }
+    NSMutableData *data = [NSMutableData dataWithLength:sizeof(h) + h.sizeofcmds];
+    return pt_harness_read_self((uintptr_t)p, data.mutableBytes, data.length) ? data : nil;
+}
+
+static NSData *pt_harness_disk_header(NSString *path, NSData *memoryHdr) {
+    if (path.length == 0) {
+        return nil;
+    }
+    int fd = open(path.fileSystemRepresentation, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return nil;
+    }
+    cpu_subtype_t wanted = CPU_SUBTYPE_ARM64_ALL;
+    if (memoryHdr.length >= sizeof(struct mach_header_64)) {
+        wanted = ((const struct mach_header_64 *)memoryHdr.bytes)->cpusubtype;
+    }
+    off_t sliceOff = -1;
+    struct fat_header fh;
+    if (pread(fd, &fh, sizeof(fh), 0) == (ssize_t)sizeof(fh)) {
+        if (fh.magic == MH_MAGIC_64) {
+            sliceOff = 0;
+        } else {
+            uint32_t magic = ntohl(fh.magic);
+            uint32_t count = ntohl(fh.nfat_arch);
+            if ((magic == FAT_MAGIC || magic == FAT_MAGIC_64) && count <= 128) {
+                BOOL wide = (magic == FAT_MAGIC_64);
+                size_t stride = wide ? sizeof(struct fat_arch_64) : sizeof(struct fat_arch);
+                off_t fallback = -1;
+                for (uint32_t i = 0; i < count; i++) {
+                    union { struct fat_arch a; struct fat_arch_64 b; } entry;
+                    memset(&entry, 0, sizeof(entry));
+                    if (pread(fd, &entry, stride, (off_t)(sizeof(fh) + i * stride)) != (ssize_t)stride) {
+                        break;
+                    }
+                    uint32_t cpu = ntohl(wide ? entry.b.cputype : entry.a.cputype);
+                    uint32_t sub = ntohl(wide ? entry.b.cpusubtype : entry.a.cpusubtype);
+                    uint64_t off = wide ? __builtin_bswap64(entry.b.offset) : ntohl(entry.a.offset);
+                    if (cpu != CPU_TYPE_ARM64 || off > (uint64_t)(INT64_MAX - 2 * 1024 * 1024)) {
+                        continue;
+                    }
+                    if ((sub & ~CPU_SUBTYPE_MASK) == ((uint32_t)wanted & ~CPU_SUBTYPE_MASK)) {
+                        sliceOff = (off_t)off;
+                        break;
+                    }
+                    if (fallback < 0) {
+                        fallback = (off_t)off;
+                    }
+                }
+                if (sliceOff < 0) {
+                    sliceOff = fallback;
+                }
+            }
+        }
+    }
+    NSData *res = nil;
+    struct mach_header_64 h;
+    if (sliceOff >= 0 &&
+        pread(fd, &h, sizeof(h), sliceOff) == (ssize_t)sizeof(h) &&
+        h.magic == MH_MAGIC_64 &&
+        h.sizeofcmds <= (1U << 20)) {
+        NSMutableData *d = [NSMutableData dataWithLength:sizeof(h) + h.sizeofcmds];
+        if (pread(fd, d.mutableBytes, d.length, sliceOff) == (ssize_t)d.length) {
+            res = d;
+        }
+    }
+    close(fd);
+    return res;
+}
+
+static const void *pt_harness_strip_ptr(const void *p) {
+#if __has_feature(ptrauth_calls)
+    return ptrauth_strip(p, ptrauth_key_function_pointer);
+#else
+    return p;
+#endif
+}
 
 static NSString *pt_state_dir(void) {
     NSArray<NSURL *> *caches = [[NSFileManager defaultManager] URLsForDirectory:NSCachesDirectory
@@ -242,6 +377,22 @@ int main(int argc, const char *argv[]) {
         CMDeviceMotion *cmDM = motionMgr.deviceMotion;
         CMAttitude *cmAttCopy = [cmDM.attitude copy];
         NSString *cmDMDesc = [cmDM description];
+        [motionMgr startMagnetometerUpdates];
+        CMMagnetometerData *cmMag = motionMgr.magnetometerData;
+        NSTimeInterval magTs1 = cmMag.timestamp;
+        CMMagneticField magField1 = cmMag.magneticField;
+        usleep(3000);
+        NSTimeInterval magTs2 = cmMag.timestamp;
+        CMMagneticField magField2 = cmMag.magneticField;
+        BOOL cmMagImmutable = (cmMag != nil &&
+                               magTs2 == magTs1 &&
+                               magField1.x == magField2.x &&
+                               magField1.y == magField2.y &&
+                               magField1.z == magField2.z &&
+                               cmDM != nil &&
+                               fabs(magTs1 - cmDM.timestamp) < 60.0);
+        BOOL cmDMMagneticCalibrated = (cmDM != nil &&
+                                       cmDM.magneticField.accuracy != CMMagneticFieldCalibrationAccuracyUncalibrated);
         BOOL cmSampleValid = (cmSample != nil &&
                               [cmSample isKindOfClass:[CMAccelerometerData class]] &&
                               cmSample.acceleration.z < -0.9 &&
@@ -251,6 +402,7 @@ int main(int argc, const char *argv[]) {
                               [cmDM isKindOfClass:[CMDeviceMotion class]] &&
                               cmAttCopy != nil &&
                               cmDMDesc.length > 0);
+        [motionMgr stopMagnetometerUpdates];
         [motionMgr stopDeviceMotionUpdates];
         [motionMgr stopAccelerometerUpdates];
 
@@ -592,6 +744,347 @@ int main(int argc, const char *argv[]) {
         uint8_t *mh0TextPtr = (mh0 != NULL) ? getsectiondata(mh0, "__TEXT", "__text", &mh0TextSize) : NULL;
         BOOL mh0SectionLookupOK = (mh0TextPtr != NULL && mh0TextSize > 0);
 
+        // P1: early constructor uname + 16-thread concurrent uname stress
+        BOOL earlyUnameOK = (g_earlyUtsRC == 0 &&
+                             (strncmp(g_earlyUts.machine, "iPad", 4) == 0 ||
+                              strncmp(g_earlyUts.machine, "iPhone", 6) == 0));
+        BOOL concurrentUnameOK = NO;
+        if (sysctlMachine[0] != '\0') {
+            pt_uname_stress_ctx_t sctx;
+            memset(&sctx, 0, sizeof(sctx));
+            strlcpy(sctx.expectedMachine, sysctlMachine, sizeof(sctx.expectedMachine));
+            pthread_t thrs[16];
+            for (int ti = 0; ti < 16; ti++) {
+                if (pthread_create(&thrs[ti], NULL, pt_harness_uname_stress_worker, &sctx) != 0) {
+                    sctx.failures++;
+                }
+            }
+            for (int ti = 0; ti < 16; ti++) {
+                pthread_join(thrs[ti], NULL);
+            }
+            concurrentUnameOK = (sctx.failures == 0);
+        }
+
+        // P1: KERN_PROCARGS2 env boundary check (must not leak apple[] auxiliary entries)
+        BOOL procArgs2LeakedApple = NO;
+        BOOL procArgs2EnvClean = NO;
+        {
+            int mib[3] = { CTL_KERN, KERN_PROCARGS2, getpid() };
+            size_t p2Sz = 64U * 1024U;
+            NSMutableData *p2Data = [NSMutableData dataWithLength:p2Sz];
+            if (sysctl(mib, 3, p2Data.mutableBytes, &p2Sz, NULL, 0) == 0 && p2Sz >= sizeof(int)) {
+                int p2Argc = 0;
+                memcpy(&p2Argc, p2Data.bytes, sizeof(int));
+                const char *cur = (const char *)p2Data.bytes + sizeof(int);
+                const char *end = (const char *)p2Data.bytes + p2Sz;
+                const char *z = memchr(cur, 0, (size_t)(end - cur));
+                if (z != NULL && p2Argc >= 0 && p2Argc <= 1024) {
+                    cur = z + 1;
+                    while (cur < end && *cur == '\0') {
+                        cur++;
+                    }
+                    BOOL argsParsed = YES;
+                    for (int ai = 0; ai < p2Argc; ai++) {
+                        z = (cur < end) ? memchr(cur, 0, (size_t)(end - cur)) : NULL;
+                        if (z == NULL) {
+                            argsParsed = NO;
+                            break;
+                        }
+                        cur = z + 1;
+                    }
+                    if (argsParsed) {
+                        NSSet *appleKeys = [NSSet setWithArray:@[
+                            @"APP_SANDBOX_CONTAINER_ID", @"dyld_file", @"executable_boothash",
+                            @"executable_cdhash", @"executable_file", @"main_stack",
+                            @"ptr_munge", @"security_config", @"th_port"
+                        ]];
+                        NSMutableDictionary *p2Env = [NSMutableDictionary dictionary];
+                        while (cur < end && *cur != '\0') {
+                            z = memchr(cur, 0, (size_t)(end - cur));
+                            if (z == NULL) {
+                                break;
+                            }
+                            NSString *entry = [NSString stringWithUTF8String:cur];
+                            NSRange eq = [entry rangeOfString:@"="];
+                            if (eq.location != NSNotFound && eq.location > 0) {
+                                NSString *k = [entry substringToIndex:eq.location];
+                                if ([appleKeys containsObject:k]) {
+                                    procArgs2LeakedApple = YES;
+                                }
+                                p2Env[k] = [entry substringFromIndex:eq.location + 1];
+                            }
+                            cur = z + 1;
+                        }
+                        NSDictionary *nsEnv = [NSProcessInfo processInfo].environment;
+                        procArgs2EnvClean = (!procArgs2LeakedApple &&
+                                             p2Env.count > 0 &&
+                                             [p2Env isEqualToDictionary:nsEnv]);
+                    }
+                }
+            }
+        }
+
+        // P1: fs.at_systemversion & /System/Volumes/Data hiding & statfs & getpwuid
+        BOOL atSystemVersionInodeMatch = NO;
+        NSString *atSystemVersionProductName = @"";
+        {
+            int svDir = open("/System/Library/CoreServices", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+            if (svDir >= 0) {
+                struct stat stByName = {0}, stByFd = {0};
+                int fstatErr = fstatat(svDir, "SystemVersion.plist", &stByName, 0);
+                int svFd = openat(svDir, "SystemVersion.plist", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+                if (svFd >= 0) {
+                    if (fstatErr == 0 && fstat(svFd, &stByFd) == 0 &&
+                        stByName.st_dev == stByFd.st_dev && stByName.st_ino == stByFd.st_ino &&
+                        S_ISREG(stByFd.st_mode) && stByFd.st_size > 0 && stByFd.st_size <= 65536) {
+                        atSystemVersionInodeMatch = YES;
+                    }
+                    NSMutableData *plistBytes = [NSMutableData dataWithLength:(NSUInteger)stByFd.st_size];
+                    ssize_t nr = read(svFd, plistBytes.mutableBytes, plistBytes.length);
+                    if (nr == (ssize_t)plistBytes.length) {
+                        id plist = [NSPropertyListSerialization propertyListWithData:plistBytes
+                                                                             options:NSPropertyListImmutable
+                                                                              format:NULL
+                                                                               error:NULL];
+                        if ([plist isKindOfClass:[NSDictionary class]]) {
+                            id pn = plist[@"ProductName"];
+                            if ([pn isKindOfClass:[NSString class]]) {
+                                atSystemVersionProductName = pn;
+                            }
+                        }
+                    }
+                    close(svFd);
+                }
+                close(svDir);
+            }
+        }
+        struct stat svVolSt = {0}, svDataSt = {0};
+        BOOL hidSystemVolumes = (stat("/System/Volumes", &svVolSt) == -1 && errno == ENOENT &&
+                                 stat("/System/Volumes/Data", &svDataSt) == -1 && errno == ENOENT &&
+                                 access("/System/Volumes/Data", F_OK) == -1 && errno == ENOENT);
+        struct statfs mntInfo = {0};
+        BOOL homeMountClean = (statfs(NSHomeDirectory().fileSystemRepresentation, &mntInfo) == 0 &&
+                               strncmp(mntInfo.f_mntonname, "/System/Volumes/", 16) != 0 &&
+                               strncmp(mntInfo.f_mntonname, "/Users/", 7) != 0);
+        struct passwd pwdBuf = {0};
+        struct passwd *pwdRes = NULL;
+        char pwdStrBuf[1024] = {0};
+        struct passwd *pwdDirect = getpwuid(getuid());
+        BOOL passwdClean = (getpwuid_r(getuid(), &pwdBuf, pwdStrBuf, sizeof(pwdStrBuf), &pwdRes) == 0 &&
+                            pwdRes != NULL && pwdRes->pw_dir != NULL &&
+                            strstr(pwdRes->pw_dir, "/Users/") == NULL &&
+                            pwdDirect != NULL && pwdDirect->pw_dir != NULL &&
+                            strstr(pwdDirect->pw_dir, "/Users/") == NULL);
+
+        // P1: vm_read_overwrite / mach_vm_read_overwrite + vm.hidden_macho + dladdr consistency
+        uint32_t machVmMh0Platform = 0;
+        if (mh0 != NULL) {
+            struct mach_header_64 mvh;
+            mach_vm_size_t mvc = 0;
+            if (mach_vm_read_overwrite(mach_task_self(), (mach_vm_address_t)mh0, sizeof(mvh),
+                                       (mach_vm_address_t)(uintptr_t)&mvh, &mvc) == KERN_SUCCESS &&
+                mvc == sizeof(mvh) && mvh.magic == MH_MAGIC_64 && mvh.sizeofcmds <= (1U << 20)) {
+                NSMutableData *mvd = [NSMutableData dataWithLength:sizeof(mvh) + mvh.sizeofcmds];
+                if (mach_vm_read_overwrite(mach_task_self(), (mach_vm_address_t)mh0, mvd.length,
+                                           (mach_vm_address_t)(uintptr_t)mvd.mutableBytes, &mvc) == KERN_SUCCESS &&
+                    mvc == mvd.length) {
+                    const uint8_t *p = (const uint8_t *)mvd.bytes + sizeof(mvh);
+                    size_t rem = mvh.sizeofcmds;
+                    for (uint32_t i = 0; i < mvh.ncmds && rem >= sizeof(struct load_command); i++) {
+                        struct load_command lc;
+                        memcpy(&lc, p, sizeof(lc));
+                        if (lc.cmdsize < sizeof(lc) || lc.cmdsize > rem) {
+                            break;
+                        }
+                        if (lc.cmd == LC_BUILD_VERSION && lc.cmdsize >= sizeof(struct build_version_command)) {
+                            struct build_version_command bv;
+                            memcpy(&bv, p, sizeof(bv));
+                            machVmMh0Platform = bv.platform;
+                            break;
+                        }
+                        p += lc.cmdsize;
+                        rem -= lc.cmdsize;
+                    }
+                }
+            }
+        }
+        NSUInteger vmNonIosImages = 0;
+        NSUInteger vmDirtyImports = 0;
+        NSUInteger vmDladdrDiffs = 0;
+        NSUInteger vmParsedImages = 0;
+        NSMutableSet<NSNumber *> *registeredImgs = [NSMutableSet set];
+        for (uint32_t i = 0; i < imgCount; i++) {
+            const struct mach_header *ih = _dyld_get_image_header(i);
+            const char *inm = _dyld_get_image_name(i);
+            if (ih == NULL) {
+                continue;
+            }
+            [registeredImgs addObject:@((uintptr_t)ih)];
+            Dl_info dli = {0};
+            if (dladdr(ih, &dli) == 0 || dli.dli_fbase != ih) {
+                vmDladdrDiffs++;
+            }
+            NSData *hdrData = pt_harness_memory_header(ih);
+            if (hdrData.length >= sizeof(struct mach_header_64)) {
+                const struct mach_header_64 *h = (const struct mach_header_64 *)hdrData.bytes;
+                if (h->sizeofcmds == hdrData.length - sizeof(*h)) {
+                    vmParsedImages++;
+                    const uint8_t *p = (const uint8_t *)hdrData.bytes + sizeof(*h);
+                    size_t rem = h->sizeofcmds;
+                    BOOL hasMacPlat = NO, hasIosPlat = NO;
+                    for (uint32_t ci = 0; ci < h->ncmds && rem >= sizeof(struct load_command); ci++) {
+                        struct load_command lc;
+                        memcpy(&lc, p, sizeof(lc));
+                        if (lc.cmdsize < sizeof(lc) || lc.cmdsize > rem || (lc.cmdsize % 8U) != 0) {
+                            break;
+                        }
+                        if (lc.cmd == LC_BUILD_VERSION && lc.cmdsize >= sizeof(struct build_version_command)) {
+                            struct build_version_command bv;
+                            memcpy(&bv, p, sizeof(bv));
+                            if (bv.platform == 6U || bv.platform == 1U || bv.platform == 7U) {
+                                hasMacPlat = YES;
+                            }
+                            if (bv.platform == 2U) {
+                                hasIosPlat = YES;
+                            }
+                        } else if ((lc.cmd == LC_LOAD_DYLIB || lc.cmd == LC_LOAD_WEAK_DYLIB ||
+                                    lc.cmd == LC_REEXPORT_DYLIB || lc.cmd == LC_LOAD_UPWARD_DYLIB) &&
+                                   lc.cmdsize >= sizeof(struct dylib_command)) {
+                            struct dylib_command dc;
+                            memcpy(&dc, p, sizeof(dc));
+                            uint32_t off = dc.dylib.name.offset;
+                            if (off >= sizeof(dc) && off < lc.cmdsize && memchr(p + off, 0, lc.cmdsize - off) != NULL) {
+                                const char *lib = (const char *)p + off;
+                                if (strcasestr(lib, "PlayTools") != NULL ||
+                                    strcasestr(lib, "AKInterface") != NULL ||
+                                    strcasestr(lib, "UserPlugins") != NULL ||
+                                    strstr(lib, "AppKit.framework") != NULL ||
+                                    strstr(lib, "UIKitMacHelper.framework") != NULL ||
+                                    strstr(lib, "/System/iOSSupport/") != NULL) {
+                                    vmDirtyImports++;
+                                }
+                            }
+                        }
+                        p += lc.cmdsize;
+                        rem -= lc.cmdsize;
+                    }
+                    if (hasMacPlat && !hasIosPlat) {
+                        vmNonIosImages++;
+                    } else if (hasMacPlat) {
+                        vmNonIosImages++;
+                    }
+                }
+            }
+            (void)inm;
+        }
+        NSUInteger vmHiddenMachOCount = 0;
+        {
+            vm_address_t va = 0;
+            for (NSUInteger r = 0; r < 131072; r++) {
+                vm_size_t vs = 0;
+                vm_region_basic_info_data_64_t ri = {0};
+                mach_msg_type_number_t rc = VM_REGION_BASIC_INFO_COUNT_64;
+                mach_port_t obj = MACH_PORT_NULL;
+                kern_return_t vkr = vm_region_64(mach_task_self(), &va, &vs, VM_REGION_BASIC_INFO_64,
+                                                 (vm_region_info_t)&ri, &rc, &obj);
+                if (MACH_PORT_VALID(obj)) {
+                    mach_port_deallocate(mach_task_self(), obj);
+                }
+                if (vkr != KERN_SUCCESS || vs == 0 || va > UINTPTR_MAX - vs) {
+                    break;
+                }
+                if ((ri.protection & (VM_PROT_READ | VM_PROT_EXECUTE)) == (VM_PROT_READ | VM_PROT_EXECUTE) &&
+                    vs >= sizeof(struct mach_header_64) &&
+                    ![registeredImgs containsObject:@((uintptr_t)va)]) {
+                    uint32_t magic = 0;
+                    if (pt_harness_read_self(va, &magic, sizeof(magic)) && magic == MH_MAGIC_64 &&
+                        pt_harness_memory_header((const struct mach_header *)va) != nil) {
+                        vmHiddenMachOCount++;
+                    }
+                }
+                va += vs;
+            }
+        }
+        NSData *mainMemHdr = pt_harness_memory_header((const struct mach_header *)mh0);
+        NSData *mainDiskHdr = pt_harness_disk_header(bundleExecPath, mainMemHdr);
+        BOOL diskHeaderMatchesMemory = (mainMemHdr != nil && mainDiskHdr != nil &&
+                                        [mainMemHdr isEqualToData:mainDiskHdr]);
+        uint32_t diskHeaderPlatform = 0;
+        if (mainDiskHdr.length >= sizeof(struct mach_header_64)) {
+            const struct mach_header_64 *dh = (const struct mach_header_64 *)mainDiskHdr.bytes;
+            const uint8_t *dp = (const uint8_t *)mainDiskHdr.bytes + sizeof(*dh);
+            size_t drem = (dh->sizeofcmds <= mainDiskHdr.length - sizeof(*dh)) ? dh->sizeofcmds : 0;
+            for (uint32_t ci = 0; ci < dh->ncmds && drem >= sizeof(struct load_command); ci++) {
+                struct load_command lc;
+                memcpy(&lc, dp, sizeof(lc));
+                if (lc.cmdsize < sizeof(lc) || lc.cmdsize > drem) {
+                    break;
+                }
+                if (lc.cmd == LC_BUILD_VERSION && lc.cmdsize >= sizeof(struct build_version_command)) {
+                    struct build_version_command bv;
+                    memcpy(&bv, dp, sizeof(bv));
+                    diskHeaderPlatform = bv.platform;
+                    break;
+                }
+                dp += lc.cmdsize;
+                drem -= lc.cmdsize;
+            }
+        }
+
+        // P1: dlsym(RTLD_DEFAULT, ...) + dladdr owner verification
+        BOOL dlsymCOwnersClean = YES;
+        {
+            const void *symPtrs[4] = {
+                pt_harness_strip_ptr(dlsym(RTLD_DEFAULT, "sysctlbyname")),
+                pt_harness_strip_ptr(dlsym(RTLD_DEFAULT, "stat")),
+                pt_harness_strip_ptr(dlsym(RTLD_DEFAULT, "csops")),
+                pt_harness_strip_ptr(dlsym(RTLD_DEFAULT, "uname"))
+            };
+            for (int si = 0; si < 4; si++) {
+                Dl_info sdli = {0};
+                if (symPtrs[si] == NULL || dladdr(symPtrs[si], &sdli) == 0 ||
+                    sdli.dli_fname == NULL ||
+                    strncmp(sdli.dli_fname, "/usr/lib/system/libsystem_", 26) != 0) {
+                    dlsymCOwnersClean = NO;
+                    break;
+                }
+            }
+            int (*dynSysctlByName)(const char *, void *, size_t *, void *, size_t) =
+                (int (*)(const char *, void *, size_t *, void *, size_t))dlsym(RTLD_DEFAULT, "sysctlbyname");
+            int (*dynStat)(const char *, struct stat *) =
+                (int (*)(const char *, struct stat *))dlsym(RTLD_DEFAULT, "stat");
+            char dynMach[64] = {0};
+            size_t dynMachLen = sizeof(dynMach);
+            struct stat dynSt = {0};
+            if (dynSysctlByName == NULL || dynStat == NULL ||
+                dynSysctlByName("hw.machine", dynMach, &dynMachLen, NULL, 0) != 0 ||
+                strcmp(dynMach, sysctlMachine) != 0 ||
+                !(dynStat("/Users", &dynSt) == -1 && errno == ENOENT)) {
+                dlsymCOwnersClean = NO;
+            }
+        }
+
+        // P1: net.interfaces getifaddrs/freeifaddrs filtering
+        BOOL ifaddrsClean = NO;
+        NSUInteger ifaddrsCount = 0;
+        {
+            struct ifaddrs *ifap = NULL;
+            if (getifaddrs(&ifap) == 0) {
+                BOOL leakedVMIf = NO;
+                for (struct ifaddrs *e = ifap; e != NULL; e = e->ifa_next) {
+                    ifaddrsCount++;
+                    if (e->ifa_name != NULL &&
+                        (strncmp(e->ifa_name, "vmenet", 6) == 0 ||
+                         strncmp(e->ifa_name, "vmnet", 5) == 0 ||
+                         strncmp(e->ifa_name, "bridge", 6) == 0)) {
+                        leakedVMIf = YES;
+                    }
+                }
+                freeifaddrs(ifap);
+                ifaddrsClean = (ifaddrsCount > 0 && !leakedVMIf);
+            }
+        }
+
         NSString *stateDir = pt_state_dir();
         NSString *crumbPath = [stateDir stringByAppendingPathComponent:@".launching_in_progress"];
         NSString *triggeredPath = [stateDir stringByAppendingPathComponent:@".safe_mode_last_triggered"];
@@ -657,6 +1150,28 @@ int main(int argc, const char *argv[]) {
             @"cmGyroAvailable": cmGyroAvailable ? @YES : @NO,
             @"cmDeviceMotionAvailable": cmDeviceMotionAvailable ? @YES : @NO,
             @"cmSampleValid": cmSampleValid ? @YES : @NO,
+            @"cmMagImmutable": cmMagImmutable ? @YES : @NO,
+            @"cmDMMagneticCalibrated": cmDMMagneticCalibrated ? @YES : @NO,
+            @"earlyUnameOK": earlyUnameOK ? @YES : @NO,
+            @"concurrentUnameOK": concurrentUnameOK ? @YES : @NO,
+            @"procArgs2LeakedApple": procArgs2LeakedApple ? @YES : @NO,
+            @"procArgs2EnvClean": procArgs2EnvClean ? @YES : @NO,
+            @"atSystemVersionInodeMatch": atSystemVersionInodeMatch ? @YES : @NO,
+            @"atSystemVersionProductName": atSystemVersionProductName ?: @"",
+            @"hidSystemVolumes": hidSystemVolumes ? @YES : @NO,
+            @"homeMountClean": homeMountClean ? @YES : @NO,
+            @"passwdClean": passwdClean ? @YES : @NO,
+            @"machVmMh0Platform": @(machVmMh0Platform),
+            @"vmParsedImages": @(vmParsedImages),
+            @"vmNonIosImages": @(vmNonIosImages),
+            @"vmDirtyImports": @(vmDirtyImports),
+            @"vmDladdrDiffs": @(vmDladdrDiffs),
+            @"vmHiddenMachOCount": @(vmHiddenMachOCount),
+            @"diskHeaderMatchesMemory": diskHeaderMatchesMemory ? @YES : @NO,
+            @"diskHeaderPlatform": @(diskHeaderPlatform),
+            @"dlsymCOwnersClean": dlsymCOwnersClean ? @YES : @NO,
+            @"ifaddrsClean": ifaddrsClean ? @YES : @NO,
+            @"ifaddrsCount": @(ifaddrsCount),
             @"provPath": provPath,
             @"hidPCInstallGen": (hidPCInstallGenNS && hidPCInstallGenCF) ? @YES : @NO,
             @"provURLPath": provURLPath,
@@ -930,6 +1445,26 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info1["cmGyroAvailable"] is True,
         info1["cmDeviceMotionAvailable"] is True,
         info1["cmSampleValid"] is True,
+        info1["cmMagImmutable"] is True,
+        info1["cmDMMagneticCalibrated"] is True,
+        info1["earlyUnameOK"] is True,
+        info1["concurrentUnameOK"] is True,
+        info1["procArgs2LeakedApple"] is False,
+        info1["procArgs2EnvClean"] is True,
+        info1["atSystemVersionInodeMatch"] is True,
+        info1["atSystemVersionProductName"] != "macOS",
+        info1["hidSystemVolumes"] is True,
+        info1["homeMountClean"] is True,
+        info1["passwdClean"] is True,
+        info1["machVmMh0Platform"] == 2,
+        int(info1["vmParsedImages"]) > 0,
+        info1["vmNonIosImages"] == 0,
+        info1["vmDirtyImports"] == 0,
+        info1["vmDladdrDiffs"] == 0,
+        info1["vmHiddenMachOCount"] == 0,
+        info1["dlsymCOwnersClean"] is True,
+        info1["ifaddrsClean"] is True,
+        int(info1["ifaddrsCount"]) > 0,
         info1["syscallMachine"] == info1["sysctlMachine"] and len(info1["syscallMachine"]) > 0,
         info1["syscallWideArityOK"] is True,
         info1["syscallStatHidSysApps"] is True,
@@ -1461,6 +1996,76 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         print("  Scenario 7 withBackups:", info7a)
         print("  Scenario 7 safeMode:", info7b)
         print("  Scenario 7 absentBackups:", info7c)
+
+    # Scenario 8: Original iOS Mach-O executable in AppBackups -> vm_read_overwrite(mh0) matches DiskHeader byte-for-byte.
+    t7 = time.monotonic()
+    isolated_home_8 = work_dir / "IsolatedHome8"
+    backup_dir_8 = isolated_home_8 / "Library/Containers/app.makedie.MacOver/AppBackups/app.makedie.harness.mockapp"
+    backup_dir_8.mkdir(parents=True, exist_ok=True)
+    raw_exec_bytes = bytearray(target_bin.read_bytes())
+    # Patch first LC_BUILD_VERSION platform=6 (Catalyst) -> 2 (iOS) in the synthetic backup binary so it differs from Catalyst disk/mem.
+    lc_pos = 32
+    import struct as _st
+    magic_val, _, _, _, ncmds, sizeofcmds, _, _ = _st.unpack_from("<IIIIIIII", raw_exec_bytes, 0)
+    assert magic_val == 0xFEEDFACF
+    patched_backup_plat = False
+    for _ in range(ncmds):
+        if lc_pos + 8 > 32 + sizeofcmds:
+            break
+        cmd, cmdsize = _st.unpack_from("<II", raw_exec_bytes, lc_pos)
+        if cmd == 0x32 and cmdsize >= 24:  # LC_BUILD_VERSION
+            _st.pack_into("<I", raw_exec_bytes, lc_pos + 8, 2)  # PLATFORM_IOS
+            patched_backup_plat = True
+            break
+        lc_pos += cmdsize
+    assert patched_backup_plat
+    backup_exec_8 = backup_dir_8 / "executable"
+    backup_exec_8.write_bytes(bytes(raw_exec_bytes))
+    os.chmod(backup_exec_8, 0o755)
+    with open(backup_dir_8 / "manifest.plist", "wb") as fp:
+        plistlib.dump(
+            {
+                "CFBundleIdentifier": "app.makedie.harness.mockapp",
+                "CFBundleShortVersionString": "1.0",
+                "CFBundleVersion": "1",
+                "PCInstallGeneration": "HARNESS-GEN-101",
+            },
+            fp,
+        )
+    plist8 = write_test_settings_plist(isolated_home_8, "app.makedie.harness.mockapp")
+    marker8a = work_dir / "marker_8a.txt"
+    env8 = base_env(
+        marker8a,
+        HOME=str(isolated_home_8),
+        CFFIXED_USER_HOME=str(isolated_home_8),
+        PLAYTOOLS_SETTINGS_PLIST=str(plist8),
+        PLAYTOOLS_TEST_APP_BACKUPS_DIR=str(backup_dir_8),
+        HARNESS_GRACEFUL_EXIT="1",
+    )
+    proc8a = run_cmd([str(target_bin)], env=env8, check=False)
+    if proc8a.returncode != 0:
+        results.append(ScenarioResult(
+            name="8. AppBackups Mach-O MemoryHeader vs DiskHeader byte parity",
+            passed=False,
+            duration_sec=time.monotonic() - t7,
+            details=f"Exit code {proc8a.returncode}\nstdout={proc8a.stdout}\nstderr={proc8a.stderr}",
+        ))
+        return results
+    info8a = parse_harness_json(proc8a.stdout)
+    checks8 = [
+        info8a["safeModeActive"] is False,
+        info8a["diskHeaderPlatform"] == 2,
+        info8a["machVmMh0Platform"] == 2,
+        info8a["diskHeaderMatchesMemory"] is True,
+    ]
+    results.append(ScenarioResult(
+        name="8. AppBackups Mach-O MemoryHeader vs DiskHeader byte parity",
+        passed=all(checks8),
+        duration_sec=time.monotonic() - t7,
+        details=json.dumps(info8a, sort_keys=True),
+    ))
+    if verbose:
+        print("  Scenario 8 payload:", info8a)
 
     return results
 

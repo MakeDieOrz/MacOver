@@ -365,7 +365,7 @@ __attribute__((visibility("hidden"))) NSBundle *ps_hook_bundle_for_class(id self
 }
 
 __attribute__((visibility("hidden"))) NSString *ps_app_settings_plist_path(void) {
-    const char *overridePlist = getenv("PLAYTOOLS_SETTINGS_PLIST");
+    const char *overridePlist = pt_raw_getenv("PLAYTOOLS_SETTINGS_PLIST");
     if (overridePlist != NULL && overridePlist[0] == '/') {
         return [NSString stringWithUTF8String:overridePlist];
     }
@@ -381,7 +381,7 @@ __attribute__((visibility("hidden"))) NSString *ps_app_settings_plist_path(void)
         if (hostUserRoot != NULL && hostUserRoot[0] == '/') {
             root = [NSString stringWithUTF8String:hostUserRoot];
         } else {
-            const char *cfHome = getenv("CFFIXED_USER_HOME");
+            const char *cfHome = pt_raw_getenv("CFFIXED_USER_HOME");
             if (cfHome != NULL && cfHome[0] == '/') {
                 NSString *cfStr = [NSString stringWithUTF8String:cfHome];
                 NSRange marker = [cfStr rangeOfString:@"/Library/Containers/"];
@@ -5002,12 +5002,43 @@ __attribute__((visibility("hidden")))
 @end
 
 static const char kPSMotionStateAssocKey = 0;
+static const char kPSMotionSamplePayloadKey = 0;
+static const char kPSRealDMMagneticFieldKey = 0;
 static _Atomic uint64_t s_ps_motion_tick = 1ULL;
 static Class s_ps_mockAccelCls = Nil;
 static Class s_ps_mockGyroCls = Nil;
 static Class s_ps_mockMagCls = Nil;
 static Class s_ps_mockAttitudeCls = Nil;
 static Class s_ps_mockDeviceMotionCls = Nil;
+
+static os_unfair_lock s_ps_cm_clock_lock = OS_UNFAIR_LOCK_INIT;
+static BOOL s_ps_cm_has_real_offset = NO;
+static double s_ps_cm_real_offset = 0.0;
+static double s_ps_cm_last_virtual_ts = 0.0;
+
+__attribute__((visibility("hidden")))
+@interface PSVirtualMotionSamplePayload : NSObject {
+@public
+    os_unfair_lock _lock;
+    BOOL _hasTimestamp;
+    NSTimeInterval _timestamp;
+    CMAcceleration _acceleration;
+    CMRotationRate _rotationRate;
+    CMMagneticField _magneticField;
+    CMAcceleration _userAcceleration;
+    CMCalibratedMagneticField _calibratedMagneticField;
+}
+@end
+
+@implementation PSVirtualMotionSamplePayload
+- (instancetype)init {
+    self = [super init];
+    if (self != nil) {
+        _lock = OS_UNFAIR_LOCK_INIT;
+    }
+    return self;
+}
+@end
 
 static PSVirtualMotionState *ps_motion_state(id mgr, BOOL createIfMissing) {
     if (mgr == nil) {
@@ -5028,6 +5059,102 @@ static inline double ps_motion_micro_jitter(uint64_t seed, double scale) {
     x ^= (x >> 33);
     int32_t centered = (int32_t)(x & 0xFFFFU) - 32768;
     return ((double)centered / 32768.0) * scale;
+}
+
+static BOOL ps_is_mock_motion_sample(id sample) {
+    if (sample == nil) {
+        return NO;
+    }
+    Class cls = object_getClass(sample);
+    return (cls != Nil) &&
+           (cls == s_ps_mockAccelCls ||
+            cls == s_ps_mockGyroCls ||
+            cls == s_ps_mockMagCls ||
+            cls == s_ps_mockDeviceMotionCls);
+}
+
+static void ps_cm_observe_real_sample(id sample) {
+    if (sample == nil || ps_is_mock_motion_sample(sample)) {
+        return;
+    }
+    if (![sample respondsToSelector:@selector(timestamp)]) {
+        return;
+    }
+    double realTs = ((double (*)(id, SEL))objc_msgSend)(sample, @selector(timestamp));
+    if (!isfinite(realTs) || realTs <= 0.0) {
+        return;
+    }
+    double up = [[NSProcessInfo processInfo] systemUptime];
+    if (!isfinite(up) || up < 0.0) {
+        return;
+    }
+    double offset = realTs - up;
+    os_unfair_lock_lock(&s_ps_cm_clock_lock);
+    s_ps_cm_real_offset = offset;
+    s_ps_cm_has_real_offset = YES;
+    os_unfair_lock_unlock(&s_ps_cm_clock_lock);
+}
+
+static NSTimeInterval ps_cm_next_virtual_timestamp(void) {
+    double up = [[NSProcessInfo processInfo] systemUptime];
+    if (!isfinite(up) || up < 0.0) {
+        up = 0.0;
+    }
+    os_unfair_lock_lock(&s_ps_cm_clock_lock);
+    double ts = s_ps_cm_has_real_offset ? (up + s_ps_cm_real_offset) : up;
+    if (!isfinite(ts) || ts <= 0.0) {
+        ts = up;
+    }
+    if (ts <= s_ps_cm_last_virtual_ts) {
+        ts = s_ps_cm_last_virtual_ts + 0.0001;
+    }
+    s_ps_cm_last_virtual_ts = ts;
+    os_unfair_lock_unlock(&s_ps_cm_clock_lock);
+    return ts;
+}
+
+static PSVirtualMotionSamplePayload *ps_make_initialized_motion_payload(void) {
+    PSVirtualMotionSamplePayload *payload = [[PSVirtualMotionSamplePayload alloc] init];
+    uint64_t t = atomic_fetch_add_explicit(&s_ps_motion_tick, 1ULL, memory_order_relaxed);
+    payload->_acceleration = (CMAcceleration){
+        .x = 0.0012 + ps_motion_micro_jitter(t, 0.0004),
+        .y = -0.0085 + ps_motion_micro_jitter(t ^ 0x9E3779B9ULL, 0.0004),
+        .z = -0.9998 + ps_motion_micro_jitter(t ^ 0x517CC1B7ULL, 0.0004)
+    };
+    payload->_rotationRate = (CMRotationRate){
+        .x = ps_motion_micro_jitter(t ^ 0x11ULL, 0.0003),
+        .y = ps_motion_micro_jitter(t ^ 0x22ULL, 0.0003),
+        .z = ps_motion_micro_jitter(t ^ 0x33ULL, 0.0003)
+    };
+    payload->_magneticField = (CMMagneticField){
+        .x = 18.4 + ps_motion_micro_jitter(t ^ 0x44ULL, 0.02),
+        .y = -6.2 + ps_motion_micro_jitter(t ^ 0x55ULL, 0.02),
+        .z = -41.5 + ps_motion_micro_jitter(t ^ 0x66ULL, 0.02)
+    };
+    payload->_userAcceleration = (CMAcceleration){
+        .x = ps_motion_micro_jitter(t ^ 0x77ULL, 0.0003),
+        .y = ps_motion_micro_jitter(t ^ 0x88ULL, 0.0003),
+        .z = ps_motion_micro_jitter(t ^ 0x99ULL, 0.0003)
+    };
+    payload->_calibratedMagneticField = (CMCalibratedMagneticField){
+        .field = payload->_magneticField,
+        .accuracy = CMMagneticFieldCalibrationAccuracyHigh
+    };
+    return payload;
+}
+
+static PSVirtualMotionSamplePayload *ps_motion_sample_payload(id sample, BOOL createIfMissing) {
+    if (sample == nil) {
+        return nil;
+    }
+    @synchronized (sample) {
+        PSVirtualMotionSamplePayload *payload = objc_getAssociatedObject(sample, &kPSMotionSamplePayloadKey);
+        if (payload == nil && createIfMissing) {
+            payload = ps_make_initialized_motion_payload();
+            objc_setAssociatedObject(sample, &kPSMotionSamplePayloadKey, payload, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        return payload;
+    }
 }
 
 static void ps_copy_hook_method_to_class(Class dstCls, SEL dstSel, SEL srcHookSel) {
@@ -5122,7 +5249,11 @@ static void ps_ensure_mock_motion_sample_classes(void) {
 
 static id ps_make_mock_sample_instance(Class cls) {
     ps_ensure_mock_motion_sample_classes();
-    return (cls != Nil) ? [[cls alloc] init] : nil;
+    id instance = (cls != Nil) ? [[cls alloc] init] : nil;
+    if (instance != nil) {
+        (void)ps_motion_sample_payload(instance, YES);
+    }
+    return instance;
 }
 
 static dispatch_source_t ps_schedule_motion_timer(id mgr,
@@ -5187,34 +5318,42 @@ static dispatch_source_t ps_schedule_motion_timer(id mgr,
 }
 
 - (NSTimeInterval) pm_ps_cm_sample_timestamp {
-    return [[NSProcessInfo processInfo] systemUptime];
+    PSVirtualMotionSamplePayload *payload = ps_motion_sample_payload(self, YES);
+    if (payload == nil) {
+        return ps_cm_next_virtual_timestamp();
+    }
+    os_unfair_lock_lock(&payload->_lock);
+    if (!payload->_hasTimestamp) {
+        payload->_timestamp = ps_cm_next_virtual_timestamp();
+        payload->_hasTimestamp = YES;
+    }
+    NSTimeInterval ts = payload->_timestamp;
+    os_unfair_lock_unlock(&payload->_lock);
+    return ts;
 }
 
 - (CMAcceleration) pm_ps_cm_sample_acceleration {
-    uint64_t t = atomic_fetch_add_explicit(&s_ps_motion_tick, 1ULL, memory_order_relaxed);
-    return (CMAcceleration){
-        .x = 0.0012 + ps_motion_micro_jitter(t, 0.0004),
-        .y = -0.0085 + ps_motion_micro_jitter(t ^ 0x9E3779B9ULL, 0.0004),
-        .z = -0.9998 + ps_motion_micro_jitter(t ^ 0x517CC1B7ULL, 0.0004)
-    };
+    PSVirtualMotionSamplePayload *payload = ps_motion_sample_payload(self, YES);
+    if (payload != nil) {
+        return payload->_acceleration;
+    }
+    return (CMAcceleration){ .x = 0.0012, .y = -0.0085, .z = -0.9998 };
 }
 
 - (CMRotationRate) pm_ps_cm_sample_rotationRate {
-    uint64_t t = atomic_fetch_add_explicit(&s_ps_motion_tick, 1ULL, memory_order_relaxed);
-    return (CMRotationRate){
-        .x = ps_motion_micro_jitter(t ^ 0x11ULL, 0.0003),
-        .y = ps_motion_micro_jitter(t ^ 0x22ULL, 0.0003),
-        .z = ps_motion_micro_jitter(t ^ 0x33ULL, 0.0003)
-    };
+    PSVirtualMotionSamplePayload *payload = ps_motion_sample_payload(self, YES);
+    if (payload != nil) {
+        return payload->_rotationRate;
+    }
+    return (CMRotationRate){ .x = 0.0, .y = 0.0, .z = 0.0 };
 }
 
 - (CMMagneticField) pm_ps_cm_sample_magneticField {
-    uint64_t t = atomic_fetch_add_explicit(&s_ps_motion_tick, 1ULL, memory_order_relaxed);
-    return (CMMagneticField){
-        .x = 18.4 + ps_motion_micro_jitter(t ^ 0x44ULL, 0.02),
-        .y = -6.2 + ps_motion_micro_jitter(t ^ 0x55ULL, 0.02),
-        .z = -41.5 + ps_motion_micro_jitter(t ^ 0x66ULL, 0.02)
-    };
+    PSVirtualMotionSamplePayload *payload = ps_motion_sample_payload(self, YES);
+    if (payload != nil) {
+        return payload->_magneticField;
+    }
+    return (CMMagneticField){ .x = 18.4, .y = -6.2, .z = -41.5 };
 }
 
 - (double) pm_ps_cm_attitude_roll { return 0.0012; }
@@ -5243,19 +5382,54 @@ static dispatch_source_t ps_schedule_motion_timer(id mgr,
 }
 
 - (CMAcceleration) pm_ps_cm_dm_userAcceleration {
-    uint64_t t = atomic_fetch_add_explicit(&s_ps_motion_tick, 1ULL, memory_order_relaxed);
-    return (CMAcceleration){
-        .x = ps_motion_micro_jitter(t ^ 0x77ULL, 0.0003),
-        .y = ps_motion_micro_jitter(t ^ 0x88ULL, 0.0003),
-        .z = ps_motion_micro_jitter(t ^ 0x99ULL, 0.0003)
-    };
+    PSVirtualMotionSamplePayload *payload = ps_motion_sample_payload(self, YES);
+    if (payload != nil) {
+        return payload->_userAcceleration;
+    }
+    return (CMAcceleration){ .x = 0.0, .y = 0.0, .z = 0.0 };
 }
 
 - (CMCalibratedMagneticField) pm_ps_cm_dm_magneticField {
+    PSVirtualMotionSamplePayload *payload = ps_motion_sample_payload(self, YES);
+    if (payload != nil) {
+        return payload->_calibratedMagneticField;
+    }
     return (CMCalibratedMagneticField){
         .field = { .x = 18.4, .y = -6.2, .z = -41.5 },
         .accuracy = CMMagneticFieldCalibrationAccuracyHigh
     };
+}
+
+- (CMCalibratedMagneticField) pm_ps_cm_real_dm_magneticField {
+    CMCalibratedMagneticField orig = [self pm_ps_cm_real_dm_magneticField];
+    if (orig.accuracy == CMMagneticFieldCalibrationAccuracyUncalibrated &&
+        orig.field.x == 0.0 &&
+        orig.field.y == 0.0 &&
+        orig.field.z == 0.0 &&
+        pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        @synchronized (self) {
+            NSValue *cached = objc_getAssociatedObject(self, &kPSRealDMMagneticFieldKey);
+            if (cached != nil && strcmp(cached.objCType, @encode(CMCalibratedMagneticField)) == 0) {
+                CMCalibratedMagneticField out = {0};
+                [cached getValue:&out];
+                return out;
+            }
+            uint64_t t = atomic_fetch_add_explicit(&s_ps_motion_tick, 1ULL, memory_order_relaxed);
+            CMCalibratedMagneticField synth = {
+                .field = {
+                    .x = 18.4 + ps_motion_micro_jitter(t ^ 0x44ULL, 0.02),
+                    .y = -6.2 + ps_motion_micro_jitter(t ^ 0x55ULL, 0.02),
+                    .z = -41.5 + ps_motion_micro_jitter(t ^ 0x66ULL, 0.02)
+                },
+                .accuracy = CMMagneticFieldCalibrationAccuracyHigh
+            };
+            NSValue *boxed = [NSValue valueWithBytes:&synth objCType:@encode(CMCalibratedMagneticField)];
+            objc_setAssociatedObject(self, &kPSRealDMMagneticFieldKey, boxed, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            return synth;
+        }
+    }
+    return orig;
 }
 
 - (double) pm_ps_cm_dm_heading { return 18.6; }
@@ -5349,6 +5523,7 @@ static dispatch_source_t ps_schedule_motion_timer(id mgr,
 
 - (CMAccelerometerData *) pm_ps_cm_accelerometerData {
     CMAccelerometerData *orig = [self pm_ps_cm_accelerometerData];
+    ps_cm_observe_real_sample(orig);
     if (orig == nil && pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         PSVirtualMotionState *st = ps_motion_state(self, NO);
         BOOL active = NO;
@@ -5367,6 +5542,7 @@ static dispatch_source_t ps_schedule_motion_timer(id mgr,
 
 - (CMGyroData *) pm_ps_cm_gyroData {
     CMGyroData *orig = [self pm_ps_cm_gyroData];
+    ps_cm_observe_real_sample(orig);
     if (orig == nil && pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         PSVirtualMotionState *st = ps_motion_state(self, NO);
         BOOL active = NO;
@@ -5385,6 +5561,7 @@ static dispatch_source_t ps_schedule_motion_timer(id mgr,
 
 - (CMMagnetometerData *) pm_ps_cm_magnetometerData {
     CMMagnetometerData *orig = [self pm_ps_cm_magnetometerData];
+    ps_cm_observe_real_sample(orig);
     if (orig == nil && pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         PSVirtualMotionState *st = ps_motion_state(self, NO);
         BOOL active = NO;
@@ -5394,6 +5571,8 @@ static dispatch_source_t ps_schedule_motion_timer(id mgr,
             }
         }
         if (active) {
+            ps_cm_observe_real_sample([self pm_ps_cm_accelerometerData]);
+            ps_cm_observe_real_sample([self pm_ps_cm_deviceMotion]);
             ps_ensure_mock_motion_sample_classes();
             return ps_make_mock_sample_instance(s_ps_mockMagCls);
         }
@@ -5403,6 +5582,7 @@ static dispatch_source_t ps_schedule_motion_timer(id mgr,
 
 - (CMDeviceMotion *) pm_ps_cm_deviceMotion {
     CMDeviceMotion *orig = [self pm_ps_cm_deviceMotion];
+    ps_cm_observe_real_sample(orig);
     if (orig == nil && pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         PSVirtualMotionState *st = ps_motion_state(self, NO);
         BOOL active = NO;
@@ -5452,6 +5632,14 @@ static dispatch_source_t ps_schedule_motion_timer(id mgr,
             }
         }
     }
+    if (handler != nil && pt_is_bypass_enabled()) {
+        CMAccelerometerHandler userHandler = [handler copy];
+        [self pm_ps_cm_startAccelerometerUpdatesToQueue:queue withHandler:^(CMAccelerometerData *data, NSError *error) {
+            ps_cm_observe_real_sample(data);
+            userHandler(data, error);
+        }];
+        return;
+    }
     [self pm_ps_cm_startAccelerometerUpdatesToQueue:queue withHandler:handler];
 }
 
@@ -5499,6 +5687,14 @@ static dispatch_source_t ps_schedule_motion_timer(id mgr,
             }
         }
     }
+    if (handler != nil && pt_is_bypass_enabled()) {
+        CMGyroHandler userHandler = [handler copy];
+        [self pm_ps_cm_startGyroUpdatesToQueue:queue withHandler:^(CMGyroData *data, NSError *error) {
+            ps_cm_observe_real_sample(data);
+            userHandler(data, error);
+        }];
+        return;
+    }
     [self pm_ps_cm_startGyroUpdatesToQueue:queue withHandler:handler];
 }
 
@@ -5517,6 +5713,8 @@ static dispatch_source_t ps_schedule_motion_timer(id mgr,
     if (pt_is_bypass_enabled() &&
         !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
         ![self pm_ps_cm_isMagnetometerAvailable]) {
+        ps_cm_observe_real_sample([self pm_ps_cm_accelerometerData]);
+        ps_cm_observe_real_sample([self pm_ps_cm_deviceMotion]);
         PSVirtualMotionState *st = ps_motion_state(self, YES);
         @synchronized (st) {
             st.magActive = YES;
@@ -5529,6 +5727,8 @@ static dispatch_source_t ps_schedule_motion_timer(id mgr,
     if (pt_is_bypass_enabled() &&
         !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
         ![self pm_ps_cm_isMagnetometerAvailable]) {
+        ps_cm_observe_real_sample([self pm_ps_cm_accelerometerData]);
+        ps_cm_observe_real_sample([self pm_ps_cm_deviceMotion]);
         PSVirtualMotionState *st = ps_motion_state(self, YES);
         @synchronized (st) {
             st.magActive = YES;
@@ -5545,6 +5745,14 @@ static dispatch_source_t ps_schedule_motion_timer(id mgr,
                 return;
             }
         }
+    }
+    if (handler != nil && pt_is_bypass_enabled()) {
+        CMMagnetometerHandler userHandler = [handler copy];
+        [self pm_ps_cm_startMagnetometerUpdatesToQueue:queue withHandler:^(CMMagnetometerData *data, NSError *error) {
+            ps_cm_observe_real_sample(data);
+            userHandler(data, error);
+        }];
+        return;
     }
     [self pm_ps_cm_startMagnetometerUpdatesToQueue:queue withHandler:handler];
 }
@@ -5605,6 +5813,14 @@ static dispatch_source_t ps_schedule_motion_timer(id mgr,
             }
         }
     }
+    if (handler != nil && pt_is_bypass_enabled()) {
+        CMDeviceMotionHandler userHandler = [handler copy];
+        [self pm_ps_cm_startDeviceMotionUpdatesToQueue:queue withHandler:^(CMDeviceMotion *motion, NSError *error) {
+            ps_cm_observe_real_sample(motion);
+            userHandler(motion, error);
+        }];
+        return;
+    }
     [self pm_ps_cm_startDeviceMotionUpdatesToQueue:queue withHandler:handler];
 }
 
@@ -5630,6 +5846,14 @@ static dispatch_source_t ps_schedule_motion_timer(id mgr,
                 return;
             }
         }
+    }
+    if (handler != nil && pt_is_bypass_enabled()) {
+        CMDeviceMotionHandler userHandler = [handler copy];
+        [self pm_ps_cm_startDeviceMotionUpdatesUsingReferenceFrame:frame toQueue:queue withHandler:^(CMDeviceMotion *motion, NSError *error) {
+            ps_cm_observe_real_sample(motion);
+            userHandler(motion, error);
+        }];
+        return;
     }
     [self pm_ps_cm_startDeviceMotionUpdatesUsingReferenceFrame:frame toQueue:queue withHandler:handler];
 }
@@ -5679,6 +5903,14 @@ static void ps_install_coremotion_hooks_if_loaded(void) {
             ps_swizzle_instance_method(cmCls, @selector(startDeviceMotionUpdatesToQueue:withHandler:), @selector(pm_ps_cm_startDeviceMotionUpdatesToQueue:withHandler:));
             ps_swizzle_instance_method(cmCls, @selector(startDeviceMotionUpdatesUsingReferenceFrame:toQueue:withHandler:), @selector(pm_ps_cm_startDeviceMotionUpdatesUsingReferenceFrame:toQueue:withHandler:));
             ps_swizzle_instance_method(cmCls, @selector(stopDeviceMotionUpdates), @selector(pm_ps_cm_stopDeviceMotionUpdates));
+        });
+    }
+    Class dmCls = objc_getClass("CMDeviceMotion");
+    if (dmCls != Nil) {
+        static dispatch_once_t dmOnce;
+        dispatch_once(&dmOnce, ^{
+            ps_ensure_mock_motion_sample_classes();
+            ps_swizzle_instance_method(dmCls, @selector(magneticField), @selector(pm_ps_cm_real_dm_magneticField));
         });
     }
     Class altCls = objc_getClass("CMAltimeter");

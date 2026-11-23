@@ -33,7 +33,7 @@ __attribute__((visibility("hidden"))) void pt_ensure_playloader_early_init(void)
         BOOL rootWorkDir = [settings rootWorkDir];
         s_tls_initializing_device_info = prev_tls;
 
-        const char *dis_env = getenv("DISABLE_PLAYSHADOW_BYPASS");
+        const char *dis_env = pt_raw_getenv("DISABLE_PLAYSHADOW_BYPASS");
         if (dis_env != NULL && strcmp(dis_env, "1") == 0) {
             bypass = NO;
         }
