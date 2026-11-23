@@ -549,7 +549,13 @@ __attribute__((visibility("hidden"))) bool pt_MGGetBoolAnswer(CFStringRef questi
 __attribute__((visibility("hidden"))) int32_t pt_MGGetSInt32Answer(CFStringRef question, int32_t defaultVal);
 __attribute__((visibility("hidden"))) CFStringRef pt_MGGetStringAnswer(CFStringRef question);
 __attribute__((visibility("hidden"))) int32_t pt_MGGetProductType(void);
+__attribute__((visibility("hidden"))) int pt_sysctl_with_caller(int *name, u_int types, void *buf, size_t *size, void *arg0, size_t arg1, const void *caller);
+__attribute__((visibility("hidden"))) int pt_sysctlbyname_with_caller(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen, const void *caller);
 __attribute__((visibility("hidden"))) char ***pt_get_app_shadow_environ_ptr(void);
+
+// Entitlements exports
+__attribute__((visibility("hidden"))) int pt_csops_with_caller(pid_t pid, unsigned int ops, void *useraddr, size_t usersize, const void *caller);
+__attribute__((visibility("hidden"))) int pt_ptrace_with_caller(int request, pid_t pid, caddr_t addr, int data, const void *caller);
 
 // FSVirtualizer exports
 __attribute__((visibility("hidden"))) BOOL pt_is_system_or_playtools_caller(const void *ret_addr);
@@ -578,6 +584,16 @@ __attribute__((visibility("hidden"))) void pt_disable_app_backups_for_safe_mode(
 __attribute__((visibility("hidden"))) BOOL pt_has_backup_mobileprovision(void);
 __attribute__((visibility("hidden"))) const char *pt_copy_virtual_mobileprovision_path(char *buf, size_t bufsize);
 __attribute__((visibility("hidden"))) const char *pt_lookup_app_backup_redirect_for_caller(const char *raw_path, const void *caller, char *vbuf, size_t vbuf_size, int *inout_is_sys_caller);
+__attribute__((visibility("hidden"))) int pt_fs_open_with_caller(const char *filename, int oflag, mode_t mode, const void *caller);
+__attribute__((visibility("hidden"))) int pt_fs_openat_with_caller(int fd, const char *path, int oflag, mode_t mode, const void *caller);
+__attribute__((visibility("hidden"))) int pt_fs_stat_with_caller(const char *path, struct stat *buf, BOOL follow_symlinks, const void *caller);
+__attribute__((visibility("hidden"))) int pt_fs_fstatat_with_caller(int fd, const char *path, struct stat *buf, int flag, const void *caller);
+__attribute__((visibility("hidden"))) int pt_fs_access_with_caller(const char *path, int mode, const void *caller);
+__attribute__((visibility("hidden"))) int pt_fs_faccessat_with_caller(int fd, const char *path, int mode, int flag, const void *caller);
+__attribute__((visibility("hidden"))) ssize_t pt_fs_readlink_with_caller(const char *path, char *buf, size_t bufsize, const void *caller);
+__attribute__((visibility("hidden"))) ssize_t pt_fs_readlinkat_with_caller(int fd, const char *path, char *buf, size_t bufsize, const void *caller);
+__attribute__((visibility("hidden"))) int pt_fs_fcntl_with_caller(int fd, int cmd, uintptr_t arg, const void *caller);
+__attribute__((visibility("hidden"))) int pt_fs_proc_pidinfo_with_caller(int pid, int flavor, uint64_t arg, void *buffer, int buffersize, const void *caller);
 
 // DyldVirtualizer exports
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_class(const char *name);
@@ -587,7 +603,11 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_dyld_image_name(const ch
 __attribute__((visibility("hidden"))) BOOL pt_should_hide_dyld_image(const char *name);
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_dyld_image_header(const struct mach_header *mh);
 __attribute__((visibility("hidden"))) const char *pt_fallback_system_image_path(void);
+__attribute__((visibility("hidden"))) const struct mach_header *pt_maybe_shadow_mach_header(const struct mach_header *real_mh);
+__attribute__((visibility("hidden"))) const struct mach_header *pt_uncloak_shadow_mach_header(const struct mach_header *mh);
+__attribute__((visibility("hidden"))) BOOL pt_is_hidden_vm_region_range(uintptr_t addr, uintptr_t size);
 __attribute__((visibility("hidden"))) void pt_register_swizzled_imp(const void *hook_imp, const void *orig_imp);
+__attribute__((visibility("hidden"))) void pt_register_hidden_swizzle_selector(SEL sel);
 __attribute__((visibility("hidden"))) BOOL pt_is_address_in_playtools(const void *addr);
 
 // NetworkVirtualizer exports

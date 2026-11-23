@@ -27,6 +27,7 @@ __attribute__((visibility("hidden"))) void ps_swizzle_instance_method(Class cls,
                             newSelector,
                             origIMP,
                             origTypes);
+        pt_register_hidden_swizzle_selector(newSelector);
         pt_register_swizzled_imp((const void *)hookIMP, (const void *)origIMP);
     } else {
         IMP prevIMP = class_replaceMethod(cls,
@@ -38,6 +39,7 @@ __attribute__((visibility("hidden"))) void ps_swizzle_instance_method(Class cls,
                             newSelector,
                             actualOrig,
                             origTypes);
+        pt_register_hidden_swizzle_selector(newSelector);
         pt_register_swizzled_imp((const void *)hookIMP, (const void *)actualOrig);
     }
 }
@@ -84,6 +86,7 @@ __attribute__((visibility("hidden"))) void ps_swizzle_class_method(Class cls, SE
                             newSelector,
                             origIMP,
                             origTypes);
+        pt_register_hidden_swizzle_selector(newSelector);
         pt_register_swizzled_imp((const void *)hookIMP, (const void *)origIMP);
     } else {
         IMP prevIMP = class_replaceMethod(metaCls,
@@ -95,6 +98,7 @@ __attribute__((visibility("hidden"))) void ps_swizzle_class_method(Class cls, SE
                             newSelector,
                             actualOrig,
                             origTypes);
+        pt_register_hidden_swizzle_selector(newSelector);
         pt_register_swizzled_imp((const void *)hookIMP, (const void *)actualOrig);
     }
 }

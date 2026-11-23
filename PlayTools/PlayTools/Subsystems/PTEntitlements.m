@@ -790,12 +790,13 @@ static int pt_handle_spoofed_csops_query(unsigned int ops, void *useraddr, size_
     return -2;
 }
 
-static int pt_csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize) {
+__attribute__((visibility("hidden")))
+int pt_csops_with_caller(pid_t pid, unsigned int ops, void *useraddr, size_t usersize, const void *caller) {
     if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire)) {
         return csops(pid, ops, useraddr, usersize);
     }
     if (pt_is_bypass_enabled() &&
-        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        !pt_is_effective_system_or_playtools_caller(caller) &&
         (pid == 0 || pid == getpid())) {
         int handled = pt_handle_spoofed_csops_query(ops, useraddr, usersize);
         if (handled != -2) {
@@ -811,6 +812,10 @@ static int pt_csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize
         return ret;
     }
     return csops(pid, ops, useraddr, usersize);
+}
+
+static int pt_csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize) {
+    return pt_csops_with_caller(pid, ops, useraddr, usersize, __builtin_return_address(0));
 }
 
 static int pt_csops_audittoken(pid_t pid, unsigned int ops, void *useraddr, size_t usersize, audit_token_t *token) {
@@ -838,12 +843,18 @@ extern int ptrace(int request, pid_t pid, caddr_t addr, int data);
 #ifndef PT_DENY_ATTACH
 #define PT_DENY_ATTACH 31
 #endif
-static int pt_ptrace(int request, pid_t pid, caddr_t addr, int data) {
+__attribute__((visibility("hidden")))
+int pt_ptrace_with_caller(int request, pid_t pid, caddr_t addr, int data, const void *caller) {
+    (void)caller;
     if (request == PT_DENY_ATTACH && pt_is_bypass_enabled()) {
         PT_DEBUG_TRACE("entitlements", "bypassed ptrace PT_DENY_ATTACH pid=%d", pid);
         return 0;
     }
     return ptrace(request, pid, addr, data);
+}
+
+static int pt_ptrace(int request, pid_t pid, caddr_t addr, int data) {
+    return pt_ptrace_with_caller(request, pid, addr, data, __builtin_return_address(0));
 }
 
 

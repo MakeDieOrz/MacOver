@@ -19,6 +19,7 @@
 //
 
 #import <Foundation/Foundation.h>
+#import <CoreMotion/CoreMotion.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <UIKit/UIKit.h>
@@ -79,6 +80,7 @@ extern __attribute__((visibility("hidden"))) BOOL pt_sanitize_ios_build_version_
 extern __attribute__((visibility("hidden"))) void pt_sanitize_system_version_dict(NSMutableDictionary *dict);
 extern __attribute__((visibility("hidden"))) const char *pt_register_and_virtualize_group_container(const char *real_group_path, char *buf, size_t bufsize, BOOL use_private_prefix);
 extern __attribute__((visibility("hidden"))) void pt_register_swizzled_imp(const void *hook_imp, const void *orig_imp);
+extern __attribute__((visibility("hidden"))) void pt_register_hidden_swizzle_selector(SEL sel);
 extern __attribute__((visibility("hidden"))) BOOL pt_is_address_in_playtools(const void *addr);
 
 

@@ -304,6 +304,10 @@ class Entitlements {
         if app.settings.settings.bypass {
             sandboxProfile.append("(deny process-fork)")
             sandboxProfile.append(
+                "(deny file-read-data (with errno ENOENT) (with no-report) " +
+                "(literal \"/Users\") (literal \"/System/Volumes/Data/Users\"))"
+            )
+            sandboxProfile.append(
                 "(deny sysctl-read (with errno ENOENT) (with no-report) " +
                 "(sysctl-name \"kern.bootargs\" \"kern.wakereason\" \"kern.hibernatefile\" " +
                 "\"kern.hv_support\" \"vm.swapusage\" \"hw.use_kernelmanagerd\" " +

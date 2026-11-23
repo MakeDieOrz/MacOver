@@ -4981,6 +4981,716 @@ static void ps_install_app_attest_hooks_if_loaded(void) {
 }
 
 __attribute__((visibility("hidden")))
+@interface PSVirtualMotionState : NSObject
+@property (nonatomic, assign) BOOL accelActive;
+@property (nonatomic, assign) BOOL gyroActive;
+@property (nonatomic, assign) BOOL magActive;
+@property (nonatomic, assign) BOOL dmActive;
+@property (nonatomic, strong) dispatch_source_t accelTimer;
+@property (nonatomic, strong) dispatch_source_t gyroTimer;
+@property (nonatomic, strong) dispatch_source_t magTimer;
+@property (nonatomic, strong) dispatch_source_t dmTimer;
+@end
+
+@implementation PSVirtualMotionState
+- (void)dealloc {
+    if (_accelTimer) { dispatch_source_cancel(_accelTimer); _accelTimer = nil; }
+    if (_gyroTimer) { dispatch_source_cancel(_gyroTimer); _gyroTimer = nil; }
+    if (_magTimer) { dispatch_source_cancel(_magTimer); _magTimer = nil; }
+    if (_dmTimer) { dispatch_source_cancel(_dmTimer); _dmTimer = nil; }
+}
+@end
+
+static const char kPSMotionStateAssocKey = 0;
+static _Atomic uint64_t s_ps_motion_tick = 1ULL;
+static Class s_ps_mockAccelCls = Nil;
+static Class s_ps_mockGyroCls = Nil;
+static Class s_ps_mockMagCls = Nil;
+static Class s_ps_mockAttitudeCls = Nil;
+static Class s_ps_mockDeviceMotionCls = Nil;
+
+static PSVirtualMotionState *ps_motion_state(id mgr, BOOL createIfMissing) {
+    if (mgr == nil) {
+        return nil;
+    }
+    @synchronized (mgr) {
+        PSVirtualMotionState *st = objc_getAssociatedObject(mgr, &kPSMotionStateAssocKey);
+        if (st == nil && createIfMissing) {
+            st = [[PSVirtualMotionState alloc] init];
+            objc_setAssociatedObject(mgr, &kPSMotionStateAssocKey, st, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        return st;
+    }
+}
+
+static inline double ps_motion_micro_jitter(uint64_t seed, double scale) {
+    uint64_t x = seed * 6364136223846793005ULL + 1442695040888963407ULL;
+    x ^= (x >> 33);
+    int32_t centered = (int32_t)(x & 0xFFFFU) - 32768;
+    return ((double)centered / 32768.0) * scale;
+}
+
+static void ps_copy_hook_method_to_class(Class dstCls, SEL dstSel, SEL srcHookSel) {
+    if (dstCls == Nil || dstSel == NULL || srcHookSel == NULL) {
+        return;
+    }
+    Method m = class_getInstanceMethod([PSSwizzleHooks class], srcHookSel);
+    if (m != NULL) {
+        class_addMethod(dstCls, dstSel, method_getImplementation(m), method_getTypeEncoding(m));
+    }
+}
+
+static void ps_ensure_mock_motion_sample_classes(void) {
+    static dispatch_once_t sampleOnce;
+    dispatch_once(&sampleOnce, ^{
+        Class baseAccel = objc_getClass("CMAccelerometerData");
+        if (baseAccel != Nil) {
+            Class c = objc_allocateClassPair(baseAccel, "PSVirtualAccelerometerData", 0);
+            if (c != Nil) {
+                ps_copy_hook_method_to_class(c, @selector(class), @selector(pm_ps_cm_accel_class));
+                ps_copy_hook_method_to_class(c, @selector(copyWithZone:), @selector(pm_ps_cm_copyWithZone:));
+                ps_copy_hook_method_to_class(c, @selector(description), @selector(pm_ps_cm_sample_description));
+                ps_copy_hook_method_to_class(c, @selector(timestamp), @selector(pm_ps_cm_sample_timestamp));
+                ps_copy_hook_method_to_class(c, @selector(acceleration), @selector(pm_ps_cm_sample_acceleration));
+                objc_registerClassPair(c);
+                s_ps_mockAccelCls = c;
+            }
+        }
+        Class baseGyro = objc_getClass("CMGyroData");
+        if (baseGyro != Nil) {
+            Class c = objc_allocateClassPair(baseGyro, "PSVirtualGyroData", 0);
+            if (c != Nil) {
+                ps_copy_hook_method_to_class(c, @selector(class), @selector(pm_ps_cm_gyro_class));
+                ps_copy_hook_method_to_class(c, @selector(copyWithZone:), @selector(pm_ps_cm_copyWithZone:));
+                ps_copy_hook_method_to_class(c, @selector(description), @selector(pm_ps_cm_sample_description));
+                ps_copy_hook_method_to_class(c, @selector(timestamp), @selector(pm_ps_cm_sample_timestamp));
+                ps_copy_hook_method_to_class(c, @selector(rotationRate), @selector(pm_ps_cm_sample_rotationRate));
+                objc_registerClassPair(c);
+                s_ps_mockGyroCls = c;
+            }
+        }
+        Class baseMag = objc_getClass("CMMagnetometerData");
+        if (baseMag != Nil) {
+            Class c = objc_allocateClassPair(baseMag, "PSVirtualMagnetometerData", 0);
+            if (c != Nil) {
+                ps_copy_hook_method_to_class(c, @selector(class), @selector(pm_ps_cm_mag_class));
+                ps_copy_hook_method_to_class(c, @selector(copyWithZone:), @selector(pm_ps_cm_copyWithZone:));
+                ps_copy_hook_method_to_class(c, @selector(description), @selector(pm_ps_cm_sample_description));
+                ps_copy_hook_method_to_class(c, @selector(timestamp), @selector(pm_ps_cm_sample_timestamp));
+                ps_copy_hook_method_to_class(c, @selector(magneticField), @selector(pm_ps_cm_sample_magneticField));
+                objc_registerClassPair(c);
+                s_ps_mockMagCls = c;
+            }
+        }
+        Class baseAtt = objc_getClass("CMAttitude");
+        if (baseAtt != Nil) {
+            Class c = objc_allocateClassPair(baseAtt, "PSVirtualAttitude", 0);
+            if (c != Nil) {
+                ps_copy_hook_method_to_class(c, @selector(class), @selector(pm_ps_cm_attitude_class));
+                ps_copy_hook_method_to_class(c, @selector(copyWithZone:), @selector(pm_ps_cm_copyWithZone:));
+                ps_copy_hook_method_to_class(c, @selector(description), @selector(pm_ps_cm_attitude_description));
+                ps_copy_hook_method_to_class(c, @selector(roll), @selector(pm_ps_cm_attitude_roll));
+                ps_copy_hook_method_to_class(c, @selector(pitch), @selector(pm_ps_cm_attitude_pitch));
+                ps_copy_hook_method_to_class(c, @selector(yaw), @selector(pm_ps_cm_attitude_yaw));
+                ps_copy_hook_method_to_class(c, @selector(quaternion), @selector(pm_ps_cm_attitude_quaternion));
+                ps_copy_hook_method_to_class(c, @selector(rotationMatrix), @selector(pm_ps_cm_attitude_rotationMatrix));
+                ps_copy_hook_method_to_class(c, @selector(multiplyByInverseOfAttitude:), @selector(pm_ps_cm_attitude_multiplyByInverseOfAttitude:));
+                objc_registerClassPair(c);
+                s_ps_mockAttitudeCls = c;
+            }
+        }
+        Class baseDM = objc_getClass("CMDeviceMotion");
+        if (baseDM != Nil) {
+            Class c = objc_allocateClassPair(baseDM, "PSVirtualDeviceMotion", 0);
+            if (c != Nil) {
+                ps_copy_hook_method_to_class(c, @selector(class), @selector(pm_ps_cm_dm_class));
+                ps_copy_hook_method_to_class(c, @selector(copyWithZone:), @selector(pm_ps_cm_copyWithZone:));
+                ps_copy_hook_method_to_class(c, @selector(description), @selector(pm_ps_cm_sample_description));
+                ps_copy_hook_method_to_class(c, @selector(timestamp), @selector(pm_ps_cm_sample_timestamp));
+                ps_copy_hook_method_to_class(c, @selector(attitude), @selector(pm_ps_cm_dm_attitude));
+                ps_copy_hook_method_to_class(c, @selector(gravity), @selector(pm_ps_cm_dm_gravity));
+                ps_copy_hook_method_to_class(c, @selector(userAcceleration), @selector(pm_ps_cm_dm_userAcceleration));
+                ps_copy_hook_method_to_class(c, @selector(rotationRate), @selector(pm_ps_cm_sample_rotationRate));
+                ps_copy_hook_method_to_class(c, @selector(magneticField), @selector(pm_ps_cm_dm_magneticField));
+                ps_copy_hook_method_to_class(c, @selector(heading), @selector(pm_ps_cm_dm_heading));
+                objc_registerClassPair(c);
+                s_ps_mockDeviceMotionCls = c;
+            }
+        }
+    });
+}
+
+static id ps_make_mock_sample_instance(Class cls) {
+    ps_ensure_mock_motion_sample_classes();
+    return (cls != Nil) ? [[cls alloc] init] : nil;
+}
+
+static dispatch_source_t ps_schedule_motion_timer(id mgr,
+                                                  NSTimeInterval interval,
+                                                  NSOperationQueue *queue,
+                                                  void (^emitBlock)(id strongMgr)) {
+    if (mgr == nil || emitBlock == nil) {
+        return nil;
+    }
+    double sec = (isfinite(interval) && interval >= 0.01) ? interval : 0.05;
+    NSOperationQueue *targetQueue = queue ?: [NSOperationQueue mainQueue];
+    __weak id weakMgr = mgr;
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                                     dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    if (timer == nil) {
+        return nil;
+    }
+    uint64_t ns = (uint64_t)(sec * (double)NSEC_PER_SEC);
+    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 0), ns, ns / 5ULL);
+    dispatch_source_set_event_handler(timer, ^{
+        id strongMgr = weakMgr;
+        if (strongMgr == nil) {
+            dispatch_source_cancel(timer);
+            return;
+        }
+        [targetQueue addOperationWithBlock:^{
+            id innerMgr = weakMgr;
+            if (innerMgr != nil) {
+                emitBlock(innerMgr);
+            }
+        }];
+    });
+    dispatch_resume(timer);
+    return timer;
+}
+
+@implementation PSSwizzleHooks (PlayShadowCoreMotion)
+
+- (Class) pm_ps_cm_accel_class { return objc_getClass("CMAccelerometerData"); }
+- (Class) pm_ps_cm_gyro_class { return objc_getClass("CMGyroData"); }
+- (Class) pm_ps_cm_mag_class { return objc_getClass("CMMagnetometerData"); }
+- (Class) pm_ps_cm_attitude_class { return objc_getClass("CMAttitude"); }
+- (Class) pm_ps_cm_dm_class { return objc_getClass("CMDeviceMotion"); }
+
+- (id) pm_ps_cm_copyWithZone:(NSZone * __unused)zone NS_RETURNS_RETAINED {
+    return self;
+}
+
+- (NSString *) pm_ps_cm_sample_description {
+    return [NSString stringWithFormat:@"<%@ %p timestamp=%.6f>",
+            NSStringFromClass([self class]),
+            self,
+            [[self valueForKey:@"timestamp"] doubleValue]];
+}
+
+- (NSString *) pm_ps_cm_attitude_description {
+    return [NSString stringWithFormat:@"<CMAttitude %p roll=%.4f pitch=%.4f yaw=%.4f>",
+            self, 0.0012, 0.0085, 0.0];
+}
+
+- (void) pm_ps_cm_attitude_multiplyByInverseOfAttitude:(CMAttitude * __unused)attitude {
+}
+
+- (NSTimeInterval) pm_ps_cm_sample_timestamp {
+    return [[NSProcessInfo processInfo] systemUptime];
+}
+
+- (CMAcceleration) pm_ps_cm_sample_acceleration {
+    uint64_t t = atomic_fetch_add_explicit(&s_ps_motion_tick, 1ULL, memory_order_relaxed);
+    return (CMAcceleration){
+        .x = 0.0012 + ps_motion_micro_jitter(t, 0.0004),
+        .y = -0.0085 + ps_motion_micro_jitter(t ^ 0x9E3779B9ULL, 0.0004),
+        .z = -0.9998 + ps_motion_micro_jitter(t ^ 0x517CC1B7ULL, 0.0004)
+    };
+}
+
+- (CMRotationRate) pm_ps_cm_sample_rotationRate {
+    uint64_t t = atomic_fetch_add_explicit(&s_ps_motion_tick, 1ULL, memory_order_relaxed);
+    return (CMRotationRate){
+        .x = ps_motion_micro_jitter(t ^ 0x11ULL, 0.0003),
+        .y = ps_motion_micro_jitter(t ^ 0x22ULL, 0.0003),
+        .z = ps_motion_micro_jitter(t ^ 0x33ULL, 0.0003)
+    };
+}
+
+- (CMMagneticField) pm_ps_cm_sample_magneticField {
+    uint64_t t = atomic_fetch_add_explicit(&s_ps_motion_tick, 1ULL, memory_order_relaxed);
+    return (CMMagneticField){
+        .x = 18.4 + ps_motion_micro_jitter(t ^ 0x44ULL, 0.02),
+        .y = -6.2 + ps_motion_micro_jitter(t ^ 0x55ULL, 0.02),
+        .z = -41.5 + ps_motion_micro_jitter(t ^ 0x66ULL, 0.02)
+    };
+}
+
+- (double) pm_ps_cm_attitude_roll { return 0.0012; }
+- (double) pm_ps_cm_attitude_pitch { return 0.0085; }
+- (double) pm_ps_cm_attitude_yaw { return 0.0; }
+
+- (CMQuaternion) pm_ps_cm_attitude_quaternion {
+    return (CMQuaternion){ .x = 0.00425, .y = 0.0006, .z = 0.0, .w = 0.99999 };
+}
+
+- (CMRotationMatrix) pm_ps_cm_attitude_rotationMatrix {
+    return (CMRotationMatrix){
+        .m11 = 1.0, .m12 = 0.0, .m13 = 0.0,
+        .m21 = 0.0, .m22 = 1.0, .m23 = 0.0,
+        .m31 = 0.0, .m32 = 0.0, .m33 = 1.0
+    };
+}
+
+- (CMAttitude *) pm_ps_cm_dm_attitude {
+    ps_ensure_mock_motion_sample_classes();
+    return (s_ps_mockAttitudeCls != Nil) ? [[s_ps_mockAttitudeCls alloc] init] : nil;
+}
+
+- (CMAcceleration) pm_ps_cm_dm_gravity {
+    return (CMAcceleration){ .x = 0.0012, .y = -0.0085, .z = -0.9999 };
+}
+
+- (CMAcceleration) pm_ps_cm_dm_userAcceleration {
+    uint64_t t = atomic_fetch_add_explicit(&s_ps_motion_tick, 1ULL, memory_order_relaxed);
+    return (CMAcceleration){
+        .x = ps_motion_micro_jitter(t ^ 0x77ULL, 0.0003),
+        .y = ps_motion_micro_jitter(t ^ 0x88ULL, 0.0003),
+        .z = ps_motion_micro_jitter(t ^ 0x99ULL, 0.0003)
+    };
+}
+
+- (CMCalibratedMagneticField) pm_ps_cm_dm_magneticField {
+    return (CMCalibratedMagneticField){
+        .field = { .x = 18.4, .y = -6.2, .z = -41.5 },
+        .accuracy = CMMagneticFieldCalibrationAccuracyHigh
+    };
+}
+
+- (double) pm_ps_cm_dm_heading { return 18.6; }
+
+- (BOOL) pm_ps_cm_isAccelerometerAvailable {
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return YES;
+    }
+    return [self pm_ps_cm_isAccelerometerAvailable];
+}
+
+- (BOOL) pm_ps_cm_isGyroAvailable {
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return YES;
+    }
+    return [self pm_ps_cm_isGyroAvailable];
+}
+
+- (BOOL) pm_ps_cm_isMagnetometerAvailable {
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return YES;
+    }
+    return [self pm_ps_cm_isMagnetometerAvailable];
+}
+
+- (BOOL) pm_ps_cm_isDeviceMotionAvailable {
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return YES;
+    }
+    return [self pm_ps_cm_isDeviceMotionAvailable];
+}
+
++ (BOOL) pm_ps_cm_isRelativeAltitudeAvailable {
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return YES;
+    }
+    return [self pm_ps_cm_isRelativeAltitudeAvailable];
+}
+
+- (BOOL) pm_ps_cm_isAccelerometerActive {
+    BOOL orig = [self pm_ps_cm_isAccelerometerActive];
+    if (!orig && pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        PSVirtualMotionState *st = ps_motion_state(self, NO);
+        if (st != nil) {
+            @synchronized (st) {
+                return st.accelActive;
+            }
+        }
+    }
+    return orig;
+}
+
+- (BOOL) pm_ps_cm_isGyroActive {
+    BOOL orig = [self pm_ps_cm_isGyroActive];
+    if (!orig && pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        PSVirtualMotionState *st = ps_motion_state(self, NO);
+        if (st != nil) {
+            @synchronized (st) {
+                return st.gyroActive;
+            }
+        }
+    }
+    return orig;
+}
+
+- (BOOL) pm_ps_cm_isMagnetometerActive {
+    BOOL orig = [self pm_ps_cm_isMagnetometerActive];
+    if (!orig && pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        PSVirtualMotionState *st = ps_motion_state(self, NO);
+        if (st != nil) {
+            @synchronized (st) {
+                return st.magActive;
+            }
+        }
+    }
+    return orig;
+}
+
+- (BOOL) pm_ps_cm_isDeviceMotionActive {
+    BOOL orig = [self pm_ps_cm_isDeviceMotionActive];
+    if (!orig && pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        PSVirtualMotionState *st = ps_motion_state(self, NO);
+        if (st != nil) {
+            @synchronized (st) {
+                return st.dmActive;
+            }
+        }
+    }
+    return orig;
+}
+
+- (CMAccelerometerData *) pm_ps_cm_accelerometerData {
+    CMAccelerometerData *orig = [self pm_ps_cm_accelerometerData];
+    if (orig == nil && pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        PSVirtualMotionState *st = ps_motion_state(self, NO);
+        BOOL active = NO;
+        if (st != nil) {
+            @synchronized (st) {
+                active = st.accelActive;
+            }
+        }
+        if (active) {
+            ps_ensure_mock_motion_sample_classes();
+            return ps_make_mock_sample_instance(s_ps_mockAccelCls);
+        }
+    }
+    return orig;
+}
+
+- (CMGyroData *) pm_ps_cm_gyroData {
+    CMGyroData *orig = [self pm_ps_cm_gyroData];
+    if (orig == nil && pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        PSVirtualMotionState *st = ps_motion_state(self, NO);
+        BOOL active = NO;
+        if (st != nil) {
+            @synchronized (st) {
+                active = st.gyroActive;
+            }
+        }
+        if (active) {
+            ps_ensure_mock_motion_sample_classes();
+            return ps_make_mock_sample_instance(s_ps_mockGyroCls);
+        }
+    }
+    return orig;
+}
+
+- (CMMagnetometerData *) pm_ps_cm_magnetometerData {
+    CMMagnetometerData *orig = [self pm_ps_cm_magnetometerData];
+    if (orig == nil && pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        PSVirtualMotionState *st = ps_motion_state(self, NO);
+        BOOL active = NO;
+        if (st != nil) {
+            @synchronized (st) {
+                active = st.magActive;
+            }
+        }
+        if (active) {
+            ps_ensure_mock_motion_sample_classes();
+            return ps_make_mock_sample_instance(s_ps_mockMagCls);
+        }
+    }
+    return orig;
+}
+
+- (CMDeviceMotion *) pm_ps_cm_deviceMotion {
+    CMDeviceMotion *orig = [self pm_ps_cm_deviceMotion];
+    if (orig == nil && pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        PSVirtualMotionState *st = ps_motion_state(self, NO);
+        BOOL active = NO;
+        if (st != nil) {
+            @synchronized (st) {
+                active = st.dmActive;
+            }
+        }
+        if (active) {
+            ps_ensure_mock_motion_sample_classes();
+            return ps_make_mock_sample_instance(s_ps_mockDeviceMotionCls);
+        }
+    }
+    return orig;
+}
+
+- (void) pm_ps_cm_startAccelerometerUpdates {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        ![self pm_ps_cm_isAccelerometerAvailable]) {
+        PSVirtualMotionState *st = ps_motion_state(self, YES);
+        @synchronized (st) {
+            st.accelActive = YES;
+        }
+    }
+    [self pm_ps_cm_startAccelerometerUpdates];
+}
+
+- (void) pm_ps_cm_startAccelerometerUpdatesToQueue:(NSOperationQueue *)queue withHandler:(CMAccelerometerHandler)handler {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        ![self pm_ps_cm_isAccelerometerAvailable]) {
+        PSVirtualMotionState *st = ps_motion_state(self, YES);
+        @synchronized (st) {
+            st.accelActive = YES;
+            if (st.accelTimer) { dispatch_source_cancel(st.accelTimer); st.accelTimer = nil; }
+            if (handler != nil) {
+                NSTimeInterval iv = ((CMMotionManager *)self).accelerometerUpdateInterval;
+                st.accelTimer = ps_schedule_motion_timer(self, iv, queue, ^(__unused id mgr) {
+                    ps_ensure_mock_motion_sample_classes();
+                    CMAccelerometerData *sample = ps_make_mock_sample_instance(s_ps_mockAccelCls);
+                    if (sample != nil) {
+                        handler(sample, nil);
+                    }
+                });
+                return;
+            }
+        }
+    }
+    [self pm_ps_cm_startAccelerometerUpdatesToQueue:queue withHandler:handler];
+}
+
+- (void) pm_ps_cm_stopAccelerometerUpdates {
+    PSVirtualMotionState *st = ps_motion_state(self, NO);
+    if (st != nil) {
+        @synchronized (st) {
+            st.accelActive = NO;
+            if (st.accelTimer) { dispatch_source_cancel(st.accelTimer); st.accelTimer = nil; }
+        }
+    }
+    [self pm_ps_cm_stopAccelerometerUpdates];
+}
+
+- (void) pm_ps_cm_startGyroUpdates {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        ![self pm_ps_cm_isGyroAvailable]) {
+        PSVirtualMotionState *st = ps_motion_state(self, YES);
+        @synchronized (st) {
+            st.gyroActive = YES;
+        }
+    }
+    [self pm_ps_cm_startGyroUpdates];
+}
+
+- (void) pm_ps_cm_startGyroUpdatesToQueue:(NSOperationQueue *)queue withHandler:(CMGyroHandler)handler {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        ![self pm_ps_cm_isGyroAvailable]) {
+        PSVirtualMotionState *st = ps_motion_state(self, YES);
+        @synchronized (st) {
+            st.gyroActive = YES;
+            if (st.gyroTimer) { dispatch_source_cancel(st.gyroTimer); st.gyroTimer = nil; }
+            if (handler != nil) {
+                NSTimeInterval iv = ((CMMotionManager *)self).gyroUpdateInterval;
+                st.gyroTimer = ps_schedule_motion_timer(self, iv, queue, ^(__unused id mgr) {
+                    ps_ensure_mock_motion_sample_classes();
+                    CMGyroData *sample = ps_make_mock_sample_instance(s_ps_mockGyroCls);
+                    if (sample != nil) {
+                        handler(sample, nil);
+                    }
+                });
+                return;
+            }
+        }
+    }
+    [self pm_ps_cm_startGyroUpdatesToQueue:queue withHandler:handler];
+}
+
+- (void) pm_ps_cm_stopGyroUpdates {
+    PSVirtualMotionState *st = ps_motion_state(self, NO);
+    if (st != nil) {
+        @synchronized (st) {
+            st.gyroActive = NO;
+            if (st.gyroTimer) { dispatch_source_cancel(st.gyroTimer); st.gyroTimer = nil; }
+        }
+    }
+    [self pm_ps_cm_stopGyroUpdates];
+}
+
+- (void) pm_ps_cm_startMagnetometerUpdates {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        ![self pm_ps_cm_isMagnetometerAvailable]) {
+        PSVirtualMotionState *st = ps_motion_state(self, YES);
+        @synchronized (st) {
+            st.magActive = YES;
+        }
+    }
+    [self pm_ps_cm_startMagnetometerUpdates];
+}
+
+- (void) pm_ps_cm_startMagnetometerUpdatesToQueue:(NSOperationQueue *)queue withHandler:(CMMagnetometerHandler)handler {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        ![self pm_ps_cm_isMagnetometerAvailable]) {
+        PSVirtualMotionState *st = ps_motion_state(self, YES);
+        @synchronized (st) {
+            st.magActive = YES;
+            if (st.magTimer) { dispatch_source_cancel(st.magTimer); st.magTimer = nil; }
+            if (handler != nil) {
+                NSTimeInterval iv = ((CMMotionManager *)self).magnetometerUpdateInterval;
+                st.magTimer = ps_schedule_motion_timer(self, iv, queue, ^(__unused id mgr) {
+                    ps_ensure_mock_motion_sample_classes();
+                    CMMagnetometerData *sample = ps_make_mock_sample_instance(s_ps_mockMagCls);
+                    if (sample != nil) {
+                        handler(sample, nil);
+                    }
+                });
+                return;
+            }
+        }
+    }
+    [self pm_ps_cm_startMagnetometerUpdatesToQueue:queue withHandler:handler];
+}
+
+- (void) pm_ps_cm_stopMagnetometerUpdates {
+    PSVirtualMotionState *st = ps_motion_state(self, NO);
+    if (st != nil) {
+        @synchronized (st) {
+            st.magActive = NO;
+            if (st.magTimer) { dispatch_source_cancel(st.magTimer); st.magTimer = nil; }
+        }
+    }
+    [self pm_ps_cm_stopMagnetometerUpdates];
+}
+
+- (void) pm_ps_cm_startDeviceMotionUpdates {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        ![self pm_ps_cm_isDeviceMotionAvailable]) {
+        PSVirtualMotionState *st = ps_motion_state(self, YES);
+        @synchronized (st) {
+            st.dmActive = YES;
+        }
+    }
+    [self pm_ps_cm_startDeviceMotionUpdates];
+}
+
+- (void) pm_ps_cm_startDeviceMotionUpdatesUsingReferenceFrame:(CMAttitudeReferenceFrame)frame {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        ![self pm_ps_cm_isDeviceMotionAvailable]) {
+        PSVirtualMotionState *st = ps_motion_state(self, YES);
+        @synchronized (st) {
+            st.dmActive = YES;
+        }
+    }
+    [self pm_ps_cm_startDeviceMotionUpdatesUsingReferenceFrame:frame];
+}
+
+- (void) pm_ps_cm_startDeviceMotionUpdatesToQueue:(NSOperationQueue *)queue withHandler:(CMDeviceMotionHandler)handler {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        ![self pm_ps_cm_isDeviceMotionAvailable]) {
+        PSVirtualMotionState *st = ps_motion_state(self, YES);
+        @synchronized (st) {
+            st.dmActive = YES;
+            if (st.dmTimer) { dispatch_source_cancel(st.dmTimer); st.dmTimer = nil; }
+            if (handler != nil) {
+                NSTimeInterval iv = ((CMMotionManager *)self).deviceMotionUpdateInterval;
+                st.dmTimer = ps_schedule_motion_timer(self, iv, queue, ^(__unused id mgr) {
+                    ps_ensure_mock_motion_sample_classes();
+                    CMDeviceMotion *sample = ps_make_mock_sample_instance(s_ps_mockDeviceMotionCls);
+                    if (sample != nil) {
+                        handler(sample, nil);
+                    }
+                });
+                return;
+            }
+        }
+    }
+    [self pm_ps_cm_startDeviceMotionUpdatesToQueue:queue withHandler:handler];
+}
+
+- (void) pm_ps_cm_startDeviceMotionUpdatesUsingReferenceFrame:(CMAttitudeReferenceFrame)frame
+                                                      toQueue:(NSOperationQueue *)queue
+                                                  withHandler:(CMDeviceMotionHandler)handler {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        ![self pm_ps_cm_isDeviceMotionAvailable]) {
+        PSVirtualMotionState *st = ps_motion_state(self, YES);
+        @synchronized (st) {
+            st.dmActive = YES;
+            if (st.dmTimer) { dispatch_source_cancel(st.dmTimer); st.dmTimer = nil; }
+            if (handler != nil) {
+                NSTimeInterval iv = ((CMMotionManager *)self).deviceMotionUpdateInterval;
+                st.dmTimer = ps_schedule_motion_timer(self, iv, queue, ^(__unused id mgr) {
+                    ps_ensure_mock_motion_sample_classes();
+                    CMDeviceMotion *sample = ps_make_mock_sample_instance(s_ps_mockDeviceMotionCls);
+                    if (sample != nil) {
+                        handler(sample, nil);
+                    }
+                });
+                return;
+            }
+        }
+    }
+    [self pm_ps_cm_startDeviceMotionUpdatesUsingReferenceFrame:frame toQueue:queue withHandler:handler];
+}
+
+- (void) pm_ps_cm_stopDeviceMotionUpdates {
+    PSVirtualMotionState *st = ps_motion_state(self, NO);
+    if (st != nil) {
+        @synchronized (st) {
+            st.dmActive = NO;
+            if (st.dmTimer) { dispatch_source_cancel(st.dmTimer); st.dmTimer = nil; }
+        }
+    }
+    [self pm_ps_cm_stopDeviceMotionUpdates];
+}
+
+@end
+
+static void ps_install_coremotion_hooks_if_loaded(void) {
+    Class cmCls = objc_getClass("CMMotionManager");
+    if (cmCls != Nil) {
+        static dispatch_once_t cmOnce;
+        dispatch_once(&cmOnce, ^{
+            ps_ensure_mock_motion_sample_classes();
+            ps_swizzle_instance_method(cmCls, @selector(isAccelerometerAvailable), @selector(pm_ps_cm_isAccelerometerAvailable));
+            ps_swizzle_instance_method(cmCls, @selector(isGyroAvailable), @selector(pm_ps_cm_isGyroAvailable));
+            ps_swizzle_instance_method(cmCls, @selector(isMagnetometerAvailable), @selector(pm_ps_cm_isMagnetometerAvailable));
+            ps_swizzle_instance_method(cmCls, @selector(isDeviceMotionAvailable), @selector(pm_ps_cm_isDeviceMotionAvailable));
+            ps_swizzle_instance_method(cmCls, @selector(isAccelerometerActive), @selector(pm_ps_cm_isAccelerometerActive));
+            ps_swizzle_instance_method(cmCls, @selector(isGyroActive), @selector(pm_ps_cm_isGyroActive));
+            ps_swizzle_instance_method(cmCls, @selector(isMagnetometerActive), @selector(pm_ps_cm_isMagnetometerActive));
+            ps_swizzle_instance_method(cmCls, @selector(isDeviceMotionActive), @selector(pm_ps_cm_isDeviceMotionActive));
+            ps_swizzle_instance_method(cmCls, @selector(accelerometerData), @selector(pm_ps_cm_accelerometerData));
+            ps_swizzle_instance_method(cmCls, @selector(gyroData), @selector(pm_ps_cm_gyroData));
+            ps_swizzle_instance_method(cmCls, @selector(magnetometerData), @selector(pm_ps_cm_magnetometerData));
+            ps_swizzle_instance_method(cmCls, @selector(deviceMotion), @selector(pm_ps_cm_deviceMotion));
+            ps_swizzle_instance_method(cmCls, @selector(startAccelerometerUpdates), @selector(pm_ps_cm_startAccelerometerUpdates));
+            ps_swizzle_instance_method(cmCls, @selector(startAccelerometerUpdatesToQueue:withHandler:), @selector(pm_ps_cm_startAccelerometerUpdatesToQueue:withHandler:));
+            ps_swizzle_instance_method(cmCls, @selector(stopAccelerometerUpdates), @selector(pm_ps_cm_stopAccelerometerUpdates));
+            ps_swizzle_instance_method(cmCls, @selector(startGyroUpdates), @selector(pm_ps_cm_startGyroUpdates));
+            ps_swizzle_instance_method(cmCls, @selector(startGyroUpdatesToQueue:withHandler:), @selector(pm_ps_cm_startGyroUpdatesToQueue:withHandler:));
+            ps_swizzle_instance_method(cmCls, @selector(stopGyroUpdates), @selector(pm_ps_cm_stopGyroUpdates));
+            ps_swizzle_instance_method(cmCls, @selector(startMagnetometerUpdates), @selector(pm_ps_cm_startMagnetometerUpdates));
+            ps_swizzle_instance_method(cmCls, @selector(startMagnetometerUpdatesToQueue:withHandler:), @selector(pm_ps_cm_startMagnetometerUpdatesToQueue:withHandler:));
+            ps_swizzle_instance_method(cmCls, @selector(stopMagnetometerUpdates), @selector(pm_ps_cm_stopMagnetometerUpdates));
+            ps_swizzle_instance_method(cmCls, @selector(startDeviceMotionUpdates), @selector(pm_ps_cm_startDeviceMotionUpdates));
+            ps_swizzle_instance_method(cmCls, @selector(startDeviceMotionUpdatesUsingReferenceFrame:), @selector(pm_ps_cm_startDeviceMotionUpdatesUsingReferenceFrame:));
+            ps_swizzle_instance_method(cmCls, @selector(startDeviceMotionUpdatesToQueue:withHandler:), @selector(pm_ps_cm_startDeviceMotionUpdatesToQueue:withHandler:));
+            ps_swizzle_instance_method(cmCls, @selector(startDeviceMotionUpdatesUsingReferenceFrame:toQueue:withHandler:), @selector(pm_ps_cm_startDeviceMotionUpdatesUsingReferenceFrame:toQueue:withHandler:));
+            ps_swizzle_instance_method(cmCls, @selector(stopDeviceMotionUpdates), @selector(pm_ps_cm_stopDeviceMotionUpdates));
+        });
+    }
+    Class altCls = objc_getClass("CMAltimeter");
+    if (altCls != Nil) {
+        static dispatch_once_t altOnce;
+        dispatch_once(&altOnce, ^{
+            ps_swizzle_class_method(altCls, @selector(isRelativeAltitudeAvailable), @selector(pm_ps_cm_isRelativeAltitudeAvailable));
+        });
+    }
+}
+
+__attribute__((visibility("hidden")))
 void ps_install_dynamic_system_bundle_hooks(void) {
     static _Thread_local bool s_tls_installing_dynamic_hooks = false;
     static _Thread_local bool s_tls_needs_rescan = false;
@@ -4997,6 +5707,7 @@ void ps_install_dynamic_system_bundle_hooks(void) {
         ps_install_audio_session_port_hooks();
         ps_install_avcapture_hooks_if_loaded();
         ps_install_app_attest_hooks_if_loaded();
+        ps_install_coremotion_hooks_if_loaded();
     } while (s_tls_needs_rescan);
     s_tls_installing_dynamic_hooks = false;
 }

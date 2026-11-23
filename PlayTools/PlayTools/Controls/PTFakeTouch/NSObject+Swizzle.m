@@ -28,6 +28,7 @@ extern __attribute__((visibility("hidden"))) double pt_get_device_native_scale(v
 extern __attribute__((visibility("hidden"))) uint32_t pt_get_device_max_fps(void);
 extern __attribute__((visibility("hidden"))) const char *pt_get_device_model_cstr(void);
 extern __attribute__((visibility("hidden"))) void pt_register_swizzled_imp(const void *hook_imp, const void *orig_imp);
+extern __attribute__((visibility("hidden"))) void pt_register_hidden_swizzle_selector(SEL sel);
 extern __attribute__((visibility("hidden"))) BOOL pt_is_address_in_playtools(const void *addr);
 
 __attribute__((visibility("hidden")))
@@ -64,6 +65,7 @@ void pt_swizzle_instance_method(Class cls, SEL origSelector, SEL newSelector)
                             newSelector,
                             origIMP,
                             origTypes);
+        pt_register_hidden_swizzle_selector(newSelector);
         pt_register_swizzled_imp((const void *)hookIMP, (const void *)origIMP);
     } else {
         IMP prevIMP = class_replaceMethod(cls,
@@ -75,6 +77,7 @@ void pt_swizzle_instance_method(Class cls, SEL origSelector, SEL newSelector)
                             newSelector,
                             actualOrig,
                             origTypes);
+        pt_register_hidden_swizzle_selector(newSelector);
         pt_register_swizzled_imp((const void *)hookIMP, (const void *)actualOrig);
     }
 }

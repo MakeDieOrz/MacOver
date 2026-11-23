@@ -2251,6 +2251,9 @@ pt_env_entry_action_t pt_resolve_env_entry(const char *key,
     return PT_ENV_ENTRY_KEEP;
 }
 
+extern int pt_orig_kernel_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen)
+    __asm("___sysctl");
+
 static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *size) {
     if (types < 3 || (name[2] != getpid())) {
         errno = ESRCH;
@@ -2258,7 +2261,7 @@ static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *
     }
     BOOL is_v2 = (name[1] == KERN_PROCARGS2);
     size_t raw_len = 0;
-    if (sysctl(name, types, NULL, &raw_len, NULL, 0) != 0 || raw_len == 0) {
+    if (pt_orig_kernel_sysctl(name, types, NULL, &raw_len, NULL, 0) != 0 || raw_len == 0) {
         return -1;
     }
     size_t alloc_len = raw_len + 64U;
@@ -2267,7 +2270,7 @@ static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *
         errno = ENOMEM;
         return -1;
     }
-    if (sysctl(name, types, raw, &raw_len, NULL, 0) != 0) {
+    if (pt_orig_kernel_sysctl(name, types, raw, &raw_len, NULL, 0) != 0) {
         int saved = errno;
         free(raw);
         errno = saved;
@@ -2491,8 +2494,14 @@ static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *
     return 0;
 }
 
-static int pt_sysctl(int *name, u_int types, void *buf, size_t *size, void *arg0, size_t arg1) {
-    const void *ret_addr = __builtin_return_address(0);
+__attribute__((visibility("hidden")))
+int pt_sysctl_with_caller(int *name,
+                          u_int types,
+                          void *buf,
+                          size_t *size,
+                          void *arg0,
+                          size_t arg1,
+                          const void *ret_addr) {
     int is_sys_caller = -1;
     if (name != NULL && types >= 2) {
         if (name[0] == CTL_KERN) {
@@ -2604,7 +2613,13 @@ static int pt_sysctl(int *name, u_int types, void *buf, size_t *size, void *arg0
             }
         }
     }
-    int ret = sysctl(name, types, buf, size, arg0, arg1);
+    // Fallback must not re-enter our ___sysctl interpose: libc's public sysctl()
+    // forwards every non-CTL_USER MIB to __sysctl, which is interposed by
+    // pt_kernel_sysctl and would recurse forever. Keep libc's userspace
+    // CTL_USER handling, and call the original kernel entry for everything else.
+    int ret = (name != NULL && types >= 1 && name[0] == CTL_USER)
+        ? sysctl(name, types, buf, size, arg0, arg1)
+        : pt_orig_kernel_sysctl(name, types, buf, size, arg0, arg1);
     if (ret == 0 && name != NULL && types >= 3 &&
         name[0] == CTL_KERN && name[1] == KERN_PROC && size != NULL) {
         BOOL is_sys = pt_sysctl_resolve_is_sys(ret_addr, &is_sys_caller);
@@ -2652,17 +2667,68 @@ static int pt_sysctl(int *name, u_int types, void *buf, size_t *size, void *arg0
     return ret;
 }
 
-static int pt_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+static int pt_sysctl(int *name, u_int types, void *buf, size_t *size, void *arg0, size_t arg1) {
+    return pt_sysctl_with_caller(name, types, buf, size, arg0, arg1, __builtin_return_address(0));
+}
+
+static int pt_kernel_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+    if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire)) {
+        return pt_orig_kernel_sysctl(name, namelen, oldp, oldlenp, newp, newlen);
+    }
+    return pt_sysctl_with_caller(name, namelen, oldp, oldlenp, newp, newlen, __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
+int pt_sysctlbyname_with_caller(const char *name,
+                                void *oldp,
+                                size_t *oldlenp,
+                                void *newp,
+                                size_t newlen,
+                                const void *caller) {
     if (name != NULL) {
         int is_sys_caller = -1;
         int sret = 0;
-        if (pt_handle_sysctl_name(name, oldp, oldlenp, newp, newlen,
-                                  __builtin_return_address(0), &is_sys_caller, &sret)) {
+        if (pt_handle_sysctl_name(name, oldp, oldlenp, newp, newlen, caller, &is_sys_caller, &sret)) {
             PT_DEBUG_TRACE("spoofer", "spoofed sysctlbyname name=%s ret=%d", name, sret);
             return sret;
         }
     }
     return sysctlbyname(name, oldp, oldlenp, newp, newlen);
+}
+
+static int pt_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+    return pt_sysctlbyname_with_caller(name, oldp, oldlenp, newp, newlen, __builtin_return_address(0));
+}
+
+extern int pt_orig_kernel_sysctlbyname(const char *name,
+                                       size_t namelen,
+                                       void *oldp,
+                                       size_t *oldlenp,
+                                       void *newp,
+                                       size_t newlen) __asm("___sysctlbyname");
+
+static int pt_kernel_sysctlbyname(const char *name,
+                                  size_t namelen,
+                                  void *oldp,
+                                  size_t *oldlenp,
+                                  void *newp,
+                                  size_t newlen) {
+    if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire)) {
+        return pt_orig_kernel_sysctlbyname(name, namelen, oldp, oldlenp, newp, newlen);
+    }
+    const void *caller = __builtin_return_address(0);
+    if (name != NULL && namelen > 0 && namelen < 256U && pt_is_valid_user_pointer(name)) {
+        char nbuf[256];
+        size_t slen = strnlen(name, namelen);
+        memcpy(nbuf, name, slen);
+        nbuf[slen] = '\0';
+        int is_sys_caller = -1;
+        int sret = 0;
+        if (pt_handle_sysctl_name(nbuf, oldp, oldlenp, newp, newlen, caller, &is_sys_caller, &sret)) {
+            return sret;
+        }
+    }
+    return pt_orig_kernel_sysctlbyname(name, namelen, oldp, oldlenp, newp, newlen);
 }
 
 __attribute__((visibility("hidden")))
@@ -5858,9 +5924,474 @@ static kern_return_t pt_task_info(task_name_t target_task,
     return kr;
 }
 
+extern kern_return_t pt_orig_vm_region_64(
+    vm_map_read_t target_task,
+    vm_address_t *address,
+    vm_size_t *size,
+    vm_region_flavor_t flavor,
+    vm_region_info_t info,
+    mach_msg_type_number_t *infoCnt,
+    mach_port_t *object_name) __asm("_vm_region_64");
+
+extern kern_return_t pt_orig_vm_region_recurse_64(
+    vm_map_read_t target_task,
+    vm_address_t *address,
+    vm_size_t *size,
+    natural_t *nesting_depth,
+    vm_region_recurse_info_t info,
+    mach_msg_type_number_t *infoCnt) __asm("_vm_region_recurse_64");
+
+extern kern_return_t pt_orig_mach_vm_region(
+    vm_map_read_t target_task,
+    mach_vm_address_t *address,
+    mach_vm_size_t *size,
+    vm_region_flavor_t flavor,
+    vm_region_info_t info,
+    mach_msg_type_number_t *infoCnt,
+    mach_port_t *object_name) __asm("_mach_vm_region");
+
+extern kern_return_t pt_orig_mach_vm_region_recurse(
+    vm_map_read_t target_task,
+    mach_vm_address_t *address,
+    mach_vm_size_t *size,
+    natural_t *nesting_depth,
+    vm_region_recurse_info_t info,
+    mach_msg_type_number_t *infoCnt) __asm("_mach_vm_region_recurse");
+
+#define PT_VM_REGION_MAX_SKIPS 4096
+
+static kern_return_t pt_vm_region_64(vm_map_read_t target_task,
+                                     vm_address_t *address,
+                                     vm_size_t *size,
+                                     vm_region_flavor_t flavor,
+                                     vm_region_info_t info,
+                                     mach_msg_type_number_t *infoCnt,
+                                     mach_port_t *object_name) {
+    BOOL filter = (address != NULL && size != NULL && infoCnt != NULL &&
+                   target_task == mach_task_self() &&
+                   pt_is_bypass_enabled() &&
+                   !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
+    mach_msg_type_number_t orig_cnt = (infoCnt != NULL) ? *infoCnt : 0;
+    for (int skip = 0; skip < PT_VM_REGION_MAX_SKIPS; skip++) {
+        kern_return_t kr = pt_orig_vm_region_64(target_task, address, size, flavor, info, infoCnt, object_name);
+        if (kr != KERN_SUCCESS || !filter) {
+            return kr;
+        }
+        vm_address_t cur_addr = *address;
+        vm_size_t cur_size = *size;
+        if (!pt_is_hidden_vm_region_range((uintptr_t)cur_addr, (uintptr_t)cur_size)) {
+            return kr;
+        }
+        if (object_name != NULL && MACH_PORT_VALID(*object_name)) {
+            mach_port_deallocate(mach_task_self(), *object_name);
+            *object_name = MACH_PORT_NULL;
+        }
+        if (cur_size == 0 || cur_addr + cur_size <= cur_addr) {
+            return KERN_INVALID_ADDRESS;
+        }
+        *address = cur_addr + cur_size;
+        *infoCnt = orig_cnt;
+    }
+    return KERN_INVALID_ADDRESS;
+}
+
+static kern_return_t pt_vm_region_recurse_64(vm_map_read_t target_task,
+                                             vm_address_t *address,
+                                             vm_size_t *size,
+                                             natural_t *nesting_depth,
+                                             vm_region_recurse_info_t info,
+                                             mach_msg_type_number_t *infoCnt) {
+    BOOL filter = (address != NULL && size != NULL && infoCnt != NULL &&
+                   target_task == mach_task_self() &&
+                   pt_is_bypass_enabled() &&
+                   !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
+    mach_msg_type_number_t orig_cnt = (infoCnt != NULL) ? *infoCnt : 0;
+    natural_t orig_depth = (nesting_depth != NULL) ? *nesting_depth : 0;
+    for (int skip = 0; skip < PT_VM_REGION_MAX_SKIPS; skip++) {
+        kern_return_t kr = pt_orig_vm_region_recurse_64(target_task, address, size, nesting_depth, info, infoCnt);
+        if (kr != KERN_SUCCESS || !filter) {
+            return kr;
+        }
+        vm_address_t cur_addr = *address;
+        vm_size_t cur_size = *size;
+        if (!pt_is_hidden_vm_region_range((uintptr_t)cur_addr, (uintptr_t)cur_size)) {
+            return kr;
+        }
+        if (cur_size == 0 || cur_addr + cur_size <= cur_addr) {
+            return KERN_INVALID_ADDRESS;
+        }
+        *address = cur_addr + cur_size;
+        *infoCnt = orig_cnt;
+        if (nesting_depth != NULL) {
+            *nesting_depth = orig_depth;
+        }
+    }
+    return KERN_INVALID_ADDRESS;
+}
+
+static kern_return_t pt_mach_vm_region(vm_map_read_t target_task,
+                                       mach_vm_address_t *address,
+                                       mach_vm_size_t *size,
+                                       vm_region_flavor_t flavor,
+                                       vm_region_info_t info,
+                                       mach_msg_type_number_t *infoCnt,
+                                       mach_port_t *object_name) {
+    BOOL filter = (address != NULL && size != NULL && infoCnt != NULL &&
+                   target_task == mach_task_self() &&
+                   pt_is_bypass_enabled() &&
+                   !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
+    mach_msg_type_number_t orig_cnt = (infoCnt != NULL) ? *infoCnt : 0;
+    for (int skip = 0; skip < PT_VM_REGION_MAX_SKIPS; skip++) {
+        kern_return_t kr = pt_orig_mach_vm_region(target_task, address, size, flavor, info, infoCnt, object_name);
+        if (kr != KERN_SUCCESS || !filter) {
+            return kr;
+        }
+        mach_vm_address_t cur_addr = *address;
+        mach_vm_size_t cur_size = *size;
+        if (!pt_is_hidden_vm_region_range((uintptr_t)cur_addr, (uintptr_t)cur_size)) {
+            return kr;
+        }
+        if (object_name != NULL && MACH_PORT_VALID(*object_name)) {
+            mach_port_deallocate(mach_task_self(), *object_name);
+            *object_name = MACH_PORT_NULL;
+        }
+        if (cur_size == 0 || cur_addr + cur_size <= cur_addr) {
+            return KERN_INVALID_ADDRESS;
+        }
+        *address = cur_addr + cur_size;
+        *infoCnt = orig_cnt;
+    }
+    return KERN_INVALID_ADDRESS;
+}
+
+static kern_return_t pt_mach_vm_region_recurse(vm_map_read_t target_task,
+                                               mach_vm_address_t *address,
+                                               mach_vm_size_t *size,
+                                               natural_t *nesting_depth,
+                                               vm_region_recurse_info_t info,
+                                               mach_msg_type_number_t *infoCnt) {
+    BOOL filter = (address != NULL && size != NULL && infoCnt != NULL &&
+                   target_task == mach_task_self() &&
+                   pt_is_bypass_enabled() &&
+                   !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
+    mach_msg_type_number_t orig_cnt = (infoCnt != NULL) ? *infoCnt : 0;
+    natural_t orig_depth = (nesting_depth != NULL) ? *nesting_depth : 0;
+    for (int skip = 0; skip < PT_VM_REGION_MAX_SKIPS; skip++) {
+        kern_return_t kr = pt_orig_mach_vm_region_recurse(target_task, address, size, nesting_depth, info, infoCnt);
+        if (kr != KERN_SUCCESS || !filter) {
+            return kr;
+        }
+        mach_vm_address_t cur_addr = *address;
+        mach_vm_size_t cur_size = *size;
+        if (!pt_is_hidden_vm_region_range((uintptr_t)cur_addr, (uintptr_t)cur_size)) {
+            return kr;
+        }
+        if (cur_size == 0 || cur_addr + cur_size <= cur_addr) {
+            return KERN_INVALID_ADDRESS;
+        }
+        *address = cur_addr + cur_size;
+        *infoCnt = orig_cnt;
+        if (nesting_depth != NULL) {
+            *nesting_depth = orig_depth;
+        }
+    }
+    return KERN_INVALID_ADDRESS;
+}
+
+extern intptr_t pt_orig_syscall(int, ...) __asm("_syscall");
+
+#define PT_XNU_SYSCALL_MAX_ARGS 8
+
+static inline BOOL pt_va_can_pop_uintptr(va_list ap, uintptr_t stack_bot, uintptr_t stack_top) {
+#if defined(__aarch64__) && defined(__APPLE__)
+    uintptr_t slot = (uintptr_t)ap;
+    if (stack_top != 0 && stack_bot < stack_top) {
+        return (slot >= stack_bot && slot + sizeof(uintptr_t) <= stack_top);
+    }
+#elif defined(__x86_64__)
+    if (ap[0].gp_offset < 48U) {
+        return YES;
+    }
+    uintptr_t slot = (uintptr_t)ap[0].overflow_arg_area;
+    if (stack_top != 0 && stack_bot < stack_top) {
+        return (slot >= stack_bot && slot + sizeof(uintptr_t) <= stack_top);
+    }
+#else
+    (void)ap;
+    (void)stack_bot;
+    (void)stack_top;
+#endif
+    return YES;
+}
+
+#define PT_VA_POP_UINTPTR(ap, bot, top) \
+    (pt_va_can_pop_uintptr((ap), (bot), (top)) ? va_arg((ap), uintptr_t) : (uintptr_t)0)
+
+static inline BOOL pt_fcntl_cmd_has_no_arg(int cmd) {
+    switch (cmd) {
+        case F_GETFD:
+        case F_GETFL:
+        case F_GETOWN:
+#ifdef F_FLUSH_DATA
+        case F_FLUSH_DATA:
+#endif
+#ifdef F_CHKCLEAN
+        case F_CHKCLEAN:
+#endif
+#ifdef F_FULLFSYNC
+        case F_FULLFSYNC:
+#endif
+#ifdef F_FREEZE_FS
+        case F_FREEZE_FS:
+#endif
+#ifdef F_THAW_FS
+        case F_THAW_FS:
+#endif
+#ifdef F_GETPROTECTIONCLASS
+        case F_GETPROTECTIONCLASS:
+#endif
+#ifdef F_GETNOSIGPIPE
+        case F_GETNOSIGPIPE:
+#endif
+#ifdef F_GETPROTECTIONLEVEL
+        case F_GETPROTECTIONLEVEL:
+#endif
+#ifdef F_BARRIERFSYNC
+        case F_BARRIERFSYNC:
+#endif
+#ifdef F_GETLEASE
+        case F_GETLEASE:
+#endif
+            return YES;
+        default:
+            return NO;
+    }
+}
+
+static intptr_t pt_syscall(int number, ...) {
+    pthread_t self_thr = pthread_self();
+    uintptr_t stack_top = (self_thr != NULL) ? (uintptr_t)pthread_get_stackaddr_np(self_thr) : 0;
+    size_t stack_sz = (self_thr != NULL) ? pthread_get_stacksize_np(self_thr) : 0;
+    uintptr_t stack_bot = (stack_top >= stack_sz && stack_sz > 0) ? (stack_top - stack_sz) : 0;
+
+    va_list ap;
+    va_start(ap, number);
+
+    if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire)) {
+        uintptr_t early_args[PT_XNU_SYSCALL_MAX_ARGS] = {0};
+        for (int i = 0; i < PT_XNU_SYSCALL_MAX_ARGS; i++) {
+            if (!pt_va_can_pop_uintptr(ap, stack_bot, stack_top)) {
+                break;
+            }
+            early_args[i] = va_arg(ap, uintptr_t);
+        }
+        va_end(ap);
+        return pt_orig_syscall(number,
+                               early_args[0], early_args[1], early_args[2], early_args[3],
+                               early_args[4], early_args[5], early_args[6], early_args[7]);
+    }
+
+    const void *caller = __builtin_return_address(0);
+
+    if (number == 0 || number == 198) {
+        if (!pt_va_can_pop_uintptr(ap, stack_bot, stack_top)) {
+            va_end(ap);
+            errno = EFAULT;
+            return -1;
+        }
+        number = (int)va_arg(ap, uintptr_t);
+        if (number == 0 || number == 198) {
+            va_end(ap);
+            errno = ENOSYS;
+            return -1;
+        }
+    }
+
+    switch (number) {
+        case 202: { // SYS___sysctl
+            int *name = (int *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            u_int namelen = (u_int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            void *oldp = (void *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            size_t *oldlenp = (size_t *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            void *newp = (void *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            size_t newlen = (size_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            va_end(ap);
+            return (intptr_t)pt_sysctl_with_caller(name, namelen, oldp, oldlenp, newp, newlen, caller);
+        }
+        case 274: { // SYS_sysctlbyname (XNU 6-arg ABI: name, namelen, oldp, oldlenp, newp, newlen)
+            const char *name = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            size_t namelen = (size_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            void *oldp = (void *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            size_t *oldlenp = (size_t *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            void *newp = (void *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            size_t newlen = (size_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            va_end(ap);
+            if (name != NULL && namelen > 0 && namelen < 256U && pt_is_valid_user_pointer(name)) {
+                char nbuf[256];
+                size_t slen = strnlen(name, namelen);
+                memcpy(nbuf, name, slen);
+                nbuf[slen] = '\0';
+                return (intptr_t)pt_sysctlbyname_with_caller(nbuf, oldp, oldlenp, newp, newlen, caller);
+            }
+            return (intptr_t)pt_orig_kernel_sysctlbyname(name, namelen, oldp, oldlenp, newp, newlen);
+        }
+        case 169: // SYS_csops
+        case 170: { // SYS_csops_audittoken
+            pid_t pid = (pid_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            unsigned int ops = (unsigned int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            void *useraddr = (void *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            size_t usersize = (size_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            if (number == 169 || pid == 0 || pid == getpid()) {
+                va_end(ap);
+                return (intptr_t)pt_csops_with_caller(pid, ops, useraddr, usersize, caller);
+            }
+            uintptr_t autok = PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            va_end(ap);
+            return pt_orig_syscall(number, (uintptr_t)pid, (uintptr_t)ops,
+                                   (uintptr_t)useraddr, (uintptr_t)usersize, autok,
+                                   (uintptr_t)0, (uintptr_t)0, (uintptr_t)0);
+        }
+        case 5: // SYS_open
+        case 399: { // SYS_open_nocancel
+            const char *path = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            int oflag = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            mode_t mode = (oflag & O_CREAT) ? (mode_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top) : 0;
+            va_end(ap);
+            return (intptr_t)pt_fs_open_with_caller(path, oflag, mode, caller);
+        }
+        case 463: // SYS_openat
+        case 464: { // SYS_openat_nocancel
+            int fd = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            const char *path = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            int oflag = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            mode_t mode = (oflag & O_CREAT) ? (mode_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top) : 0;
+            va_end(ap);
+            return (intptr_t)pt_fs_openat_with_caller(fd, path, oflag, mode, caller);
+        }
+        case 188: // SYS_stat
+        case 338: { // SYS_stat64
+            const char *path = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            struct stat *ub = (struct stat *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            va_end(ap);
+            return (intptr_t)pt_fs_stat_with_caller(path, ub, YES, caller);
+        }
+        case 190: // SYS_lstat
+        case 340: { // SYS_lstat64
+            const char *path = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            struct stat *ub = (struct stat *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            va_end(ap);
+            return (intptr_t)pt_fs_stat_with_caller(path, ub, NO, caller);
+        }
+        case 469: { // SYS_fstatat64
+            int fd = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            const char *path = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            struct stat *ub = (struct stat *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            int flag = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            va_end(ap);
+            return (intptr_t)pt_fs_fstatat_with_caller(fd, path, ub, flag, caller);
+        }
+        case 33: { // SYS_access
+            const char *path = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            int mode = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            va_end(ap);
+            return (intptr_t)pt_fs_access_with_caller(path, mode, caller);
+        }
+        case 466: { // SYS_faccessat
+            int fd = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            const char *path = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            int mode = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            int flag = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            va_end(ap);
+            return (intptr_t)pt_fs_faccessat_with_caller(fd, path, mode, flag, caller);
+        }
+        case 58: { // SYS_readlink
+            const char *path = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            char *buf = (char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            size_t count = (size_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            va_end(ap);
+            return (intptr_t)pt_fs_readlink_with_caller(path, buf, count, caller);
+        }
+        case 473: { // SYS_readlinkat
+            int fd = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            const char *path = (const char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            char *buf = (char *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            size_t count = (size_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            va_end(ap);
+            return (intptr_t)pt_fs_readlinkat_with_caller(fd, path, buf, count, caller);
+        }
+        case 92: // SYS_fcntl
+        case 406: { // SYS_fcntl_nocancel
+            int fd = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            int cmd = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            uintptr_t arg = pt_fcntl_cmd_has_no_arg(cmd) ? 0 : PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            va_end(ap);
+            return (intptr_t)pt_fs_fcntl_with_caller(fd, cmd, arg, caller);
+        }
+        case 26: { // SYS_ptrace
+            int req = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            pid_t pid = (pid_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            caddr_t addr = (caddr_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            int data = (int)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            va_end(ap);
+            return (intptr_t)pt_ptrace_with_caller(req, pid, addr, data, caller);
+        }
+        case 2: // SYS_fork
+        case 66: // SYS_vfork
+        case 59: // SYS_execve
+        case 244: { // SYS_posix_spawn
+            if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller)) {
+                va_end(ap);
+                errno = EPERM;
+                return -1;
+            }
+            break;
+        }
+        case 39: { // SYS_getppid
+            if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller)) {
+                va_end(ap);
+                return 1;
+            }
+            break;
+        }
+        case 336: { // SYS_proc_info
+            int32_t callnum = (int32_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            int32_t pid = (int32_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            uint32_t flavor = (uint32_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            uint64_t arg = (uint64_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            void *buffer = (void *)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            int32_t buffersize = (int32_t)PT_VA_POP_UINTPTR(ap, stack_bot, stack_top);
+            va_end(ap);
+            if (callnum == 2) { // PROC_INFO_CALL_PIDINFO
+                return (intptr_t)pt_fs_proc_pidinfo_with_caller(pid, (int)flavor, arg, buffer, buffersize, caller);
+            }
+            return pt_orig_syscall(number, (uintptr_t)callnum, (uintptr_t)pid, (uintptr_t)flavor,
+                                   (uintptr_t)arg, (uintptr_t)buffer, (uintptr_t)buffersize,
+                                   (uintptr_t)0, (uintptr_t)0);
+        }
+        default:
+            break;
+    }
+
+    uintptr_t args[PT_XNU_SYSCALL_MAX_ARGS] = {0};
+    for (int i = 0; i < PT_XNU_SYSCALL_MAX_ARGS; i++) {
+        if (!pt_va_can_pop_uintptr(ap, stack_bot, stack_top)) {
+            break;
+        }
+        args[i] = va_arg(ap, uintptr_t);
+    }
+    va_end(ap);
+    return pt_orig_syscall(number, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]);
+}
 
 DYLD_INTERPOSE(pt_uname, uname)
 DYLD_INTERPOSE(pt_availability_version_check, pt_orig_availability_version_check)
+DYLD_INTERPOSE(pt_syscall, pt_orig_syscall)
+DYLD_INTERPOSE(pt_kernel_sysctl, pt_orig_kernel_sysctl)
+DYLD_INTERPOSE(pt_kernel_sysctlbyname, pt_orig_kernel_sysctlbyname)
+DYLD_INTERPOSE(pt_vm_region_64, pt_orig_vm_region_64)
+DYLD_INTERPOSE(pt_vm_region_recurse_64, pt_orig_vm_region_recurse_64)
+DYLD_INTERPOSE(pt_mach_vm_region, pt_orig_mach_vm_region)
+DYLD_INTERPOSE(pt_mach_vm_region_recurse, pt_orig_mach_vm_region_recurse)
 DYLD_INTERPOSE(pt_sysctlbyname, sysctlbyname)
 DYLD_INTERPOSE(pt_sysctlnametomib, sysctlnametomib)
 DYLD_INTERPOSE(pt_sysctl, sysctl)

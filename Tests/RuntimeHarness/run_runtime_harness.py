@@ -56,6 +56,7 @@ static void mock_plugin_init(void) {
 
 MOCK_TARGET_M = r"""
 @import Foundation;
+@import CoreMotion;
 @import QuartzCore;
 @import UIKit;
 @import PlayTools;
@@ -77,11 +78,17 @@ MOCK_TARGET_M = r"""
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <sys/utsname.h>
+#include <time.h>
 #include <unistd.h>
 
 extern bool pt_is_registered_hidden_module(const char *name);
 extern bool pt_is_registered_hidden_class(const char *name);
+extern intptr_t pt_harness_syscall(int, ...) __asm("_syscall");
 extern int pt_harness_csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize) __asm("_csops");
+extern void pt_harness_dyld_get_image_versions(
+    const struct mach_header *mh,
+    void (^callback)(uint32_t platform, uint32_t sdk, uint32_t minos))
+    __asm("_dyld_get_image_versions") __attribute__((weak_import));
 
 static NSString *pt_state_dir(void) {
     NSArray<NSURL *> *caches = [[NSFileManager defaultManager] URLsForDirectory:NSCachesDirectory
@@ -147,6 +154,28 @@ int main(int argc, const char *argv[]) {
         if (sysctl(mibMachine, 2, sysctlMibMachine, &sysctlMibMachineLen, NULL, 0) != 0) {
             sysctlMibMachine[0] = '\0';
         }
+        char syscallMachine[64] = {0};
+        size_t syscallMachineLen = sizeof(syscallMachine);
+        if (pt_harness_syscall(274, "hw.machine", (size_t)10, syscallMachine, &syscallMachineLen, NULL, (size_t)0) != 0) {
+            syscallMachine[0] = '\0';
+        }
+        int kqProbe = (int)pt_harness_syscall(362);
+        struct timespec badKevTimeout = { 0, -1 };
+        errno = 0;
+        BOOL syscallWideArityOK = (kqProbe >= 0 &&
+                                   pt_harness_syscall(369, kqProbe, NULL, 0, NULL, 0, 0U, &badKevTimeout) == -1 &&
+                                   errno == EINVAL);
+        if (kqProbe >= 0) {
+            close(kqProbe);
+        }
+        struct stat sysAppsSyscallSt;
+        errno = 0;
+        BOOL syscallStatHidSysApps = (pt_harness_syscall(338, "/System/Applications", &sysAppsSyscallSt) == -1 &&
+                                      errno == ENOENT);
+        struct stat sysAppsSt, usersSt;
+        errno = 0;
+        BOOL fsHidMacRoots = (stat("/System/Applications", &sysAppsSt) == -1 && errno == ENOENT &&
+                              stat("/Users", &usersSt) == -1 && errno == ENOENT);
         uint32_t csopsTeamShortHdr[2] = {0x11111111U, 0x22222222U};
         errno = 0;
         BOOL csopsTeamShortERange = (pt_harness_csops(0, 14U, csopsTeamShortHdr, sizeof(csopsTeamShortHdr)) == -1 &&
@@ -200,6 +229,30 @@ int main(int argc, const char *argv[]) {
         if (uname(&uts) != 0) {
             memset(&uts, 0, sizeof(uts));
         }
+
+        CMMotionManager *motionMgr = [[CMMotionManager alloc] init];
+        BOOL cmAccelAvailable = motionMgr.isAccelerometerAvailable;
+        BOOL cmGyroAvailable = motionMgr.isGyroAvailable;
+        BOOL cmDeviceMotionAvailable = motionMgr.isDeviceMotionAvailable;
+        [motionMgr startAccelerometerUpdates];
+        CMAccelerometerData *cmSample = motionMgr.accelerometerData;
+        CMAccelerometerData *cmSampleCopy = [cmSample copy];
+        NSString *cmSampleDesc = [cmSample description];
+        [motionMgr startDeviceMotionUpdates];
+        CMDeviceMotion *cmDM = motionMgr.deviceMotion;
+        CMAttitude *cmAttCopy = [cmDM.attitude copy];
+        NSString *cmDMDesc = [cmDM description];
+        BOOL cmSampleValid = (cmSample != nil &&
+                              [cmSample isKindOfClass:[CMAccelerometerData class]] &&
+                              cmSample.acceleration.z < -0.9 &&
+                              cmSampleCopy == cmSample &&
+                              cmSampleDesc.length > 0 &&
+                              cmDM != nil &&
+                              [cmDM isKindOfClass:[CMDeviceMotion class]] &&
+                              cmAttCopy != nil &&
+                              cmDMDesc.length > 0);
+        [motionMgr stopDeviceMotionUpdates];
+        [motionMgr stopAccelerometerUpdates];
 
         Class dcDeviceCls = NSClassFromString(@"DCDevice");
         if (dcDeviceCls == Nil) {
@@ -428,6 +481,32 @@ int main(int argc, const char *argv[]) {
         void *blockedDlsym = dlsym(RTLD_DEFAULT, "pt_is_registered_hidden_module");
         Class reflectedSafeMode = NSClassFromString(@"PTSafeMode");
         Class reflectedPluginCls = objc_lookUpClass("MockHarnessHiddenClass");
+        SEL shadowSel = NSSelectorFromString(@"pm_isiOSAppOnMac");
+        BOOL leakedShadowResponds = [[NSProcessInfo processInfo] respondsToSelector:shadowSel] ||
+                                    [NSProcessInfo instancesRespondToSelector:shadowSel] ||
+                                    (class_getInstanceMethod([NSProcessInfo class], shadowSel) != NULL);
+        unsigned int piMethodCount = 0;
+        Method *piMethods = class_copyMethodList([NSProcessInfo class], &piMethodCount);
+        if (piMethods != NULL) {
+            for (unsigned int mi = 0; mi < piMethodCount; mi++) {
+                const char *sname = sel_getName(method_getName(piMethods[mi]));
+                if (sname != NULL && strncmp(sname, "pm_", 3) == 0) {
+                    leakedShadowResponds = YES;
+                    break;
+                }
+            }
+            free(piMethods);
+        }
+        Method isiOSOnMacM = class_getInstanceMethod([NSProcessInfo class], @selector(isiOSAppOnMac));
+        IMP isiOSOnMacIMP = (isiOSOnMacM != NULL) ? method_getImplementation(isiOSOnMacM) : NULL;
+        Dl_info impDlInfo;
+        memset(&impDlInfo, 0, sizeof(impDlInfo));
+        if (isiOSOnMacIMP != NULL &&
+            dladdr((const void *)isiOSOnMacIMP, &impDlInfo) != 0 &&
+            impDlInfo.dli_fname != NULL &&
+            strstr(impDlInfo.dli_fname, "PlayTools") != NULL) {
+            leakedShadowResponds = YES;
+        }
         BOOL dyldLeakedPlugin = NO;
         uint32_t imgCount = _dyld_image_count();
         for (uint32_t i = 0; i < imgCount; i++) {
@@ -471,6 +550,44 @@ int main(int argc, const char *argv[]) {
                                           mainDlInfo.dli_fbase == (void *)mh0 &&
                                           foundTextSeg &&
                                           computedSlide0 == slide0);
+        __block uint32_t mh0Platform = 0;
+        if (mh0 != NULL && pt_harness_dyld_get_image_versions != NULL) {
+            pt_harness_dyld_get_image_versions((const struct mach_header *)mh0, ^(uint32_t platform, uint32_t sdk, uint32_t minos) {
+                (void)sdk;
+                (void)minos;
+                if (mh0Platform == 0) {
+                    mh0Platform = platform;
+                }
+            });
+        }
+        vm_address_t mh0ProbeAddr = (vm_address_t)mh0;
+        vm_size_t mh0ProbeSz = 0;
+        vm_region_basic_info_data_64_t mh0ProbeInfo;
+        mach_msg_type_number_t mh0ProbeCnt = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t mh0ProbeObj = MACH_PORT_NULL;
+        BOOL mh0VMRegionOK = (mh0 != NULL &&
+                              vm_region_64(mach_task_self(), &mh0ProbeAddr, &mh0ProbeSz,
+                                           VM_REGION_BASIC_INFO_64, (vm_region_info_t)&mh0ProbeInfo,
+                                           &mh0ProbeCnt, &mh0ProbeObj) == KERN_SUCCESS);
+        if (MACH_PORT_VALID(mh0ProbeObj)) {
+            mach_port_deallocate(mach_task_self(), mh0ProbeObj);
+        }
+        uintptr_t ptSymAddr = (uintptr_t)&pt_is_registered_hidden_module;
+        vm_address_t ptProbeAddr = (vm_address_t)ptSymAddr;
+        vm_size_t ptProbeSz = 0;
+        vm_region_basic_info_data_64_t ptProbeInfo;
+        mach_msg_type_number_t ptProbeCnt = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t ptProbeObj = MACH_PORT_NULL;
+        kern_return_t ptProbeKr = vm_region_64(mach_task_self(), &ptProbeAddr, &ptProbeSz,
+                                               VM_REGION_BASIC_INFO_64, (vm_region_info_t)&ptProbeInfo,
+                                               &ptProbeCnt, &ptProbeObj);
+        if (MACH_PORT_VALID(ptProbeObj)) {
+            mach_port_deallocate(mach_task_self(), ptProbeObj);
+        }
+        BOOL vmRegionHidPlayTools = (mh0VMRegionOK &&
+                                     !(ptProbeKr == KERN_SUCCESS &&
+                                       ptProbeAddr <= ptSymAddr &&
+                                       ptSymAddr < ptProbeAddr + ptProbeSz));
         unsigned long mh0TextSize = 0;
         uint8_t *mh0TextPtr = (mh0 != NULL) ? getsectiondata(mh0, "__TEXT", "__text", &mh0TextSize) : NULL;
         BOOL mh0SectionLookupOK = (mh0TextPtr != NULL && mh0TextSize > 0);
@@ -516,6 +633,10 @@ int main(int argc, const char *argv[]) {
             @"sysctlVersion": [NSString stringWithUTF8String:sysctlVersion] ?: @"",
             @"sysctlMachine": [NSString stringWithUTF8String:sysctlMachine] ?: @"",
             @"sysctlMibMachine": [NSString stringWithUTF8String:sysctlMibMachine] ?: @"",
+            @"syscallMachine": [NSString stringWithUTF8String:syscallMachine] ?: @"",
+            @"syscallWideArityOK": syscallWideArityOK ? @YES : @NO,
+            @"syscallStatHidSysApps": syscallStatHidSysApps ? @YES : @NO,
+            @"fsHidMacRoots": fsHidMacRoots ? @YES : @NO,
             @"swapUsageBlocked": swapUsageBlocked ? @YES : @NO,
             @"csopsStringAndBlobOK": csopsStringAndBlobOK ? @YES : @NO,
             @"l2CacheSize": @(l2CacheSize),
@@ -532,6 +653,10 @@ int main(int argc, const char *argv[]) {
             @"dcDeviceLoaded": dcDeviceLoaded ? @YES : @NO,
             @"dcDeviceSupported": dcDeviceSupported ? @YES : @NO,
             @"dcDeviceTokenUnsupported": dcDeviceTokenUnsupported ? @YES : @NO,
+            @"cmAccelAvailable": cmAccelAvailable ? @YES : @NO,
+            @"cmGyroAvailable": cmGyroAvailable ? @YES : @NO,
+            @"cmDeviceMotionAvailable": cmDeviceMotionAvailable ? @YES : @NO,
+            @"cmSampleValid": cmSampleValid ? @YES : @NO,
             @"provPath": provPath,
             @"hidPCInstallGen": (hidPCInstallGenNS && hidPCInstallGenCF) ? @YES : @NO,
             @"provURLPath": provURLPath,
@@ -557,7 +682,10 @@ int main(int argc, const char *argv[]) {
             @"antiDetectionHidDlsym": (blockedDlsym == NULL) ? @YES : @NO,
             @"antiDetectionHidSafeModeClass": (reflectedSafeMode == Nil) ? @YES : @NO,
             @"antiDetectionHidPluginClass": (reflectedPluginCls == Nil) ? @YES : @NO,
+            @"antiDetectionHidShadowSelector": (!leakedShadowResponds) ? @YES : @NO,
             @"antiDetectionHidPluginImage": (!dyldLeakedPlugin) ? @YES : @NO,
+            @"mh0Platform": @(mh0Platform),
+            @"vmRegionHidPlayTools": vmRegionHidPlayTools ? @YES : @NO,
             @"mh0BaseAndSlideConsistent": mh0BaseAndSlideConsistent ? @YES : @NO,
             @"mh0SectionLookupOK": mh0SectionLookupOK ? @YES : @NO,
             @"argvConsistent": argvConsistent ? @YES : @NO,
@@ -721,6 +849,7 @@ def build_mock_app(work_dir: Path, playtools_fw: Path) -> Path:
         "-iframework", ios_support_fw,
         "-F", fw_parent,
         "-framework", "Foundation",
+        "-framework", "CoreMotion",
         "-framework", "QuartzCore",
         "-framework", "UIKit",
         "-framework", "PlayTools",
@@ -789,11 +918,22 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info1["antiDetectionHidDlsym"] is True,
         info1["antiDetectionHidSafeModeClass"] is True,
         info1["antiDetectionHidPluginClass"] is True,
+        info1["antiDetectionHidShadowSelector"] is True,
         info1["antiDetectionHidPluginImage"] is True,
+        info1["mh0Platform"] == 2,
+        info1["vmRegionHidPlayTools"] is True,
         info1["mh0BaseAndSlideConsistent"] is True,
         info1["mh0SectionLookupOK"] is True,
         info1["argvConsistent"] is True,
         info1["procArgCount"] == 2,
+        info1["cmAccelAvailable"] is True,
+        info1["cmGyroAvailable"] is True,
+        info1["cmDeviceMotionAvailable"] is True,
+        info1["cmSampleValid"] is True,
+        info1["syscallMachine"] == info1["sysctlMachine"] and len(info1["syscallMachine"]) > 0,
+        info1["syscallWideArityOK"] is True,
+        info1["syscallStatHidSysApps"] is True,
+        info1["fsHidMacRoots"] is True,
         info1["availIOS16"] is True,
         info1["uiColorWellLoaded"] is True,
         info1["uiColorWellInClassList"] is True,
@@ -1104,6 +1244,10 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         "xnu-6153" in info6a["unameVersion"],
         info6a["sysctlMachine"] == "iPhone12,5",
         info6a["sysctlMibMachine"] == "iPhone12,5",
+        info6a["syscallMachine"] == "iPhone12,5",
+        info6a["syscallWideArityOK"] is True,
+        info6a["syscallStatHidSysApps"] is True,
+        info6a["fsHidMacRoots"] is True,
         info6a["unameMachine"] == "iPhone12,5",
         0.0 < float(info6a["displayLinkClampedMaxHz"]) <= 60.0,
         info6a["displayLinkClampedLegacyFPS"] == 60,

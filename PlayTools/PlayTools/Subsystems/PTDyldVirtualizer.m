@@ -176,7 +176,9 @@ BOOL pt_is_hidden_objc_selector_name(const char *selName) {
     }
     switch (selName[0]) {
         case 'p':
-            return PT_HAS_PREFIX_LIT(selName, "pm_");
+            return PT_HAS_PREFIX_LIT(selName, "pm_") ||
+                   PT_HAS_PREFIX_LIT(selName, "ps_hook_") ||
+                   PT_HAS_PREFIX_LIT(selName, "pt_hook_");
         case 'k':
             return PT_HAS_PREFIX_LIT(selName, "kif_");
         default:
@@ -362,9 +364,74 @@ static inline const void *pt_strip_code_ptr(const void *p) {
 typedef struct {
     _Atomic(uintptr_t) hook;
     _Atomic(uintptr_t) orig;
+    _Atomic(uintptr_t) raw_orig;
 } pt_swizzle_imp_slot_t;
 
 static pt_swizzle_imp_slot_t s_swizzled_imp_table[PT_SWIZZLE_IMP_SLOTS];
+static _Atomic(uintptr_t) s_swizzled_orig_set[PT_SWIZZLE_IMP_SLOTS];
+static _Atomic(uintptr_t) s_hidden_swizzle_sel_set[PT_SWIZZLE_IMP_SLOTS];
+
+static void pt_ptr_set_insert(_Atomic(uintptr_t) *table, uintptr_t val) {
+    if (val == 0 || val == 1) {
+        return;
+    }
+    uint64_t h = ((uint64_t)(val >> 2) * 11400714819323198485ULL);
+    size_t start = (size_t)((h >> 53) & (PT_SWIZZLE_IMP_SLOTS - 1U));
+    for (size_t probe = 0; probe < PT_SWIZZLE_IMP_SLOTS; probe++) {
+        size_t idx = (start + probe) & (PT_SWIZZLE_IMP_SLOTS - 1U);
+        for (;;) {
+            uintptr_t cur = atomic_load_explicit(&table[idx], memory_order_acquire);
+            if (cur == val) {
+                return;
+            }
+            if (cur == 0) {
+                uintptr_t expected = 0;
+                if (atomic_compare_exchange_strong_explicit(
+                        &table[idx], &expected, val,
+                        memory_order_release, memory_order_acquire)) {
+                    return;
+                }
+                continue;
+            }
+            break;
+        }
+    }
+}
+
+static BOOL pt_ptr_set_contains(const _Atomic(uintptr_t) *table, uintptr_t val) {
+    if (val == 0 || val == 1) {
+        return NO;
+    }
+    uint64_t h = ((uint64_t)(val >> 2) * 11400714819323198485ULL);
+    size_t start = (size_t)((h >> 53) & (PT_SWIZZLE_IMP_SLOTS - 1U));
+    for (size_t probe = 0; probe < PT_SWIZZLE_IMP_SLOTS; probe++) {
+        size_t idx = (start + probe) & (PT_SWIZZLE_IMP_SLOTS - 1U);
+        uintptr_t cur = atomic_load_explicit(&table[idx], memory_order_acquire);
+        if (cur == 0) {
+            return NO;
+        }
+        if (cur == val) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+__attribute__((visibility("hidden")))
+void pt_register_hidden_swizzle_selector(SEL sel) {
+    if (sel != NULL) {
+        pt_ptr_set_insert(s_hidden_swizzle_sel_set, (uintptr_t)sel);
+    }
+}
+
+static inline BOOL pt_is_registered_hidden_swizzle_selector(SEL sel) {
+    return (sel != NULL) && pt_ptr_set_contains(s_hidden_swizzle_sel_set, (uintptr_t)sel);
+}
+
+static inline BOOL pt_is_swizzled_orig_imp(const void *addr) {
+    uintptr_t stripped = (uintptr_t)pt_strip_code_ptr(addr);
+    return pt_ptr_set_contains(s_swizzled_orig_set, stripped);
+}
 
 static inline size_t pt_swizzle_imp_hash(uintptr_t key) {
     uint64_t h = ((uint64_t)(key >> 2) * 11400714819323198485ULL);
@@ -410,20 +477,61 @@ static const void *pt_lookup_swizzled_orig_imp(const void *addr) {
     return resolved;
 }
 
+static const void *pt_lookup_swizzled_raw_orig_imp(const void *addr) {
+    uintptr_t cur = (uintptr_t)pt_strip_code_ptr(addr);
+    if (cur == 0 || cur == 1) {
+        return NULL;
+    }
+    const void *resolved = NULL;
+    for (int depth = 0; depth < 16; depth++) {
+        size_t start = pt_swizzle_imp_hash(cur);
+        uintptr_t next_stripped = 0;
+        uintptr_t next_raw = 0;
+        for (size_t probe = 0; probe < PT_SWIZZLE_IMP_SLOTS; probe++) {
+            size_t idx = (start + probe) & (PT_SWIZZLE_IMP_SLOTS - 1U);
+            pt_swizzle_imp_slot_t *slot = &s_swizzled_imp_table[idx];
+            uintptr_t slot_hook = atomic_load_explicit(&slot->hook, memory_order_acquire);
+            while (slot_hook == 1) {
+                slot_hook = atomic_load_explicit(&slot->hook, memory_order_acquire);
+            }
+            if (slot_hook == 0) {
+                break;
+            }
+            if (slot_hook == cur) {
+                next_stripped = atomic_load_explicit(&slot->orig, memory_order_relaxed);
+                next_raw = atomic_load_explicit(&slot->raw_orig, memory_order_relaxed);
+                break;
+            }
+        }
+        if (next_stripped == 0 || next_stripped == cur) {
+            break;
+        }
+        resolved = (const void *)(next_raw != 0 ? next_raw : next_stripped);
+        cur = next_stripped;
+    }
+    return resolved;
+}
+
 __attribute__((visibility("hidden")))
 void pt_register_swizzled_imp(const void *hook_imp, const void *orig_imp) {
     uintptr_t hook = (uintptr_t)pt_strip_code_ptr(hook_imp);
     uintptr_t orig = (uintptr_t)pt_strip_code_ptr(orig_imp);
+    uintptr_t raw_orig = (uintptr_t)orig_imp;
     if (hook == 0 || orig == 0 || hook == 1 || orig == 1 || hook == orig) {
         return;
     }
+    const void *root_raw = pt_lookup_swizzled_raw_orig_imp(orig_imp);
     const void *root_orig = pt_lookup_swizzled_orig_imp((const void *)orig);
     if (root_orig != NULL) {
         orig = (uintptr_t)root_orig;
+        if (root_raw != NULL) {
+            raw_orig = (uintptr_t)root_raw;
+        }
     }
     if (hook == orig) {
         return;
     }
+    pt_ptr_set_insert(s_swizzled_orig_set, orig);
     size_t start = pt_swizzle_imp_hash(hook);
     for (size_t probe = 0; probe < PT_SWIZZLE_IMP_SLOTS; probe++) {
         size_t idx = (start + probe) & (PT_SWIZZLE_IMP_SLOTS - 1U);
@@ -442,6 +550,7 @@ void pt_register_swizzled_imp(const void *hook_imp, const void *orig_imp) {
                         &slot->hook, &expected, (uintptr_t)1,
                         memory_order_acq_rel, memory_order_acquire)) {
                     atomic_store_explicit(&slot->orig, orig, memory_order_relaxed);
+                    atomic_store_explicit(&slot->raw_orig, raw_orig, memory_order_relaxed);
                     atomic_store_explicit(&slot->hook, hook, memory_order_release);
                     return;
                 }
@@ -497,6 +606,55 @@ static uint32_t pt_dyld_get_base_platform(uint32_t platform) {
         return PLATFORM_IOS;
     }
     return (dyld_get_base_platform != NULL) ? dyld_get_base_platform(platform) : platform;
+}
+
+extern void pt_orig_dyld_get_image_versions(
+    const struct mach_header *mh,
+    void (^callback)(uint32_t platform, uint32_t sdk_version, uint32_t min_version))
+    __asm("_dyld_get_image_versions") __attribute__((weak_import));
+
+static void pt_dyld_get_image_versions(
+    const struct mach_header *mh,
+    void (^callback)(uint32_t platform, uint32_t sdk_version, uint32_t min_version)) {
+    if (pt_orig_dyld_get_image_versions == NULL || mh == NULL || callback == NULL) {
+        return;
+    }
+    const struct mach_header *lc_mh = mh;
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        lc_mh = pt_maybe_shadow_mach_header(mh);
+    }
+    pt_orig_dyld_get_image_versions(lc_mh, callback);
+}
+
+extern bool pt_orig_dyld_sdk_at_least(const struct mach_header *mh, pt_dyld_build_version_t version)
+    __asm("_dyld_sdk_at_least") __attribute__((weak_import));
+
+static bool pt_dyld_sdk_at_least(const struct mach_header *mh, pt_dyld_build_version_t version) {
+    if (pt_orig_dyld_sdk_at_least == NULL || mh == NULL) {
+        return false;
+    }
+    const struct mach_header *lc_mh = mh;
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        lc_mh = pt_maybe_shadow_mach_header(mh);
+    }
+    return pt_orig_dyld_sdk_at_least(lc_mh, version);
+}
+
+extern bool pt_orig_dyld_minos_at_least(const struct mach_header *mh, pt_dyld_build_version_t version)
+    __asm("_dyld_minos_at_least") __attribute__((weak_import));
+
+static bool pt_dyld_minos_at_least(const struct mach_header *mh, pt_dyld_build_version_t version) {
+    if (pt_orig_dyld_minos_at_least == NULL || mh == NULL) {
+        return false;
+    }
+    const struct mach_header *lc_mh = mh;
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        lc_mh = pt_maybe_shadow_mach_header(mh);
+    }
+    return pt_orig_dyld_minos_at_least(lc_mh, version);
 }
 
 extern const char *dyld_shared_cache_file_path(void) __attribute__((weak_import));
@@ -851,6 +1009,85 @@ static int pt_objc_getClassList(Class *buffer, int bufferCount) {
     return (int)count;
 }
 
+static inline BOOL pt_is_playtools_injected_method(Method m, SEL sel) {
+    if (m == NULL || sel == NULL) {
+        return NO;
+    }
+    if (!pt_is_registered_hidden_swizzle_selector(sel) &&
+        !pt_is_hidden_objc_selector_name(sel_getName(sel))) {
+        return NO;
+    }
+    const void *imp = (const void *)method_getImplementation(m);
+    return pt_is_address_in_playtools(imp) || pt_is_swizzled_orig_imp(imp);
+}
+
+static Method pt_class_getInstanceMethod(Class cls, SEL name) {
+    if (!pt_is_valid_user_pointer((__bridge const void *)cls) ||
+        !pt_is_valid_user_pointer((const void *)name)) {
+        return NULL;
+    }
+    Method m = class_getInstanceMethod(cls, name);
+    if (m != NULL && pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_is_playtools_injected_method(m, name)) {
+        return NULL;
+    }
+    return m;
+}
+
+static Method pt_class_getClassMethod(Class cls, SEL name) {
+    if (!pt_is_valid_user_pointer((__bridge const void *)cls) ||
+        !pt_is_valid_user_pointer((const void *)name)) {
+        return NULL;
+    }
+    Method m = class_getClassMethod(cls, name);
+    if (m != NULL && pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_is_playtools_injected_method(m, name)) {
+        return NULL;
+    }
+    return m;
+}
+
+static IMP pt_method_getImplementation(Method m) {
+    if (m == NULL) {
+        return NULL;
+    }
+    IMP imp = method_getImplementation(m);
+    if (imp != NULL && pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        SEL sel = method_getName(m);
+        if (sel != NULL && pt_is_playtools_injected_method(m, sel)) {
+            return NULL;
+        }
+        const void *orig = pt_lookup_swizzled_raw_orig_imp((const void *)imp);
+        if (orig != NULL) {
+            return (IMP)orig;
+        }
+    }
+    return imp;
+}
+
+static IMP pt_class_getMethodImplementation(Class cls, SEL name) {
+    if (!pt_is_valid_user_pointer((__bridge const void *)cls) ||
+        !pt_is_valid_user_pointer((const void *)name)) {
+        return NULL;
+    }
+    IMP imp = class_getMethodImplementation(cls, name);
+    if (imp != NULL && pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        Method m = class_getInstanceMethod(cls, name);
+        if (m != NULL && pt_is_playtools_injected_method(m, name)) {
+            return class_getMethodImplementation(cls, sel_registerName("__pt_ps_nonexistent_sel_lookup__"));
+        }
+        const void *orig = pt_lookup_swizzled_raw_orig_imp((const void *)imp);
+        if (orig != NULL) {
+            return (IMP)orig;
+        }
+    }
+    return imp;
+}
+
 static Method *pt_class_copyMethodList(Class cls, unsigned int *outCount) {
     unsigned int count = 0;
     Method *methods = class_copyMethodList(cls, &count);
@@ -861,9 +1098,7 @@ static Method *pt_class_copyMethodList(Class cls, unsigned int *outCount) {
             Method m = methods[i];
             if (m != NULL) {
                 SEL sel = method_getName(m);
-                const char *selName = (sel != NULL) ? sel_getName(sel) : NULL;
-                if (pt_is_hidden_objc_selector_name(selName) &&
-                    pt_is_address_in_playtools((const void *)method_getImplementation(m))) {
+                if (sel != NULL && pt_is_playtools_injected_method(m, sel)) {
                     continue;
                 }
             }
@@ -888,10 +1123,9 @@ static BOOL pt_class_respondsToSelector(Class cls, SEL sel) {
     }
     BOOL orig = class_respondsToSelector(cls, sel);
     if (orig && pt_is_bypass_enabled() &&
-        pt_is_hidden_objc_selector_name(sel_getName(sel)) &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         Method m = class_getInstanceMethod(cls, sel);
-        if (m != NULL && pt_is_address_in_playtools((const void *)method_getImplementation(m))) {
+        if (m != NULL && pt_is_playtools_injected_method(m, sel)) {
             return NO;
         }
     }
@@ -920,6 +1154,351 @@ static const char *pt_dyld_get_image_name(uint32_t image_index) {
         return name;
     }
     return _dyld_get_image_name(image_index);
+}
+
+#ifndef MH_DYLIB_IN_CACHE
+#define MH_DYLIB_IN_CACHE 0x80000000U
+#endif
+
+#define PT_MAX_SHADOW_MACH_HEADERS 256U
+
+typedef struct {
+    const struct mach_header *real_mh;
+    const struct mach_header *shadow_mh;
+    vm_size_t alloc_size;
+} pt_shadow_mach_header_entry_t;
+
+static os_unfair_lock s_shadow_mh_lock = OS_UNFAIR_LOCK_INIT;
+static pt_shadow_mach_header_entry_t s_shadow_mh_entries[PT_MAX_SHADOW_MACH_HEADERS];
+static uint32_t s_shadow_mh_count = 0;
+static _Atomic uint32_t s_shadow_mh_count_atomic = 0;
+
+static BOOL pt_lc_dylib_name_should_drop(const char *name) {
+    if (name == NULL || name[0] == '\0') {
+        return NO;
+    }
+    return pt_is_hidden_dyld_image_name(name) ||
+           strstr(name, "/Users/") != NULL ||
+           strcasestr(name, "PlayCover") != NULL ||
+           strcasestr(name, "MacOver") != NULL ||
+           strcasestr(name, "app.makedie") != NULL;
+}
+
+static BOOL pt_mach_header_64_needs_shadow(const struct mach_header_64 *mh) {
+    if (mh == NULL || mh->magic != MH_MAGIC_64 || (mh->flags & MH_DYLIB_IN_CACHE) != 0) {
+        return NO;
+    }
+    if (mh->sizeofcmds == 0 || mh->sizeofcmds > (1U << 20)) {
+        return NO;
+    }
+    const uint8_t *base = (const uint8_t *)mh;
+    size_t total = sizeof(struct mach_header_64) + (size_t)mh->sizeofcmds;
+    size_t off = sizeof(struct mach_header_64);
+    for (uint32_t i = 0; i < mh->ncmds && off + sizeof(struct load_command) <= total; i++) {
+        const struct load_command *lc = (const struct load_command *)(base + off);
+        if (lc->cmdsize < sizeof(struct load_command) || off + lc->cmdsize > total) {
+            break;
+        }
+        if (lc->cmd == LC_BUILD_VERSION && lc->cmdsize >= sizeof(struct build_version_command)) {
+            const struct build_version_command *bv = (const struct build_version_command *)lc;
+            if (bv->platform == PLATFORM_MACCATALYST || bv->platform == 1U) {
+                return YES;
+            }
+        } else if (lc->cmd == LC_VERSION_MIN_MACOSX) {
+            return YES;
+        } else if ((lc->cmd == LC_LOAD_DYLIB || lc->cmd == LC_LOAD_WEAK_DYLIB ||
+                    lc->cmd == LC_REEXPORT_DYLIB || lc->cmd == LC_LOAD_UPWARD_DYLIB ||
+                    lc->cmd == LC_LAZY_LOAD_DYLIB) &&
+                   lc->cmdsize >= sizeof(struct dylib_command)) {
+            const struct dylib_command *dc = (const struct dylib_command *)lc;
+            uint32_t noff = dc->dylib.name.offset;
+            if (noff >= sizeof(struct dylib_command) && noff < lc->cmdsize) {
+                char nbuf[PATH_MAX];
+                size_t maxn = lc->cmdsize - noff;
+                size_t slen = strnlen((const char *)lc + noff, maxn);
+                if (slen < sizeof(nbuf)) {
+                    memcpy(nbuf, (const char *)lc + noff, slen);
+                    nbuf[slen] = '\0';
+                    if (pt_lc_dylib_name_should_drop(nbuf) ||
+                        strncmp(nbuf, "/System/iOSSupport/", 19) == 0) {
+                        return YES;
+                    }
+                }
+            }
+        } else if (lc->cmd == LC_RPATH && lc->cmdsize >= sizeof(struct rpath_command)) {
+            const struct rpath_command *rc = (const struct rpath_command *)lc;
+            uint32_t poff = rc->path.offset;
+            if (poff >= sizeof(struct rpath_command) && poff < lc->cmdsize) {
+                char pbuf[PATH_MAX];
+                size_t maxp = lc->cmdsize - poff;
+                size_t slen = strnlen((const char *)lc + poff, maxp);
+                if (slen < sizeof(pbuf)) {
+                    memcpy(pbuf, (const char *)lc + poff, slen);
+                    pbuf[slen] = '\0';
+                    if (pt_lc_dylib_name_should_drop(pbuf) ||
+                        strncmp(pbuf, "/System/iOSSupport", 18) == 0) {
+                        return YES;
+                    }
+                }
+            }
+        }
+        off += lc->cmdsize;
+    }
+    return NO;
+}
+
+static const struct mach_header *pt_build_shadow_mach_header_locked(const struct mach_header_64 *src_mh,
+                                                                    vm_size_t *out_alloc_size) {
+    size_t total = sizeof(struct mach_header_64) + (size_t)src_mh->sizeofcmds;
+    vm_size_t page_sz = (vm_page_size > 0) ? (vm_size_t)vm_page_size : 16384U;
+    vm_size_t alloc_sz = ((vm_size_t)total + page_sz - 1U) & ~(page_sz - 1U);
+    vm_address_t vm_addr = 0;
+    if (vm_allocate(mach_task_self(), &vm_addr, alloc_sz, VM_FLAGS_ANYWHERE) != KERN_SUCCESS || vm_addr == 0) {
+        return NULL;
+    }
+    uint8_t *dst = (uint8_t *)(uintptr_t)vm_addr;
+    memset(dst, 0, (size_t)alloc_sz);
+
+    const uint8_t *src = (const uint8_t *)src_mh;
+    struct mach_header_64 new_hdr = *src_mh;
+    size_t write_off = sizeof(struct mach_header_64);
+    uint32_t new_ncmds = 0;
+    size_t read_off = sizeof(struct mach_header_64);
+
+    for (uint32_t i = 0; i < src_mh->ncmds && read_off + sizeof(struct load_command) <= total; i++) {
+        const struct load_command *lc = (const struct load_command *)(src + read_off);
+        if (lc->cmdsize < sizeof(struct load_command) || read_off + lc->cmdsize > total) {
+            break;
+        }
+        uint32_t cmd = lc->cmd;
+        uint32_t cmdsize = lc->cmdsize;
+        read_off += cmdsize;
+
+        if (cmd == LC_BUILD_VERSION && cmdsize >= sizeof(struct build_version_command)) {
+            memcpy(dst + write_off, lc, cmdsize);
+            struct build_version_command *bv = (struct build_version_command *)(dst + write_off);
+            if (bv->platform == PLATFORM_MACCATALYST || bv->platform == 1U) {
+                bv->platform = PLATFORM_IOS;
+            }
+            write_off += cmdsize;
+            new_ncmds++;
+            continue;
+        }
+        if (cmd == LC_VERSION_MIN_MACOSX && cmdsize >= sizeof(struct version_min_command)) {
+            memcpy(dst + write_off, lc, cmdsize);
+            struct version_min_command *vmc = (struct version_min_command *)(dst + write_off);
+            vmc->cmd = LC_VERSION_MIN_IPHONEOS;
+            write_off += cmdsize;
+            new_ncmds++;
+            continue;
+        }
+        if (cmd == LC_LOAD_DYLIB || cmd == LC_LOAD_WEAK_DYLIB ||
+            cmd == LC_REEXPORT_DYLIB || cmd == LC_LOAD_UPWARD_DYLIB ||
+            cmd == LC_LAZY_LOAD_DYLIB) {
+            if (cmdsize < sizeof(struct dylib_command)) {
+                continue;
+            }
+            const struct dylib_command *dc = (const struct dylib_command *)lc;
+            uint32_t noff = dc->dylib.name.offset;
+            if (noff < sizeof(struct dylib_command) || noff >= cmdsize) {
+                continue;
+            }
+            char nbuf[PATH_MAX];
+            size_t maxn = cmdsize - noff;
+            size_t slen = strnlen((const char *)lc + noff, maxn);
+            if (slen >= sizeof(nbuf)) {
+                continue;
+            }
+            memcpy(nbuf, (const char *)lc + noff, slen);
+            nbuf[slen] = '\0';
+            if (pt_lc_dylib_name_should_drop(nbuf)) {
+                continue;
+            }
+            char rewritten[PATH_MAX];
+            const char *replacement = NULL;
+            if (strncmp(nbuf, "/System/iOSSupport/usr/lib/swift/libswift", 41) == 0) {
+                snprintf(rewritten, sizeof(rewritten), "@rpath/%s", nbuf + 33);
+                replacement = rewritten;
+            } else if (strncmp(nbuf, "/System/iOSSupport/", 19) == 0) {
+                replacement = nbuf + 18;
+            }
+            if (replacement != NULL) {
+                size_t rlen = strlen(replacement);
+                size_t raw_sz = sizeof(struct dylib_command) + rlen + 1U;
+                size_t aligned_sz = (raw_sz + 7U) & ~7ULL;
+                if (aligned_sz <= (size_t)cmdsize && write_off + aligned_sz <= total) {
+                    struct dylib_command ndc = *dc;
+                    ndc.cmdsize = (uint32_t)aligned_sz;
+                    ndc.dylib.name.offset = (uint32_t)sizeof(struct dylib_command);
+                    memcpy(dst + write_off, &ndc, sizeof(ndc));
+                    memcpy(dst + write_off + sizeof(ndc), replacement, rlen + 1U);
+                    write_off += aligned_sz;
+                    new_ncmds++;
+                }
+                continue;
+            }
+        }
+        if (cmd == LC_RPATH) {
+            if (cmdsize < sizeof(struct rpath_command)) {
+                continue;
+            }
+            const struct rpath_command *rc = (const struct rpath_command *)lc;
+            uint32_t poff = rc->path.offset;
+            if (poff < sizeof(struct rpath_command) || poff >= cmdsize) {
+                continue;
+            }
+            char pbuf[PATH_MAX];
+            size_t maxp = cmdsize - poff;
+            size_t slen = strnlen((const char *)lc + poff, maxp);
+            if (slen >= sizeof(pbuf)) {
+                continue;
+            }
+            memcpy(pbuf, (const char *)lc + poff, slen);
+            pbuf[slen] = '\0';
+            if (pt_lc_dylib_name_should_drop(pbuf) ||
+                strncmp(pbuf, "/System/iOSSupport", 18) == 0) {
+                continue;
+            }
+        }
+        if (write_off + cmdsize > total) {
+            (void)vm_deallocate(mach_task_self(), vm_addr, alloc_sz);
+            return NULL;
+        }
+        memcpy(dst + write_off, lc, cmdsize);
+        write_off += cmdsize;
+        new_ncmds++;
+    }
+
+    new_hdr.ncmds = new_ncmds;
+    new_hdr.sizeofcmds = (uint32_t)(write_off - sizeof(struct mach_header_64));
+    memcpy(dst, &new_hdr, sizeof(new_hdr));
+    (void)vm_protect(mach_task_self(), vm_addr, alloc_sz, FALSE, VM_PROT_READ);
+    if (out_alloc_size != NULL) {
+        *out_alloc_size = alloc_sz;
+    }
+    return (const struct mach_header *)dst;
+}
+
+__attribute__((visibility("hidden")))
+const struct mach_header *pt_maybe_shadow_mach_header(const struct mach_header *real_mh) {
+    if (real_mh == NULL || !pt_is_valid_user_pointer((const void *)real_mh)) {
+        return real_mh;
+    }
+    if (atomic_load_explicit(&s_shadow_mh_count_atomic, memory_order_acquire) > 0) {
+        os_unfair_lock_lock(&s_shadow_mh_lock);
+        for (uint32_t i = 0; i < s_shadow_mh_count; i++) {
+            if (s_shadow_mh_entries[i].real_mh == real_mh ||
+                s_shadow_mh_entries[i].shadow_mh == real_mh) {
+                const struct mach_header *res = s_shadow_mh_entries[i].shadow_mh;
+                os_unfair_lock_unlock(&s_shadow_mh_lock);
+                return res;
+            }
+        }
+        os_unfair_lock_unlock(&s_shadow_mh_lock);
+    }
+
+    const struct mach_header_64 *mh64 = (const struct mach_header_64 *)real_mh;
+    if (!pt_mach_header_64_needs_shadow(mh64)) {
+        return real_mh;
+    }
+
+    os_unfair_lock_lock(&s_shadow_mh_lock);
+    for (uint32_t i = 0; i < s_shadow_mh_count; i++) {
+        if (s_shadow_mh_entries[i].real_mh == real_mh) {
+            const struct mach_header *res = s_shadow_mh_entries[i].shadow_mh;
+            os_unfair_lock_unlock(&s_shadow_mh_lock);
+            return res;
+        }
+    }
+    const struct mach_header *shadow = real_mh;
+    if (s_shadow_mh_count < PT_MAX_SHADOW_MACH_HEADERS) {
+        vm_size_t alloc_sz = 0;
+        const struct mach_header *built = pt_build_shadow_mach_header_locked(mh64, &alloc_sz);
+        if (built != NULL) {
+            s_shadow_mh_entries[s_shadow_mh_count++] = (pt_shadow_mach_header_entry_t){
+                .real_mh = real_mh,
+                .shadow_mh = built,
+                .alloc_size = alloc_sz
+            };
+            atomic_store_explicit(&s_shadow_mh_count_atomic, s_shadow_mh_count, memory_order_release);
+            shadow = built;
+        }
+    }
+    os_unfair_lock_unlock(&s_shadow_mh_lock);
+    return shadow;
+}
+
+__attribute__((visibility("hidden")))
+const struct mach_header *pt_uncloak_shadow_mach_header(const struct mach_header *mh) {
+    if (mh == NULL || atomic_load_explicit(&s_shadow_mh_count_atomic, memory_order_acquire) == 0) {
+        return mh;
+    }
+    os_unfair_lock_lock(&s_shadow_mh_lock);
+    for (uint32_t i = 0; i < s_shadow_mh_count; i++) {
+        if (s_shadow_mh_entries[i].shadow_mh == mh) {
+            const struct mach_header *real_mh = s_shadow_mh_entries[i].real_mh;
+            os_unfair_lock_unlock(&s_shadow_mh_lock);
+            return real_mh;
+        }
+    }
+    os_unfair_lock_unlock(&s_shadow_mh_lock);
+    return mh;
+}
+
+__attribute__((visibility("hidden")))
+BOOL pt_is_hidden_vm_region_range(uintptr_t addr, uintptr_t size) {
+    if (addr == 0) {
+        return NO;
+    }
+    if (atomic_load_explicit(&s_shadow_mh_count_atomic, memory_order_acquire) > 0) {
+        uintptr_t end = (size > 0 && addr + size > addr) ? (addr + size) : (addr + 1U);
+        os_unfair_lock_lock(&s_shadow_mh_lock);
+        for (uint32_t i = 0; i < s_shadow_mh_count; i++) {
+            uintptr_t sbase = (uintptr_t)s_shadow_mh_entries[i].shadow_mh;
+            uintptr_t send = sbase + (uintptr_t)s_shadow_mh_entries[i].alloc_size;
+            if (addr < send && end > sbase) {
+                os_unfair_lock_unlock(&s_shadow_mh_lock);
+                return YES;
+            }
+        }
+        os_unfair_lock_unlock(&s_shadow_mh_lock);
+    }
+
+    const struct mach_header *mh = dyld_image_header_containing_address((const void *)addr);
+    if (mh != NULL && pt_is_hidden_dyld_image_header(mh)) {
+        return YES;
+    }
+    const char *path = dyld_image_path_containing_address((const void *)addr);
+    if (path != NULL && pt_should_hide_dyld_image(path)) {
+        return YES;
+    }
+    return NO;
+}
+
+static uint8_t *pt_getsectiondata(const struct mach_header_64 *mhp,
+                                  const char *segname,
+                                  const char *sectname,
+                                  unsigned long *size) {
+    const struct mach_header_64 *real_mh =
+        (const struct mach_header_64 *)pt_uncloak_shadow_mach_header((const struct mach_header *)mhp);
+    return getsectiondata(real_mh, segname, sectname, size);
+}
+
+static uint8_t *pt_getsegmentdata(const struct mach_header_64 *mhp,
+                                  const char *segname,
+                                  unsigned long *size) {
+    const struct mach_header_64 *real_mh =
+        (const struct mach_header_64 *)pt_uncloak_shadow_mach_header((const struct mach_header *)mhp);
+    return getsegmentdata(real_mh, segname, size);
+}
+
+static char *pt_getsectdatafromheader_64(const struct mach_header_64 *mhp,
+                                         const char *segname,
+                                         const char *sectname,
+                                         uint64_t *size) {
+    const struct mach_header_64 *real_mh =
+        (const struct mach_header_64 *)pt_uncloak_shadow_mach_header((const struct mach_header *)mhp);
+    return getsectdatafromheader_64(real_mh, segname, sectname, size);
 }
 
 static const struct mach_header *pt_dyld_get_image_header(uint32_t image_index) {
@@ -1786,7 +2365,11 @@ static bool pt_dlopen_preflight(const char *path) {
 
         if (strncmp(path, "@rpath/", 7) == 0) {
             const char *rel = path + 7;
-            int res = pt_dlopen_preflight_search_rpaths(caller_hdr, rel, caller_dir, exec_dir, caller);
+            BOOL sanitize_rpath_lc = (pt_is_bypass_enabled() &&
+                                      !pt_is_effective_system_or_playtools_caller(caller));
+            const struct mach_header *caller_lc_hdr =
+                (sanitize_rpath_lc && caller_hdr != NULL) ? pt_maybe_shadow_mach_header(caller_hdr) : caller_hdr;
+            int res = pt_dlopen_preflight_search_rpaths(caller_lc_hdr, rel, caller_dir, exec_dir, caller);
             if (res > 0) {
                 return true;
             }
@@ -1794,7 +2377,9 @@ static bool pt_dlopen_preflight(const char *path) {
                 return false;
             }
             if (main_hdr != NULL && main_hdr != caller_hdr) {
-                res = pt_dlopen_preflight_search_rpaths(main_hdr, rel, exec_dir, exec_dir, caller);
+                const struct mach_header *main_lc_hdr =
+                    sanitize_rpath_lc ? pt_maybe_shadow_mach_header(main_hdr) : main_hdr;
+                res = pt_dlopen_preflight_search_rpaths(main_lc_hdr, rel, exec_dir, exec_dir, caller);
                 if (res > 0) {
                     return true;
                 }
@@ -1967,6 +2552,9 @@ static void *pt_dlsym(void *handle, const char *symbol) {
 
 DYLD_INTERPOSE(pt_dyld_get_active_platform, dyld_get_active_platform)
 DYLD_INTERPOSE(pt_dyld_get_base_platform, dyld_get_base_platform)
+DYLD_INTERPOSE(pt_dyld_get_image_versions, pt_orig_dyld_get_image_versions)
+DYLD_INTERPOSE(pt_dyld_sdk_at_least, pt_orig_dyld_sdk_at_least)
+DYLD_INTERPOSE(pt_dyld_minos_at_least, pt_orig_dyld_minos_at_least)
 DYLD_INTERPOSE(pt_dyld_shared_cache_file_path, dyld_shared_cache_file_path)
 DYLD_INTERPOSE(pt_dyld_shared_cache_contains_path, pt_orig_dyld_shared_cache_contains_path)
 DYLD_INTERPOSE(pt_objc_getClass, objc_getClass)
@@ -1977,6 +2565,10 @@ DYLD_INTERPOSE(pt_class_getImageName, class_getImageName)
 DYLD_INTERPOSE(pt_objc_copyClassNamesForImage, objc_copyClassNamesForImage)
 DYLD_INTERPOSE(pt_objc_copyClassList, objc_copyClassList)
 DYLD_INTERPOSE(pt_objc_getClassList, objc_getClassList)
+DYLD_INTERPOSE(pt_class_getInstanceMethod, class_getInstanceMethod)
+DYLD_INTERPOSE(pt_class_getClassMethod, class_getClassMethod)
+DYLD_INTERPOSE(pt_method_getImplementation, method_getImplementation)
+DYLD_INTERPOSE(pt_class_getMethodImplementation, class_getMethodImplementation)
 DYLD_INTERPOSE(pt_class_copyMethodList, class_copyMethodList)
 DYLD_INTERPOSE(pt_class_respondsToSelector, class_respondsToSelector)
 DYLD_INTERPOSE(pt_objc_getProtocol, objc_getProtocol)
@@ -1989,6 +2581,9 @@ DYLD_INTERPOSE(pt_dyld_register_func_for_add_image, _dyld_register_func_for_add_
 DYLD_INTERPOSE(pt_dyld_register_func_for_remove_image, _dyld_register_func_for_remove_image)
 DYLD_INTERPOSE(pt_dyld_image_path_containing_address, dyld_image_path_containing_address)
 DYLD_INTERPOSE(pt_dyld_image_header_containing_address, dyld_image_header_containing_address)
+DYLD_INTERPOSE(pt_getsectiondata, getsectiondata)
+DYLD_INTERPOSE(pt_getsegmentdata, getsegmentdata)
+DYLD_INTERPOSE(pt_getsectdatafromheader_64, getsectdatafromheader_64)
 DYLD_INTERPOSE(pt_dladdr, dladdr)
 DYLD_INTERPOSE(pt_dlopen, dlopen)
 DYLD_INTERPOSE(pt_dlopen_preflight, dlopen_preflight)
@@ -2005,8 +2600,8 @@ static IMP s_nsobject_notFoundIMP = NULL;
 
 static inline BOOL ps_should_hide_selector_for_target_class(Class targetCls, SEL aSelector, const void *caller) {
     if (targetCls == Nil ||
+        aSelector == NULL ||
         !pt_is_bypass_enabled() ||
-        !pt_is_hidden_objc_selector_name(sel_getName(aSelector)) ||
         pt_is_effective_system_or_playtools_caller(caller)) {
         return NO;
     }
@@ -2014,7 +2609,7 @@ static inline BOOL ps_should_hide_selector_for_target_class(Class targetCls, SEL
     if (m == NULL) {
         return NO;
     }
-    return pt_is_address_in_playtools((const void *)method_getImplementation(m));
+    return pt_is_playtools_injected_method(m, aSelector);
 }
 
 static BOOL ps_hook_nsobject_respondsToSelector(id self, SEL _cmd, SEL aSelector) {
