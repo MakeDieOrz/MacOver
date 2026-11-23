@@ -17,6 +17,11 @@ private struct AKAppSettingsData: Codable {
     var resolution: Int?
     var resizableAspectRatioWidth: Int?
     var resizableAspectRatioHeight: Int?
+    var strictEmulationMode: Bool?
+    var strictViewportOrientation: String?
+    var strictViewportScaleMode: String?
+    var iosDeviceModel: String?
+    var reportedIOSVersion: String?
 }
 
 class AKPlugin: NSObject, Plugin {
@@ -52,7 +57,26 @@ class AKPlugin: NSObject, Plugin {
     }
 
     private func configureWindow(_ window: NSWindow) {
-        window.styleMask.insert([.resizable])
+        if let plan = strictWindowPlan(for: window) {
+            if plan.allowsUserResize {
+                window.styleMask.insert([.resizable])
+            } else {
+                window.styleMask.remove(.resizable)
+            }
+            window.contentMinSize = NSSize(
+                width: min(100, max(1, plan.windowContentSize.width)),
+                height: min(100, max(1, plan.windowContentSize.height))
+            )
+            window.contentAspectRatio = NSSize(
+                width: plan.lockedAspectRatio.width,
+                height: plan.lockedAspectRatio.height
+            )
+        } else {
+            window.styleMask.insert([.resizable])
+            if let aspectRatio = self.aspectRatioSetting {
+                window.contentAspectRatio = aspectRatio
+            }
+        }
         window.collectionBehavior = [.fullScreenPrimary, .managed, .participatesInCycle]
         window.isMovable = true
         window.isMovableByWindowBackground = true
@@ -67,10 +91,6 @@ class AKPlugin: NSObject, Plugin {
 
         if self.floatingWindowSetting {
             window.level = .floating
-        }
-
-        if let aspectRatio = self.aspectRatioSetting {
-            window.contentAspectRatio = aspectRatio
         }
     }
 
@@ -126,12 +146,31 @@ class AKPlugin: NSObject, Plugin {
             guard let self, let window = self.activeWindow else { return }
             guard !window.styleMask.contains(.fullScreen) else { return }
             let visibleFrame = (window.screen ?? NSScreen.main ?? NSScreen.screens.first)?.visibleFrame ?? .zero
-            let clamped = PTWindowGeometryMath.clampedContentSize(
-                requested: size,
-                visibleScreenFrame: visibleFrame
-            )
-            guard clamped.width > 0, clamped.height > 0 else { return }
             let titleHeight = max(0, window.frame.height - window.contentLayoutRect.height)
+            let clamped: CGSize
+            if let plan = self.strictWindowPlan(for: window, visibleFrame: visibleFrame, titleHeight: titleHeight) {
+                clamped = plan.windowContentSize
+                if plan.allowsUserResize {
+                    window.styleMask.insert([.resizable])
+                } else {
+                    window.styleMask.remove(.resizable)
+                }
+                window.contentMinSize = NSSize(
+                    width: min(100, max(1, clamped.width)),
+                    height: min(100, max(1, clamped.height))
+                )
+                window.contentAspectRatio = NSSize(
+                    width: plan.lockedAspectRatio.width,
+                    height: plan.lockedAspectRatio.height
+                )
+            } else {
+                clamped = PTWindowGeometryMath.clampedContentSize(
+                    requested: size,
+                    visibleScreenFrame: visibleFrame,
+                    titleBarHeight: titleHeight
+                )
+            }
+            guard clamped.width > 0, clamped.height > 0 else { return }
             let nextFrame = PTWindowGeometryMath.centeredFrame(
                 forContentSize: clamped,
                 currentFrame: window.frame,
@@ -152,8 +191,12 @@ class AKPlugin: NSObject, Plugin {
     func setWindowAspectRatio(_ ratio: CGSize) {
         let apply = { [weak self] in
             guard let self, let window = self.activeWindow else { return }
-            guard ratio.width.isFinite, ratio.height.isFinite, ratio.width > 0, ratio.height > 0 else { return }
-            window.contentAspectRatio = NSSize(width: ratio.width, height: ratio.height)
+            let effectiveRatio = self.strictDeviceLogicalSize ?? ratio
+            guard effectiveRatio.width.isFinite,
+                  effectiveRatio.height.isFinite,
+                  effectiveRatio.width > 0,
+                  effectiveRatio.height > 0 else { return }
+            window.contentAspectRatio = NSSize(width: effectiveRatio.width, height: effectiveRatio.height)
         }
         if Thread.isMainThread {
             apply()
@@ -164,7 +207,7 @@ class AKPlugin: NSObject, Plugin {
 
     func clearWindowAspectRatio() {
         let apply = { [weak self] in
-            guard let self, let window = self.activeWindow else { return }
+            guard let self, !self.isStrictEmulationActive, let window = self.activeWindow else { return }
             window.resizeIncrements = NSSize(width: 1, height: 1)
         }
         if Thread.isMainThread {
@@ -177,6 +220,11 @@ class AKPlugin: NSObject, Plugin {
     func setWindowOrientation(portrait: Bool, targetSize: CGSize) {
         let apply = { [weak self] in
             guard let self else { return }
+            if let strictSize = self.strictDeviceLogicalSize {
+                self.setWindowAspectRatio(strictSize)
+                self.setWindowContentSize(strictSize)
+                return
+            }
             let fallback = self.activeWindow?.contentLayoutRect.size ?? CGSize(width: 1920, height: 1080)
             let base = (targetSize.width > 0 && targetSize.height > 0) ? targetSize : fallback
             let oriented = PTWindowGeometryMath.orientedSize(baseSize: base, portrait: portrait)
@@ -435,10 +483,58 @@ class AKPlugin: NSObject, Plugin {
         NSMenu.setMenuBarVisible(visible)
     }
 
+    private static var isSafeModeEnvActive: Bool {
+        guard let ptr = getenv("PLAYTOOLS_SAFE_MODE") else { return false }
+        return String(cString: ptr) == "1"
+    }
+
+    private var isStrictEmulationActive: Bool {
+        !Self.isSafeModeEnvActive && (Self.akAppSettingsData?.strictEmulationMode == true)
+    }
+
+    private var strictDeviceLogicalSize: CGSize? {
+        guard isStrictEmulationActive, let settings = Self.akAppSettingsData else {
+            return nil
+        }
+        let normIOS = PTWindowGeometryMath.StrictDeviceDisplaySpec.normalizedReportedIOSVersion(
+            settings.reportedIOSVersion
+        )
+        let effModel = PTWindowGeometryMath.StrictDeviceDisplaySpec.effectiveModel(
+            for: settings.iosDeviceModel ?? "iPad13,8",
+            normalizedReportedIOSVersion: normIOS
+        )
+        let spec = PTWindowGeometryMath.StrictDeviceDisplaySpec.resolve(forModel: effModel)
+        let orientation = PTWindowGeometryMath.normalizedStrictOrientation(settings.strictViewportOrientation)
+        return spec.logicalSize(orientation: orientation)
+    }
+
+    private func strictWindowPlan(
+        for window: NSWindow,
+        visibleFrame: CGRect? = nil,
+        titleHeight: CGFloat? = nil
+    ) -> PTWindowGeometryMath.StrictViewportWindowPlan? {
+        guard let logicalSize = strictDeviceLogicalSize else {
+            return nil
+        }
+        let targetFrame = visibleFrame
+            ?? (window.screen ?? NSScreen.main ?? NSScreen.screens.first)?.visibleFrame
+            ?? .zero
+        let resolvedTitleHeight = titleHeight ?? max(0, window.frame.height - window.contentLayoutRect.height)
+        return PTWindowGeometryMath.strictViewportWindowPlan(
+            logicalSceneSize: logicalSize,
+            scaleMode: Self.akAppSettingsData?.strictViewportScaleMode,
+            visibleScreenFrame: targetFrame,
+            titleBarHeight: resolvedTitleHeight
+        )
+    }
+
     /// Convenience instance property that exposes the cached static preference.
     private var hideTitleBarSetting: Bool { Self.akAppSettingsData?.hideTitleBar ?? false }
     private var floatingWindowSetting: Bool { Self.akAppSettingsData?.floatingWindow ?? false }
     private var aspectRatioSetting: NSSize? {
+        if let strictSize = strictDeviceLogicalSize {
+            return NSSize(width: strictSize.width, height: strictSize.height)
+        }
         guard Self.akAppSettingsData?.resolution == 6 else {
             return nil
         }

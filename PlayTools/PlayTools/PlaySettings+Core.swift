@@ -7,6 +7,7 @@ import CoreGraphics
 import Darwin
 import Foundation
 import ObjectiveC
+import Security
 
 /// Thread-safe unfair lock wrapper with deterministic cleanup on deinit.
 public final class PTUnfairLock {
@@ -180,41 +181,50 @@ public final class PTUnfairLock {
         self._settingsData = decoded
         self.discordActivity = decoded.discordActivity
         self.keymapping = decoded.keymapping
-        self.notch = decoded.notch
+        self.configuredNotch = decoded.notch
         self.sensitivity = decoded.sensitivity / 100
-        self.bypass = decoded.bypass
+        self.configuredBypass = decoded.bypass
         self._windowSizeHeight = CGFloat(decoded.windowHeight)
         self._windowSizeWidth = CGFloat(decoded.windowWidth)
         self.configuredInverseScreenValues = decoded.inverseScreenValues
-        self.adaptiveDisplay = decoded.resolution != 0
-        self.resizableWindow = decoded.resolution == 6
-        let normalizedIOSVersion = Self.normalizedReportedIOSVersion(decoded.reportedIOSVersion)
+        self.configuredResolution = decoded.resolution
+        let normalizedIOSVersion = PTWindowGeometryMath.StrictDeviceDisplaySpec.normalizedReportedIOSVersion(
+            decoded.reportedIOSVersion
+        )
         let trimmedModel = decoded.iosDeviceModel.trimmingCharacters(in: .whitespacesAndNewlines)
         let baseDeviceModel = trimmedModel.isEmpty ? "iPad13,8" : trimmedModel
         self.configuredDeviceModel = baseDeviceModel
-        self.coercedDeviceModel = Self.effectiveDeviceModel(
-            baseDeviceModel,
-            reportedIOSVersion: normalizedIOSVersion
+        self.coercedDeviceModel = PTWindowGeometryMath.StrictDeviceDisplaySpec.effectiveModel(
+            for: baseDeviceModel,
+            normalizedReportedIOSVersion: normalizedIOSVersion
         )
         self.playChain = decoded.playChain
-        self.playChainDebugging = decoded.playChainDebugging
+        self.configuredPlayChainDebugging = decoded.playChainDebugging
+        self.configuredMetalHUD = decoded.metalHUD
         self.configuredWindowFixMethod = decoded.windowFixMethod
         self.configuredCustomScaler = decoded.customScaler
         self.configuredFrameRateTarget = Self.normalizedFrameRateTarget(decoded.frameRateTarget)
         self.configuredReportedIOSVersion = normalizedIOSVersion
-        self.rootWorkDir = decoded.rootWorkDir
+        self.configuredRootWorkDir = decoded.rootWorkDir
         self.noKMOnInput = decoded.noKMOnInput
         self.enableScrollWheel = decoded.enableScrollWheel
         self.rightClickLongPress = decoded.rightClickLongPress
         self.hideTitleBar = decoded.hideTitleBar
         self.floatingWindow = decoded.floatingWindow
-        self.displayRotation = decoded.displayRotation
+        self.configuredDisplayRotation = decoded.displayRotation
         self.checkMicPermissionSync = decoded.checkMicPermissionSync
         self.limitMotionUpdateFrequency = decoded.limitMotionUpdateFrequency
         self.disableBuiltinMouse = decoded.disableBuiltinMouse
         self.blockSleepSpamming = decoded.blockSleepSpamming
         self.ignoreUnityKeyboardInitializationError = decoded.ignoreUnityKeyboardInitializationError
         self.configuredInterceptInlineSyscalls = decoded.interceptInlineSyscalls
+        self.configuredStrictEmulationMode = decoded.strictEmulationMode
+        self.configuredStrictViewportOrientation = PTWindowGeometryMath.normalizedStrictOrientation(
+            decoded.strictViewportOrientation
+        )
+        self.configuredStrictViewportScaleMode = PTWindowGeometryMath.normalizedStrictScaleMode(
+            decoded.strictViewportScaleMode
+        )
 
         super.init()
     }
@@ -227,37 +237,97 @@ public final class PTUnfairLock {
 
     @objc public let keymapping: Bool
 
-    @objc public let notch: Bool
+    private let configuredNotch: Bool
+    @objc public var notch: Bool {
+        isStrictEmulationActive ? false : configuredNotch
+    }
 
     @objc public let sensitivity: Float
 
-    @objc public let bypass: Bool
+    private let configuredBypass: Bool
+    @objc public var bypass: Bool {
+        isStrictEmulationActive ? true : configuredBypass
+    }
 
     private var _windowSizeHeight: CGFloat
     @objc public var windowSizeHeight: CGFloat {
-        get { stateLock.withLock { _windowSizeHeight } }
+        get {
+            if isStrictEmulationActive {
+                return strictLogicalSize.height
+            }
+            return stateLock.withLock { _windowSizeHeight }
+        }
         set { stateLock.withLock { _windowSizeHeight = newValue } }
     }
 
     private var _windowSizeWidth: CGFloat
     @objc public var windowSizeWidth: CGFloat {
-        get { stateLock.withLock { _windowSizeWidth } }
+        get {
+            if isStrictEmulationActive {
+                return strictLogicalSize.width
+            }
+            return stateLock.withLock { _windowSizeWidth }
+        }
         set { stateLock.withLock { _windowSizeWidth = newValue } }
     }
 
     private let configuredInverseScreenValues: Bool
     @objc public var inverseScreenValues: Bool {
-        PTSafeMode.isActive ? false : configuredInverseScreenValues
+        (PTSafeMode.isActive || configuredStrictEmulationMode) ? false : configuredInverseScreenValues
     }
 
     private let configuredInterceptInlineSyscalls: Bool
     @objc public var interceptInlineSyscalls: Bool {
-        PTSafeMode.isActive ? false : configuredInterceptInlineSyscalls
+        if PTSafeMode.isActive {
+            return false
+        }
+        return configuredStrictEmulationMode ? true : configuredInterceptInlineSyscalls
     }
 
-    @objc public let adaptiveDisplay: Bool
+    private let configuredResolution: Int
+    @objc public var adaptiveDisplay: Bool {
+        isStrictEmulationActive ? true : (configuredResolution != 0)
+    }
 
-    @objc public let resizableWindow: Bool
+    @objc public var resizableWindow: Bool {
+        isStrictEmulationActive ? false : (configuredResolution == 6)
+    }
+
+    private let configuredStrictEmulationMode: Bool
+    private let configuredStrictViewportOrientation: String
+    private let configuredStrictViewportScaleMode: String
+
+    private var isStrictEmulationActive: Bool {
+        !PTSafeMode.isActive && configuredStrictEmulationMode
+    }
+
+    private var strictDisplaySpec: PTWindowGeometryMath.StrictDeviceDisplaySpec {
+        PTWindowGeometryMath.StrictDeviceDisplaySpec.resolve(forModel: coercedDeviceModel)
+    }
+
+    private var strictLogicalSize: CGSize {
+        strictDisplaySpec.logicalSize(orientation: configuredStrictViewportOrientation)
+    }
+
+    @objc public var strictEmulationMode: Bool {
+        isStrictEmulationActive
+    }
+
+    @objc public var rawConfiguredStrictEmulationMode: Bool {
+        configuredStrictEmulationMode
+    }
+
+    @objc public var strictViewportOrientation: NSString {
+        configuredStrictViewportOrientation as NSString
+    }
+
+    @objc public var strictViewportScaleMode: NSString {
+        configuredStrictViewportScaleMode as NSString
+    }
+
+    @objc public var isStrictPortraitOrientation: Bool {
+        configuredStrictViewportOrientation == "portrait"
+    }
 
     private let configuredDeviceModel: String
     private let coercedDeviceModel: String
@@ -336,16 +406,30 @@ public final class PTUnfairLock {
 
     @objc public let playChain: Bool
 
-    @objc public let playChainDebugging: Bool
+    private let configuredPlayChainDebugging: Bool
+    @objc public var playChainDebugging: Bool {
+        isStrictEmulationActive ? false : configuredPlayChainDebugging
+    }
+
+    private let configuredMetalHUD: Bool
+    @objc public var metalHUD: Bool {
+        isStrictEmulationActive ? false : configuredMetalHUD
+    }
 
     private let configuredWindowFixMethod: Int
     @objc public var windowFixMethod: Int {
-        PTSafeMode.isActive ? 0 : configuredWindowFixMethod
+        (PTSafeMode.isActive || configuredStrictEmulationMode) ? 0 : configuredWindowFixMethod
     }
 
     private let configuredCustomScaler: Double
     @objc public var customScaler: Double {
-        PTSafeMode.isActive ? 1.0 : configuredCustomScaler
+        if PTSafeMode.isActive {
+            return 1.0
+        }
+        if configuredStrictEmulationMode {
+            return strictDisplaySpec.nativeScale
+        }
+        return configuredCustomScaler
     }
 
     private let configuredFrameRateTarget: String
@@ -385,29 +469,10 @@ public final class PTUnfairLock {
         }
     }
 
-    private static func normalizedReportedIOSVersion(_ raw: String?) -> String {
-        switch (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "followhost", "follow_host", "host":
-            return "followHost"
-        case "compat18_3", "18.3", "ios18_3":
-            return "compat18_3"
-        case "compat13_7", "13.7", "ios13_7":
-            return "compat13_7"
-        default:
-            return "automatic"
-        }
+    private let configuredRootWorkDir: Bool
+    @objc public var rootWorkDir: Bool {
+        isStrictEmulationActive ? true : configuredRootWorkDir
     }
-
-    private static let ios13CompatibleModels: Set<String> = ["iPad6,7", "iPad8,6", "iPhone12,5"]
-
-    private static func effectiveDeviceModel(_ model: String, reportedIOSVersion: String) -> String {
-        guard reportedIOSVersion == "compat13_7", !ios13CompatibleModels.contains(model) else {
-            return model
-        }
-        return model.hasPrefix("iPhone") ? "iPhone12,5" : "iPad8,6"
-    }
-
-    @objc public let rootWorkDir: Bool
 
     @objc public let noKMOnInput: Bool
 
@@ -419,7 +484,13 @@ public final class PTUnfairLock {
 
     @objc public let floatingWindow: Bool
 
-    @objc public let displayRotation: Int
+    private let configuredDisplayRotation: Int
+    @objc public var displayRotation: Int {
+        if isStrictEmulationActive {
+            return configuredStrictViewportOrientation == "portrait" ? 1 : 0
+        }
+        return configuredDisplayRotation
+    }
 
     @objc public let checkMicPermissionSync: Bool
 
@@ -480,8 +551,31 @@ struct AppSettingsData: Codable, Equatable {
     var keymappingDisabledAt: Float = 0
     var frameRateTarget: String = "adaptive"
     var reportedIOSVersion: String = "automatic"
+    var strictEmulationMode: Bool = false
+    var strictViewportOrientation: String = "landscape"
+    var strictViewportScaleMode: String = "fitScreen"
 
     init() {}
+
+    var effectiveStrictViewportOrientation: String {
+        PTWindowGeometryMath.normalizedStrictOrientation(strictViewportOrientation)
+    }
+
+    var effectiveStrictViewportScaleMode: String {
+        PTWindowGeometryMath.normalizedStrictScaleMode(strictViewportScaleMode)
+    }
+
+    var effectiveBypass: Bool { strictEmulationMode ? true : bypass }
+    var effectiveInterceptInlineSyscalls: Bool { strictEmulationMode ? true : interceptInlineSyscalls }
+    var effectiveRootWorkDir: Bool { strictEmulationMode ? true : rootWorkDir }
+    var effectiveMetalHUD: Bool { strictEmulationMode ? false : metalHUD }
+    var effectivePlayChainDebugging: Bool { strictEmulationMode ? false : playChainDebugging }
+    var effectiveNotch: Bool { strictEmulationMode ? false : notch }
+    var effectiveInverseScreenValues: Bool { strictEmulationMode ? false : inverseScreenValues }
+    var effectiveWindowFixMethod: Int { strictEmulationMode ? 0 : windowFixMethod }
+    var effectiveDisplayRotation: Int {
+        strictEmulationMode ? (effectiveStrictViewportOrientation == "portrait" ? 1 : 0) : displayRotation
+    }
 
     private static func decodeDouble<K: CodingKey>(
         from container: KeyedDecodingContainer<K>,
@@ -518,7 +612,7 @@ struct AppSettingsData: Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         bundleIdentifier = (try? container.decodeIfPresent(String.self, forKey: .bundleIdentifier)) ?? ""
         originalBundleName = (try? container.decodeIfPresent(String.self, forKey: .originalBundleName)) ?? nil
-        originalMinimumOSVersion = (try? container.decodeIfPresent(String.self, forKey: .originalMinimumOSVersion)) ?? nil
+        originalMinimumOSVersion = try? container.decodeIfPresent(String.self, forKey: .originalMinimumOSVersion)
         keymapping = (try? container.decodeIfPresent(Bool.self, forKey: .keymapping)) ?? true
         sensitivity = Self.decodeFloat(from: container, forKey: .sensitivity, default: 50)
         disableTimeout = (try? container.decodeIfPresent(Bool.self, forKey: .disableTimeout)) ?? false
@@ -556,7 +650,9 @@ struct AppSettingsData: Codable, Equatable {
         disableBuiltinMouse = (try? container.decodeIfPresent(Bool.self, forKey: .disableBuiltinMouse)) ?? false
         resizableAspectRatioType = (try? container.decodeIfPresent(Int.self, forKey: .resizableAspectRatioType)) ?? 0
         resizableAspectRatioWidth = (try? container.decodeIfPresent(Int.self, forKey: .resizableAspectRatioWidth)) ?? 0
-        resizableAspectRatioHeight = (try? container.decodeIfPresent(Int.self, forKey: .resizableAspectRatioHeight)) ?? 0
+        resizableAspectRatioHeight = (
+            try? container.decodeIfPresent(Int.self, forKey: .resizableAspectRatioHeight)
+        ) ?? 0
         blockSleepSpamming = (try? container.decodeIfPresent(Bool.self, forKey: .blockSleepSpamming)) ?? false
         ignoreUnityKeyboardInitializationError = (try? container.decodeIfPresent(
             Bool.self,
@@ -572,6 +668,13 @@ struct AppSettingsData: Codable, Equatable {
         keymappingDisabledAt = Self.decodeFloat(from: container, forKey: .keymappingDisabledAt, default: 0)
         frameRateTarget = (try? container.decodeIfPresent(String.self, forKey: .frameRateTarget)) ?? "adaptive"
         reportedIOSVersion = (try? container.decodeIfPresent(String.self, forKey: .reportedIOSVersion)) ?? "automatic"
+        strictEmulationMode = (try? container.decodeIfPresent(Bool.self, forKey: .strictEmulationMode)) ?? false
+        strictViewportOrientation = PTWindowGeometryMath.normalizedStrictOrientation(
+            try? container.decodeIfPresent(String.self, forKey: .strictViewportOrientation)
+        )
+        strictViewportScaleMode = PTWindowGeometryMath.normalizedStrictScaleMode(
+            try? container.decodeIfPresent(String.self, forKey: .strictViewportScaleMode)
+        )
     }
 }
 
@@ -603,5 +706,224 @@ public struct PTFrameRateRangeValues: Equatable {
             return maxHz
         }
         return min(requestedFPS, maxHz)
+    }
+}
+
+public enum PTPlayChainPersistentRef {
+    public static let binaryLength = 20
+    private static let binaryHeader: [UInt8] = [0x8A, 0x9F, 0xC4]
+    private static let legacyPrefix = "PCPR1:"
+
+    private static let tableToTag: [String: UInt8] = [
+        kSecClassGenericPassword as String: 0x91,
+        kSecClassInternetPassword as String: 0x92,
+        kSecClassCertificate as String: 0x93,
+        kSecClassKey as String: 0x94,
+        kSecClassIdentity as String: 0x95
+    ]
+
+    private static let tagToTable: [UInt8: String] = [
+        0x91: kSecClassGenericPassword as String,
+        0x92: kSecClassInternetPassword as String,
+        0x93: kSecClassCertificate as String,
+        0x94: kSecClassKey as String,
+        0x95: kSecClassIdentity as String
+    ]
+
+    public static func encode(tableName: String, uuid: UUID = UUID()) -> Data {
+        var bytes = [UInt8]()
+        bytes.reserveCapacity(binaryLength)
+        bytes.append(contentsOf: binaryHeader)
+        bytes.append(tableToTag[tableName] ?? 0x90)
+        withUnsafeBytes(of: uuid.uuid) { uuidBuf in
+            bytes.append(contentsOf: uuidBuf)
+        }
+        return Data(bytes)
+    }
+
+    public static func decodeTableName(from data: Data) -> String? {
+        if data.count == binaryLength {
+            let base = data.startIndex
+            if data[base] == binaryHeader[0],
+               data[base + 1] == binaryHeader[1],
+               data[base + 2] == binaryHeader[2] {
+                return tagToTable[data[base + 3]]
+            }
+        }
+        if let legacyStr = String(data: data, encoding: .utf8), legacyStr.hasPrefix(legacyPrefix) {
+            let tail = legacyStr.dropFirst(legacyPrefix.count)
+            if let colonIndex = tail.firstIndex(of: ":") {
+                let parsed = String(tail[..<colonIndex])
+                if tableToTag[parsed] != nil {
+                    return parsed
+                }
+            }
+        }
+        return nil
+    }
+
+    public static func isPersistentRef(_ data: Data) -> Bool {
+        if data.count == binaryLength {
+            let base = data.startIndex
+            if data[base] == binaryHeader[0],
+               data[base + 1] == binaryHeader[1],
+               data[base + 2] == binaryHeader[2],
+               (data[base + 3] & 0xF0) == 0x90 {
+                return true
+            }
+        }
+        if let legacyStr = String(data: data, encoding: .utf8), legacyStr.hasPrefix(legacyPrefix) {
+            return true
+        }
+        return false
+    }
+}
+
+public enum PTPlayChainAccessGroupPolicy {
+    public static func expandAccessGroupPatterns(
+        fromEntitlements entitlements: [String: Any]?,
+        teamID: String,
+        bundleID: String
+    ) -> [String] {
+        let cleanTeam = teamID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanBundle = bundleID.trimmingCharacters(in: .whitespacesAndNewlines)
+        var ordered = [String]()
+        var seen = Set<String>()
+
+        func appendExpanded(_ raw: String) {
+            var expanded = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !expanded.isEmpty else { return }
+            if !cleanTeam.isEmpty {
+                expanded = expanded
+                    .replacingOccurrences(of: "$(AppIdentifierPrefix)", with: "\(cleanTeam).")
+                    .replacingOccurrences(of: "$(TeamIdentifierPrefix)", with: "\(cleanTeam).")
+                if expanded.hasPrefix("FAKETEAMID.") {
+                    let suffix = expanded.dropFirst("FAKETEAMID.".count)
+                    expanded = "\(cleanTeam).\(suffix)"
+                }
+            }
+            if seen.insert(expanded).inserted {
+                ordered.append(expanded)
+            }
+        }
+
+        if let rawGroups = entitlements?["keychain-access-groups"] {
+            if let arr = rawGroups as? [String] {
+                for item in arr { appendExpanded(item) }
+            } else if let arr = rawGroups as? [Any] {
+                for case let item as String in arr { appendExpanded(item) }
+            } else if let single = rawGroups as? String {
+                appendExpanded(single)
+            }
+        }
+        if let appID = entitlements?["application-identifier"] as? String {
+            appendExpanded(appID)
+        }
+        if !cleanTeam.isEmpty, !cleanBundle.isEmpty {
+            appendExpanded("\(cleanTeam).\(cleanBundle)")
+        }
+        return ordered
+    }
+
+    public static func validate(
+        requestedGroup: Any?,
+        allowedPatterns: [String],
+        isReadOnlyQuery: Bool
+    ) -> OSStatus {
+        if requestedGroup == nil || requestedGroup is NSNull {
+            return errSecSuccess
+        }
+        guard let group = requestedGroup as? String else {
+            return errSecParam
+        }
+        if group.isEmpty {
+            return errSecSuccess
+        }
+        if isReadOnlyQuery && group == (kSecAttrAccessGroupToken as String) {
+            return errSecSuccess
+        }
+        for rawPattern in allowedPatterns {
+            let pattern = rawPattern.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !pattern.isEmpty else { continue }
+            if pattern == group {
+                return errSecSuccess
+            }
+            if pattern.hasSuffix(".*") {
+                let prefix = String(pattern.dropLast(1))
+                if group.hasPrefix(prefix), group.count > prefix.count {
+                    return errSecSuccess
+                }
+            }
+        }
+        return errSecMissingEntitlement
+    }
+}
+
+@objc public final class PTPlayChainPolicyBridge: NSObject {
+    @objc public static func expandAccessGroupPatterns(
+        fromEntitlements entitlements: NSDictionary?,
+        teamID: String,
+        bundleID: String
+    ) -> [String] {
+        PTPlayChainAccessGroupPolicy.expandAccessGroupPatterns(
+            fromEntitlements: entitlements as? [String: Any],
+            teamID: teamID,
+            bundleID: bundleID
+        )
+    }
+
+    @objc public static func validateAccessGroup(
+        _ requestedGroup: Any?,
+        allowedPatterns: [String],
+        isReadOnlyQuery: Bool
+    ) -> OSStatus {
+        PTPlayChainAccessGroupPolicy.validate(
+            requestedGroup: requestedGroup,
+            allowedPatterns: allowedPatterns,
+            isReadOnlyQuery: isReadOnlyQuery
+        )
+    }
+}
+
+@objc public final class PTPlayChainSecureEnclaveRegistry: NSObject {
+    private static let seTagObject = NSObject()
+
+    private static var associationKey: UnsafeRawPointer {
+        UnsafeRawPointer(Unmanaged.passUnretained(seTagObject).toOpaque())
+    }
+
+    @objc public static func parametersRequestSecureEnclave(_ parameters: NSDictionary?) -> Bool {
+        guard let parameters else { return false }
+        let seToken = kSecAttrTokenIDSecureEnclave as String
+        if let topToken = parameters[kSecAttrTokenID as String] as? String, topToken == seToken {
+            return true
+        }
+        if let privAttrs = parameters[kSecPrivateKeyAttrs as String] as? NSDictionary,
+           let privToken = privAttrs[kSecAttrTokenID as String] as? String,
+           privToken == seToken {
+            return true
+        }
+        return false
+    }
+
+    private static func isPublicKey(_ key: SecKey) -> Bool {
+        guard let attrs = SecKeyCopyAttributes(key) as? [String: Any],
+              let keyClass = attrs[kSecAttrKeyClass as String] as? String else {
+            return false
+        }
+        return keyClass == (kSecAttrKeyClassPublic as String)
+    }
+
+    @objc public static func markSecureEnclaveKey(_ key: SecKey?) {
+        guard let key, !isPublicKey(key) else { return }
+        objc_setAssociatedObject(key, associationKey, NSNumber(value: true), .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+
+    @objc public static func isSecureEnclaveKey(_ key: SecKey?) -> Bool {
+        guard let key else { return false }
+        guard let marked = objc_getAssociatedObject(key, associationKey) as? NSNumber, marked.boolValue else {
+            return false
+        }
+        return !isPublicKey(key)
     }
 }

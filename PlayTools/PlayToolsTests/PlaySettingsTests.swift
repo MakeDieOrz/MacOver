@@ -480,4 +480,113 @@ final class PlaySettingsTests: XCTestCase {
         XCTAssertFalse(disabledLoaded.rightClickLongPress)
         XCTAssertFalse(disabledLoaded.settingsData.rightClickLongPress)
     }
+
+    private func makeStrictPortraitTestSettingsData() -> AppSettingsData {
+        var data = AppSettingsData()
+        data.bundleIdentifier = "com.example.strict.portrait"
+        data.strictEmulationMode = true
+        data.strictViewportOrientation = "portrait"
+        data.strictViewportScaleMode = "native1x"
+        data.iosDeviceModel = "iPhone15,3"
+        data.bypass = false
+        data.interceptInlineSyscalls = false
+        data.rootWorkDir = false
+        data.metalHUD = true
+        data.playChainDebugging = true
+        data.notch = true
+        data.customScaler = 1.25
+        data.resolution = 6
+        data.windowFixMethod = 1
+        data.inverseScreenValues = true
+        data.displayRotation = 2
+        data.windowWidth = 800
+        data.windowHeight = 600
+        return data
+    }
+
+    func testStrictEmulationModePortraitOverridesAndNonDestructiveDisk() throws {
+        let dir = try XCTUnwrap(tempDir)
+        let hadBreadcrumbBefore = FileManager.default.fileExists(atPath: PTSafeMode.shared.breadcrumbURL.path)
+        _ = PTSafeMode.shared.evaluateAndBeginLaunch(environment: ["PLAYTOOLS_SAFE_MODE": "0"])
+        defer {
+            _ = PTSafeMode.shared.evaluateAndBeginLaunch(environment: ["PLAYTOOLS_SAFE_MODE": "0"])
+            if !hadBreadcrumbBefore {
+                PTSafeMode.shared.markGracefulTermination()
+            }
+        }
+
+        let legacy = AppSettingsData()
+        XCTAssertFalse(legacy.strictEmulationMode)
+        XCTAssertEqual(legacy.strictViewportOrientation, "landscape")
+        XCTAssertEqual(legacy.strictViewportScaleMode, "fitScreen")
+
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .xml
+        let portraitURL = dir.appendingPathComponent("com.example.strict.portrait.plist")
+        try encoder.encode(makeStrictPortraitTestSettingsData()).write(to: portraitURL)
+
+        let playSettings = PlaySettings(settingsURL: portraitURL, bundleIdentifier: "com.example.strict.portrait")
+        XCTAssertTrue(playSettings.strictEmulationMode)
+        XCTAssertEqual(playSettings.strictViewportOrientation as String, "portrait")
+        XCTAssertEqual(playSettings.strictViewportScaleMode as String, "native1x")
+        XCTAssertTrue(playSettings.isStrictPortraitOrientation)
+        XCTAssertTrue(playSettings.bypass)
+        XCTAssertTrue(playSettings.interceptInlineSyscalls)
+        XCTAssertTrue(playSettings.rootWorkDir)
+        XCTAssertFalse(playSettings.metalHUD)
+        XCTAssertFalse(playSettings.playChainDebugging)
+        XCTAssertFalse(playSettings.notch)
+        XCTAssertFalse(playSettings.inverseScreenValues)
+        XCTAssertEqual(playSettings.windowFixMethod, 0)
+        XCTAssertTrue(playSettings.adaptiveDisplay)
+        XCTAssertFalse(playSettings.resizableWindow)
+        XCTAssertEqual(playSettings.customScaler, 3.0)
+        XCTAssertEqual(playSettings.windowSizeWidth, 430)
+        XCTAssertEqual(playSettings.windowSizeHeight, 932)
+        XCTAssertEqual(playSettings.displayRotation, 1)
+
+        // Persisting keymappingDisabledAt must NOT overwrite non-strict settings on disk
+        playSettings.keymappingDisabledAt = 12.0
+        let reloadedDisk = try PropertyListDecoder().decode(AppSettingsData.self, from: Data(contentsOf: portraitURL))
+        XCTAssertFalse(reloadedDisk.bypass)
+        XCTAssertTrue(reloadedDisk.notch)
+        XCTAssertEqual(reloadedDisk.customScaler, 1.25)
+        XCTAssertEqual(reloadedDisk.windowWidth, 800)
+        XCTAssertEqual(reloadedDisk.windowHeight, 600)
+        XCTAssertEqual(reloadedDisk.keymappingDisabledAt, 12.0)
+    }
+
+    func testStrictEmulationModeLandscapePadAndSafeModePrecedence() throws {
+        let dir = try XCTUnwrap(tempDir)
+        let hadBreadcrumbBefore = FileManager.default.fileExists(atPath: PTSafeMode.shared.breadcrumbURL.path)
+        _ = PTSafeMode.shared.evaluateAndBeginLaunch(environment: ["PLAYTOOLS_SAFE_MODE": "0"])
+        defer {
+            _ = PTSafeMode.shared.evaluateAndBeginLaunch(environment: ["PLAYTOOLS_SAFE_MODE": "0"])
+            if !hadBreadcrumbBefore {
+                PTSafeMode.shared.markGracefulTermination()
+            }
+        }
+
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .xml
+        var landscapePad = AppSettingsData()
+        landscapePad.bundleIdentifier = "com.example.strict.ipad"
+        landscapePad.strictEmulationMode = true
+        landscapePad.strictViewportOrientation = "landscape"
+        landscapePad.strictViewportScaleMode = "fitScreen"
+        landscapePad.iosDeviceModel = "iPad16,6"
+        let padURL = dir.appendingPathComponent("com.example.strict.ipad.plist")
+        try encoder.encode(landscapePad).write(to: padURL)
+        let padSettings = PlaySettings(settingsURL: padURL, bundleIdentifier: "com.example.strict.ipad")
+        XCTAssertEqual(padSettings.customScaler, 2.0)
+        XCTAssertEqual(padSettings.windowSizeWidth, 1376)
+        XCTAssertEqual(padSettings.windowSizeHeight, 1032)
+        XCTAssertEqual(padSettings.displayRotation, 0)
+
+        // Safe Mode still supersedes strict mode overrides cleanly
+        _ = PTSafeMode.shared.evaluateAndBeginLaunch(environment: ["PLAYTOOLS_SAFE_MODE": "1"])
+        XCTAssertFalse(padSettings.strictEmulationMode)
+        XCTAssertEqual(padSettings.customScaler, 1.0)
+        XCTAssertFalse(padSettings.interceptInlineSyscalls)
+    }
 }

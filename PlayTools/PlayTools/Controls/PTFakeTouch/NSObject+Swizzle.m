@@ -421,6 +421,9 @@ static double pt_hook_fbs_mode_refreshRate(id self, SEL _cmd) {
 }
 
 static CGRect pt_hook_screen_bounds_resizable(id self, SEL _cmd) {
+    if ([[PlaySettings shared] strictEmulationMode]) {
+        return [PlayScreen boundsResizable:CGRectZero];
+    }
     CGRect orig = s_orig_screen_bounds ? s_orig_screen_bounds(self, _cmd) : CGRectZero;
     return [PlayScreen boundsResizable:orig];
 }

@@ -636,4 +636,145 @@ final class PTCoordinateMathTests: XCTestCase {
         XCTAssertFalse(sm.invalidate())
         XCTAssertFalse(sm.onMinimumHoldElapsed(generation: fifth.generation))
     }
+
+    func testTitlebarAwareClamping() {
+        let laptopVisible = CGRect(x: 0, y: 25, width: 1440, height: 875)
+        let titleBarHeight: CGFloat = 28
+
+        // Tall portrait iPad (1024 x 1366) must subtract titleBarHeight BEFORE clamping
+        let clampedPad = PTWindowGeometryMath.clampedContentSize(
+            requested: CGSize(width: 1024, height: 1366),
+            visibleScreenFrame: laptopVisible,
+            titleBarHeight: titleBarHeight
+        )
+        XCTAssertLessThanOrEqual(clampedPad.width, laptopVisible.width)
+        XCTAssertLessThanOrEqual(clampedPad.height + titleBarHeight, laptopVisible.height)
+        XCTAssertEqual(clampedPad.width / clampedPad.height, 1024.0 / 1366.0, accuracy: 0.005)
+        let centeredPad = PTWindowGeometryMath.centeredFrame(
+            forContentSize: clampedPad,
+            currentFrame: .zero,
+            visibleScreenFrame: laptopVisible,
+            titleBarHeight: titleBarHeight
+        )
+        XCTAssertGreaterThanOrEqual(centeredPad.minY, laptopVisible.minY)
+        XCTAssertLessThanOrEqual(centeredPad.maxY, laptopVisible.maxY)
+
+        // Fractional visible height still guarantees content + titlebar <= visible height
+        let fractionalVisible = CGRect(x: 0, y: 0, width: 1440, height: 875.8)
+        let clampedFrac = PTWindowGeometryMath.clampedContentSize(
+            requested: CGSize(width: 440, height: 956),
+            visibleScreenFrame: fractionalVisible,
+            titleBarHeight: 28.0
+        )
+        XCTAssertLessThanOrEqual(clampedFrac.height + 28.0, fractionalVisible.height)
+        XCTAssertEqual(clampedFrac.width / clampedFrac.height, 440.0 / 956.0, accuracy: 0.005)
+    }
+
+    private struct StrictSpecExpectation {
+        let model: String
+        let pxW: Int
+        let pxH: Int
+        let portrait: CGSize
+        let landscape: CGSize
+
+        init(
+            _ model: String,
+            _ pxW: Int,
+            _ pxH: Int,
+            _ portraitWidth: CGFloat,
+            _ portraitHeight: CGFloat
+        ) {
+            self.model = model
+            self.pxW = pxW
+            self.pxH = pxH
+            self.portrait = CGSize(width: portraitWidth, height: portraitHeight)
+            self.landscape = CGSize(width: portraitHeight, height: portraitWidth)
+        }
+    }
+
+    private func verifyStrictSpecs(_ expectations: [StrictSpecExpectation], expectedScale: Double) {
+        for entry in expectations {
+            let spec = PTWindowGeometryMath.StrictDeviceDisplaySpec.resolve(forModel: entry.model)
+            XCTAssertEqual(spec.nativePixelWidth, entry.pxW)
+            XCTAssertEqual(spec.nativePixelHeight, entry.pxH)
+            XCTAssertEqual(spec.nativeScale, expectedScale)
+            XCTAssertEqual(spec.logicalSize(orientation: "portrait"), entry.portrait)
+            XCTAssertEqual(spec.logicalSize(orientation: "landscape"), entry.landscape)
+        }
+    }
+
+    func testStrictDeviceDisplaySpecsForIPadModels() {
+        let ipadExpected: [StrictSpecExpectation] = [
+            .init("iPad6,7", 2048, 2732, 1024, 1366),
+            .init("iPad8,6", 2048, 2732, 1024, 1366),
+            .init("iPad13,8", 2048, 2732, 1024, 1366),
+            .init("iPad14,5", 2048, 2732, 1024, 1366),
+            .init("iPad16,6", 2064, 2752, 1032, 1376),
+            .init("iPad17,3", 2064, 2752, 1032, 1376)
+        ]
+        verifyStrictSpecs(ipadExpected, expectedScale: 2.0)
+        XCTAssertEqual(
+            PTWindowGeometryMath.StrictDeviceDisplaySpec.resolve(forModel: "UnknownDevice").model,
+            "iPad13,8"
+        )
+    }
+
+    func testStrictDeviceDisplaySpecsForIPhoneModels() {
+        let iphoneExpected: [StrictSpecExpectation] = [
+            .init("iPhone12,5", 1242, 2688, 414, 896),
+            .init("iPhone14,3", 1284, 2778, 428, 926),
+            .init("iPhone15,3", 1290, 2796, 430, 932),
+            .init("iPhone16,2", 1290, 2796, 430, 932),
+            .init("iPhone17,2", 1320, 2868, 440, 956),
+            .init("iPhone18,2", 1320, 2868, 440, 956)
+        ]
+        verifyStrictSpecs(iphoneExpected, expectedScale: 3.0)
+        XCTAssertEqual(
+            PTWindowGeometryMath.StrictDeviceDisplaySpec.resolve(forModel: "iPhone99,1").model,
+            "iPhone17,2"
+        )
+    }
+
+    func testStrictViewportWindowPlansFitScreenAndNative1x() {
+        let laptopVisible = CGRect(x: 0, y: 25, width: 1440, height: 875)
+        let titleBarHeight: CGFloat = 28
+
+        let fitOversized = PTWindowGeometryMath.strictViewportWindowPlan(
+            logicalSceneSize: CGSize(width: 1024, height: 1366),
+            scaleMode: "fitScreen",
+            visibleScreenFrame: laptopVisible,
+            titleBarHeight: titleBarHeight
+        )
+        XCTAssertEqual(fitOversized.logicalSceneSize, CGSize(width: 1024, height: 1366))
+        XCTAssertEqual(fitOversized.lockedAspectRatio, CGSize(width: 1024, height: 1366))
+        XCTAssertEqual(fitOversized.windowContentSize, CGSize(width: 635, height: 847))
+        XCTAssertTrue(fitOversized.allowsUserResize)
+
+        let fitSmallPhone = PTWindowGeometryMath.strictViewportWindowPlan(
+            logicalSceneSize: CGSize(width: 932, height: 430),
+            scaleMode: "fitScreen",
+            visibleScreenFrame: CGRect(x: 0, y: 0, width: 1512, height: 944),
+            titleBarHeight: titleBarHeight
+        )
+        XCTAssertEqual(fitSmallPhone.windowContentSize, CGSize(width: 932, height: 430))
+        XCTAssertTrue(fitSmallPhone.allowsUserResize)
+
+        let nativeOversized = PTWindowGeometryMath.strictViewportWindowPlan(
+            logicalSceneSize: CGSize(width: 1024, height: 1366),
+            scaleMode: "native1x",
+            visibleScreenFrame: laptopVisible,
+            titleBarHeight: titleBarHeight
+        )
+        XCTAssertEqual(nativeOversized.windowContentSize, CGSize(width: 635, height: 847))
+        XCTAssertFalse(nativeOversized.allowsUserResize)
+
+        let nativeSmall = PTWindowGeometryMath.strictViewportWindowPlan(
+            logicalSceneSize: CGSize(width: 430, height: 932),
+            scaleMode: "native1x",
+            visibleScreenFrame: CGRect(x: 0, y: 0, width: 2560, height: 1415),
+            titleBarHeight: titleBarHeight
+        )
+        XCTAssertEqual(nativeSmall.windowContentSize, CGSize(width: 430, height: 932))
+        XCTAssertFalse(nativeSmall.allowsUserResize)
+    }
 }

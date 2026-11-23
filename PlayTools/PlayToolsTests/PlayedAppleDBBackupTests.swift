@@ -1,3 +1,5 @@
+import Foundation
+import Security
 import SQLite3
 import XCTest
 
@@ -104,5 +106,165 @@ final class PlayedAppleDBBackupTests: XCTestCase {
         )
         XCTAssertTrue(PlayedAppleDBBackup.backupIfNeeded(sourceDB: db, dbPath: dbURL.path, targetVersion: 2))
         XCTAssertFalse(FileManager.default.fileExists(atPath: backupURL.path))
+    }
+
+    func testOpaqueBinaryPersistentRefEncodingAndLegacyDecoding() throws {
+        let tables: [CFString] = [
+            kSecClassGenericPassword,
+            kSecClassInternetPassword,
+            kSecClassCertificate,
+            kSecClassKey,
+            kSecClassIdentity
+        ]
+        for cls in tables {
+            let tableName = cls as String
+            let pRef = PTPlayChainPersistentRef.encode(tableName: tableName)
+            XCTAssertEqual(pRef.count, 20)
+            XCTAssertTrue(PTPlayChainPersistentRef.isPersistentRef(pRef))
+            XCTAssertEqual(PTPlayChainPersistentRef.decodeTableName(from: pRef), tableName)
+
+            // Ensure no readable PCPR prefix or ASCII table name appears in persistent ref bytes
+            XCTAssertFalse(pRef.starts(with: Data("PCPR".utf8)))
+            let utf8Str = String(data: pRef, encoding: .utf8)
+            XCTAssertNil(utf8Str)
+            XCTAssertNil(pRef.range(of: Data(tableName.utf8)))
+            for byte in pRef.prefix(4) {
+                XCTAssertGreaterThanOrEqual(byte, 0x80)
+            }
+        }
+
+        // Legacy PCPR1 lookup fallback remains decodable without minting PCPR1
+        let legacyRef = Data("PCPR1:genp:\(UUID().uuidString)".utf8)
+        XCTAssertTrue(PTPlayChainPersistentRef.isPersistentRef(legacyRef))
+        XCTAssertEqual(PTPlayChainPersistentRef.decodeTableName(from: legacyRef), kSecClassGenericPassword as String)
+
+        // Arbitrary 20-byte non-persistent-ref key payload is not misidentified
+        let random20 = Data(repeating: 0x2A, count: 20)
+        XCTAssertFalse(PTPlayChainPersistentRef.isPersistentRef(random20))
+        XCTAssertNil(PTPlayChainPersistentRef.decodeTableName(from: random20))
+    }
+
+    func testAccessGroupEntitlementAllowsDefaultsAndEntitledPatterns() {
+        let entitlements: [String: Any] = [
+            "keychain-access-groups": [
+                "$(AppIdentifierPrefix)com.example.shared",
+                "FAKETEAMID.com.example.legacy"
+            ],
+            "application-identifier": "ABCD123456.com.example.app"
+        ]
+        let patterns = PTPlayChainAccessGroupPolicy.expandAccessGroupPatterns(
+            fromEntitlements: entitlements,
+            teamID: "ABCD123456",
+            bundleID: "com.example.app"
+        )
+        XCTAssertTrue(patterns.contains("ABCD123456.com.example.shared"))
+        XCTAssertTrue(patterns.contains("ABCD123456.com.example.legacy"))
+        XCTAssertTrue(patterns.contains("ABCD123456.com.example.app"))
+
+        XCTAssertEqual(
+            PTPlayChainAccessGroupPolicy.validate(
+                requestedGroup: nil,
+                allowedPatterns: patterns,
+                isReadOnlyQuery: false
+            ),
+            errSecSuccess
+        )
+        XCTAssertEqual(
+            PTPlayChainAccessGroupPolicy.validate(
+                requestedGroup: "",
+                allowedPatterns: patterns,
+                isReadOnlyQuery: false
+            ),
+            errSecSuccess
+        )
+        XCTAssertEqual(
+            PTPlayChainAccessGroupPolicy.validate(
+                requestedGroup: "ABCD123456.com.example.shared",
+                allowedPatterns: patterns,
+                isReadOnlyQuery: false
+            ),
+            errSecSuccess
+        )
+        XCTAssertEqual(
+            PTPlayChainAccessGroupPolicy.validate(
+                requestedGroup: "ABCD123456.com.example.anything",
+                allowedPatterns: ["ABCD123456.*"],
+                isReadOnlyQuery: false
+            ),
+            errSecSuccess
+        )
+    }
+
+    func testAccessGroupEntitlementRejectsForeignAndInvalidGroups() {
+        let patterns = ["ABCD123456.com.example.app"]
+        XCTAssertEqual(
+            PTPlayChainAccessGroupPolicy.validate(
+                requestedGroup: "ZZZZ999999.com.evil.app",
+                allowedPatterns: patterns,
+                isReadOnlyQuery: false
+            ),
+            errSecMissingEntitlement
+        )
+        XCTAssertEqual(
+            PTPlayChainAccessGroupPolicy.validate(
+                requestedGroup: "com.apple.mobilesafari",
+                allowedPatterns: patterns,
+                isReadOnlyQuery: true
+            ),
+            errSecMissingEntitlement
+        )
+        XCTAssertEqual(
+            PTPlayChainAccessGroupPolicy.validate(
+                requestedGroup: kSecAttrAccessGroupToken as String,
+                allowedPatterns: patterns,
+                isReadOnlyQuery: true
+            ),
+            errSecSuccess
+        )
+        XCTAssertEqual(
+            PTPlayChainAccessGroupPolicy.validate(
+                requestedGroup: kSecAttrAccessGroupToken as String,
+                allowedPatterns: patterns,
+                isReadOnlyQuery: false
+            ),
+            errSecMissingEntitlement
+        )
+        XCTAssertEqual(
+            PTPlayChainAccessGroupPolicy.validate(
+                requestedGroup: 123,
+                allowedPatterns: patterns,
+                isReadOnlyQuery: false
+            ),
+            errSecParam
+        )
+    }
+
+    func testSecureEnclaveRegistryTracksPrivateKeysOnly() throws {
+        XCTAssertTrue(PTPlayChainSecureEnclaveRegistry.parametersRequestSecureEnclave([
+            kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave as String
+        ]))
+        XCTAssertTrue(PTPlayChainSecureEnclaveRegistry.parametersRequestSecureEnclave([
+            kSecPrivateKeyAttrs as String: [
+                kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave as String
+            ]
+        ]))
+        XCTAssertFalse(PTPlayChainSecureEnclaveRegistry.parametersRequestSecureEnclave([
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom as String
+        ]))
+
+        let ecAttrs: [CFString: Any] = [
+            kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeySizeInBits: 256
+        ]
+        let seKey = try XCTUnwrap(SecKeyCreateRandomKey(ecAttrs as CFDictionary, nil))
+        let normalKey = try XCTUnwrap(SecKeyCreateRandomKey(ecAttrs as CFDictionary, nil))
+        let sePubKey = try XCTUnwrap(SecKeyCopyPublicKey(seKey))
+
+        PTPlayChainSecureEnclaveRegistry.markSecureEnclaveKey(seKey)
+        PTPlayChainSecureEnclaveRegistry.markSecureEnclaveKey(sePubKey)
+
+        XCTAssertTrue(PTPlayChainSecureEnclaveRegistry.isSecureEnclaveKey(seKey))
+        XCTAssertFalse(PTPlayChainSecureEnclaveRegistry.isSecureEnclaveKey(sePubKey))
+        XCTAssertFalse(PTPlayChainSecureEnclaveRegistry.isSecureEnclaveKey(normalKey))
     }
 }

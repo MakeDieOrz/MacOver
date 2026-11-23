@@ -17,7 +17,7 @@ public class PlayKeychain: NSObject {
     private static let playChainDB = PlayKeychainDB.shared
 
     @objc public static func debugLogger(_ logContent: String) {
-        if PlaySettings.shared.settingsData.playChainDebugging {
+        if PlaySettings.shared.playChainDebugging {
             NSLog("PC-DEBUG: \(logContent)")
         }
     }
@@ -64,6 +64,14 @@ public class PlayKeychain: NSObject {
         return Unmanaged.passRetained(err)
     }
 
+    private static func isSecureEnclavePrivateKeyItem(_ item: NSDictionary) -> Bool {
+        guard (item[PlayKeychainDB.internalTokenIDColumn] as? String) == (kSecAttrTokenIDSecureEnclave as String) else {
+            return false
+        }
+        let keyClass = (item[kSecAttrKeyClass] as? String) ?? (item["kcls"] as? String)
+        return keyClass != (kSecAttrKeyClassPublic as String)
+    }
+
     private static func makeResultDictionary(
         from item: NSDictionary,
         queryClassType: String,
@@ -74,7 +82,12 @@ public class PlayKeychain: NSObject {
     ) -> NSMutableDictionary {
         let dict = wantsAttributes ? NSMutableDictionary(dictionary: item) : NSMutableDictionary()
         dict.removeObject(forKey: PlayKeychainDB.internalPrivateKeyColumn)
-        if wantsData, let vData = item[kSecValueData] {
+        let storedTokenID = item[PlayKeychainDB.internalTokenIDColumn] as? String
+        dict.removeObject(forKey: PlayKeychainDB.internalTokenIDColumn)
+        if wantsAttributes, let storedTokenID, dict[kSecAttrTokenID as String] == nil {
+            dict[kSecAttrTokenID as String] = storedTokenID
+        }
+        if wantsData, !isSecureEnclavePrivateKeyItem(item), let vData = item[kSecValueData] {
             dict[kSecValueData as String] = vData
         } else {
             dict.removeObject(forKey: kSecValueData)
@@ -132,7 +145,8 @@ public class PlayKeychain: NSObject {
         }
 
         if wantsData {
-            guard let vData = keychainDict[kSecValueData] else {
+            guard !isSecureEnclavePrivateKeyItem(keychainDict),
+                  let vData = keychainDict[kSecValueData] else {
                 return errSecItemNotFound
             }
             result.pointee = Unmanaged.passRetained(vData as CFTypeRef)
@@ -250,6 +264,7 @@ public class PlayKeychain: NSObject {
         // If it is, set it to 0 before forwarding the call to SecKeyCreateRandomKey,
         // and then add the key to the keychain db with the original attributes (with kSecAttrIsPermanent set to 1)
         let rawPrivateKeyAttrs = parameters[kSecPrivateKeyAttrs as String] as? [String: Any] ?? [:]
+        let isSecureEnclave = PTPlayChainSecureEnclaveRegistry.parametersRequestSecureEnclave(parameters)
         let isPermanent = flag(rawPrivateKeyAttrs as NSDictionary, kSecAttrIsPermanent) ||
             flag(parameters, kSecAttrIsPermanent)
         let privateKeyAttrs = sanitizedKeySubAttrs(rawPrivateKeyAttrs, forceNonPermanent: isPermanent)
@@ -309,6 +324,9 @@ public class PlayKeychain: NSObject {
             keychainDict["type"] = keychainDict[kSecAttrKeyType as String]
             keychainDict["kcls"] = keychainDict[kSecAttrKeyClass as String]
             keychainDict[kSecValueData as String] = extData
+            if isSecureEnclave {
+                keychainDict[PlayKeychainDB.internalTokenIDColumn] = kSecAttrTokenIDSecureEnclave as String
+            }
             let (insertStatus, _) = playChainDB.insertWithStatus(keychainDict as NSDictionary)
             guard insertStatus == errSecSuccess else {
                 debugLogger("Failed to write keychain file (status: \(insertStatus))")
@@ -318,6 +336,9 @@ public class PlayKeychain: NSObject {
                 return nil
             }
         }
+        if isSecureEnclave {
+            PTPlayChainSecureEnclaveRegistry.markSecureEnclaveKey(key)
+        }
         return Unmanaged.passRetained(key)
     }
 
@@ -326,6 +347,7 @@ public class PlayKeychain: NSObject {
                                              publicKey: UnsafeMutablePointer<Unmanaged<SecKey>?>?,
                                              privateKey: UnsafeMutablePointer<Unmanaged<SecKey>?>?) -> OSStatus {
         // Same as above but we need to disable kSecAttrIsPermanent for both the public and private key.
+        let isSecureEnclave = PTPlayChainSecureEnclaveRegistry.parametersRequestSecureEnclave(parameters)
         var isPermanent = flag(parameters, kSecAttrIsPermanent)
         let rawPrivateKeyAttrs = parameters[kSecPrivateKeyAttrs as String] as? [String: Any] ?? [:]
         if flag(rawPrivateKeyAttrs as NSDictionary, kSecAttrIsPermanent) {
@@ -383,11 +405,17 @@ public class PlayKeychain: NSObject {
             privateKeyDict["type"] = privateKeyDict[kSecAttrKeyType as String]
             privateKeyDict["kcls"] = kSecAttrKeyClassPrivate
             privateKeyDict[kSecValueData as String] = privData
+            if isSecureEnclave {
+                privateKeyDict[PlayKeychainDB.internalTokenIDColumn] = kSecAttrTokenIDSecureEnclave as String
+            }
             let (privStatus, _) = playChainDB.insertWithStatus(privateKeyDict as NSDictionary)
             guard privStatus == errSecSuccess else {
                 debugLogger("Failed to write private key to keychain db (status: \(privStatus))")
                 return privStatus
             }
+        }
+        if isSecureEnclave, let newPrivateKey {
+            PTPlayChainSecureEnclaveRegistry.markSecureEnclaveKey(newPrivateKey)
         }
         if let newPublicKey = newPublicKey {
             publicKey?.pointee = Unmanaged.passRetained(newPublicKey)
@@ -420,15 +448,19 @@ extension PlayKeychain {
         if let vData = keychainDict[kSecValueData] as? Data {
             rawData = vData
         } else if let pRef = keychainDict[kSecValuePersistentRef] as? Data,
-                  !(String(data: pRef, encoding: .utf8)?.hasPrefix("PCPR1:") ?? false) {
+                  !PTPlayChainPersistentRef.isPersistentRef(pRef) {
             rawData = pRef
         } else {
             rawData = nil
         }
-        guard let vData = rawData else {
+        guard let vData = rawData,
+              let secKey = makeSecKey(fromData: vData, attributes: keychainDict) else {
             return nil
         }
-        return makeSecKey(fromData: vData, attributes: keychainDict)
+        if isSecureEnclavePrivateKeyItem(keychainDict) {
+            PTPlayChainSecureEnclaveRegistry.markSecureEnclaveKey(secKey)
+        }
+        return secKey
     }
 
     private static func makeSecCertificate(from dict: NSDictionary) -> SecCertificate? {
@@ -550,7 +582,10 @@ extension PlayKeychain {
 
         let classType = query[kSecClass as String] as? String ?? ""
         if wantsData && !wantsAttributes && !wantsRef && !wantsPersistentRef {
-            let values = keychainDicts.compactMap { $0[kSecValueData] }
+            let values = keychainDicts.compactMap { item -> Any? in
+                guard !isSecureEnclavePrivateKeyItem(item) else { return nil }
+                return item[kSecValueData]
+            }
             guard values.count == keychainDicts.count else {
                 return errSecItemNotFound
             }

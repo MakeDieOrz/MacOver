@@ -887,8 +887,104 @@ static inline BOOL pt_is_playchain_debug_enabled(void) {
     return v;
 }
 
+static NSArray<NSString *> *pt_get_allowed_keychain_access_groups(void) {
+    static NSArray<NSString *> *s_allowed_groups = nil;
+    static dispatch_once_t s_once;
+    dispatch_once(&s_once, ^{
+        NSMutableDictionary *merged = [NSMutableDictionary dictionary];
+        NSDictionary *synth = pt_get_synthesized_app_entitlements_dict();
+        if (synth != nil) {
+            [merged addEntriesFromDictionary:synth];
+        }
+        SecCodeRef selfCode = NULL;
+        if (SecCodeCopySelf(0, &selfCode) == 0 && selfCode != NULL) {
+            CFDictionaryRef info = NULL;
+            // kSecCSSigningInformation == 2
+            if (SecCodeCopySigningInformation(selfCode, 2, &info) == 0 && info != NULL) {
+                NSDictionary *infoDict = (__bridge NSDictionary *)info;
+                NSDictionary *liveEnt = infoDict[@"entitlements-dict"];
+                if ([liveEnt isKindOfClass:[NSDictionary class]]) {
+                    id liveGroups = liveEnt[@"keychain-access-groups"];
+                    if (liveGroups != nil && merged[@"keychain-access-groups"] == nil) {
+                        merged[@"keychain-access-groups"] = liveGroups;
+                    } else if ([liveGroups isKindOfClass:[NSArray class]] &&
+                               [merged[@"keychain-access-groups"] isKindOfClass:[NSArray class]]) {
+                        NSMutableArray *combined = [(NSArray *)merged[@"keychain-access-groups"] mutableCopy];
+                        for (id g in (NSArray *)liveGroups) {
+                            if ([g isKindOfClass:[NSString class]] && ![combined containsObject:g]) {
+                                [combined addObject:g];
+                            }
+                        }
+                        merged[@"keychain-access-groups"] = [combined copy];
+                    }
+                    id liveAppId = liveEnt[@"application-identifier"];
+                    if ([liveAppId isKindOfClass:[NSString class]] &&
+                        ![(NSString *)liveAppId hasPrefix:@"FAKETEAMID."] &&
+                        [(NSString *)liveAppId length] > 0 &&
+                        merged[@"application-identifier"] == nil) {
+                        merged[@"application-identifier"] = liveAppId;
+                    }
+                }
+                CFRelease(info);
+            }
+            CFRelease(selfCode);
+        }
+        const char *team = pt_get_effective_team_id_cstr();
+        char bid[256];
+        pt_get_effective_bundle_id_cstr(bid, sizeof(bid));
+        NSString *teamStr = (team != NULL) ? ([NSString stringWithUTF8String:team] ?: @"") : @"";
+        NSString *bidStr = [NSString stringWithUTF8String:bid] ?: @"";
+        s_allowed_groups = [PTPlayChainPolicyBridge expandAccessGroupPatternsFromEntitlements:merged
+                                                                                       teamID:teamStr
+                                                                                     bundleID:bidStr];
+    });
+    return s_allowed_groups ?: @[];
+}
+
+static OSStatus pt_validate_dict_access_group(CFDictionaryRef dictRef, BOOL isReadOnlyQuery) {
+    if (dictRef == NULL) {
+        return errSecSuccess;
+    }
+    NSDictionary *dict = (__bridge NSDictionary *)dictRef;
+    id requested = dict[(__bridge NSString *)kSecAttrAccessGroup];
+    if (requested == nil) {
+        return errSecSuccess;
+    }
+    NSArray<NSString *> *allowed = pt_get_allowed_keychain_access_groups();
+    return [PTPlayChainPolicyBridge validateAccessGroup:requested
+                                        allowedPatterns:allowed
+                                        isReadOnlyQuery:isReadOnlyQuery];
+}
+
+static OSStatus pt_validate_key_params_access_groups(CFDictionaryRef parametersRef) {
+    if (parametersRef == NULL) {
+        return errSecSuccess;
+    }
+    OSStatus st = pt_validate_dict_access_group(parametersRef, NO);
+    if (st != errSecSuccess) {
+        return st;
+    }
+    NSDictionary *params = (__bridge NSDictionary *)parametersRef;
+    id privAttrs = params[(__bridge NSString *)kSecPrivateKeyAttrs];
+    if ([privAttrs isKindOfClass:[NSDictionary class]]) {
+        st = pt_validate_dict_access_group((__bridge CFDictionaryRef)privAttrs, NO);
+        if (st != errSecSuccess) {
+            return st;
+        }
+    }
+    id pubAttrs = params[(__bridge NSString *)kSecPublicKeyAttrs];
+    if ([pubAttrs isKindOfClass:[NSDictionary class]]) {
+        st = pt_validate_dict_access_group((__bridge CFDictionaryRef)pubAttrs, NO);
+        if (st != errSecSuccess) {
+            return st;
+        }
+    }
+    return errSecSuccess;
+}
+
 // Use the implementations from PlayKeychain
 static OSStatus pt_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
+    const void *caller = __builtin_return_address(0);
     OSStatus retval;
     if (result != NULL) {
         *result = NULL;
@@ -896,6 +992,12 @@ static OSStatus pt_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result)
     if (pt_is_playchain_enabled()) {
         if (query == NULL) {
             return errSecParam;
+        }
+        if (!pt_is_effective_system_or_playtools_caller(caller)) {
+            OSStatus agrpStatus = pt_validate_dict_access_group(query, YES);
+            if (agrpStatus != errSecSuccess) {
+                return agrpStatus;
+            }
         }
         retval = [PlayKeychain copyMatching:(__bridge NSDictionary * _Nonnull)(query) result:result];
         if (retval == errSecItemNotFound) {
@@ -920,6 +1022,7 @@ static OSStatus pt_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result)
 }
 
 static OSStatus pt_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
+    const void *caller = __builtin_return_address(0);
     OSStatus retval;
     if (result != NULL) {
         *result = NULL;
@@ -927,6 +1030,12 @@ static OSStatus pt_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
     if (pt_is_playchain_enabled()) {
         if (attributes == NULL) {
             return errSecParam;
+        }
+        if (!pt_is_effective_system_or_playtools_caller(caller)) {
+            OSStatus agrpStatus = pt_validate_dict_access_group(attributes, NO);
+            if (agrpStatus != errSecSuccess) {
+                return agrpStatus;
+            }
         }
         retval = [PlayKeychain add:(__bridge NSDictionary * _Nonnull)(attributes) result:result];
     } else {
@@ -940,10 +1049,21 @@ static OSStatus pt_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
 }
 
 static OSStatus pt_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributesToUpdate) {
+    const void *caller = __builtin_return_address(0);
     OSStatus retval;
     if (pt_is_playchain_enabled()) {
         if (query == NULL || attributesToUpdate == NULL) {
             return errSecParam;
+        }
+        if (!pt_is_effective_system_or_playtools_caller(caller)) {
+            OSStatus agrpStatus = pt_validate_dict_access_group(query, NO);
+            if (agrpStatus != errSecSuccess) {
+                return agrpStatus;
+            }
+            agrpStatus = pt_validate_dict_access_group(attributesToUpdate, NO);
+            if (agrpStatus != errSecSuccess) {
+                return agrpStatus;
+            }
         }
         retval = [PlayKeychain update:(__bridge NSDictionary * _Nonnull)(query) attributesToUpdate:(__bridge NSDictionary * _Nonnull)(attributesToUpdate)];
     } else {
@@ -957,10 +1077,17 @@ static OSStatus pt_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attribut
 }
 
 static OSStatus pt_SecItemDelete(CFDictionaryRef query) {
+    const void *caller = __builtin_return_address(0);
     OSStatus retval;
     if (pt_is_playchain_enabled()) {
         if (query == NULL) {
             return errSecParam;
+        }
+        if (!pt_is_effective_system_or_playtools_caller(caller)) {
+            OSStatus agrpStatus = pt_validate_dict_access_group(query, NO);
+            if (agrpStatus != errSecSuccess) {
+                return agrpStatus;
+            }
         }
         retval = [PlayKeychain delete:(__bridge NSDictionary * _Nonnull)(query)];
     } else {
@@ -973,6 +1100,7 @@ static OSStatus pt_SecItemDelete(CFDictionaryRef query) {
 }
 
 static SecKeyRef pt_SecKeyCreateRandomKey(CFDictionaryRef parameters, CFErrorRef *error) {
+    const void *caller = __builtin_return_address(0);
     SecKeyRef result;
     if (error != NULL) {
         *error = NULL;
@@ -983,6 +1111,15 @@ static SecKeyRef pt_SecKeyCreateRandomKey(CFDictionaryRef parameters, CFErrorRef
                 *error = CFErrorCreate(kCFAllocatorDefault, kCFErrorDomainOSStatus, errSecParam, NULL);
             }
             return NULL;
+        }
+        if (!pt_is_effective_system_or_playtools_caller(caller)) {
+            OSStatus agrpStatus = pt_validate_key_params_access_groups(parameters);
+            if (agrpStatus != errSecSuccess) {
+                if (error != NULL) {
+                    *error = CFErrorCreate(kCFAllocatorDefault, kCFErrorDomainOSStatus, agrpStatus, NULL);
+                }
+                return NULL;
+            }
         }
         result = [PlayKeychain keyCreateRandomKey:(__bridge NSDictionary * _Nonnull)(parameters) error:error];
     } else {
@@ -995,14 +1132,52 @@ static SecKeyRef pt_SecKeyCreateRandomKey(CFDictionaryRef parameters, CFErrorRef
     return result;
 }
 
+static CFDataRef pt_SecKeyCopyExternalRepresentation(SecKeyRef key, CFErrorRef *error) {
+    if (error != NULL) {
+        *error = NULL;
+    }
+    if (key == NULL) {
+        if (error != NULL) {
+            *error = CFErrorCreate(kCFAllocatorDefault, kCFErrorDomainOSStatus, errSecParam, NULL);
+        }
+        return NULL;
+    }
+    const void *caller = __builtin_return_address(0);
+    if (pt_is_playchain_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(caller) &&
+        [PTPlayChainSecureEnclaveRegistry isSecureEnclaveKey:key]) {
+        if (error != NULL) {
+            NSDictionary *userInfo = @{
+                NSLocalizedDescriptionKey: @"Secure Enclave private keys cannot be exported."
+            };
+            *error = CFErrorCreate(kCFAllocatorDefault,
+                                   kCFErrorDomainOSStatus,
+                                   errSecUnimplemented,
+                                   (__bridge CFDictionaryRef)userInfo);
+        }
+        if (pt_is_playchain_debug_enabled()) {
+            [PlayKeychain debugLogger:@"Blocked SecKeyCopyExternalRepresentation on simulated Secure Enclave key"];
+        }
+        return NULL;
+    }
+    return SecKeyCopyExternalRepresentation(key, error);
+}
+
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 // Deprecated, but some apps might still use it.
 static OSStatus pt_SecKeyGeneratePair(CFDictionaryRef parameters, SecKeyRef *publicKey, SecKeyRef *privateKey) {
+    const void *caller = __builtin_return_address(0);
     OSStatus retval;
     if (pt_is_playchain_enabled()) {
         if (parameters == NULL) {
             return errSecParam;
+        }
+        if (!pt_is_effective_system_or_playtools_caller(caller)) {
+            OSStatus agrpStatus = pt_validate_key_params_access_groups(parameters);
+            if (agrpStatus != errSecSuccess) {
+                return agrpStatus;
+            }
         }
         retval = [PlayKeychain keyGeneratePair:(__bridge NSDictionary * _Nonnull)(parameters) publicKey:(void *)publicKey privateKey:(void *)privateKey];
     } else {
@@ -1021,6 +1196,7 @@ DYLD_INTERPOSE(pt_SecItemAdd, SecItemAdd)
 DYLD_INTERPOSE(pt_SecItemUpdate, SecItemUpdate)
 DYLD_INTERPOSE(pt_SecItemDelete, SecItemDelete)
 DYLD_INTERPOSE(pt_SecKeyCreateRandomKey, SecKeyCreateRandomKey)
+DYLD_INTERPOSE(pt_SecKeyCopyExternalRepresentation, SecKeyCopyExternalRepresentation)
 DYLD_INTERPOSE(pt_SecKeyGeneratePair, SecKeyGeneratePair)
 #pragma clang diagnostic pop
 

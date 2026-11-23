@@ -90,6 +90,7 @@ class PlayKeychainDB: NSObject {
     ] as [CFString]).map { $0 as String })
 
     internal static let internalPrivateKeyColumn = "pc_privkey"
+    internal static let internalTokenIDColumn = "pc_tokid"
 
     private static let nonFilterableKeys: Set<String> = [
         kSecAttrAccessControl as String,
@@ -114,6 +115,9 @@ class PlayKeychainDB: NSObject {
             cols.formUnion(valueNames)
             if table == (kSecClassIdentity as String) {
                 cols.insert(internalPrivateKeyColumn)
+            }
+            if table == (kSecClassKey as String) {
+                cols.insert(internalTokenIDColumn)
             }
             map[table] = cols
         }
@@ -268,6 +272,9 @@ class PlayKeychainDB: NSObject {
                    let extData = SecKeyCopyExternalRepresentation(key, nil) as Data? {
                     dict[kSecValueData as String] = extData
                 }
+                if forPersistence, PTPlayChainSecureEnclaveRegistry.isSecureEnclaveKey(key) {
+                    dict[internalTokenIDColumn] = kSecAttrTokenIDSecureEnclave as String
+                }
                 if let keyAttrs = SecKeyCopyAttributes(key) as NSDictionary? {
                     if dict[kSecValueData] == nil, let vData = keyAttrs[kSecValueData] as? Data {
                         dict[kSecValueData as String] = vData
@@ -326,11 +333,16 @@ class PlayKeychainDB: NSObject {
             populateCertificateMetadata(from: cert, into: dict)
         }
 
+        if let tokenID = dict[kSecAttrTokenID as String] as? String {
+            dict[internalTokenIDColumn] = tokenID
+            dict.removeObject(forKey: kSecAttrTokenID)
+        }
+
         return dict
     }
 
     private static func makePersistentRef(tableName: String) -> Data {
-        return "PCPR1:\(tableName):\(UUID().uuidString)".data(using: .utf8) ?? Data()
+        return PTPlayChainPersistentRef.encode(tableName: tableName)
     }
 
     private static func resolveCandidateTables(for attributes: NSDictionary) -> [String] {
@@ -338,14 +350,9 @@ class PlayKeychainDB: NSObject {
             return PlayedAppleDBConstants.primaries[tableName as CFString] != nil ? [tableName] : []
         }
         if let pRefData = attributes[kSecValuePersistentRef] as? Data {
-            if let pRefStr = String(data: pRefData, encoding: .utf8), pRefStr.hasPrefix("PCPR1:") {
-                let tail = pRefStr.dropFirst("PCPR1:".count)
-                if let colonIndex = tail.firstIndex(of: ":") {
-                    let parsedTable = String(tail[..<colonIndex])
-                    if PlayedAppleDBConstants.primaries[parsedTable as CFString] != nil {
-                        return [parsedTable]
-                    }
-                }
+            if let decodedTable = PTPlayChainPersistentRef.decodeTableName(from: pRefData),
+               PlayedAppleDBConstants.primaries[decodedTable as CFString] != nil {
+                return [decodedTable]
             }
             return orderedTableNames
         }
@@ -606,6 +613,10 @@ class PlayKeychainDB: NSObject {
         if tableName == (kSecClassIdentity as String),
            normalized[Self.internalPrivateKeyColumn] is Data {
             columnsQuery.append(Self.internalPrivateKeyColumn)
+        }
+        if tableName == (kSecClassKey as String),
+           normalized[Self.internalTokenIDColumn] is String {
+            columnsQuery.append(Self.internalTokenIDColumn)
         }
 
         let insertValues: [CFTypeRef] = columnsQuery.map { col in
@@ -1022,6 +1033,9 @@ class PlayKeychainDB: NSObject {
             columns.append(contentsOf: PlayedAppleDBConstants.values.map { $0 as String })
             if tableName == (kSecClassIdentity as String) {
                 columns.append(Self.internalPrivateKeyColumn)
+            }
+            if tableName == (kSecClassKey as String) {
+                columns.append(Self.internalTokenIDColumn)
             }
             let columnsSetting = columns.map { "\($0) TEXT" }.joined(separator: ", ")
             let primaryKeysSetting = "PRIMARY KEY (\(value.map { "\($0)" }.joined(separator: ", ")))"

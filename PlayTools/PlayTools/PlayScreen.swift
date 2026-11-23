@@ -95,7 +95,9 @@ extension UIScreen {
 
         let computed: CGFloat
         let count = AKInterface.shared?.screenCount ?? 1
-        if PlaySettings.shared.notch && (count == 1 || (AKInterface.shared?.isMainScreenEqualToFirst ?? true)) {
+        if PlaySettings.shared.strictEmulationMode {
+            computed = mainScreenHeight > 0 ? (mainScreenWidth / mainScreenHeight) : 1.0
+        } else if PlaySettings.shared.notch && (count == 1 || (AKInterface.shared?.isMainScreenEqualToFirst ?? true)) {
             computed = mainScreenWidth / mainScreenHeight
         } else if let frame = AKInterface.shared?.mainScreenFrame {
             computed = frame.aspectRatio()
@@ -139,20 +141,25 @@ public class PlayScreen: NSObject {
                !Self.isAuxiliaryKeyboardWindow(window),
                Self.isValidWindowBounds(window) {
                 Self.cachedWindow = window
-                if self.resizable, let windowScene = window.windowScene {
+                let isStrict = PlaySettings.shared.strictEmulationMode
+                if self.resizable || isStrict, let windowScene = window.windowScene {
                     windowScene.sizeRestrictions?.minimumSize = CGSize(width: 0, height: 0)
                     windowScene.sizeRestrictions?.maximumSize = CGSize(width: .max, height: .max)
                 }
                 if !PTSafeMode.isActive,
                    let ak = AKInterface.shared,
-                   ak.isSequoiaOrNewer == true,
+                   isStrict || ak.isSequoiaOrNewer == true,
                    !self.fullscreen,
                    PlaySettings.shared.adaptiveDisplay {
                     let targetSize = CGSize(width: mainScreenWidth, height: mainScreenHeight)
                     if targetSize.width > 0, targetSize.height > 0 {
+                        if isStrict {
+                            ak.setWindowAspectRatio?(targetSize)
+                        }
                         ak.setWindowContentSize?(targetSize)
                         let settingsData = PlaySettings.shared.settingsData
-                        if self.resizable,
+                        if !isStrict,
+                           self.resizable,
                            settingsData.resizableAspectRatioWidth > 0,
                            settingsData.resizableAspectRatioHeight > 0 {
                             ak.setWindowAspectRatio?(
@@ -227,6 +234,9 @@ public class PlayScreen: NSObject {
     }
 
     @objc public var screenRect: CGRect {
+        if PlaySettings.shared.strictEmulationMode {
+            return CGRect(x: 0, y: 0, width: mainScreenWidth, height: mainScreenHeight)
+        }
         if Thread.isMainThread {
             let b = UIScreen.main.bounds
             Self.updateCachedScreenRect(b)
@@ -430,6 +440,9 @@ public class PlayScreen: NSObject {
     }
 
     @objc public static func boundsResizable(_ rect: CGRect) -> CGRect {
+        if PlaySettings.shared.strictEmulationMode {
+            return CGRect(x: 0, y: 0, width: mainScreenWidth, height: mainScreenHeight)
+        }
         if Thread.isMainThread {
             if let cw = cachedWindow,
                !cw.isHidden,
@@ -472,7 +485,8 @@ public class PlayScreen: NSObject {
                 return cached
             }
         }
-        if (!PlaySettings.shared.adaptiveDisplay || PlaySettings.shared.resizableWindow),
+        let preservesManualBounds = !PlaySettings.shared.adaptiveDisplay || PlaySettings.shared.resizableWindow
+        if preservesManualBounds,
            rect.width > 1, rect.height > 1 {
             return rect
         }

@@ -292,7 +292,8 @@ public enum PTWindowGeometryMath {
     public static func clampedContentSize(
         requested: CGSize,
         visibleScreenFrame: CGRect,
-        aspectRatio: CGSize? = nil
+        aspectRatio: CGSize? = nil,
+        titleBarHeight: CGFloat = 0
     ) -> CGSize {
         guard requested.width.isFinite,
               requested.height.isFinite,
@@ -301,12 +302,13 @@ public enum PTWindowGeometryMath {
             return .zero
         }
 
-        let maxW = visibleScreenFrame.width.isFinite && visibleScreenFrame.width > 0
-            ? visibleScreenFrame.width
-            : requested.width
-        let maxH = visibleScreenFrame.height.isFinite && visibleScreenFrame.height > 0
-            ? visibleScreenFrame.height
-            : requested.height
+        let safeTitleHeight = (titleBarHeight.isFinite && titleBarHeight > 0) ? titleBarHeight : 0
+        let hasValidWidth = visibleScreenFrame.width.isFinite && visibleScreenFrame.width > 0
+        let hasValidHeight = visibleScreenFrame.height.isFinite && visibleScreenFrame.height > 0
+        let rawMaxW = hasValidWidth ? visibleScreenFrame.width : requested.width
+        let rawMaxH = hasValidHeight ? max(1.0, visibleScreenFrame.height - safeTitleHeight) : requested.height
+        let maxW = (hasValidWidth && rawMaxW >= 1.0) ? floor(rawMaxW) : rawMaxW
+        let maxH = (hasValidHeight && rawMaxH >= 1.0) ? floor(rawMaxH) : rawMaxH
 
         var targetW = requested.width
         var targetH = requested.height
@@ -319,12 +321,162 @@ public enum PTWindowGeometryMath {
         }
 
         let scale = min(1.0, min(maxW / max(1.0, targetW), maxH / max(1.0, targetH)))
-        let finalW = max(1.0, (targetW * scale).rounded())
-        let finalH = max(1.0, (targetH * scale).rounded())
+        var finalW = max(1.0, (targetW * scale).rounded())
+        var finalH = max(1.0, (targetH * scale).rounded())
+        if (hasValidWidth && finalW > maxW) || (hasValidHeight && finalH > maxH) {
+            finalW = max(1.0, floor(targetW * scale))
+            finalH = max(1.0, floor(targetH * scale))
+        }
         guard finalW.isFinite, finalH.isFinite else {
             return .zero
         }
         return CGSize(width: finalW, height: finalH)
+    }
+
+    public struct StrictDeviceDisplaySpec: Equatable {
+        public let model: String
+        public let nativePixelWidth: Int
+        public let nativePixelHeight: Int
+        public let nativeScale: Double
+        public let isIPad: Bool
+
+        public var portraitLogicalSize: CGSize {
+            let shortPx = Double(min(nativePixelWidth, nativePixelHeight))
+            let longPx = Double(max(nativePixelWidth, nativePixelHeight))
+            return CGSize(
+                width: (shortPx / nativeScale).rounded(),
+                height: (longPx / nativeScale).rounded()
+            )
+        }
+
+        public func logicalSize(orientation: String) -> CGSize {
+            orientedSize(baseSize: portraitLogicalSize, portrait: isPortrait(orientation))
+        }
+
+        private func isPortrait(_ orientation: String) -> Bool {
+            orientation.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "portrait"
+        }
+
+        private func orientedSize(baseSize: CGSize, portrait: Bool) -> CGSize {
+            PTWindowGeometryMath.orientedSize(baseSize: baseSize, portrait: portrait)
+        }
+
+        private static let table: [String: StrictDeviceDisplaySpec] = [
+            "iPad6,7": StrictDeviceDisplaySpec(
+                model: "iPad6,7", nativePixelWidth: 2048, nativePixelHeight: 2732, nativeScale: 2.0, isIPad: true
+            ),
+            "iPad8,6": StrictDeviceDisplaySpec(
+                model: "iPad8,6", nativePixelWidth: 2048, nativePixelHeight: 2732, nativeScale: 2.0, isIPad: true
+            ),
+            "iPad13,8": StrictDeviceDisplaySpec(
+                model: "iPad13,8", nativePixelWidth: 2048, nativePixelHeight: 2732, nativeScale: 2.0, isIPad: true
+            ),
+            "iPad14,5": StrictDeviceDisplaySpec(
+                model: "iPad14,5", nativePixelWidth: 2048, nativePixelHeight: 2732, nativeScale: 2.0, isIPad: true
+            ),
+            "iPad16,6": StrictDeviceDisplaySpec(
+                model: "iPad16,6", nativePixelWidth: 2064, nativePixelHeight: 2752, nativeScale: 2.0, isIPad: true
+            ),
+            "iPad17,3": StrictDeviceDisplaySpec(
+                model: "iPad17,3", nativePixelWidth: 2064, nativePixelHeight: 2752, nativeScale: 2.0, isIPad: true
+            ),
+            "iPhone12,5": StrictDeviceDisplaySpec(
+                model: "iPhone12,5", nativePixelWidth: 1242, nativePixelHeight: 2688, nativeScale: 3.0, isIPad: false
+            ),
+            "iPhone14,3": StrictDeviceDisplaySpec(
+                model: "iPhone14,3", nativePixelWidth: 1284, nativePixelHeight: 2778, nativeScale: 3.0, isIPad: false
+            ),
+            "iPhone15,3": StrictDeviceDisplaySpec(
+                model: "iPhone15,3", nativePixelWidth: 1290, nativePixelHeight: 2796, nativeScale: 3.0, isIPad: false
+            ),
+            "iPhone16,2": StrictDeviceDisplaySpec(
+                model: "iPhone16,2", nativePixelWidth: 1290, nativePixelHeight: 2796, nativeScale: 3.0, isIPad: false
+            ),
+            "iPhone17,2": StrictDeviceDisplaySpec(
+                model: "iPhone17,2", nativePixelWidth: 1320, nativePixelHeight: 2868, nativeScale: 3.0, isIPad: false
+            ),
+            "iPhone18,2": StrictDeviceDisplaySpec(
+                model: "iPhone18,2", nativePixelWidth: 1320, nativePixelHeight: 2868, nativeScale: 3.0, isIPad: false
+            )
+        ]
+
+        private static let ios13CompatibleModels: Set<String> = ["iPad6,7", "iPad8,6", "iPhone12,5"]
+
+        public static func normalizedReportedIOSVersion(_ raw: String?) -> String {
+            switch (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "followhost", "follow_host", "host":
+                return "followHost"
+            case "compat18_3", "18.3", "ios18_3":
+                return "compat18_3"
+            case "compat13_7", "13.7", "ios13_7":
+                return "compat13_7"
+            default:
+                return "automatic"
+            }
+        }
+
+        public static func effectiveModel(
+            for rawModel: String,
+            normalizedReportedIOSVersion: String
+        ) -> String {
+            let trimmed = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            let base = trimmed.isEmpty ? "iPad13,8" : trimmed
+            guard normalizedReportedIOSVersion == "compat13_7", !ios13CompatibleModels.contains(base) else {
+                return base
+            }
+            return base.hasPrefix("iPhone") ? "iPhone12,5" : "iPad8,6"
+        }
+
+        public static func resolve(forModel rawModel: String) -> StrictDeviceDisplaySpec {
+            let trimmed = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let exact = table[trimmed] {
+                return exact
+            }
+            if trimmed.hasPrefix("iPhone"), let fallbackPhone = table["iPhone17,2"] {
+                return fallbackPhone
+            }
+            return table["iPad13,8"] ?? StrictDeviceDisplaySpec(
+                model: "iPad13,8", nativePixelWidth: 2048, nativePixelHeight: 2732, nativeScale: 2.0, isIPad: true
+            )
+        }
+    }
+
+    public struct StrictViewportWindowPlan: Equatable {
+        public let logicalSceneSize: CGSize
+        public let windowContentSize: CGSize
+        public let lockedAspectRatio: CGSize
+        public let allowsUserResize: Bool
+    }
+
+    public static func normalizedStrictOrientation(_ raw: String?) -> String {
+        let trimmed = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return trimmed == "portrait" ? "portrait" : "landscape"
+    }
+
+    public static func normalizedStrictScaleMode(_ raw: String?) -> String {
+        let trimmed = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return trimmed == "native1x" ? "native1x" : "fitScreen"
+    }
+
+    public static func strictViewportWindowPlan(
+        logicalSceneSize: CGSize,
+        scaleMode: String?,
+        visibleScreenFrame: CGRect,
+        titleBarHeight: CGFloat
+    ) -> StrictViewportWindowPlan {
+        let normalizedScale = normalizedStrictScaleMode(scaleMode)
+        let clamped = clampedContentSize(
+            requested: logicalSceneSize,
+            visibleScreenFrame: visibleScreenFrame,
+            titleBarHeight: titleBarHeight
+        )
+        let allowsResize = (normalizedScale == "fitScreen")
+        return StrictViewportWindowPlan(
+            logicalSceneSize: logicalSceneSize,
+            windowContentSize: clamped,
+            lockedAspectRatio: logicalSceneSize,
+            allowsUserResize: allowsResize
+        )
     }
 
     public static func orientedSize(baseSize: CGSize, portrait: Bool) -> CGSize {
