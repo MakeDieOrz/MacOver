@@ -1489,111 +1489,290 @@ static int (*pt_get_pthread_fchdir_fn(void))(int) {
     return (int (*)(int))atomic_load_explicit(&s_fn, memory_order_relaxed);
 }
 
-#define PT_UNIX_REL_SOCK_SLOTS 64U
+extern int pt_orig_close_nocancel(int fd) __asm("_close$NOCANCEL");
+
+#define PT_UNIX_REL_SOCK_SLOTS 256U
+#define PT_UNIX_SUN_PATH_CAP sizeof(((struct sockaddr_un *)0)->sun_path)
 
 typedef struct {
+    BOOL in_use;
+    int fd;
     uint64_t sock_ino;
-    char leaf[sizeof(((struct sockaddr_un *)0)->sun_path)];
-    char virt_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
+    uint64_t seq;
+    BOOL has_local;
+    BOOL has_peer;
+    char leaf[PT_UNIX_SUN_PATH_CAP];
+    char local_path[PT_UNIX_SUN_PATH_CAP];
+    char peer_path[PT_UNIX_SUN_PATH_CAP];
 } pt_unix_rel_sock_entry_t;
 
 static os_unfair_lock s_unix_rel_sock_lock = OS_UNFAIR_LOCK_INIT;
 static pt_unix_rel_sock_entry_t s_unix_rel_sock_table[PT_UNIX_REL_SOCK_SLOTS];
-static uint32_t s_unix_rel_sock_cursor = 0;
+static uint64_t s_unix_rel_sock_seq = 0;
+static _Atomic int s_unix_sock_tracked_count = 0;
 
 static uint64_t pt_unix_sock_ino(int fd) {
     struct stat st;
     return (fd >= 0 && fstat(fd, &st) == 0) ? (uint64_t)st.st_ino : 0;
 }
 
-static void pt_unix_record_rel_sock(int fd, const char *leaf, const char *virt_path) {
-    if (fd < 0 || leaf == NULL || leaf[0] == '\0' || virt_path == NULL || virt_path[0] != '/') {
+static void pt_unix_record_sock_path(int fd, BOOL is_peer, const char *leaf, const char *reported_path) {
+    if (fd < 0 || reported_path == NULL || reported_path[0] == '\0') {
+        return;
+    }
+    if (strlen(reported_path) >= PT_UNIX_SUN_PATH_CAP) {
         return;
     }
     uint64_t ino = pt_unix_sock_ino(fd);
     os_unfair_lock_lock(&s_unix_rel_sock_lock);
     pt_unix_rel_sock_entry_t *dst = NULL;
-    if (ino != 0) {
-        for (size_t i = 0; i < PT_UNIX_REL_SOCK_SLOTS; i++) {
-            if (s_unix_rel_sock_table[i].sock_ino == ino) {
-                dst = &s_unix_rel_sock_table[i];
-                break;
+    pt_unix_rel_sock_entry_t *free_slot = NULL;
+    pt_unix_rel_sock_entry_t *oldest_slot = &s_unix_rel_sock_table[0];
+    for (size_t i = 0; i < PT_UNIX_REL_SOCK_SLOTS; i++) {
+        pt_unix_rel_sock_entry_t *e = &s_unix_rel_sock_table[i];
+        if (!e->in_use) {
+            if (free_slot == NULL) {
+                free_slot = e;
             }
+            continue;
+        }
+        if (e->fd == fd) {
+            dst = e;
+            break;
+        }
+        if (e->seq < oldest_slot->seq) {
+            oldest_slot = e;
         }
     }
-    if (dst == NULL) {
-        uint32_t idx = s_unix_rel_sock_cursor++ & (PT_UNIX_REL_SOCK_SLOTS - 1U);
-        dst = &s_unix_rel_sock_table[idx];
+    if (dst != NULL) {
+        if (ino != 0 && dst->sock_ino != 0 && dst->sock_ino != ino) {
+            dst->has_local = NO;
+            dst->has_peer = NO;
+            dst->leaf[0] = '\0';
+            dst->local_path[0] = '\0';
+            dst->peer_path[0] = '\0';
+        }
+    } else {
+        dst = (free_slot != NULL) ? free_slot : oldest_slot;
+        if (!dst->in_use) {
+            atomic_fetch_add_explicit(&s_unix_sock_tracked_count, 1, memory_order_release);
+        }
+        memset(dst, 0, sizeof(*dst));
+        dst->in_use = YES;
+        dst->fd = fd;
     }
     dst->sock_ino = ino;
-    strlcpy(dst->leaf, leaf, sizeof(dst->leaf));
-    strlcpy(dst->virt_path, virt_path, sizeof(dst->virt_path));
+    dst->seq = ++s_unix_rel_sock_seq;
+    if (leaf != NULL && leaf[0] != '\0') {
+        strlcpy(dst->leaf, leaf, sizeof(dst->leaf));
+    }
+    if (is_peer) {
+        dst->has_peer = YES;
+        strlcpy(dst->peer_path, reported_path, sizeof(dst->peer_path));
+    } else {
+        dst->has_local = YES;
+        strlcpy(dst->local_path, reported_path, sizeof(dst->local_path));
+    }
     os_unfair_lock_unlock(&s_unix_rel_sock_lock);
 }
 
-static BOOL pt_unix_copy_entry_by_fd(int fd,
-                                     char *out_leaf,
-                                     size_t out_leaf_cap,
-                                     char *out_virt,
-                                     size_t out_virt_cap) {
-    uint64_t ino = pt_unix_sock_ino(fd);
-    if (ino == 0) {
-        return NO;
+static void pt_unix_copy_local_for_accept(int listen_fd, int client_fd) {
+    if (listen_fd < 0 || client_fd < 0) {
+        return;
     }
+    uint64_t listen_ino = pt_unix_sock_ino(listen_fd);
+    char leaf_buf[PT_UNIX_SUN_PATH_CAP];
+    char local_buf[PT_UNIX_SUN_PATH_CAP];
+    leaf_buf[0] = '\0';
+    local_buf[0] = '\0';
     BOOL found = NO;
+
     os_unfair_lock_lock(&s_unix_rel_sock_lock);
+    const pt_unix_rel_sock_entry_t *best = NULL;
     for (size_t i = 0; i < PT_UNIX_REL_SOCK_SLOTS; i++) {
         const pt_unix_rel_sock_entry_t *e = &s_unix_rel_sock_table[i];
-        if (e->sock_ino == ino && e->leaf[0] != '\0' && e->virt_path[0] == '/') {
-            if (out_leaf && out_leaf_cap > 0) {
-                strlcpy(out_leaf, e->leaf, out_leaf_cap);
+        if (!e->in_use || !e->has_local || e->local_path[0] == '\0') {
+            continue;
+        }
+        if (e->fd == listen_fd && (listen_ino == 0 || e->sock_ino == 0 || e->sock_ino == listen_ino)) {
+            best = e;
+            break;
+        }
+        if (listen_ino != 0 && e->sock_ino == listen_ino && (best == NULL || e->seq > best->seq)) {
+            best = e;
+        }
+    }
+    if (best != NULL) {
+        strlcpy(leaf_buf, best->leaf, sizeof(leaf_buf));
+        strlcpy(local_buf, best->local_path, sizeof(local_buf));
+        found = YES;
+    }
+    os_unfair_lock_unlock(&s_unix_rel_sock_lock);
+
+    if (found) {
+        pt_unix_record_sock_path(client_fd, NO, leaf_buf, local_buf);
+    }
+}
+
+static void pt_unix_forget_fd(int fd) {
+    if (fd < 0) {
+        return;
+    }
+    os_unfair_lock_lock(&s_unix_rel_sock_lock);
+    for (size_t i = 0; i < PT_UNIX_REL_SOCK_SLOTS; i++) {
+        pt_unix_rel_sock_entry_t *e = &s_unix_rel_sock_table[i];
+        if (e->in_use && e->fd == fd) {
+            memset(e, 0, sizeof(*e));
+            atomic_fetch_sub_explicit(&s_unix_sock_tracked_count, 1, memory_order_release);
+        }
+    }
+    os_unfair_lock_unlock(&s_unix_rel_sock_lock);
+}
+
+static BOOL pt_unix_lookup_sock_path(int fd,
+                                     BOOL is_peer,
+                                     const char *raw_kernel_path,
+                                     char *out_path,
+                                     size_t out_cap) {
+    if (out_path == NULL || out_cap == 0) {
+        return NO;
+    }
+    uint64_t ino = pt_unix_sock_ino(fd);
+    BOOL found = NO;
+    os_unfair_lock_lock(&s_unix_rel_sock_lock);
+    const pt_unix_rel_sock_entry_t *matched = NULL;
+    if (fd >= 0) {
+        for (size_t i = 0; i < PT_UNIX_REL_SOCK_SLOTS; i++) {
+            const pt_unix_rel_sock_entry_t *e = &s_unix_rel_sock_table[i];
+            if (!e->in_use || e->fd != fd) {
+                continue;
             }
-            if (out_virt && out_virt_cap > 0) {
-                strlcpy(out_virt, e->virt_path, out_virt_cap);
+            if (ino != 0 && e->sock_ino != 0 && e->sock_ino != ino) {
+                continue;
             }
-            found = YES;
+            if (is_peer ? e->has_peer : e->has_local) {
+                matched = e;
+            }
             break;
         }
     }
+    if (matched == NULL && ino != 0) {
+        for (size_t i = 0; i < PT_UNIX_REL_SOCK_SLOTS; i++) {
+            const pt_unix_rel_sock_entry_t *e = &s_unix_rel_sock_table[i];
+            if (!e->in_use || e->sock_ino != ino || !(is_peer ? e->has_peer : e->has_local)) {
+                continue;
+            }
+            if (matched == NULL || e->seq > matched->seq) {
+                matched = e;
+            }
+        }
+    }
+    if (matched == NULL && raw_kernel_path != NULL &&
+        strncmp(raw_kernel_path, "./", 2) == 0 && raw_kernel_path[2] != '\0') {
+        const char *leaf = raw_kernel_path + 2;
+        for (size_t i = 0; i < PT_UNIX_REL_SOCK_SLOTS; i++) {
+            const pt_unix_rel_sock_entry_t *e = &s_unix_rel_sock_table[i];
+            if (!e->in_use || e->leaf[0] == '\0' || strcmp(e->leaf, leaf) != 0) {
+                continue;
+            }
+            if ((is_peer && e->has_peer) || (!is_peer && e->has_local)) {
+                if (matched == NULL || e->seq > matched->seq) {
+                    matched = e;
+                }
+            } else if (is_peer && e->has_local) {
+                if (matched == NULL || e->seq > matched->seq) {
+                    matched = e;
+                }
+            }
+        }
+    }
+    if (matched != NULL) {
+        const char *val = NULL;
+        if (is_peer) {
+            val = matched->has_peer ? matched->peer_path : (matched->has_local ? matched->local_path : NULL);
+        } else {
+            val = matched->has_local ? matched->local_path : NULL;
+        }
+        if (val != NULL && val[0] != '\0' && strlcpy(out_path, val, out_cap) < out_cap) {
+            found = YES;
+        }
+    }
     os_unfair_lock_unlock(&s_unix_rel_sock_lock);
     return found;
 }
 
-static BOOL pt_unix_lookup_rel_sock(int fd, const char *leaf, char *out_virt, size_t out_cap) {
-    if (leaf == NULL || leaf[0] == '\0' || out_virt == NULL || out_cap == 0) {
+static BOOL pt_normalize_relative_path(const char *src, char *dst, size_t dst_size) {
+    if (src == NULL || dst == NULL || dst_size < 2 || src[0] == '\0' || src[0] == '/') {
         return NO;
     }
-    uint64_t ino = pt_unix_sock_ino(fd);
-    BOOL found = NO;
-    os_unfair_lock_lock(&s_unix_rel_sock_lock);
-    if (ino != 0) {
-        for (size_t i = 0; i < PT_UNIX_REL_SOCK_SLOTS; i++) {
-            const pt_unix_rel_sock_entry_t *e = &s_unix_rel_sock_table[i];
-            if (e->sock_ino == ino &&
-                e->virt_path[0] == '/' &&
-                strcmp(e->leaf, leaf) == 0) {
-                if (strlcpy(out_virt, e->virt_path, out_cap) < out_cap) {
-                    found = YES;
-                }
-                break;
-            }
+    const char *seg_ptrs[128];
+    size_t seg_lens[128];
+    size_t depth = 0;
+
+    const char *p = src;
+    while (*p != '\0') {
+        while (*p == '/') {
+            p++;
         }
-    }
-    if (!found) {
-        uint32_t cur = s_unix_rel_sock_cursor;
-        for (uint32_t k = 0; k < PT_UNIX_REL_SOCK_SLOTS; k++) {
-            uint32_t idx = (cur - 1U - k) & (PT_UNIX_REL_SOCK_SLOTS - 1U);
-            const pt_unix_rel_sock_entry_t *e = &s_unix_rel_sock_table[idx];
-            if (e->virt_path[0] == '/' && strcmp(e->leaf, leaf) == 0) {
-                if (strlcpy(out_virt, e->virt_path, out_cap) < out_cap) {
-                    found = YES;
-                }
-                break;
-            }
+        if (*p == '\0') {
+            break;
         }
+        const char *start = p;
+        while (*p != '\0' && *p != '/') {
+            p++;
+        }
+        size_t len = (size_t)(p - start);
+        if (len == 1U && start[0] == '.') {
+            continue;
+        }
+        if (len == 2U && start[0] == '.' && start[1] == '.') {
+            if (depth > 0U && !(seg_lens[depth - 1U] == 2U &&
+                                seg_ptrs[depth - 1U][0] == '.' &&
+                                seg_ptrs[depth - 1U][1] == '.')) {
+                depth--;
+            } else {
+                if (depth >= 128U) {
+                    return NO;
+                }
+                seg_ptrs[depth] = start;
+                seg_lens[depth] = len;
+                depth++;
+            }
+            continue;
+        }
+        if (depth >= 128U) {
+            return NO;
+        }
+        seg_ptrs[depth] = start;
+        seg_lens[depth] = len;
+        depth++;
     }
-    os_unfair_lock_unlock(&s_unix_rel_sock_lock);
-    return found;
+
+    if (depth == 0U) {
+        if (dst_size < 2U) {
+            return NO;
+        }
+        dst[0] = '.';
+        dst[1] = '\0';
+        return YES;
+    }
+
+    size_t out = 0U;
+    for (size_t i = 0U; i < depth; i++) {
+        if (i > 0U) {
+            if (out + 1U >= dst_size) {
+                return NO;
+            }
+            dst[out++] = '/';
+        }
+        if (out + seg_lens[i] >= dst_size) {
+            return NO;
+        }
+        memcpy(dst + out, seg_ptrs[i], seg_lens[i]);
+        out += seg_lens[i];
+    }
+    dst[out] = '\0';
+    return YES;
 }
 
 static int pt_prepare_unix_sockaddr(const struct sockaddr *address,
@@ -1625,19 +1804,49 @@ static int pt_prepare_unix_sockaddr(const struct sockaddr *address,
     }
     const struct sockaddr_un *un = (const struct sockaddr_un *)address;
     size_t max_sun = (size_t)address_len - offsetof(struct sockaddr_un, sun_path);
+    if (max_sun == 0U || un->sun_path[0] == '\0') {
+        return 0;
+    }
     char raw_path[PATH_MAX];
     size_t copy_len = strnlen(un->sun_path, MIN(max_sun, sizeof(raw_path) - 1U));
     memcpy(raw_path, un->sun_path, copy_len);
     raw_path[copy_len] = '\0';
 
-    if (raw_path[0] != '/') {
-        return 0;
+    BOOL is_relative = (raw_path[0] != '/');
+    char norm_rel[PT_UNIX_SUN_PATH_CAP];
+    char abs_raw[PATH_MAX];
+    const char *fs_input = raw_path;
+
+    if (is_relative) {
+        if (!pt_is_bypass_enabled() || pt_is_effective_system_or_playtools_caller(caller)) {
+            return 0;
+        }
+        if (!pt_normalize_relative_path(raw_path, norm_rel, sizeof(norm_rel))) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        char cwd_buf[PATH_MAX];
+        if (getcwd(cwd_buf, sizeof(cwd_buf)) == NULL || cwd_buf[0] != '/') {
+            return 0;
+        }
+        const char *cwd = cwd_buf;
+        if (strncmp(cwd, "/System/Volumes/Data/", 21) == 0) {
+            cwd += 20;
+        }
+        int jn = snprintf(abs_raw, sizeof(abs_raw), "%s/%s",
+                          (strcmp(cwd, "/") == 0) ? "" : cwd, raw_path);
+        if (jn < 0 || (size_t)jn >= sizeof(abs_raw)) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        fs_input = abs_raw;
     }
+
     char resolved_buf[PATH_MAX];
     const char *resolved = NULL;
     int is_sys = -1;
     pt_fs_path_disposition_t disp = pt_prepare_fs_path_cached_caller(
-        raw_path, caller, resolved_buf, sizeof(resolved_buf), &resolved, &is_sys);
+        fs_input, caller, resolved_buf, sizeof(resolved_buf), &resolved, &is_sys);
     if (disp == PT_FS_PATH_HIDDEN) {
         errno = ENOENT;
         return -1;
@@ -1646,11 +1855,23 @@ static int pt_prepare_unix_sockaddr(const struct sockaddr *address,
         errno = EACCES;
         return -1;
     }
-    if (resolved == NULL || strcmp(resolved, raw_path) == 0) {
+    char norm_resolved_buf[PATH_MAX];
+    if (resolved != NULL && resolved[0] == '/' && pt_needs_lexical_norm(resolved)) {
+        const char *collapsed = pt_normalize_lexical_path(resolved, norm_resolved_buf, sizeof(norm_resolved_buf));
+        if (collapsed == NULL) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        resolved = collapsed;
+    }
+    if (resolved == NULL || (!is_relative && strcmp(resolved, raw_path) == 0)) {
         return 0;
     }
     size_t rlen = strlen(resolved);
     if (rlen < sizeof(out_mapped->sun_path)) {
+        if (is_relative && out_virt != NULL && out_virt_cap > 0) {
+            strlcpy(out_virt, norm_rel, out_virt_cap);
+        }
         memset(out_mapped, 0, sizeof(*out_mapped));
         out_mapped->sun_family = AF_UNIX;
         memcpy(out_mapped->sun_path, resolved, rlen + 1U);
@@ -1714,8 +1935,10 @@ static int pt_prepare_unix_sockaddr(const struct sockaddr *address,
         strlcpy(out_leaf, leaf, out_leaf_cap);
     }
     if (out_virt != NULL && out_virt_cap > 0) {
-        if ((strncmp(raw_path, "/var/", 5) == 0 || strncmp(raw_path, "/private/var/", 13) == 0) &&
-            strlen(raw_path) < out_virt_cap) {
+        if (is_relative) {
+            strlcpy(out_virt, norm_rel, out_virt_cap);
+        } else if ((strncmp(raw_path, "/var/", 5) == 0 || strncmp(raw_path, "/private/var/", 13) == 0) &&
+                   strlen(raw_path) < out_virt_cap) {
             strlcpy(out_virt, raw_path, out_virt_cap);
         } else {
             char vbuf[PATH_MAX];
@@ -1776,6 +1999,7 @@ static void pt_end_unix_fchdir(pt_unix_fchdir_guard_t *guard) {
 }
 
 static void pt_virtualize_unix_sockaddr_out(int socket_fd,
+                                            BOOL is_peer,
                                             struct sockaddr *address,
                                             socklen_t *address_len,
                                             socklen_t caller_cap,
@@ -1791,7 +2015,7 @@ static void pt_virtualize_unix_sockaddr_out(int socket_fd,
     struct sockaddr_un *un = (struct sockaddr_un *)address;
     size_t written = (size_t)MIN(*address_len, caller_cap);
     size_t avail = written - offsetof(struct sockaddr_un, sun_path);
-    if (avail == 0) {
+    if (avail == 0 || un->sun_path[0] == '\0') {
         return;
     }
     char raw_path[PATH_MAX];
@@ -1801,12 +2025,10 @@ static void pt_virtualize_unix_sockaddr_out(int socket_fd,
 
     char vbuf[PATH_MAX];
     const char *virt = NULL;
-    if (raw_path[0] == '/') {
+    if (pt_unix_lookup_sock_path(socket_fd, is_peer, raw_path, vbuf, sizeof(vbuf))) {
+        virt = vbuf;
+    } else if (raw_path[0] == '/') {
         virt = pt_virtualize_path_for_app(raw_path, vbuf, sizeof(vbuf), NO);
-    } else if (strncmp(raw_path, "./", 2) == 0 && raw_path[2] != '\0') {
-        if (pt_unix_lookup_rel_sock(socket_fd, raw_path + 2, vbuf, sizeof(vbuf))) {
-            virt = vbuf;
-        }
     }
     if (virt == NULL || strcmp(virt, raw_path) == 0) {
         return;
@@ -1842,8 +2064,8 @@ static int pt_bind(int socket, const struct sockaddr *address, socklen_t address
     socklen_t use_len = (prep > 0) ? mapped_len : address_len;
     int ret = bind(socket, use_addr, use_len);
     pt_end_unix_fchdir(&guard);
-    if (ret == 0 && leaf_buf[0] != '\0' && virt_buf[0] == '/') {
-        pt_unix_record_rel_sock(socket, leaf_buf, virt_buf);
+    if (ret == 0 && virt_buf[0] != '\0') {
+        pt_unix_record_sock_path(socket, NO, leaf_buf, virt_buf);
     }
     return ret;
 }
@@ -1863,9 +2085,11 @@ static int pt_connect(int socket, const struct sockaddr *address, socklen_t addr
     const struct sockaddr *use_addr = (prep > 0) ? (const struct sockaddr *)&mapped : address;
     socklen_t use_len = (prep > 0) ? mapped_len : address_len;
     int ret = connect(socket, use_addr, use_len);
+    int saved_err = errno;
     pt_end_unix_fchdir(&guard);
-    if (ret == 0 && leaf_buf[0] != '\0' && virt_buf[0] == '/') {
-        pt_unix_record_rel_sock(socket, leaf_buf, virt_buf);
+    if ((ret == 0 || (ret < 0 && saved_err == EINPROGRESS)) && virt_buf[0] != '\0') {
+        pt_unix_record_sock_path(socket, YES, leaf_buf, virt_buf);
+        errno = saved_err;
     }
     return ret;
 }
@@ -1874,13 +2098,9 @@ static int pt_accept(int socket, struct sockaddr * __restrict address, socklen_t
     socklen_t caller_cap = (address_len != NULL) ? *address_len : 0;
     int ret = accept(socket, address, address_len);
     if (ret >= 0) {
-        char leaf_buf[sizeof(((struct sockaddr_un *)0)->sun_path)];
-        char virt_buf[sizeof(((struct sockaddr_un *)0)->sun_path)];
-        if (pt_unix_copy_entry_by_fd(socket, leaf_buf, sizeof(leaf_buf), virt_buf, sizeof(virt_buf))) {
-            pt_unix_record_rel_sock(ret, leaf_buf, virt_buf);
-        }
+        pt_unix_copy_local_for_accept(socket, ret);
         if (address != NULL && address_len != NULL) {
-            pt_virtualize_unix_sockaddr_out(ret, address, address_len, caller_cap, __builtin_return_address(0));
+            pt_virtualize_unix_sockaddr_out(ret, YES, address, address_len, caller_cap, __builtin_return_address(0));
         }
     }
     return ret;
@@ -1916,7 +2136,7 @@ static int pt_getsockname(int socket, struct sockaddr * __restrict address, sock
     socklen_t caller_cap = *address_len;
     int ret = getsockname(socket, address, address_len);
     if (ret == 0) {
-        pt_virtualize_unix_sockaddr_out(socket, address, address_len, caller_cap, __builtin_return_address(0));
+        pt_virtualize_unix_sockaddr_out(socket, NO, address, address_len, caller_cap, __builtin_return_address(0));
     }
     return ret;
 }
@@ -1929,9 +2149,23 @@ static int pt_getpeername(int socket, struct sockaddr * __restrict address, sock
     socklen_t caller_cap = *address_len;
     int ret = getpeername(socket, address, address_len);
     if (ret == 0) {
-        pt_virtualize_unix_sockaddr_out(socket, address, address_len, caller_cap, __builtin_return_address(0));
+        pt_virtualize_unix_sockaddr_out(socket, YES, address, address_len, caller_cap, __builtin_return_address(0));
     }
     return ret;
+}
+
+static int pt_close(int fd) {
+    if (fd >= 0 && atomic_load_explicit(&s_unix_sock_tracked_count, memory_order_acquire) > 0) {
+        pt_unix_forget_fd(fd);
+    }
+    return close(fd);
+}
+
+static int pt_close_nocancel(int fd) {
+    if (fd >= 0 && atomic_load_explicit(&s_unix_sock_tracked_count, memory_order_acquire) > 0) {
+        pt_unix_forget_fd(fd);
+    }
+    return pt_orig_close_nocancel(fd);
 }
 
 #define PT_IFADDRS_HEAD_MAP_CAP 64
@@ -2061,5 +2295,7 @@ DYLD_INTERPOSE(pt_accept, accept)
 DYLD_INTERPOSE(pt_sendto, sendto)
 DYLD_INTERPOSE(pt_getsockname, getsockname)
 DYLD_INTERPOSE(pt_getpeername, getpeername)
+DYLD_INTERPOSE(pt_close, close)
+DYLD_INTERPOSE(pt_close_nocancel, pt_orig_close_nocancel)
 DYLD_INTERPOSE(pt_getifaddrs, getifaddrs)
 DYLD_INTERPOSE(pt_freeifaddrs, freeifaddrs)

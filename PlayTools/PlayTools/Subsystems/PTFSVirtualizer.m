@@ -135,9 +135,10 @@ BOOL pt_is_effective_system_or_playtools_caller(const void *ret_addr) {
     BOOL need_backtrace_fallback = NO;
 
     // Advance past internal PlayTools helper frames (without counting toward wrapper budget)
-    // until reaching the first external/wrapper frame, then memoize using compound key
-    // (lr ^ fp[1] ^ fp[2]) and bound unwinding to PT_MAX_CALLER_UNWIND_DEPTH (4 frames).
-    for (int hop = 0; hop < 16; hop++) {
+    // until reaching the first external/wrapper frame, then check the 3-frame cache
+    // (populated only when the verdict resolves within the first 3 frames) and bound
+    // unwinding to PT_MAX_CALLER_UNWIND_DEPTH frames.
+    for (int hop = 0; hop < 32; hop++) {
         if (stack_top < 16 || fp < stack_bot || fp + 16 > stack_top || (fp & 0x7) != 0) {
             if (hop == 0) {
                 need_backtrace_fallback = YES;
@@ -159,6 +160,7 @@ BOOL pt_is_effective_system_or_playtools_caller(const void *ret_addr) {
         }
 
         // First external frame reached: collect up to 2 caller link registers for compound key.
+        uintptr_t lr0 = (uintptr_t)lr_addr;
         uintptr_t fp1_lr = 0;
         uintptr_t fp2_lr = 0;
         if (next_fp > fp && stack_top >= 16 && next_fp >= stack_bot && next_fp + 16 <= stack_top && (next_fp & 0x7) == 0) {
@@ -168,38 +170,59 @@ BOOL pt_is_effective_system_or_playtools_caller(const void *ret_addr) {
                 fp2_lr = (uintptr_t)pt_strip_return_addr(((const uintptr_t *)fp2)[1]);
             }
         }
-        uint64_t compound_key = pt_caller_compound_key3((uintptr_t)ret_addr, fp1_lr, fp2_lr);
-        size_t wslot = pt_wrapper_cache_slot(compound_key);
-        uint64_t cached_entry = atomic_load_explicit(&s_wrapper_context_cache[wslot], memory_order_relaxed);
-        bool cached_sys = false;
-        if (pt_wrapper_cache_match(cached_entry, compound_key, &cached_sys)) {
-            s_tls_in_callstack = NO;
-            return cached_sys ? YES : NO;
+        bool key_matches_ret = (lr0 == (uintptr_t)pt_strip_return_addr((uintptr_t)ret_addr));
+        uint64_t compound_key = 0ULL;
+        size_t wslot = 0;
+        if (key_matches_ret) {
+            compound_key = pt_caller_compound_key3(lr0, fp1_lr, fp2_lr);
+            wslot = pt_wrapper_cache_slot(compound_key);
+            uint64_t cached_entry = atomic_load_explicit(&s_wrapper_context_cache[wslot], memory_order_relaxed);
+            bool cached_sys = false;
+            if (pt_wrapper_cache_match(cached_entry, compound_key, &cached_sys)) {
+                s_tls_in_callstack = NO;
+                return cached_sys ? YES : NO;
+            }
         }
 
-        // Cache miss: perform bounded 4-frame walk starting from this external frame.
+        // Cache miss: perform bounded frame walk up to PT_MAX_CALLER_UNWIND_DEPTH.
         uint8_t frame_kinds[PT_MAX_CALLER_UNWIND_DEPTH];
         size_t collected = 0;
         uintptr_t walk_fp = fp;
         for (int depth = 0; depth < PT_MAX_CALLER_UNWIND_DEPTH; depth++) {
-            if (stack_top < 16 || walk_fp < stack_bot || walk_fp + 16 > stack_top || (walk_fp & 0x7) != 0) {
+            uint8_t wkind;
+            uintptr_t wnext;
+            if (depth == 0) {
+                wnext = next_fp;
+                wkind = fkind;
+            } else {
+                if (stack_top < 16 || walk_fp < stack_bot || walk_fp + 16 > stack_top || (walk_fp & 0x7) != 0) {
+                    break;
+                }
+                wnext = ((const uintptr_t *)walk_fp)[0];
+                const void *wlr = pt_strip_return_addr(((const uintptr_t *)walk_fp)[1]);
+                if (wlr == NULL) {
+                    break;
+                }
+                wkind = pt_classify_caller_addr(wlr);
+            }
+            frame_kinds[collected++] = wkind;
+            if (wkind != PT_CALLER_SYS_WRAPPER) {
                 break;
             }
-            uintptr_t wnext = ((const uintptr_t *)walk_fp)[0];
-            const void *wlr = pt_strip_return_addr(((const uintptr_t *)walk_fp)[1]);
-            if (wlr == NULL) {
-                break;
-            }
-            frame_kinds[collected++] = pt_classify_caller_addr(wlr);
             if (wnext <= walk_fp) {
                 break;
             }
             walk_fp = wnext;
         }
-        bool bounded_sys = pt_classify_bounded_frame_kinds(frame_kinds, collected, true);
+        bool cacheable_3frame = false;
+        bool bounded_sys = pt_classify_bounded_frame_kinds_ex(frame_kinds, collected, true, &cacheable_3frame);
         result = bounded_sys ? YES : NO;
-        uint64_t packed = pt_wrapper_cache_pack(compound_key, bounded_sys);
-        atomic_store_explicit(&s_wrapper_context_cache[wslot], packed, memory_order_relaxed);
+        // Only cache verdicts fully determined within the 3-frame key [0..2];
+        // deeper chains must not poison the 3-frame slot for other origins.
+        if (key_matches_ret && cacheable_3frame) {
+            uint64_t packed = pt_wrapper_cache_pack(compound_key, bounded_sys);
+            atomic_store_explicit(&s_wrapper_context_cache[wslot], packed, memory_order_relaxed);
+        }
         break;
     }
     if (need_backtrace_fallback) {
@@ -628,6 +651,8 @@ static BOOL pt_is_hidden_normalized_path_cached_caller(const char *norm, const v
                     (check_bypass_artifacts &&
                      ((strncmp(norm, "/System/Applications", 20) == 0 &&
                        (norm[20] == '\0' || norm[20] == '/')) ||
+                      (strncmp(norm, "/System/Library/CoreServices/Finder.app", 39) == 0 &&
+                       (norm[39] == '\0' || norm[39] == '/')) ||
                       strcmp(norm, "/System/Volumes") == 0 ||
                       strcmp(norm, "/System/Volumes/Data") == 0))) {
                     is_candidate = YES;
@@ -3718,15 +3743,16 @@ static int pt_proc_pidpath(int pid, void *buffer, uint32_t buffersize) {
     int ret = proc_pidpath(pid, buffer, buffersize);
     if (ret > 0 && buffer != NULL && buffersize > 1 && !is_sys) {
         char *pathbuf = (char *)buffer;
-        if (pt_is_sensitive_host_fd_path(pathbuf, caller)) {
+        char vout[PATH_MAX];
+        const char *virt = pt_virtualize_path_for_app(pathbuf, vout, sizeof(vout), YES);
+        const char *effective = (virt != NULL) ? virt : pathbuf;
+        if (pt_is_sensitive_host_fd_path(effective, caller)) {
             PT_DEBUG_TRACE("fs", "hid proc_pidpath pid=%d path=%s", pid, pathbuf);
             pathbuf[0] = '\0';
             errno = ESRCH;
             return 0;
         }
-        char vout[PATH_MAX];
-        const char *virt = pt_virtualize_path_for_app(pathbuf, vout, sizeof(vout), YES);
-        if (virt != pathbuf) {
+        if (virt != NULL && virt != pathbuf) {
             PT_DEBUG_TRACE("fs", "virtualized proc_pidpath %s -> %s", pathbuf, virt);
             size_t n = strlcpy(pathbuf, virt, (size_t)buffersize);
             if (n < (size_t)buffersize) {
@@ -4133,6 +4159,24 @@ static BOOL pt_should_hide_dirent(const char *d_name,
         return NO;
     }
     BOOL hide_candidate = pt_is_hidden_dirent_name(d_name);
+    if (!hide_candidate && strcmp(d_name, "Finder.app") == 0) {
+        char dp[PATH_MAX];
+        const char *dir_path = dirname_for_lazy_check;
+        if (dir_path == NULL) {
+            int dfd = (dirp_for_lazy_check != NULL) ? dirfd(dirp_for_lazy_check) : dirfd_for_check;
+            if (dfd >= 0 && fcntl(dfd, F_GETPATH, dp) != -1) {
+                dir_path = dp;
+            }
+        }
+        if (dir_path != NULL) {
+            if (strncmp(dir_path, "/System/Volumes/Data/", 21) == 0) {
+                dir_path += 20;
+            }
+            if (strcmp(dir_path, "/System/Library/CoreServices") == 0) {
+                hide_candidate = YES;
+            }
+        }
+    }
     if (!hide_candidate && pt_is_macos_data_root_symlink_name(d_name)) {
         if (*inout_in_data_root < 0) {
             BOOL in_root = NO;

@@ -3659,6 +3659,7 @@ BOOL pt_is_hidden_env_key(const char *name) {
         "OLDPWD",
         "SHLVL",
         "_",
+        "APP_SANDBOX_CONTAINER_ID",
         "DISABLE_PLAYSHADOW_BYPASS"
     };
     size_t count = sizeof(kHiddenKeys) / sizeof(kHiddenKeys[0]);

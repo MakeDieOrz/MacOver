@@ -51,6 +51,33 @@ extern kern_return_t pt_orig_thread_set_exception_ports(thread_act_t thread,
                                                        exception_behavior_t behavior,
                                                        thread_state_flavor_t new_flavor)
     __asm("_thread_set_exception_ports");
+extern kern_return_t pt_orig_thread_swap_exception_ports(thread_act_t thread,
+                                                        exception_mask_t exception_mask,
+                                                        mach_port_t new_port,
+                                                        exception_behavior_t behavior,
+                                                        thread_state_flavor_t new_flavor,
+                                                        exception_mask_array_t masks,
+                                                        mach_msg_type_number_t *masksCnt,
+                                                        exception_handler_array_t old_handlers,
+                                                        exception_behavior_array_t old_behaviors,
+                                                        exception_flavor_array_t old_flavors)
+    __asm("_thread_swap_exception_ports");
+extern kern_return_t pt_orig_task_get_exception_ports(task_t task,
+                                                     exception_mask_t exception_mask,
+                                                     exception_mask_array_t masks,
+                                                     mach_msg_type_number_t *masksCnt,
+                                                     exception_handler_array_t old_handlers,
+                                                     exception_behavior_array_t old_behaviors,
+                                                     exception_flavor_array_t old_flavors)
+    __asm("_task_get_exception_ports");
+extern kern_return_t pt_orig_thread_get_exception_ports(thread_act_t thread,
+                                                       exception_mask_t exception_mask,
+                                                       exception_mask_array_t masks,
+                                                       mach_msg_type_number_t *masksCnt,
+                                                       exception_handler_array_t old_handlers,
+                                                       exception_behavior_array_t old_behaviors,
+                                                       exception_flavor_array_t old_flavors)
+    __asm("_thread_get_exception_ports");
 
 #define PT_ARM64_SVC80_INSN 0xD4001001U
 #define PT_ARM64_BRK_SVC_INSN 0xD42A0E80U
@@ -93,8 +120,261 @@ static uintptr_t *s_registered_pcs = NULL;
 static size_t s_registered_pc_count = 0;
 static size_t s_registered_pc_cap = 0;
 
-static mach_port_t s_svc_exc_port = MACH_PORT_NULL;
+static _Atomic mach_port_t s_svc_exc_port = MACH_PORT_NULL;
 static pthread_t s_svc_exc_thread;
+
+typedef struct {
+    BOOL valid;
+    exception_mask_t mask;
+    mach_port_t port;
+    exception_behavior_t behavior;
+    thread_state_flavor_t flavor;
+} pt_svc_saved_exc_handler_t;
+
+#define PT_SVC_THREAD_EXC_SLOTS 64U
+
+typedef struct {
+    BOOL in_use;
+    thread_act_t thread;
+    pt_svc_saved_exc_handler_t bp;
+    uint64_t seq;
+} pt_svc_thread_exc_entry_t;
+
+static os_unfair_lock s_svc_exc_snapshot_lock = OS_UNFAIR_LOCK_INIT;
+static pt_svc_saved_exc_handler_t s_saved_task_bp_handler = {0};
+static pt_svc_thread_exc_entry_t s_saved_thread_bp_handlers[PT_SVC_THREAD_EXC_SLOTS];
+static uint64_t s_saved_thread_bp_seq = 0;
+
+static mach_port_t pt_svc_retain_send_right(mach_port_t port) {
+    if (!MACH_PORT_VALID(port)) {
+        return MACH_PORT_NULL;
+    }
+    if (mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_SEND, 1) == KERN_SUCCESS) {
+        return port;
+    }
+    return MACH_PORT_NULL;
+}
+
+static void pt_svc_release_send_right(mach_port_t port) {
+    if (MACH_PORT_VALID(port)) {
+        (void)mach_port_deallocate(mach_task_self(), port);
+    }
+}
+
+static void pt_svc_swap_saved_slot_locked(pt_svc_saved_exc_handler_t *slot,
+                                          exception_mask_t mask,
+                                          mach_port_t retained_new_port,
+                                          exception_behavior_t behavior,
+                                          thread_state_flavor_t flavor,
+                                          pt_svc_saved_exc_handler_t *out_prev) {
+    if (out_prev != NULL) {
+        *out_prev = *slot;
+    } else {
+        pt_svc_release_send_right(slot->port);
+    }
+    if (MACH_PORT_VALID(retained_new_port)) {
+        slot->valid = YES;
+        slot->mask = mask & (exception_mask_t)EXC_MASK_BREAKPOINT;
+        slot->port = retained_new_port;
+        slot->behavior = behavior;
+        slot->flavor = flavor;
+    } else {
+        memset(slot, 0, sizeof(*slot));
+    }
+}
+
+static pt_svc_saved_exc_handler_t pt_svc_copy_retained_task_bp(void) {
+    pt_svc_saved_exc_handler_t out = {0};
+    os_unfair_lock_lock(&s_svc_exc_snapshot_lock);
+    if (s_saved_task_bp_handler.valid && MACH_PORT_VALID(s_saved_task_bp_handler.port)) {
+        mach_port_t ref = pt_svc_retain_send_right(s_saved_task_bp_handler.port);
+        if (MACH_PORT_VALID(ref)) {
+            out = s_saved_task_bp_handler;
+            out.port = ref;
+        }
+    }
+    os_unfair_lock_unlock(&s_svc_exc_snapshot_lock);
+    return out;
+}
+
+static pt_svc_saved_exc_handler_t pt_svc_copy_retained_thread_bp(thread_act_t thread) {
+    pt_svc_saved_exc_handler_t out = {0};
+    if (!MACH_PORT_VALID(thread)) {
+        return out;
+    }
+    os_unfair_lock_lock(&s_svc_exc_snapshot_lock);
+    for (size_t i = 0; i < PT_SVC_THREAD_EXC_SLOTS; i++) {
+        const pt_svc_thread_exc_entry_t *e = &s_saved_thread_bp_handlers[i];
+        if (e->in_use && e->thread == thread && e->bp.valid && MACH_PORT_VALID(e->bp.port)) {
+            mach_port_t ref = pt_svc_retain_send_right(e->bp.port);
+            if (MACH_PORT_VALID(ref)) {
+                out = e->bp;
+                out.port = ref;
+            }
+            break;
+        }
+    }
+    os_unfair_lock_unlock(&s_svc_exc_snapshot_lock);
+    return out;
+}
+
+static void pt_svc_update_thread_bp(thread_act_t thread,
+                                    exception_mask_t mask,
+                                    mach_port_t retained_new_port,
+                                    exception_behavior_t behavior,
+                                    thread_state_flavor_t flavor,
+                                    pt_svc_saved_exc_handler_t *out_prev) {
+    if (out_prev != NULL) {
+        memset(out_prev, 0, sizeof(*out_prev));
+    }
+    if (!MACH_PORT_VALID(thread)) {
+        pt_svc_release_send_right(retained_new_port);
+        return;
+    }
+    os_unfair_lock_lock(&s_svc_exc_snapshot_lock);
+    pt_svc_thread_exc_entry_t *match = NULL;
+    pt_svc_thread_exc_entry_t *free_slot = NULL;
+    pt_svc_thread_exc_entry_t *oldest_slot = &s_saved_thread_bp_handlers[0];
+    for (size_t i = 0; i < PT_SVC_THREAD_EXC_SLOTS; i++) {
+        pt_svc_thread_exc_entry_t *e = &s_saved_thread_bp_handlers[i];
+        if (!e->in_use) {
+            if (free_slot == NULL) {
+                free_slot = e;
+            }
+            continue;
+        }
+        if (e->thread == thread) {
+            match = e;
+            break;
+        }
+        if (e->seq < oldest_slot->seq) {
+            oldest_slot = e;
+        }
+    }
+    if (match != NULL) {
+        pt_svc_swap_saved_slot_locked(&match->bp, mask, retained_new_port, behavior, flavor, out_prev);
+        if (!match->bp.valid) {
+            match->in_use = NO;
+            match->thread = MACH_PORT_NULL;
+            match->seq = 0;
+        } else {
+            match->seq = ++s_saved_thread_bp_seq;
+        }
+    } else if (MACH_PORT_VALID(retained_new_port)) {
+        pt_svc_thread_exc_entry_t *dst = (free_slot != NULL) ? free_slot : oldest_slot;
+        if (dst->in_use) {
+            pt_svc_release_send_right(dst->bp.port);
+            memset(dst, 0, sizeof(*dst));
+        }
+        dst->in_use = YES;
+        dst->thread = thread;
+        dst->seq = ++s_saved_thread_bp_seq;
+        pt_svc_swap_saved_slot_locked(&dst->bp, mask, retained_new_port, behavior, flavor, NULL);
+    } else {
+        pt_svc_release_send_right(retained_new_port);
+    }
+    os_unfair_lock_unlock(&s_svc_exc_snapshot_lock);
+}
+
+static void pt_svc_redact_exc_ports_array(mach_port_t svc_port,
+                                          BOOL inject_if_missing_bp,
+                                          pt_svc_saved_exc_handler_t *retained_saved,
+                                          exception_mask_array_t masks,
+                                          mach_msg_type_number_t *masksCnt,
+                                          exception_handler_array_t old_handlers,
+                                          exception_behavior_array_t old_behaviors,
+                                          exception_flavor_array_t old_flavors) {
+    if (masksCnt == NULL || masks == NULL || old_handlers == NULL ||
+        old_behaviors == NULL || old_flavors == NULL) {
+        if (retained_saved != NULL) {
+            pt_svc_release_send_right(retained_saved->port);
+            retained_saved->port = MACH_PORT_NULL;
+            retained_saved->valid = NO;
+        }
+        return;
+    }
+
+    mach_msg_type_number_t count = *masksCnt;
+    if (count > (mach_msg_type_number_t)EXC_TYPES_COUNT) {
+        count = (mach_msg_type_number_t)EXC_TYPES_COUNT;
+    }
+
+    BOOL has_saved = (retained_saved != NULL &&
+                      retained_saved->valid &&
+                      MACH_PORT_VALID(retained_saved->port));
+    BOOL saw_bp_slot = NO;
+    mach_msg_type_number_t write_idx = 0;
+
+    for (mach_msg_type_number_t i = 0; i < count; i++) {
+        exception_mask_t m = masks[i];
+        mach_port_t h = old_handlers[i];
+        exception_behavior_t b = old_behaviors[i];
+        thread_state_flavor_t f = old_flavors[i];
+
+        if (MACH_PORT_VALID(svc_port) && h == svc_port) {
+            pt_svc_release_send_right(h);
+            if (!has_saved) {
+                continue;
+            }
+            h = retained_saved->port;
+            b = retained_saved->behavior;
+            f = retained_saved->flavor;
+            retained_saved->port = MACH_PORT_NULL;
+            retained_saved->valid = NO;
+            has_saved = NO;
+            saw_bp_slot = YES;
+        } else if ((m & (exception_mask_t)EXC_MASK_BREAKPOINT) != 0) {
+            saw_bp_slot = YES;
+        }
+
+        BOOL merged = NO;
+        for (mach_msg_type_number_t j = 0; j < write_idx; j++) {
+            if (old_handlers[j] == h && old_behaviors[j] == b && old_flavors[j] == f) {
+                masks[j] |= m;
+                pt_svc_release_send_right(h);
+                merged = YES;
+                break;
+            }
+        }
+        if (!merged) {
+            masks[write_idx] = m;
+            old_handlers[write_idx] = h;
+            old_behaviors[write_idx] = b;
+            old_flavors[write_idx] = f;
+            write_idx++;
+        }
+    }
+
+    if (inject_if_missing_bp && !saw_bp_slot && has_saved) {
+        BOOL merged = NO;
+        for (mach_msg_type_number_t j = 0; j < write_idx; j++) {
+            if (old_handlers[j] == retained_saved->port &&
+                old_behaviors[j] == retained_saved->behavior &&
+                old_flavors[j] == retained_saved->flavor) {
+                masks[j] |= (exception_mask_t)EXC_MASK_BREAKPOINT;
+                merged = YES;
+                break;
+            }
+        }
+        if (!merged && write_idx < (mach_msg_type_number_t)EXC_TYPES_COUNT) {
+            masks[write_idx] = (exception_mask_t)EXC_MASK_BREAKPOINT;
+            old_handlers[write_idx] = retained_saved->port;
+            old_behaviors[write_idx] = retained_saved->behavior;
+            old_flavors[write_idx] = retained_saved->flavor;
+            retained_saved->port = MACH_PORT_NULL;
+            retained_saved->valid = NO;
+            write_idx++;
+        }
+    }
+
+    if (retained_saved != NULL) {
+        pt_svc_release_send_right(retained_saved->port);
+        retained_saved->port = MACH_PORT_NULL;
+        retained_saved->valid = NO;
+    }
+
+    *masksCnt = write_idx;
+}
 
 static BOOL pt_svc_env_flag_true(const char *val) {
     if (val == NULL) {
@@ -1078,7 +1358,7 @@ static void *pt_svc_exc_server_thread(void *arg) {
                                         MACH_RCV_MSG | MACH_RCV_LARGE,
                                         0,
                                         (mach_msg_size_t)sizeof(req),
-                                        s_svc_exc_port,
+                                        atomic_load_explicit(&s_svc_exc_port, memory_order_acquire),
                                         MACH_MSG_TIMEOUT_NONE,
                                         MACH_PORT_NULL);
         if (mr != MACH_MSG_SUCCESS) {
@@ -1116,14 +1396,14 @@ static BOOL pt_svc_install_exception_handler(void) {
         return NO;
     }
 
-    s_svc_exc_port = port;
+    atomic_store_explicit(&s_svc_exc_port, port, memory_order_release);
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
     int prc = pthread_create(&s_svc_exc_thread, &attr, pt_svc_exc_server_thread, NULL);
     pthread_attr_destroy(&attr);
     if (prc != 0) {
-        s_svc_exc_port = MACH_PORT_NULL;
+        atomic_store_explicit(&s_svc_exc_port, MACH_PORT_NULL, memory_order_release);
         mach_port_destroy(mach_task_self(), port);
         return NO;
     }
@@ -1145,16 +1425,34 @@ static BOOL pt_svc_install_exception_handler(void) {
         old_handlers,
         old_behaviors,
         old_flavors);
+    pt_svc_saved_exc_handler_t pre_bp = {0};
     for (mach_msg_type_number_t i = 0; i < old_count && i < EXC_TYPES_COUNT; i++) {
+        if (kr == KERN_SUCCESS &&
+            !pre_bp.valid &&
+            (old_masks[i] & (exception_mask_t)EXC_MASK_BREAKPOINT) != 0 &&
+            MACH_PORT_VALID(old_handlers[i]) &&
+            old_handlers[i] != port) {
+            pre_bp.valid = YES;
+            pre_bp.mask = old_masks[i] & (exception_mask_t)EXC_MASK_BREAKPOINT;
+            pre_bp.port = old_handlers[i];
+            pre_bp.behavior = old_behaviors[i];
+            pre_bp.flavor = old_flavors[i];
+            continue;
+        }
         if (MACH_PORT_VALID(old_handlers[i]) && old_handlers[i] != port) {
             mach_port_deallocate(mach_task_self(), old_handlers[i]);
         }
     }
     if (kr != KERN_SUCCESS) {
-        s_svc_exc_port = MACH_PORT_NULL;
+        pt_svc_release_send_right(pre_bp.port);
+        atomic_store_explicit(&s_svc_exc_port, MACH_PORT_NULL, memory_order_release);
         mach_port_destroy(mach_task_self(), port);
         return NO;
     }
+    os_unfair_lock_lock(&s_svc_exc_snapshot_lock);
+    pt_svc_release_send_right(s_saved_task_bp_handler.port);
+    s_saved_task_bp_handler = pre_bp;
+    os_unfair_lock_unlock(&s_svc_exc_snapshot_lock);
     return YES;
 }
 
@@ -1171,11 +1469,22 @@ static kern_return_t pt_task_set_exception_ports(task_t task,
         task == mach_task_self() &&
         (exception_mask & EXC_MASK_BREAKPOINT) != 0 &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        exception_mask_t filtered = exception_mask & ~((exception_mask_t)EXC_MASK_BREAKPOINT);
-        if (filtered == 0) {
-            return KERN_SUCCESS;
+        mach_port_t retained_new = pt_svc_retain_send_right(new_port);
+        if (MACH_PORT_VALID(new_port) && !MACH_PORT_VALID(retained_new)) {
+            return KERN_INVALID_RIGHT;
         }
-        exception_mask = filtered;
+        exception_mask_t filtered = exception_mask & ~((exception_mask_t)EXC_MASK_BREAKPOINT);
+        if (filtered != 0) {
+            kern_return_t kr = pt_orig_task_set_exception_ports(task, filtered, new_port, behavior, new_flavor);
+            if (kr != KERN_SUCCESS) {
+                pt_svc_release_send_right(retained_new);
+                return kr;
+            }
+        }
+        os_unfair_lock_lock(&s_svc_exc_snapshot_lock);
+        pt_svc_swap_saved_slot_locked(&s_saved_task_bp_handler, exception_mask, retained_new, behavior, new_flavor, NULL);
+        os_unfair_lock_unlock(&s_svc_exc_snapshot_lock);
+        return KERN_SUCCESS;
     }
     return pt_orig_task_set_exception_ports(task, exception_mask, new_port, behavior, new_flavor);
 }
@@ -1194,14 +1503,37 @@ static kern_return_t pt_task_swap_exception_ports(task_t task,
         task == mach_task_self() &&
         (exception_mask & EXC_MASK_BREAKPOINT) != 0 &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        exception_mask_t filtered = exception_mask & ~((exception_mask_t)EXC_MASK_BREAKPOINT);
-        if (filtered == 0) {
-            if (masksCnt != NULL) {
-                *masksCnt = 0;
-            }
-            return KERN_SUCCESS;
+        mach_port_t retained_new = pt_svc_retain_send_right(new_port);
+        if (MACH_PORT_VALID(new_port) && !MACH_PORT_VALID(retained_new)) {
+            return KERN_INVALID_RIGHT;
         }
-        exception_mask = filtered;
+        exception_mask_t filtered = exception_mask & ~((exception_mask_t)EXC_MASK_BREAKPOINT);
+        if (filtered != 0) {
+            kern_return_t kr = pt_orig_task_swap_exception_ports(task,
+                                                                 filtered,
+                                                                 new_port,
+                                                                 behavior,
+                                                                 new_flavor,
+                                                                 masks,
+                                                                 masksCnt,
+                                                                 old_handlers,
+                                                                 old_behaviors,
+                                                                 old_flavors);
+            if (kr != KERN_SUCCESS) {
+                pt_svc_release_send_right(retained_new);
+                return kr;
+            }
+        } else if (masksCnt != NULL) {
+            *masksCnt = 0;
+        }
+        pt_svc_saved_exc_handler_t prev_bp = {0};
+        os_unfair_lock_lock(&s_svc_exc_snapshot_lock);
+        pt_svc_swap_saved_slot_locked(&s_saved_task_bp_handler, exception_mask, retained_new, behavior, new_flavor, &prev_bp);
+        os_unfair_lock_unlock(&s_svc_exc_snapshot_lock);
+        mach_port_t svc_port = atomic_load_explicit(&s_svc_exc_port, memory_order_acquire);
+        pt_svc_redact_exc_ports_array(svc_port, YES, &prev_bp, masks, masksCnt,
+                                      old_handlers, old_behaviors, old_flavors);
+        return KERN_SUCCESS;
     }
     return pt_orig_task_swap_exception_ports(task,
                                              exception_mask,
@@ -1223,18 +1555,138 @@ static kern_return_t pt_thread_set_exception_ports(thread_act_t thread,
     if (atomic_load_explicit(&s_svc_interceptor_active, memory_order_acquire) &&
         (exception_mask & EXC_MASK_BREAKPOINT) != 0 &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        exception_mask_t filtered = exception_mask & ~((exception_mask_t)EXC_MASK_BREAKPOINT);
-        if (filtered == 0) {
-            return KERN_SUCCESS;
+        mach_port_t retained_new = pt_svc_retain_send_right(new_port);
+        if (MACH_PORT_VALID(new_port) && !MACH_PORT_VALID(retained_new)) {
+            return KERN_INVALID_RIGHT;
         }
-        exception_mask = filtered;
+        exception_mask_t filtered = exception_mask & ~((exception_mask_t)EXC_MASK_BREAKPOINT);
+        if (filtered != 0) {
+            kern_return_t kr = pt_orig_thread_set_exception_ports(thread, filtered, new_port, behavior, new_flavor);
+            if (kr != KERN_SUCCESS) {
+                pt_svc_release_send_right(retained_new);
+                return kr;
+            }
+        }
+        pt_svc_update_thread_bp(thread, exception_mask, retained_new, behavior, new_flavor, NULL);
+        return KERN_SUCCESS;
     }
     return pt_orig_thread_set_exception_ports(thread, exception_mask, new_port, behavior, new_flavor);
 }
 
+static kern_return_t pt_thread_swap_exception_ports(thread_act_t thread,
+                                                    exception_mask_t exception_mask,
+                                                    mach_port_t new_port,
+                                                    exception_behavior_t behavior,
+                                                    thread_state_flavor_t new_flavor,
+                                                    exception_mask_array_t masks,
+                                                    mach_msg_type_number_t *masksCnt,
+                                                    exception_handler_array_t old_handlers,
+                                                    exception_behavior_array_t old_behaviors,
+                                                    exception_flavor_array_t old_flavors) {
+    if (atomic_load_explicit(&s_svc_interceptor_active, memory_order_acquire) &&
+        (exception_mask & EXC_MASK_BREAKPOINT) != 0 &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        mach_port_t retained_new = pt_svc_retain_send_right(new_port);
+        if (MACH_PORT_VALID(new_port) && !MACH_PORT_VALID(retained_new)) {
+            return KERN_INVALID_RIGHT;
+        }
+        exception_mask_t filtered = exception_mask & ~((exception_mask_t)EXC_MASK_BREAKPOINT);
+        if (filtered != 0) {
+            kern_return_t kr = pt_orig_thread_swap_exception_ports(thread,
+                                                                   filtered,
+                                                                   new_port,
+                                                                   behavior,
+                                                                   new_flavor,
+                                                                   masks,
+                                                                   masksCnt,
+                                                                   old_handlers,
+                                                                   old_behaviors,
+                                                                   old_flavors);
+            if (kr != KERN_SUCCESS) {
+                pt_svc_release_send_right(retained_new);
+                return kr;
+            }
+        } else if (masksCnt != NULL) {
+            *masksCnt = 0;
+        }
+        pt_svc_saved_exc_handler_t prev_bp = {0};
+        pt_svc_update_thread_bp(thread, exception_mask, retained_new, behavior, new_flavor, &prev_bp);
+        mach_port_t svc_port = atomic_load_explicit(&s_svc_exc_port, memory_order_acquire);
+        pt_svc_redact_exc_ports_array(svc_port, YES, &prev_bp, masks, masksCnt,
+                                      old_handlers, old_behaviors, old_flavors);
+        return KERN_SUCCESS;
+    }
+    return pt_orig_thread_swap_exception_ports(thread,
+                                               exception_mask,
+                                               new_port,
+                                               behavior,
+                                               new_flavor,
+                                               masks,
+                                               masksCnt,
+                                               old_handlers,
+                                               old_behaviors,
+                                               old_flavors);
+}
+
+static kern_return_t pt_task_get_exception_ports(task_t task,
+                                                 exception_mask_t exception_mask,
+                                                 exception_mask_array_t masks,
+                                                 mach_msg_type_number_t *masksCnt,
+                                                 exception_handler_array_t old_handlers,
+                                                 exception_behavior_array_t old_behaviors,
+                                                 exception_flavor_array_t old_flavors) {
+    kern_return_t kr = pt_orig_task_get_exception_ports(task,
+                                                        exception_mask,
+                                                        masks,
+                                                        masksCnt,
+                                                        old_handlers,
+                                                        old_behaviors,
+                                                        old_flavors);
+    if (kr == KERN_SUCCESS &&
+        atomic_load_explicit(&s_svc_interceptor_active, memory_order_acquire) &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        mach_port_t svc_port = atomic_load_explicit(&s_svc_exc_port, memory_order_acquire);
+        pt_svc_saved_exc_handler_t saved = pt_svc_copy_retained_task_bp();
+        BOOL inject_missing = (task == mach_task_self() &&
+                               (exception_mask & (exception_mask_t)EXC_MASK_BREAKPOINT) != 0);
+        pt_svc_redact_exc_ports_array(svc_port, inject_missing, &saved, masks, masksCnt,
+                                      old_handlers, old_behaviors, old_flavors);
+    }
+    return kr;
+}
+
+static kern_return_t pt_thread_get_exception_ports(thread_act_t thread,
+                                                   exception_mask_t exception_mask,
+                                                   exception_mask_array_t masks,
+                                                   mach_msg_type_number_t *masksCnt,
+                                                   exception_handler_array_t old_handlers,
+                                                   exception_behavior_array_t old_behaviors,
+                                                   exception_flavor_array_t old_flavors) {
+    kern_return_t kr = pt_orig_thread_get_exception_ports(thread,
+                                                          exception_mask,
+                                                          masks,
+                                                          masksCnt,
+                                                          old_handlers,
+                                                          old_behaviors,
+                                                          old_flavors);
+    if (kr == KERN_SUCCESS &&
+        atomic_load_explicit(&s_svc_interceptor_active, memory_order_acquire) &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        mach_port_t svc_port = atomic_load_explicit(&s_svc_exc_port, memory_order_acquire);
+        pt_svc_saved_exc_handler_t saved = pt_svc_copy_retained_thread_bp(thread);
+        BOOL inject_missing = ((exception_mask & (exception_mask_t)EXC_MASK_BREAKPOINT) != 0);
+        pt_svc_redact_exc_ports_array(svc_port, inject_missing, &saved, masks, masksCnt,
+                                      old_handlers, old_behaviors, old_flavors);
+    }
+    return kr;
+}
+
 DYLD_INTERPOSE(pt_task_set_exception_ports, task_set_exception_ports)
 DYLD_INTERPOSE(pt_task_swap_exception_ports, task_swap_exception_ports)
+DYLD_INTERPOSE(pt_task_get_exception_ports, task_get_exception_ports)
 DYLD_INTERPOSE(pt_thread_set_exception_ports, thread_set_exception_ports)
+DYLD_INTERPOSE(pt_thread_swap_exception_ports, thread_swap_exception_ports)
+DYLD_INTERPOSE(pt_thread_get_exception_ports, thread_get_exception_ports)
 
 // MARK: - Initialization
 

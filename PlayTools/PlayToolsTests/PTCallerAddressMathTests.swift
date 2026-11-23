@@ -98,11 +98,10 @@ final class PTCallerAddressMathTests: XCTestCase {
         )
         XCTAssertTrue(cacheable)
 
+        let akPath = "/Users/u/Library/Containers/app.makedie.MacOver/Frameworks/PlayTools.framework/" +
+            "PlugIns/AKInterface.bundle/Contents/MacOS/AKInterface"
         XCTAssertEqual(
-            pt_classify_caller_image_path(
-                "/Users/u/Library/Containers/app.makedie.MacOver/Frameworks/PlayTools.framework/PlugIns/AKInterface.bundle/Contents/MacOS/AKInterface",
-                &cacheable
-            ),
+            pt_classify_caller_image_path(akPath, &cacheable),
             UInt8(PT_CALLER_PLAYTOOLS)
         )
         XCTAssertTrue(cacheable)
@@ -194,11 +193,10 @@ final class PTCallerAddressMathTests: XCTestCase {
             UInt8(PT_CALLER_PLAYTOOLS)
         )
         XCTAssertTrue(cacheable)
+        let embeddedAkPath = "/Applications/Game.app/Contents/Frameworks/PlayTools.framework/" +
+            "PlugIns/AKInterface.bundle/Contents/MacOS/AKInterface"
         XCTAssertEqual(
-            pt_classify_caller_image_path(
-                "/Applications/Game.app/Contents/Frameworks/PlayTools.framework/PlugIns/AKInterface.bundle/Contents/MacOS/AKInterface",
-                &cacheable
-            ),
+            pt_classify_caller_image_path(embeddedAkPath, &cacheable),
             UInt8(PT_CALLER_PLAYTOOLS)
         )
         XCTAssertTrue(cacheable)
@@ -228,22 +226,26 @@ final class PTCallerAddressMathTests: XCTestCase {
         XCTAssertTrue(cacheable)
 
         cacheable = false
+        let resPtPath = "/Applications/Game.app/Contents/Resources/PlayTools.framework/Evil"
         XCTAssertEqual(
-            pt_classify_caller_image_path("/Applications/Game.app/Contents/Resources/PlayTools.framework/Evil", &cacheable),
+            pt_classify_caller_image_path(resPtPath, &cacheable),
             UInt8(PT_CALLER_APP)
         )
         XCTAssertTrue(cacheable)
 
         cacheable = false
+        let fakeAppPath = "/Users/Frameworks/PlayTools.framework/Fake.app/Contents/MacOS/App"
         XCTAssertEqual(
-            pt_classify_caller_image_path("/Users/Frameworks/PlayTools.framework/Fake.app/Contents/MacOS/App", &cacheable),
+            pt_classify_caller_image_path(fakeAppPath, &cacheable),
             UInt8(PT_CALLER_APP)
         )
         XCTAssertTrue(cacheable)
 
         // Non-system paths containing wrapper library substrings must not match pt_is_wrapper_library_path
         XCTAssertFalse(pt_is_wrapper_library_path("/tmp/libc++.1.dylib"))
-        XCTAssertFalse(pt_is_wrapper_library_path("/Applications/Game.app/Contents/Frameworks/Foundation.framework/Foundation"))
+        XCTAssertFalse(pt_is_wrapper_library_path(
+            "/Applications/Game.app/Contents/Frameworks/Foundation.framework/Foundation"
+        ))
     }
 
     func testCompoundCacheKeysAndWrapperCachePacking() {
@@ -278,7 +280,7 @@ final class PTCallerAddressMathTests: XCTestCase {
     }
 
     func testBoundedFrameClassifierCapsDepthAndRespectsWrapperTransitions() {
-        XCTAssertEqual(PT_MAX_CALLER_UNWIND_DEPTH, 4)
+        XCTAssertEqual(PT_MAX_CALLER_UNWIND_DEPTH, 32)
 
         let appDirect: [UInt8] = [
             UInt8(PT_CALLER_SYS_WRAPPER),
@@ -297,17 +299,56 @@ final class PTCallerAddressMathTests: XCTestCase {
             pt_classify_bounded_frame_kinds($0.baseAddress, $0.count, true)
         })
 
-        // Fifth frame (beyond PT_MAX_CALLER_UNWIND_DEPTH=4) must NOT be unwound
-        let deepAppBeyondCap: [UInt8] = [
-            UInt8(PT_CALLER_SYS_WRAPPER),
-            UInt8(PT_CALLER_SYS_WRAPPER),
-            UInt8(PT_CALLER_SYS_WRAPPER),
-            UInt8(PT_CALLER_SYS_WRAPPER),
-            UInt8(PT_CALLER_APP)
-        ]
-        XCTAssertTrue(deepAppBeyondCap.withUnsafeBufferPointer {
-            pt_classify_bounded_frame_kinds($0.baseAddress, $0.count, false)
+        // Deep wrapper chain (13+ system frames above app frame) must unwind to app
+        var nsInvocationAppChain = Array(repeating: UInt8(PT_CALLER_SYS_WRAPPER), count: 14)
+        nsInvocationAppChain.append(UInt8(PT_CALLER_APP))
+        var cacheable = true
+        XCTAssertFalse(nsInvocationAppChain.withUnsafeBufferPointer {
+            pt_classify_bounded_frame_kinds_ex($0.baseAddress, $0.count, true, &cacheable)
         })
+        XCTAssertFalse(cacheable)
+
+        // 32nd frame (index 31) is within PT_MAX_CALLER_UNWIND_DEPTH=32 and must unwind to app
+        var maxDepthAppChain = Array(repeating: UInt8(PT_CALLER_SYS_WRAPPER), count: 31)
+        maxDepthAppChain.append(UInt8(PT_CALLER_APP))
+        cacheable = true
+        XCTAssertFalse(maxDepthAppChain.withUnsafeBufferPointer {
+            pt_classify_bounded_frame_kinds_ex($0.baseAddress, $0.count, true, &cacheable)
+        })
+        XCTAssertFalse(cacheable)
+
+        // 33rd frame (beyond PT_MAX_CALLER_UNWIND_DEPTH=32) must NOT be unwound
+        var deepAppBeyondCap = Array(repeating: UInt8(PT_CALLER_SYS_WRAPPER), count: 32)
+        deepAppBeyondCap.append(UInt8(PT_CALLER_APP))
+        cacheable = true
+        XCTAssertTrue(deepAppBeyondCap.withUnsafeBufferPointer {
+            pt_classify_bounded_frame_kinds_ex($0.baseAddress, $0.count, false, &cacheable)
+        })
+        XCTAssertFalse(cacheable)
+
+        // 3-frame cacheability: resolved within [0..2] -> cacheable; resolved at >= 3 -> not cacheable
+        let shallowSys: [UInt8] = [
+            UInt8(PT_CALLER_SYS_WRAPPER),
+            UInt8(PT_CALLER_SYS_WRAPPER),
+            UInt8(PT_CALLER_SYS_NON_WRAPPER)
+        ]
+        cacheable = false
+        XCTAssertTrue(shallowSys.withUnsafeBufferPointer {
+            pt_classify_bounded_frame_kinds_ex($0.baseAddress, $0.count, true, &cacheable)
+        })
+        XCTAssertTrue(cacheable)
+
+        let deeperSys: [UInt8] = [
+            UInt8(PT_CALLER_SYS_WRAPPER),
+            UInt8(PT_CALLER_SYS_WRAPPER),
+            UInt8(PT_CALLER_SYS_WRAPPER),
+            UInt8(PT_CALLER_SYS_NON_WRAPPER)
+        ]
+        cacheable = true
+        XCTAssertTrue(deeperSys.withUnsafeBufferPointer {
+            pt_classify_bounded_frame_kinds_ex($0.baseAddress, $0.count, true, &cacheable)
+        })
+        XCTAssertFalse(cacheable)
     }
 
     func testPathEarlyExitAndInternalScopeIsolation() {

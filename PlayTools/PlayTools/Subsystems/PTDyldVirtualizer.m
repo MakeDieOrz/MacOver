@@ -688,6 +688,9 @@ static bool pt_dyld_shared_cache_contains_path(const char *path) {
             strncmp(norm, "/System/iOSSupport/", 19) == 0) {
             return false;
         }
+        if (strstr(norm, ".framework/Versions/") != NULL) {
+            return false;
+        }
         if (pt_is_hidden_dyld_image_name(norm) || pt_is_hidden_path(norm, caller)) {
             return false;
         }

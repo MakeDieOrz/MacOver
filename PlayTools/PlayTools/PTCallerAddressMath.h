@@ -27,7 +27,7 @@ enum {
 
 #define PT_CALLER_ADDR_CACHE_SIZE 1024U
 #define PT_WRAPPER_CACHE_SIZE 1024U
-#define PT_MAX_CALLER_UNWIND_DEPTH 4
+#define PT_MAX_CALLER_UNWIND_DEPTH 32
 #define PT_CALLER_ADDR_TAG_MASK 3ULL
 #define PT_CALLER_ADDR_MASK (~3ULL)
 #define PT_USER_ADDR_STRIP_MASK 0x0000ffffffffffffULL
@@ -169,6 +169,10 @@ void pt_enter_internal_scope(void);
 void pt_leave_internal_scope(void);
 bool pt_is_in_internal_scope(void);
 
+bool pt_classify_bounded_frame_kinds_ex(const uint8_t *frame_kinds,
+                                        size_t count,
+                                        bool initial_seen_wrapper,
+                                        bool *out_cacheable_3frame);
 bool pt_classify_bounded_frame_kinds(const uint8_t *frame_kinds, size_t count, bool initial_seen_wrapper);
 
 #ifdef __cplusplus

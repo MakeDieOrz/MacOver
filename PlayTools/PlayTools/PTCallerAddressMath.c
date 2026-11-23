@@ -204,7 +204,13 @@ bool pt_is_nonsensitive_app_or_tmp_path(const char *norm_path, const char *bundl
     return false;
 }
 
-bool pt_classify_bounded_frame_kinds(const uint8_t *frame_kinds, size_t count, bool initial_seen_wrapper) {
+bool pt_classify_bounded_frame_kinds_ex(const uint8_t *frame_kinds,
+                                        size_t count,
+                                        bool initial_seen_wrapper,
+                                        bool *out_cacheable_3frame) {
+    if (out_cacheable_3frame != NULL) {
+        *out_cacheable_3frame = false;
+    }
     if (frame_kinds == NULL || count == 0U) {
         return true;
     }
@@ -214,13 +220,23 @@ bool pt_classify_bounded_frame_kinds(const uint8_t *frame_kinds, size_t count, b
         uint8_t fkind = frame_kinds[i];
         if (fkind == PT_CALLER_PLAYTOOLS) {
             if (seen_wrapper) {
+                if (out_cacheable_3frame != NULL) {
+                    *out_cacheable_3frame = (i < 3U);
+                }
                 return true;
             }
         } else if (fkind == PT_CALLER_SYS_WRAPPER) {
             seen_wrapper = true;
         } else {
+            if (out_cacheable_3frame != NULL) {
+                *out_cacheable_3frame = (i < 3U);
+            }
             return (fkind != PT_CALLER_APP);
         }
     }
     return true;
+}
+
+bool pt_classify_bounded_frame_kinds(const uint8_t *frame_kinds, size_t count, bool initial_seen_wrapper) {
+    return pt_classify_bounded_frame_kinds_ex(frame_kinds, count, initial_seen_wrapper, NULL);
 }
