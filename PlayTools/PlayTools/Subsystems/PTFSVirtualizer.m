@@ -4,6 +4,9 @@
 //
 
 #import "PTInternal.h"
+#if __has_include(<sys/fsgetpath.h>)
+#include <sys/fsgetpath.h>
+#endif
 
 extern const char *dyld_image_path_containing_address(const void *addr);
 extern const struct mach_header *dyld_image_header_containing_address(const void *addr);
@@ -457,6 +460,86 @@ static inline BOOL pt_rel_data_subpath_is_macos_artifact(const char *rel) {
     return NO;
 }
 
+static BOOL pt_rel_data_subpath_is_host_user_symlink(const char *rel) {
+    if (!pt_is_bypass_enabled() || rel == NULL || rel[0] != '/' || s_real_data_container_len == 0) {
+        return NO;
+    }
+    const char *s = rel + 1;
+    static const struct {
+        const char *name;
+        size_t len;
+    } kSymlinkNames[] = {
+        PT_STR_ENTRY("Downloads"),
+        PT_STR_ENTRY("Movies"),
+        PT_STR_ENTRY("Music"),
+        PT_STR_ENTRY("Pictures")
+    };
+    const char *matched_name = NULL;
+    for (size_t i = 0; i < sizeof(kSymlinkNames) / sizeof(kSymlinkNames[0]); i++) {
+        size_t len = kSymlinkNames[i].len;
+        if (strncmp(s, kSymlinkNames[i].name, len) == 0 &&
+            (s[len] == '\0' || s[len] == '/')) {
+            matched_name = kSymlinkNames[i].name;
+            break;
+        }
+    }
+    if (matched_name == NULL) {
+        return NO;
+    }
+
+    char link_path[PATH_MAX];
+    int ln = snprintf(link_path, sizeof(link_path), "%s/%s", s_real_data_container_dir, matched_name);
+    if (ln <= 0 || (size_t)ln >= sizeof(link_path)) {
+        return NO;
+    }
+    struct stat st;
+    if (lstat(link_path, &st) != 0 || !S_ISLNK(st.st_mode)) {
+        return NO;
+    }
+    char target[PATH_MAX];
+    ssize_t rlen = readlink(link_path, target, sizeof(target) - 1U);
+    if (rlen <= 0) {
+        return NO;
+    }
+    target[rlen] = '\0';
+
+    char joined[PATH_MAX];
+    const char *cand = target;
+    if (target[0] != '/') {
+        int jn = snprintf(joined, sizeof(joined), "%s/%s", s_real_data_container_dir, target);
+        if (jn <= 0 || (size_t)jn >= sizeof(joined)) {
+            return NO;
+        }
+        cand = joined;
+    }
+    char norm_buf[PATH_MAX];
+    const char *resolved = cand;
+    if (cand[0] == '/' && pt_needs_lexical_norm(cand)) {
+        const char *collapsed = pt_normalize_lexical_path(cand, norm_buf, sizeof(norm_buf));
+        if (collapsed != NULL) {
+            resolved = collapsed;
+        }
+    }
+    if (strncmp(resolved, "/System/Volumes/Data/", 21) == 0) {
+        resolved += 20;
+    }
+    if (pt_match_prefix_modulo_private(resolved, s_real_data_container_dir, s_real_data_container_len) != NULL) {
+        return NO;
+    }
+    if (strncmp(resolved, "/Users/", 7) == 0) {
+        return YES;
+    }
+    const char *user_root = pt_get_host_user_root_cstr();
+    if (user_root != NULL) {
+        size_t ur_len = strlen(user_root);
+        if (ur_len > 1U && strncmp(resolved, user_root, ur_len) == 0 &&
+            (resolved[ur_len] == '/' || resolved[ur_len] == '\0')) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
 static BOOL pt_is_hidden_normalized_path_cached_caller(const char *norm, const void *caller, int *inout_is_sys_caller) {
     if (norm == NULL || norm[0] == '\0') {
         return NO;
@@ -489,7 +572,8 @@ static BOOL pt_is_hidden_normalized_path_cached_caller(const char *norm, const v
             const char *rel = pt_match_prefix_modulo_private(norm, s_real_data_container_dir, s_real_data_container_len);
             if (rel != NULL) {
                 if (!pt_rel_subpath_has_hidden_plugin_component(rel) &&
-                    !pt_rel_data_subpath_is_macos_artifact(rel)) {
+                    !pt_rel_data_subpath_is_macos_artifact(rel) &&
+                    !pt_rel_data_subpath_is_host_user_symlink(rel)) {
                     return NO;
                 }
                 if (*inout_is_sys_caller < 0) {
@@ -646,12 +730,13 @@ static BOOL pt_is_hidden_normalized_path_cached_caller(const char *norm, const v
                 }
                 break;
             case 'S':
+            case 's':
                 if ((strncmp(norm, "/System/iOSSupport", 18) == 0 &&
                      (norm[18] == '\0' || norm[18] == '/')) ||
                     (check_bypass_artifacts &&
                      ((strncmp(norm, "/System/Applications", 20) == 0 &&
                        (norm[20] == '\0' || norm[20] == '/')) ||
-                      (strncmp(norm, "/System/Library/CoreServices/Finder.app", 39) == 0 &&
+                      (strncasecmp(norm, "/System/Library/CoreServices/Finder.app", 39) == 0 &&
                        (norm[39] == '\0' || norm[39] == '/')) ||
                       strcmp(norm, "/System/Volumes") == 0 ||
                       strcmp(norm, "/System/Volumes/Data") == 0))) {
@@ -1973,6 +2058,29 @@ BOOL pt_is_virtual_container_ancestor_dir(const char *path) {
     return pt_is_clean_virtual_ancestor_dir(p);
 }
 
+static _Atomic bool s_has_synth_sysver = false;
+static os_unfair_lock s_synth_sysver_lock = OS_UNFAIR_LOCK_INIT;
+static char s_synth_sysver_path[PATH_MAX] = {0};
+static char s_synth_sysver_ver[32] = {0};
+static char s_synth_sysver_build[32] = {0};
+static dev_t s_synth_sysver_dev = 0;
+static ino_t s_synth_sysver_ino = 0;
+
+static BOOL pt_is_synth_system_version_path(const char *p) {
+    if (p == NULL || !atomic_load_explicit(&s_has_synth_sysver, memory_order_acquire) ||
+        strstr(p, ".pt_sysver_") == NULL) {
+        return NO;
+    }
+    BOOL match = NO;
+    os_unfair_lock_lock(&s_synth_sysver_lock);
+    if (s_synth_sysver_path[0] != '\0') {
+        const char *rem = pt_match_prefix_modulo_private(p, s_synth_sysver_path, strlen(s_synth_sysver_path));
+        match = (rem != NULL && rem[0] == '\0');
+    }
+    os_unfair_lock_unlock(&s_synth_sysver_lock);
+    return match;
+}
+
 __attribute__((visibility("hidden")))
 const char *pt_virtualize_path_for_app(const char *path, char *buf, size_t bufsize, BOOL use_private_prefix) {
     if (path == NULL || buf == NULL || bufsize == 0) {
@@ -1986,6 +2094,10 @@ const char *pt_virtualize_path_for_app(const char *path, char *buf, size_t bufsi
     }
     if (strncmp(p, "/System/iOSSupport/", 19) == 0) {
         p += 18;
+    }
+    if (pt_is_synth_system_version_path(p)) {
+        size_t n = strlcpy(buf, "/System/Library/CoreServices/SystemVersion.plist", bufsize);
+        return (n < bufsize) ? buf : path;
     }
     if (s_real_data_container_len > 0) {
         const char *suffix = pt_match_prefix_modulo_private(p, s_real_data_container_dir, s_real_data_container_len);
@@ -2013,7 +2125,7 @@ const char *pt_virtualize_path_for_app(const char *path, char *buf, size_t bufsi
     if (group_virt != NULL) {
         return group_virt;
     }
-    if (strcmp(p, "/System/Library/CoreServices/iOSSystemVersion.plist") == 0) {
+    if (strcasecmp(p, "/System/Library/CoreServices/iOSSystemVersion.plist") == 0) {
         size_t n = strlcpy(buf, "/System/Library/CoreServices/SystemVersion.plist", bufsize);
         return (n < bufsize) ? buf : path;
     }
@@ -2032,7 +2144,7 @@ static BOOL pt_is_sensitive_host_fd_path(const char *path, const void *caller) {
     if (strncmp(p, "/System/Volumes/Data/", 21) == 0) {
         p += 20;
     }
-    if (pt_is_active_app_backup_file_path(p)) {
+    if (pt_is_active_app_backup_file_path(p) || pt_is_synth_system_version_path(p)) {
         return NO;
     }
     int is_sys_caller = -1;
@@ -2042,6 +2154,16 @@ static BOOL pt_is_sensitive_host_fd_path(const char *path, const void *caller) {
     if (pt_is_hidden_dyld_image_name(p)) {
         return YES;
     }
+    pt_ensure_bundle_path_map();
+    pt_ensure_data_container_map();
+    if (s_real_data_container_len > 0 &&
+        pt_match_prefix_modulo_private(p, s_real_data_container_dir, s_real_data_container_len) != NULL) {
+        return NO;
+    }
+    if (s_real_app_bundle_len > 0 &&
+        pt_match_prefix_modulo_private(p, s_real_app_bundle_dir, s_real_app_bundle_len) != NULL) {
+        return NO;
+    }
     if (strncmp(p, "/Library/Application Support/MacOver", 36) == 0 ||
         strncmp(p, "/Library/Application Support/PlayCover", 38) == 0 ||
         strstr(p, "/Library/Containers/app.makedie.") != NULL ||
@@ -2050,20 +2172,10 @@ static BOOL pt_is_sensitive_host_fd_path(const char *path, const void *caller) {
         strstr(p, "/Library/Preferences/io.playcover.") != NULL) {
         return YES;
     }
-    pt_ensure_bundle_path_map();
-    pt_ensure_data_container_map();
     const char *user_root = pt_get_host_user_root_cstr();
     if (user_root != NULL) {
         size_t ur_len = strlen(user_root);
         if (ur_len > 1 && strncmp(p, user_root, ur_len) == 0 && (p[ur_len] == '/' || p[ur_len] == '\0')) {
-            if (s_real_data_container_len > 0 &&
-                pt_match_prefix_modulo_private(p, s_real_data_container_dir, s_real_data_container_len) != NULL) {
-                return NO;
-            }
-            if (s_real_app_bundle_len > 0 &&
-                pt_match_prefix_modulo_private(p, s_real_app_bundle_dir, s_real_app_bundle_len) != NULL) {
-                return NO;
-            }
             char tmp[PATH_MAX];
             if (pt_group_try_virtualize_known_or_root(p, tmp, sizeof(tmp), YES) != NULL) {
                 return NO;
@@ -2477,6 +2589,147 @@ static BOOL pt_has_ios_system_version_plist(void) {
     return exists;
 }
 
+static BOOL pt_write_all_fd(int fd, const char *data, size_t len) {
+    size_t written = 0;
+    while (written < len) {
+        ssize_t n = write(fd, data + written, len - written);
+        if (n > 0) {
+            written += (size_t)n;
+        } else if (n < 0 && errno == EINTR) {
+            continue;
+        } else {
+            return NO;
+        }
+    }
+    return YES;
+}
+
+static BOOL pt_ensure_synthesized_system_version_plist(const char *ver,
+                                                       const char *build,
+                                                       char *out_buf,
+                                                       size_t out_cap) {
+    if (ver == NULL || ver[0] == '\0' || build == NULL || build[0] == '\0' ||
+        out_buf == NULL || out_cap == 0) {
+        return NO;
+    }
+
+    os_unfair_lock_lock(&s_synth_sysver_lock);
+    if (s_synth_sysver_path[0] != '\0' &&
+        strcmp(s_synth_sysver_ver, ver) == 0 &&
+        strcmp(s_synth_sysver_build, build) == 0) {
+        pt_enter_internal_scope();
+        struct stat st;
+        BOOL alive = (stat(s_synth_sysver_path, &st) == 0 &&
+                      st.st_dev == s_synth_sysver_dev &&
+                      st.st_ino == s_synth_sysver_ino);
+        pt_leave_internal_scope();
+        if (alive) {
+            size_t n = strlcpy(out_buf, s_synth_sysver_path, out_cap);
+            os_unfair_lock_unlock(&s_synth_sysver_lock);
+            return n < out_cap;
+        }
+    }
+
+    char xml[1024];
+    int xml_len = snprintf(xml, sizeof(xml),
+                           "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                           "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+                           "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+                           "<plist version=\"1.0\">\n"
+                           "<dict>\n"
+                           "\t<key>ProductBuildVersion</key>\n"
+                           "\t<string>%s</string>\n"
+                           "\t<key>ProductCopyright</key>\n"
+                           "\t<string>1983-2025 Apple Inc.</string>\n"
+                           "\t<key>ProductName</key>\n"
+                           "\t<string>iPhone OS</string>\n"
+                           "\t<key>ProductUserVisibleVersion</key>\n"
+                           "\t<string>%s</string>\n"
+                           "\t<key>ProductVersion</key>\n"
+                           "\t<string>%s</string>\n"
+                           "</dict>\n"
+                           "</plist>\n",
+                           build, ver, ver);
+    if (xml_len <= 0 || (size_t)xml_len >= sizeof(xml)) {
+        os_unfair_lock_unlock(&s_synth_sysver_lock);
+        return NO;
+    }
+
+    pt_ensure_data_container_map();
+    char container_tmp[PATH_MAX];
+    const char *dirs[3] = { NULL, NULL, "/tmp" };
+    if (s_real_data_container_len > 0) {
+        int dn = snprintf(container_tmp, sizeof(container_tmp), "%s/tmp", s_real_data_container_dir);
+        if (dn > 0 && (size_t)dn < sizeof(container_tmp)) {
+            dirs[0] = container_tmp;
+        }
+    }
+    const char *env_tmp = pt_raw_getenv("TMPDIR");
+    char env_tmp_buf[PATH_MAX];
+    if (env_tmp != NULL && env_tmp[0] == '/') {
+        strlcpy(env_tmp_buf, env_tmp, sizeof(env_tmp_buf));
+        size_t elen = strlen(env_tmp_buf);
+        while (elen > 1 && env_tmp_buf[elen - 1] == '/') {
+            env_tmp_buf[--elen] = '\0';
+        }
+        dirs[1] = env_tmp_buf;
+    }
+
+    BOOL ok = NO;
+    char chosen_path[PATH_MAX] = {0};
+    struct stat chosen_st;
+    memset(&chosen_st, 0, sizeof(chosen_st));
+    pid_t pid = getpid();
+
+    pt_enter_internal_scope();
+    for (size_t i = 0; i < 3 && !ok; i++) {
+        const char *dir = dirs[i];
+        if (dir == NULL || dir[0] != '/') {
+            continue;
+        }
+        if (i == 0) {
+            (void)mkdir(dir, 0700);
+        }
+        char target[PATH_MAX];
+        char staging[PATH_MAX];
+        int tn = snprintf(target, sizeof(target), "%s/.pt_sysver_%d_%s_%s.plist",
+                          dir, (int)pid, ver, build);
+        int sn = snprintf(staging, sizeof(staging), "%s/.pt_sysver_%d_tmp.plist",
+                          dir, (int)pid);
+        if (tn <= 0 || (size_t)tn >= sizeof(target) ||
+            sn <= 0 || (size_t)sn >= sizeof(staging)) {
+            continue;
+        }
+        int fd = pt_orig_open_nocancel(staging, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        if (fd < 0) {
+            continue;
+        }
+        BOOL wrote = pt_write_all_fd(fd, xml, (size_t)xml_len);
+        (void)close(fd);
+        if (wrote && rename(staging, target) == 0 && stat(target, &chosen_st) == 0) {
+            strlcpy(chosen_path, target, sizeof(chosen_path));
+            ok = YES;
+        } else {
+            (void)unlink(staging);
+        }
+    }
+    pt_leave_internal_scope();
+
+    if (ok) {
+        strlcpy(s_synth_sysver_path, chosen_path, sizeof(s_synth_sysver_path));
+        strlcpy(s_synth_sysver_ver, ver, sizeof(s_synth_sysver_ver));
+        strlcpy(s_synth_sysver_build, build, sizeof(s_synth_sysver_build));
+        s_synth_sysver_dev = chosen_st.st_dev;
+        s_synth_sysver_ino = chosen_st.st_ino;
+        atomic_store_explicit(&s_has_synth_sysver, 1, memory_order_release);
+        size_t n = strlcpy(out_buf, s_synth_sysver_path, out_cap);
+        os_unfair_lock_unlock(&s_synth_sysver_lock);
+        return n < out_cap;
+    }
+    os_unfair_lock_unlock(&s_synth_sysver_lock);
+    return NO;
+}
+
 static pt_fs_path_disposition_t pt_prepare_fs_path_abs_cached_caller(const char *cleaned,
                                                                       const void *caller,
                                                                       char *vbuf,
@@ -2582,17 +2835,27 @@ static pt_fs_path_disposition_t pt_prepare_fs_path_abs_cached_caller(const char 
 
     if (for_readonly && pt_is_bypass_enabled() && vbuf != NULL && vbuf_size > 0) {
         const char *sv_norm = norm;
-        if (strncmp(sv_norm, "/System/Volumes/Data/", 21) == 0) {
+        if (strncasecmp(sv_norm, "/System/Volumes/Data/", 21) == 0) {
             sv_norm += 20;
         }
-        if (strcmp(sv_norm, "/System/Library/CoreServices/SystemVersion.plist") == 0) {
+        if (strcasecmp(sv_norm, "/System/Library/CoreServices/SystemVersion.plist") == 0 ||
+            strcasecmp(sv_norm, "/System/Library/CoreServices/iOSSystemVersion.plist") == 0) {
             if (*inout_is_sys_caller < 0) {
                 *inout_is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
             }
-            if (*inout_is_sys_caller == 0 && pt_has_ios_system_version_plist()) {
-                strlcpy(vbuf, "/System/Library/CoreServices/iOSSystemVersion.plist", vbuf_size);
-                *out_path = vbuf;
-                return PT_FS_PATH_NORMAL;
+            if (*inout_is_sys_caller == 0) {
+                const char *ov_build = NULL;
+                const char *ov_ver = pt_get_reported_ios_version_override(&ov_build);
+                if (ov_ver != NULL && ov_build != NULL &&
+                    pt_ensure_synthesized_system_version_plist(ov_ver, ov_build, vbuf, vbuf_size)) {
+                    *out_path = vbuf;
+                    return PT_FS_PATH_NORMAL;
+                }
+                if (pt_has_ios_system_version_plist()) {
+                    strlcpy(vbuf, "/System/Library/CoreServices/iOSSystemVersion.plist", vbuf_size);
+                    *out_path = vbuf;
+                    return PT_FS_PATH_NORMAL;
+                }
             }
         }
     }
@@ -2806,7 +3069,8 @@ static inline BOOL pt_is_hidden_dirent_name(const char *d_name) {
     if (d_name == NULL || d_name[0] == '\0') {
         return NO;
     }
-    if (strncmp(d_name, "discord-ipc-", 12) == 0) {
+    if (strncmp(d_name, "discord-ipc-", 12) == 0 ||
+        strncmp(d_name, ".pt_sysver_", 11) == 0) {
         return YES;
     }
     if (strstr(d_name, "Play") != NULL &&
@@ -3009,7 +3273,12 @@ static int pt_creat_nocancel(const char *path, mode_t mode) {
 
 static int pt_open_dprotected_np(const char *path, int flags, int dpclass, int dpflags, ...) {
     char vbuf[PATH_MAX];
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path(path, __builtin_return_address(0), vbuf, sizeof(vbuf), &path);
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_mode(path,
+                                                            __builtin_return_address(0),
+                                                            vbuf,
+                                                            sizeof(vbuf),
+                                                            &path,
+                                                            pt_open_flags_are_readonly(flags));
     if (disp == PT_FS_PATH_HIDDEN) {
         errno = ENOENT;
         return -1;
@@ -3030,7 +3299,13 @@ static int pt_open_dprotected_np(const char *path, int flags, int dpclass, int d
 
 static int pt_openat_dprotected_np(int fd, const char *path, int flags, int dpclass, int dpflags, ...) {
     char vbuf[PATH_MAX];
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path_at(fd, path, __builtin_return_address(0), vbuf, sizeof(vbuf), &path);
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_at_mode(fd,
+                                                               path,
+                                                               __builtin_return_address(0),
+                                                               vbuf,
+                                                               sizeof(vbuf),
+                                                               &path,
+                                                               pt_open_flags_are_readonly(flags));
     if (disp == PT_FS_PATH_HIDDEN) {
         errno = ENOENT;
         return -1;
@@ -3055,7 +3330,12 @@ extern int guarded_open_dprotected_np(const char *path, const pt_guardid_t *guar
 
 static int pt_guarded_open_np(const char *path, const pt_guardid_t *guard, u_int guardflags, int flags, ...) {
     char vbuf[PATH_MAX];
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path(path, __builtin_return_address(0), vbuf, sizeof(vbuf), &path);
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_mode(path,
+                                                            __builtin_return_address(0),
+                                                            vbuf,
+                                                            sizeof(vbuf),
+                                                            &path,
+                                                            pt_open_flags_are_readonly(flags));
     if (disp == PT_FS_PATH_HIDDEN) {
         errno = ENOENT;
         return -1;
@@ -3076,7 +3356,12 @@ static int pt_guarded_open_np(const char *path, const pt_guardid_t *guard, u_int
 
 static int pt_guarded_open_dprotected_np(const char *path, const pt_guardid_t *guard, u_int guardflags, int flags, int dpclass, int dpflags, ...) {
     char vbuf[PATH_MAX];
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path(path, __builtin_return_address(0), vbuf, sizeof(vbuf), &path);
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_mode(path,
+                                                            __builtin_return_address(0),
+                                                            vbuf,
+                                                            sizeof(vbuf),
+                                                            &path,
+                                                            pt_open_flags_are_readonly(flags));
     if (disp == PT_FS_PATH_HIDDEN) {
         errno = ENOENT;
         return -1;
@@ -3561,6 +3846,13 @@ int pt_fs_fcntl_with_caller(int fd, int cmd, uintptr_t arg, const void *caller) 
 #ifdef F_DUPFD_CLOFORK
         case F_DUPFD_CLOFORK:
 #endif
+        {
+            int ret = fcntl(fd, cmd, (int)arg);
+            if (ret >= 0) {
+                pt_network_notify_fd_dup(fd, ret);
+            }
+            return ret;
+        }
         case F_SETFD:
         case F_SETFL:
         case F_SETOWN:
@@ -3615,6 +3907,17 @@ static int pt_fcntl(int fd, int cmd, ...) {
 #ifdef F_DUPFD_CLOFORK
         case F_DUPFD_CLOFORK:
 #endif
+        {
+            va_list ap;
+            va_start(ap, cmd);
+            int iarg = va_arg(ap, int);
+            va_end(ap);
+            int ret = fcntl(fd, cmd, iarg);
+            if (ret >= 0) {
+                pt_network_notify_fd_dup(fd, ret);
+            }
+            return ret;
+        }
         case F_SETFD:
         case F_SETFL:
         case F_SETOWN:
@@ -3687,6 +3990,17 @@ static int pt_fcntl_nocancel(int fd, int cmd, ...) {
 #ifdef F_DUPFD_CLOFORK
         case F_DUPFD_CLOFORK:
 #endif
+        {
+            va_list ap;
+            va_start(ap, cmd);
+            int iarg = va_arg(ap, int);
+            va_end(ap);
+            int ret = pt_orig_fcntl_nocancel(fd, cmd, iarg);
+            if (ret >= 0) {
+                pt_network_notify_fd_dup(fd, ret);
+            }
+            return ret;
+        }
         case F_SETFD:
         case F_SETFL:
         case F_SETOWN:
@@ -3841,18 +4155,37 @@ static int pt_proc_regionfilename(int pid, uint64_t address, void *buffer, uint3
     return ret;
 }
 
-__attribute__((visibility("hidden")))
-int pt_fs_proc_pidinfo_with_caller(int pid, int flavor, uint64_t arg, void *buffer, int buffersize, const void *caller) {
+static int pt_fs_proc_pidinfo_ex(int pid,
+                                     int flavor,
+                                     uint64_t arg,
+                                     void *buffer,
+                                     int buffersize,
+                                     const void *caller,
+                                     BOOL raw_syscall_abi) {
     BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
     int self_pid = getpid();
     if (!is_sys && pid != 0 && pid != self_pid) {
         errno = ESRCH;
+        return raw_syscall_abi ? -1 : 0;
+    }
+    int saved_errno = errno;
+    errno = 0;
+    int ret = proc_pidinfo(pid, flavor, arg, buffer, buffersize);
+    int call_errno = errno;
+    BOOL failed = (ret < 0 || call_errno != 0);
+    if (failed) {
+        errno = call_errno;
+        return raw_syscall_abi ? -1 : ret;
+    }
+    if (ret == 0 && flavor != PROC_PIDPATHINFO) {
+        errno = saved_errno;
         return 0;
     }
-    int ret = proc_pidinfo(pid, flavor, arg, buffer, buffersize);
-    if (ret <= 0 || buffer == NULL || is_sys) {
+    if (buffer == NULL || is_sys) {
+        errno = saved_errno;
         return ret;
     }
+    BOOL bypass_active = pt_is_bypass_enabled();
     switch (flavor) {
         case PROC_PIDVNODEPATHINFO:
             if ((size_t)ret >= sizeof(struct proc_vnodepathinfo)) {
@@ -3890,7 +4223,7 @@ int pt_fs_proc_pidinfo_with_caller(int pid, int flavor, uint64_t arg, void *buff
             break;
 
         case PROC_PIDLISTTHREADS:
-            if (pt_is_bypass_enabled() && (size_t)ret >= sizeof(uint64_t)) {
+            if (bypass_active && (size_t)ret >= sizeof(uint64_t)) {
                 int count = ret / (int)sizeof(uint64_t);
                 uint64_t *tids = (uint64_t *)buffer;
                 int kept = 0;
@@ -3911,7 +4244,7 @@ int pt_fs_proc_pidinfo_with_caller(int pid, int flavor, uint64_t arg, void *buff
 
         case PROC_PIDTHREADINFO:
         case PROC_PIDTHREADID64INFO:
-            if (pt_is_bypass_enabled() && (size_t)ret >= sizeof(struct proc_threadinfo)) {
+            if (bypass_active && (size_t)ret >= sizeof(struct proc_threadinfo)) {
                 struct proc_threadinfo *ti = (struct proc_threadinfo *)buffer;
                 if (pt_is_hidden_thread_name(ti->pth_name)) {
                     memset(ti->pth_name, 0, sizeof(ti->pth_name));
@@ -3923,7 +4256,7 @@ int pt_fs_proc_pidinfo_with_caller(int pid, int flavor, uint64_t arg, void *buff
             if ((size_t)ret >= sizeof(struct proc_threadwithpathinfo)) {
                 struct proc_threadwithpathinfo tpi;
                 memcpy(&tpi, buffer, sizeof(tpi));
-                if (pt_is_bypass_enabled() && pt_is_hidden_thread_name(tpi.pt.pth_name)) {
+                if (bypass_active && pt_is_hidden_thread_name(tpi.pt.pth_name)) {
                     memset(tpi.pt.pth_name, 0, sizeof(tpi.pt.pth_name));
                 }
                 pt_sanitize_vnode_vip_path(tpi.pvip.vip_path,
@@ -3939,6 +4272,17 @@ int pt_fs_proc_pidinfo_with_caller(int pid, int flavor, uint64_t arg, void *buff
                 struct proc_bsdinfo *binfo = (struct proc_bsdinfo *)buffer;
                 binfo->pbi_flags &= ~(uint32_t)PROC_FLAG_TRACED;
                 binfo->pbi_ppid = 1;
+                if (bypass_active) {
+                    if (binfo->pbi_gid == 20U) {
+                        binfo->pbi_gid = 501U;
+                    }
+                    if (binfo->pbi_rgid == 20U) {
+                        binfo->pbi_rgid = 501U;
+                    }
+                    if (binfo->pbi_svgid == 20U) {
+                        binfo->pbi_svgid = 501U;
+                    }
+                }
             }
             break;
 
@@ -3947,6 +4291,17 @@ int pt_fs_proc_pidinfo_with_caller(int pid, int flavor, uint64_t arg, void *buff
                 struct proc_taskallinfo *tinfo = (struct proc_taskallinfo *)buffer;
                 tinfo->pbsd.pbi_flags &= ~(uint32_t)PROC_FLAG_TRACED;
                 tinfo->pbsd.pbi_ppid = 1;
+                if (bypass_active) {
+                    if (tinfo->pbsd.pbi_gid == 20U) {
+                        tinfo->pbsd.pbi_gid = 501U;
+                    }
+                    if (tinfo->pbsd.pbi_rgid == 20U) {
+                        tinfo->pbsd.pbi_rgid = 501U;
+                    }
+                    if (tinfo->pbsd.pbi_svgid == 20U) {
+                        tinfo->pbsd.pbi_svgid = 501U;
+                    }
+                }
             }
             break;
 
@@ -3955,6 +4310,17 @@ int pt_fs_proc_pidinfo_with_caller(int pid, int flavor, uint64_t arg, void *buff
                 struct proc_bsdshortinfo *sinfo = (struct proc_bsdshortinfo *)buffer;
                 sinfo->pbsi_flags &= ~(uint32_t)PROC_FLAG_TRACED;
                 sinfo->pbsi_ppid = 1;
+                if (bypass_active) {
+                    if (sinfo->pbsi_gid == 20U) {
+                        sinfo->pbsi_gid = 501U;
+                    }
+                    if (sinfo->pbsi_rgid == 20U) {
+                        sinfo->pbsi_rgid = 501U;
+                    }
+                    if (sinfo->pbsi_svgid == 20U) {
+                        sinfo->pbsi_svgid = 501U;
+                    }
+                }
             }
             break;
 
@@ -3975,24 +4341,37 @@ int pt_fs_proc_pidinfo_with_caller(int pid, int flavor, uint64_t arg, void *buff
         case PROC_PIDPATHINFO:
             if (buffersize > 1) {
                 char *pbuf = (char *)buffer;
-                if (pt_is_sensitive_host_fd_path(pbuf, caller)) {
-                    pbuf[0] = '\0';
-                    errno = ESRCH;
-                    return 0;
-                }
+                pbuf[buffersize - 1] = '\0';
                 char vout[PATH_MAX];
                 const char *virt = pt_virtualize_path_for_app(pbuf, vout, sizeof(vout), YES);
                 if (virt != pbuf) {
-                    size_t n = strlcpy(pbuf, virt, (size_t)buffersize);
-                    return (n < (size_t)buffersize) ? (int)(n + 1) : buffersize;
+                    strlcpy(pbuf, virt, (size_t)buffersize);
                 }
+                if (pt_is_sensitive_host_fd_path(pbuf, caller)) {
+                    pbuf[0] = '\0';
+                    errno = ESRCH;
+                    return raw_syscall_abi ? -1 : 0;
+                }
+                errno = saved_errno;
+                return 0;
             }
             break;
 
         default:
             break;
     }
+    errno = saved_errno;
     return ret;
+}
+
+__attribute__((visibility("hidden")))
+int pt_fs_proc_pidinfo_with_caller(int pid, int flavor, uint64_t arg, void *buffer, int buffersize, const void *caller) {
+    return pt_fs_proc_pidinfo_ex(pid, flavor, arg, buffer, buffersize, caller, NO);
+}
+
+__attribute__((visibility("hidden")))
+int pt_fs_proc_pidinfo_syscall_with_caller(int pid, int flavor, uint64_t arg, void *buffer, int buffersize, const void *caller) {
+    return pt_fs_proc_pidinfo_ex(pid, flavor, arg, buffer, buffersize, caller, YES);
 }
 
 static int pt_proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer, int buffersize) {
@@ -4159,7 +4538,7 @@ static BOOL pt_should_hide_dirent(const char *d_name,
         return NO;
     }
     BOOL hide_candidate = pt_is_hidden_dirent_name(d_name);
-    if (!hide_candidate && strcmp(d_name, "Finder.app") == 0) {
+    if (!hide_candidate && strcasecmp(d_name, "Finder.app") == 0) {
         char dp[PATH_MAX];
         const char *dir_path = dirname_for_lazy_check;
         if (dir_path == NULL) {
@@ -4169,10 +4548,10 @@ static BOOL pt_should_hide_dirent(const char *d_name,
             }
         }
         if (dir_path != NULL) {
-            if (strncmp(dir_path, "/System/Volumes/Data/", 21) == 0) {
+            if (strncasecmp(dir_path, "/System/Volumes/Data/", 21) == 0) {
                 dir_path += 20;
             }
-            if (strcmp(dir_path, "/System/Library/CoreServices") == 0) {
+            if (strcasecmp(dir_path, "/System/Library/CoreServices") == 0) {
                 hide_candidate = YES;
             }
         }
@@ -6717,5 +7096,53 @@ DYLD_INTERPOSE(pt_mkostemp, mkostemp)
 DYLD_INTERPOSE(pt_mkostemps, mkostemps)
 DYLD_INTERPOSE(pt_mkdtemp, mkdtemp)
 DYLD_INTERPOSE(pt_amkrtemp, _amkrtemp)
+static ssize_t pt_fs_fsgetpath_impl(char *buf, size_t bufsize, fsid_t *fsid, uint64_t objid, const void *caller) {
+    ssize_t ret = fsgetpath(buf, bufsize, fsid, objid);
+    if (ret <= 0 || buf == NULL || bufsize == 0 || pt_is_effective_system_or_playtools_caller(caller)) {
+        return ret;
+    }
+    buf[bufsize - 1] = '\0';
+    char vout[PATH_MAX];
+    const char *virt = pt_virtualize_path_for_app(buf, vout, sizeof(vout), YES);
+    if (virt != buf) {
+        size_t n = strlcpy(buf, virt, bufsize);
+        if (n >= bufsize) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        ret = (ssize_t)(n + 1);
+    }
+    if (pt_is_sensitive_host_fd_path(buf, caller)) {
+        buf[0] = '\0';
+        errno = ENOENT;
+        return -1;
+    }
+    return ret;
+}
+
+__attribute__((visibility("hidden")))
+ssize_t pt_fs_fsgetpath_with_caller(char *buf, size_t bufsize, fsid_t *fsid, uint64_t objid, const void *caller) {
+    return pt_fs_fsgetpath_impl(buf, bufsize, fsid, objid, caller);
+}
+
+static ssize_t pt_fsgetpath(char *buf, size_t bufsize, fsid_t *fsid, uint64_t objid) {
+    return pt_fs_fsgetpath_impl(buf, bufsize, fsid, objid, __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
+void *pt_fs_dlsym_route(const char *symbol) {
+    if (symbol == NULL) {
+        return NULL;
+    }
+    if (strcmp(symbol, "fsgetpath") == 0) {
+        return (void *)&pt_fsgetpath;
+    }
+    if (strcmp(symbol, "proc_pidinfo") == 0) {
+        return (void *)&pt_proc_pidinfo;
+    }
+    return NULL;
+}
+
 DYLD_INTERPOSE(pt_sqlite3_open, sqlite3_open)
 DYLD_INTERPOSE(pt_sqlite3_open_v2, sqlite3_open_v2)
+DYLD_INTERPOSE(pt_fsgetpath, fsgetpath)

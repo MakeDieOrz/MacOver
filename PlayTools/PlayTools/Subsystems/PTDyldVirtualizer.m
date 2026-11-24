@@ -694,6 +694,13 @@ static bool pt_dyld_shared_cache_contains_path(const char *path) {
         if (pt_is_hidden_dyld_image_name(norm) || pt_is_hidden_path(norm, caller)) {
             return false;
         }
+        if (pt_is_compat13_7_active() &&
+            (strstr(norm, "libswift_Concurrency.dylib") != NULL ||
+             strstr(norm, "libswift_StringProcessing.dylib") != NULL ||
+             strstr(norm, "UniformTypeIdentifiers.framework") != NULL ||
+             strstr(norm, "AppTrackingTransparency.framework") != NULL)) {
+            return false;
+        }
         if (pt_orig_dyld_shared_cache_contains_path(norm)) {
             return true;
         }
@@ -2480,6 +2487,234 @@ static bool pt_dlopen_preflight(const char *path) {
     return dlopen_preflight(path);
 }
 
+extern const void *swift_getTypeByMangledNameInContext(const char *typeNameStart,
+                                                       size_t typeNameLength,
+                                                       const void *context,
+                                                       const void * const *genericArgs)
+    __attribute__((swiftcall)) __attribute__((weak_import));
+
+extern const void *swift_getTypeByMangledNameInContext2(const char *typeNameStart,
+                                                        size_t typeNameLength,
+                                                        const void *context,
+                                                        const void * const *genericArgs)
+    __attribute__((swiftcall)) __attribute__((weak_import));
+
+extern const void *swift_getTypeByMangledNameInContextInMetadataState(size_t metadataState,
+                                                                      const char *typeNameStart,
+                                                                      size_t typeNameLength,
+                                                                      const void *context,
+                                                                      const void * const *genericArgs)
+    __attribute__((swiftcall)) __attribute__((weak_import));
+
+extern const void *swift_getTypeByMangledNameInContextInMetadataState2(size_t metadataState,
+                                                                       const char *typeNameStart,
+                                                                       size_t typeNameLength,
+                                                                       const void *context,
+                                                                       const void * const *genericArgs)
+    __attribute__((swiftcall)) __attribute__((weak_import));
+
+extern const void *pt_orig_swift_typeByName(uint64_t w0, uint64_t w1)
+    __asm("_$ss11_typeByNameyypXpSgSSF") __attribute__((swiftcall)) __attribute__((weak_import));
+
+extern CFTypeRef pt_orig_swift_string_bridge(uint64_t w0, uint64_t w1)
+    __asm("_$sSS10FoundationE19_bridgeToObjectiveCSo8NSStringCyF")
+    __attribute__((swiftcall)) __attribute__((weak_import)) CF_RETURNS_RETAINED;
+
+static BOOL pt_memmem_lit(const char *buf, size_t len, const char *lit, size_t lit_len) {
+    return (buf != NULL && len >= lit_len && memmem(buf, len, lit, lit_len) != NULL);
+}
+
+static BOOL pt_is_hidden_swift_mangled_type_name(const char *typeNameStart, size_t typeNameLength) {
+    if (typeNameStart == NULL || typeNameLength == 0 || !pt_is_valid_user_pointer(typeNameStart)) {
+        return NO;
+    }
+    size_t scan_len = (typeNameLength > 4096U) ? 4096U : typeNameLength;
+    if (pt_memmem_lit(typeNameStart, scan_len, "9PlayTools", 10) ||
+        pt_memmem_lit(typeNameStart, scan_len, "PlayTools.", 10) ||
+        pt_memmem_lit(typeNameStart, scan_len, "11AKInterface", 13) ||
+        pt_memmem_lit(typeNameStart, scan_len, "AKInterface.", 12) ||
+        pt_memmem_lit(typeNameStart, scan_len, "9PlayCover", 10) ||
+        pt_memmem_lit(typeNameStart, scan_len, "8AKPlugin", 9)) {
+        return YES;
+    }
+    if (pt_registered_hidden_module_count() > 0) {
+        char tmp[1024];
+        size_t copy_len = (scan_len >= sizeof(tmp)) ? (sizeof(tmp) - 1U) : scan_len;
+        for (size_t i = 0; i < copy_len; i++) {
+            char ch = typeNameStart[i];
+            tmp[i] = (ch == '\0') ? ' ' : ch;
+        }
+        tmp[copy_len] = '\0';
+        if (pt_is_registered_hidden_module(tmp)) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static BOOL pt_is_swift_type_lookup_app_caller(const void *ret_addr) {
+    if (pt_is_in_internal_scope() || pt_is_address_in_playtools(ret_addr)) {
+        return NO;
+    }
+    if (!pt_is_effective_system_or_playtools_caller(ret_addr)) {
+        return YES;
+    }
+    const char *img0 = dyld_image_path_containing_address(pt_strip_code_ptr(ret_addr));
+    if (img0 == NULL || (strstr(img0, "libswift") == NULL && strncmp(img0, "/usr/lib/", 9) != 0)) {
+        return NO;
+    }
+#if defined(__arm64__) || defined(__aarch64__)
+    pthread_t self = pthread_self();
+    uintptr_t stack_top = (self != NULL) ? (uintptr_t)pthread_get_stackaddr_np(self) : 0;
+    size_t stack_sz = (self != NULL) ? pthread_get_stacksize_np(self) : 0;
+    uintptr_t stack_bot = (stack_top > stack_sz && stack_sz > 0) ? (stack_top - stack_sz) : 0;
+    uintptr_t fp = (uintptr_t)__builtin_frame_address(0);
+    for (int depth = 0; depth < PT_MAX_CALLER_UNWIND_DEPTH; depth++) {
+        if (stack_top < 16 || fp < stack_bot || fp + 16 > stack_top || (fp & 0x7) != 0) {
+            break;
+        }
+        uintptr_t next_fp = ((const uintptr_t *)fp)[0];
+        const void *lr = pt_strip_return_addr(((const uintptr_t *)fp)[1]);
+        if (lr != NULL) {
+            if (pt_is_address_in_playtools(lr)) {
+                return NO;
+            }
+            if (!pt_is_system_or_playtools_caller(lr)) {
+                return YES;
+            }
+        }
+        if (next_fp <= fp) {
+            break;
+        }
+        fp = next_fp;
+    }
+#endif
+    return NO;
+}
+
+static BOOL pt_should_hide_swift_type_lookup(const char *typeNameStart,
+                                              size_t typeNameLength,
+                                              const void *caller) {
+    return (pt_is_bypass_enabled() &&
+            pt_is_hidden_swift_mangled_type_name(typeNameStart, typeNameLength) &&
+            pt_is_swift_type_lookup_app_caller(caller));
+}
+
+static const void *pt_swift_getTypeByMangledNameInContext(const char *typeNameStart,
+                                                         size_t typeNameLength,
+                                                         const void *context,
+                                                         const void * const *genericArgs)
+    __attribute__((swiftcall)) {
+    if (pt_should_hide_swift_type_lookup(typeNameStart, typeNameLength, __builtin_return_address(0)) ||
+        &swift_getTypeByMangledNameInContext == NULL) {
+        return NULL;
+    }
+    return swift_getTypeByMangledNameInContext(typeNameStart, typeNameLength, context, genericArgs);
+}
+
+static const void *pt_swift_getTypeByMangledNameInContext2(const char *typeNameStart,
+                                                          size_t typeNameLength,
+                                                          const void *context,
+                                                          const void * const *genericArgs)
+    __attribute__((swiftcall)) {
+    if (pt_should_hide_swift_type_lookup(typeNameStart, typeNameLength, __builtin_return_address(0)) ||
+        &swift_getTypeByMangledNameInContext2 == NULL) {
+        return NULL;
+    }
+    return swift_getTypeByMangledNameInContext2(typeNameStart, typeNameLength, context, genericArgs);
+}
+
+static const void *pt_swift_getTypeByMangledNameInContextInMetadataState(size_t metadataState,
+                                                                        const char *typeNameStart,
+                                                                        size_t typeNameLength,
+                                                                        const void *context,
+                                                                        const void * const *genericArgs)
+    __attribute__((swiftcall)) {
+    if (pt_should_hide_swift_type_lookup(typeNameStart, typeNameLength, __builtin_return_address(0)) ||
+        &swift_getTypeByMangledNameInContextInMetadataState == NULL) {
+        return NULL;
+    }
+    return swift_getTypeByMangledNameInContextInMetadataState(metadataState,
+                                                              typeNameStart,
+                                                              typeNameLength,
+                                                              context,
+                                                              genericArgs);
+}
+
+static const void *pt_swift_getTypeByMangledNameInContextInMetadataState2(size_t metadataState,
+                                                                         const char *typeNameStart,
+                                                                         size_t typeNameLength,
+                                                                         const void *context,
+                                                                         const void * const *genericArgs)
+    __attribute__((swiftcall)) {
+    if (pt_should_hide_swift_type_lookup(typeNameStart, typeNameLength, __builtin_return_address(0)) ||
+        &swift_getTypeByMangledNameInContextInMetadataState2 == NULL) {
+        return NULL;
+    }
+    return swift_getTypeByMangledNameInContextInMetadataState2(metadataState,
+                                                               typeNameStart,
+                                                               typeNameLength,
+                                                               context,
+                                                               genericArgs);
+}
+
+static BOOL pt_is_hidden_swift_type_cstr(const char *buf, size_t len) {
+    if (pt_is_hidden_swift_mangled_type_name(buf, len)) {
+        return YES;
+    }
+    if (buf == NULL || len == 0 || !pt_is_valid_user_pointer(buf)) {
+        return NO;
+    }
+    char tmp[512];
+    size_t copy_len = (len >= sizeof(tmp)) ? (sizeof(tmp) - 1U) : len;
+    memcpy(tmp, buf, copy_len);
+    tmp[copy_len] = '\0';
+    return (strcmp(tmp, "PlayTools") == 0 ||
+            strcmp(tmp, "AKInterface") == 0 ||
+            strcmp(tmp, "PlayCover") == 0 ||
+            pt_is_hidden_objc_class(tmp));
+}
+
+static BOOL pt_swift_string_is_hidden_type(uint64_t w0, uint64_t w1) {
+    if ((w1 & (1ULL << 61)) != 0) {
+        size_t len = (size_t)((w1 >> 56) & 0xfULL);
+        char sbuf[16];
+        memset(sbuf, 0, sizeof(sbuf));
+        memcpy(sbuf, &w0, 8);
+        memcpy(sbuf + 8, &w1, 7);
+        return pt_is_hidden_swift_type_cstr(sbuf, len);
+    }
+    if (&pt_orig_swift_string_bridge == NULL) {
+        return NO;
+    }
+    CFTypeRef cf = pt_orig_swift_string_bridge(w0, w1);
+    if (cf == NULL) {
+        return NO;
+    }
+    char stack_buf[1024];
+    const char *cstr = CFStringGetCStringPtr((CFStringRef)cf, kCFStringEncodingUTF8);
+    if (cstr == NULL &&
+        CFStringGetCString((CFStringRef)cf, stack_buf, sizeof(stack_buf), kCFStringEncodingUTF8)) {
+        cstr = stack_buf;
+    }
+    BOOL hide = (cstr != NULL && pt_is_hidden_swift_type_cstr(cstr, strlen(cstr)));
+    CFRelease(cf);
+    return hide;
+}
+
+static const void *pt_swift_typeByName(uint64_t w0, uint64_t w1) __attribute__((swiftcall)) {
+    const void *caller = __builtin_return_address(0);
+    if (pt_is_bypass_enabled() &&
+        pt_is_swift_type_lookup_app_caller(caller) &&
+        pt_swift_string_is_hidden_type(w0, w1)) {
+        return NULL;
+    }
+    if (&pt_orig_swift_typeByName == NULL) {
+        return NULL;
+    }
+    return pt_orig_swift_typeByName(w0, w1);
+}
+
 static void *pt_dlsym(void *handle, const char *symbol) {
     if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire)) {
         return dlsym(handle, symbol);
@@ -2505,8 +2740,11 @@ static void *pt_dlsym(void *handle, const char *symbol) {
             }
         } else if (strncmp(symbol, "SecCode", 7) == 0 ||
                    strncmp(symbol, "SecStaticCode", 13) == 0 ||
-                   strncmp(symbol, "SecRequirementCreate", 20) == 0) {
-            PT_DEBUG_TRACE("dyld", "hid macOS-only Security symbol=%s", symbol);
+                   strncmp(symbol, "SecRequirementCreate", 20) == 0 ||
+                   strcmp(symbol, "AudioObjectGetPropertyDataSize") == 0 ||
+                   strcmp(symbol, "AudioObjectGetPropertyData") == 0 ||
+                   strcmp(symbol, "_LSCopyApplicationInformation") == 0) {
+            PT_DEBUG_TRACE("dyld", "hid macOS-only symbol=%s", symbol);
             pt_set_synthetic_dlerror("symbol not found");
             return NULL;
         } else if (strcmp(symbol, "_dyld_shared_cache_contains_path") == 0) {
@@ -2522,6 +2760,9 @@ static void *pt_dlsym(void *handle, const char *symbol) {
             if (strcmp(symbol, "MGCopyAnswer") == 0) {
                 return (void *)&pt_MGCopyAnswer;
             }
+            if (strcmp(symbol, "MGCopyAnswerWithError") == 0) {
+                return (void *)&pt_MGCopyAnswerWithError;
+            }
             if (strcmp(symbol, "MGCopyMultipleAnswers") == 0) {
                 return (void *)&pt_MGCopyMultipleAnswers;
             }
@@ -2536,6 +2777,39 @@ static void *pt_dlsym(void *handle, const char *symbol) {
             }
             if (strcmp(symbol, "MGGetProductType") == 0) {
                 return (void *)&pt_MGGetProductType;
+            }
+        } else if (handle != RTLD_MAIN_ONLY) {
+            if (strcmp(symbol, "swift_getTypeByMangledNameInContext") == 0 &&
+                &swift_getTypeByMangledNameInContext != NULL) {
+                return (void *)&pt_swift_getTypeByMangledNameInContext;
+            }
+            if (strcmp(symbol, "swift_getTypeByMangledNameInContext2") == 0 &&
+                &swift_getTypeByMangledNameInContext2 != NULL) {
+                return (void *)&pt_swift_getTypeByMangledNameInContext2;
+            }
+            if (strcmp(symbol, "swift_getTypeByMangledNameInContextInMetadataState") == 0 &&
+                &swift_getTypeByMangledNameInContextInMetadataState != NULL) {
+                return (void *)&pt_swift_getTypeByMangledNameInContextInMetadataState;
+            }
+            if (strcmp(symbol, "swift_getTypeByMangledNameInContextInMetadataState2") == 0 &&
+                &swift_getTypeByMangledNameInContextInMetadataState2 != NULL) {
+                return (void *)&pt_swift_getTypeByMangledNameInContextInMetadataState2;
+            }
+            if (strcmp(symbol, "$ss11_typeByNameyypXpSgSSF") == 0 &&
+                &pt_orig_swift_typeByName != NULL) {
+                return (void *)&pt_swift_typeByName;
+            }
+            void *routed = pt_fs_dlsym_route(symbol);
+            if (routed != NULL) {
+                return routed;
+            }
+            routed = pt_network_dlsym_route(symbol);
+            if (routed != NULL) {
+                return routed;
+            }
+            routed = pt_spoofer_dlsym_route(symbol);
+            if (routed != NULL) {
+                return routed;
             }
         }
     }
@@ -2656,6 +2930,11 @@ DYLD_INTERPOSE(pt_dlopen, dlopen)
 DYLD_INTERPOSE(pt_dlopen_preflight, dlopen_preflight)
 DYLD_INTERPOSE(pt_dlsym, dlsym)
 DYLD_INTERPOSE(pt_dlerror, dlerror)
+DYLD_INTERPOSE(pt_swift_getTypeByMangledNameInContext, swift_getTypeByMangledNameInContext)
+DYLD_INTERPOSE(pt_swift_getTypeByMangledNameInContext2, swift_getTypeByMangledNameInContext2)
+DYLD_INTERPOSE(pt_swift_getTypeByMangledNameInContextInMetadataState, swift_getTypeByMangledNameInContextInMetadataState)
+DYLD_INTERPOSE(pt_swift_getTypeByMangledNameInContextInMetadataState2, swift_getTypeByMangledNameInContextInMetadataState2)
+DYLD_INTERPOSE(pt_swift_typeByName, pt_orig_swift_typeByName)
 
 static BOOL (*s_orig_nsobject_respondsToSelector)(id, SEL, SEL) = NULL;
 static BOOL (*s_orig_nsobject_instancesRespondToSelector)(id, SEL, SEL) = NULL;

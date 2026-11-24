@@ -545,11 +545,13 @@ __attribute__((visibility("hidden"))) BOOL pt_sanitize_ios_build_version_cstr(co
 __attribute__((visibility("hidden"))) void pt_sanitize_system_version_dict(NSMutableDictionary *dict);
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_thread_name(const char *name);
 __attribute__((visibility("hidden"))) CFTypeRef pt_MGCopyAnswer(CFStringRef question, CFDictionaryRef options);
+__attribute__((visibility("hidden"))) CFTypeRef pt_MGCopyAnswerWithError(CFStringRef question, CFDictionaryRef options, int *outError);
 __attribute__((visibility("hidden"))) CFDictionaryRef pt_MGCopyMultipleAnswers(CFArrayRef questions, CFDictionaryRef options);
 __attribute__((visibility("hidden"))) bool pt_MGGetBoolAnswer(CFStringRef question);
 __attribute__((visibility("hidden"))) int32_t pt_MGGetSInt32Answer(CFStringRef question, int32_t defaultVal);
 __attribute__((visibility("hidden"))) CFStringRef pt_MGGetStringAnswer(CFStringRef question);
 __attribute__((visibility("hidden"))) int32_t pt_MGGetProductType(void);
+__attribute__((visibility("hidden"))) void *pt_spoofer_dlsym_route(const char *symbol);
 __attribute__((visibility("hidden"))) int pt_sysctl_with_caller(int *name, u_int types, void *buf, size_t *size, void *arg0, size_t arg1, const void *caller);
 __attribute__((visibility("hidden"))) int pt_sysctlbyname_with_caller(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen, const void *caller);
 __attribute__((visibility("hidden"))) intptr_t pt_syscall_dispatch_with_caller(int number, const uintptr_t args[8], const void *caller, BOOL *out_handled);
@@ -597,6 +599,9 @@ __attribute__((visibility("hidden"))) ssize_t pt_fs_readlink_with_caller(const c
 __attribute__((visibility("hidden"))) ssize_t pt_fs_readlinkat_with_caller(int fd, const char *path, char *buf, size_t bufsize, const void *caller);
 __attribute__((visibility("hidden"))) int pt_fs_fcntl_with_caller(int fd, int cmd, uintptr_t arg, const void *caller);
 __attribute__((visibility("hidden"))) int pt_fs_proc_pidinfo_with_caller(int pid, int flavor, uint64_t arg, void *buffer, int buffersize, const void *caller);
+__attribute__((visibility("hidden"))) int pt_fs_proc_pidinfo_syscall_with_caller(int pid, int flavor, uint64_t arg, void *buffer, int buffersize, const void *caller);
+__attribute__((visibility("hidden"))) ssize_t pt_fs_fsgetpath_with_caller(char *buf, size_t bufsize, fsid_t *fsid, uint64_t objid, const void *caller);
+__attribute__((visibility("hidden"))) void *pt_fs_dlsym_route(const char *symbol);
 
 // DyldVirtualizer exports
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_class(const char *name);
@@ -617,6 +622,9 @@ __attribute__((visibility("hidden"))) BOOL pt_is_address_in_playtools(const void
 // NetworkVirtualizer exports
 __attribute__((visibility("hidden"))) int ps_should_block_host_cstr(const char *hostname);
 __attribute__((visibility("hidden"))) void ps_notify_dynamic_image_loaded(void);
+__attribute__((visibility("hidden"))) BOOL pt_is_hidden_network_ifname(const char *name);
+__attribute__((visibility("hidden"))) void pt_network_notify_fd_dup(int oldfd, int newfd);
+__attribute__((visibility("hidden"))) void *pt_network_dlsym_route(const char *symbol);
 
 // SvcInterceptor exports
 __attribute__((visibility("hidden"))) void pt_svc_interceptor_init_early(void);

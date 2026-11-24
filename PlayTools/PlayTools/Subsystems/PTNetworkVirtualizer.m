@@ -6,6 +6,7 @@
 #import "PSInternal.h"
 #include <ctype.h>
 #include <ifaddrs.h>
+#include <net/if.h>
 
 
 typedef NS_ENUM(NSInteger, PSNetRuleAction) {
@@ -1629,6 +1630,57 @@ static void pt_unix_forget_fd(int fd) {
     os_unfair_lock_unlock(&s_unix_rel_sock_lock);
 }
 
+__attribute__((visibility("hidden")))
+void pt_network_notify_fd_dup(int oldfd, int newfd) {
+    if (oldfd < 0 || newfd < 0 || oldfd == newfd) {
+        return;
+    }
+    if (atomic_load_explicit(&s_unix_sock_tracked_count, memory_order_acquire) <= 0) {
+        return;
+    }
+    os_unfair_lock_lock(&s_unix_rel_sock_lock);
+    const pt_unix_rel_sock_entry_t *src = NULL;
+    pt_unix_rel_sock_entry_t *stale_new = NULL;
+    pt_unix_rel_sock_entry_t *free_slot = NULL;
+    pt_unix_rel_sock_entry_t *oldest_slot = &s_unix_rel_sock_table[0];
+    for (size_t i = 0; i < PT_UNIX_REL_SOCK_SLOTS; i++) {
+        pt_unix_rel_sock_entry_t *e = &s_unix_rel_sock_table[i];
+        if (!e->in_use) {
+            if (free_slot == NULL) {
+                free_slot = e;
+            }
+            continue;
+        }
+        if (e->fd == oldfd && src == NULL) {
+            src = e;
+        }
+        if (e->fd == newfd && stale_new == NULL) {
+            stale_new = e;
+        }
+        if (e->seq < oldest_slot->seq) {
+            oldest_slot = e;
+        }
+    }
+    if (src == NULL) {
+        if (stale_new != NULL) {
+            memset(stale_new, 0, sizeof(*stale_new));
+            atomic_fetch_sub_explicit(&s_unix_sock_tracked_count, 1, memory_order_release);
+        }
+        os_unfair_lock_unlock(&s_unix_rel_sock_lock);
+        return;
+    }
+    pt_unix_rel_sock_entry_t copy = *src;
+    pt_unix_rel_sock_entry_t *dst = (stale_new != NULL) ? stale_new : ((free_slot != NULL) ? free_slot : oldest_slot);
+    if (!dst->in_use) {
+        atomic_fetch_add_explicit(&s_unix_sock_tracked_count, 1, memory_order_release);
+    }
+    *dst = copy;
+    dst->in_use = YES;
+    dst->fd = newfd;
+    dst->seq = ++s_unix_rel_sock_seq;
+    os_unfair_lock_unlock(&s_unix_rel_sock_lock);
+}
+
 static BOOL pt_unix_lookup_sock_path(int fd,
                                      BOOL is_peer,
                                      const char *raw_kernel_path,
@@ -2168,6 +2220,22 @@ static int pt_close_nocancel(int fd) {
     return pt_orig_close_nocancel(fd);
 }
 
+static int pt_dup(int fd) {
+    int ret = dup(fd);
+    if (ret >= 0) {
+        pt_network_notify_fd_dup(fd, ret);
+    }
+    return ret;
+}
+
+static int pt_dup2(int fd, int fd2) {
+    int ret = dup2(fd, fd2);
+    if (ret >= 0) {
+        pt_network_notify_fd_dup(fd, ret);
+    }
+    return ret;
+}
+
 #define PT_IFADDRS_HEAD_MAP_CAP 64
 
 typedef struct {
@@ -2178,20 +2246,21 @@ typedef struct {
 static os_unfair_lock s_ifaddrs_lock = OS_UNFAIR_LOCK_INIT;
 static pt_ifaddrs_head_entry_t s_ifaddrs_head_map[PT_IFADDRS_HEAD_MAP_CAP];
 
-static BOOL pt_is_hidden_ifname(const char *name) {
+__attribute__((visibility("hidden")))
+BOOL pt_is_hidden_network_ifname(const char *name) {
     if (name == NULL || name[0] == '\0') {
         return NO;
     }
-    if (strncmp(name, "vmenet", 6) == 0 && isdigit((unsigned char)name[6])) {
-        return YES;
-    }
-    if (strncmp(name, "vmnet", 5) == 0 && isdigit((unsigned char)name[5])) {
-        return YES;
-    }
-    if (strncmp(name, "bridge", 6) == 0 && isdigit((unsigned char)name[6])) {
+    if (strncmp(name, "vmenet", 6) == 0 ||
+        strncmp(name, "vmnet", 5) == 0 ||
+        strncmp(name, "bridge", 6) == 0) {
         return YES;
     }
     return NO;
+}
+
+static BOOL pt_is_hidden_ifname(const char *name) {
+    return pt_is_hidden_network_ifname(name);
 }
 
 static BOOL pt_record_ifaddrs_head_remap(struct ifaddrs *returned_head, struct ifaddrs *orig_head) {
@@ -2280,6 +2349,173 @@ static void pt_freeifaddrs(struct ifaddrs *ifa) {
     freeifaddrs(pt_consume_ifaddrs_head_remap(ifa));
 }
 
+#define PT_IFNI_PTR_CAP 256
+
+static os_unfair_lock s_ifni_lock = OS_UNFAIR_LOCK_INIT;
+static struct if_nameindex *s_custom_ifni_ptrs[PT_IFNI_PTR_CAP];
+
+static BOOL pt_record_custom_ifni(struct if_nameindex *ptr) {
+    if (ptr == NULL) {
+        return NO;
+    }
+    BOOL stored = NO;
+    os_unfair_lock_lock(&s_ifni_lock);
+    for (size_t i = 0; i < PT_IFNI_PTR_CAP; i++) {
+        if (s_custom_ifni_ptrs[i] == NULL) {
+            s_custom_ifni_ptrs[i] = ptr;
+            stored = YES;
+            break;
+        }
+    }
+    os_unfair_lock_unlock(&s_ifni_lock);
+    return stored;
+}
+
+static BOOL pt_take_custom_ifni(struct if_nameindex *ptr) {
+    if (ptr == NULL) {
+        return NO;
+    }
+    BOOL found = NO;
+    os_unfair_lock_lock(&s_ifni_lock);
+    for (size_t i = 0; i < PT_IFNI_PTR_CAP; i++) {
+        if (s_custom_ifni_ptrs[i] == ptr) {
+            s_custom_ifni_ptrs[i] = NULL;
+            found = YES;
+            break;
+        }
+    }
+    os_unfair_lock_unlock(&s_ifni_lock);
+    return found;
+}
+
+static struct if_nameindex *pt_if_nameindex(void) {
+    struct if_nameindex *orig = if_nameindex();
+    if (orig == NULL ||
+        !pt_is_bypass_enabled() ||
+        pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return orig;
+    }
+
+    size_t total = 0;
+    size_t kept = 0;
+    size_t str_bytes = 0;
+    for (size_t i = 0; orig[i].if_index != 0; i++) {
+        total++;
+        const char *name = orig[i].if_name;
+        if (pt_is_hidden_network_ifname(name)) {
+            continue;
+        }
+        kept++;
+        if (name != NULL) {
+            str_bytes += strlen(name) + 1U;
+        }
+    }
+    if (kept == total) {
+        return orig;
+    }
+
+    size_t arr_bytes = (kept + 1U) * sizeof(struct if_nameindex);
+    uint8_t *block = (uint8_t *)calloc(1, arr_bytes + str_bytes);
+    if (block == NULL) {
+        return orig;
+    }
+
+    struct if_nameindex *filtered = (struct if_nameindex *)block;
+    if (!pt_record_custom_ifni(filtered)) {
+        free(block);
+        return orig;
+    }
+
+    char *str_cur = (char *)(block + arr_bytes);
+    char *str_end = (char *)(block + arr_bytes + str_bytes);
+    size_t out_idx = 0;
+    for (size_t i = 0; orig[i].if_index != 0; i++) {
+        const char *name = orig[i].if_name;
+        if (pt_is_hidden_network_ifname(name)) {
+            continue;
+        }
+        filtered[out_idx].if_index = orig[i].if_index;
+        if (name != NULL) {
+            size_t len = strlen(name) + 1U;
+            if ((size_t)(str_end - str_cur) >= len) {
+                memcpy(str_cur, name, len);
+                filtered[out_idx].if_name = str_cur;
+                str_cur += len;
+            }
+        }
+        out_idx++;
+    }
+    filtered[out_idx].if_index = 0;
+    filtered[out_idx].if_name = NULL;
+
+    if_freenameindex(orig);
+    return filtered;
+}
+
+static void pt_if_freenameindex(struct if_nameindex *ptr) {
+    if (ptr == NULL) {
+        return;
+    }
+    if (pt_take_custom_ifni(ptr)) {
+        free(ptr);
+        return;
+    }
+    if_freenameindex(ptr);
+}
+
+static unsigned int pt_if_nametoindex(const char *ifname) {
+    unsigned int idx = if_nametoindex(ifname);
+    if (idx != 0 &&
+        ifname != NULL &&
+        pt_is_hidden_network_ifname(ifname) &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        errno = ENXIO;
+        return 0;
+    }
+    return idx;
+}
+
+static char *pt_if_indextoname(unsigned int ifindex, char *ifname) {
+    char *ret = if_indextoname(ifindex, ifname);
+    if (ret != NULL &&
+        pt_is_hidden_network_ifname(ret) &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (ifname != NULL) {
+            ifname[0] = '\0';
+        }
+        errno = ENXIO;
+        return NULL;
+    }
+    return ret;
+}
+
+__attribute__((visibility("hidden")))
+void *pt_network_dlsym_route(const char *symbol) {
+    if (symbol == NULL) {
+        return NULL;
+    }
+    if (strcmp(symbol, "if_nameindex") == 0) {
+        return (void *)&pt_if_nameindex;
+    }
+    if (strcmp(symbol, "if_freenameindex") == 0) {
+        return (void *)&pt_if_freenameindex;
+    }
+    if (strcmp(symbol, "if_nametoindex") == 0) {
+        return (void *)&pt_if_nametoindex;
+    }
+    if (strcmp(symbol, "if_indextoname") == 0) {
+        return (void *)&pt_if_indextoname;
+    }
+    if (strcmp(symbol, "dup") == 0) {
+        return (void *)&pt_dup;
+    }
+    if (strcmp(symbol, "dup2") == 0) {
+        return (void *)&pt_dup2;
+    }
+    return NULL;
+}
 
 DYLD_INTERPOSE(pt_getaddrinfo, getaddrinfo)
 DYLD_INTERPOSE(pt_gethostbyname, gethostbyname)
@@ -2297,5 +2533,11 @@ DYLD_INTERPOSE(pt_getsockname, getsockname)
 DYLD_INTERPOSE(pt_getpeername, getpeername)
 DYLD_INTERPOSE(pt_close, close)
 DYLD_INTERPOSE(pt_close_nocancel, pt_orig_close_nocancel)
+DYLD_INTERPOSE(pt_dup, dup)
+DYLD_INTERPOSE(pt_dup2, dup2)
 DYLD_INTERPOSE(pt_getifaddrs, getifaddrs)
 DYLD_INTERPOSE(pt_freeifaddrs, freeifaddrs)
+DYLD_INTERPOSE(pt_if_nameindex, if_nameindex)
+DYLD_INTERPOSE(pt_if_freenameindex, if_freenameindex)
+DYLD_INTERPOSE(pt_if_nametoindex, if_nametoindex)
+DYLD_INTERPOSE(pt_if_indextoname, if_indextoname)
