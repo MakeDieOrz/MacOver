@@ -249,12 +249,82 @@ static void test_ioreg_compat13_sanitize(void) {
     assert(strcmp(b3, "IOService:/AppleT8027IO/gpio@T8027GPIOIC/pci@T8027") == 0);
 }
 
+/* ---------- Batch 3 Unit Tests ---------- */
+
+static int sf_cmp(const void *k, const void *e) {
+    return strcmp((const char *)k, *(const char * const *)e);
+}
+
+static int is_post13_sf_symbol(const char *s) {
+    static const char *const kPost13Prefixes[] = {
+        "aqi.", "arrow.triangle.", "camera.metering.", "contextualmenu.",
+        "die.face.", "dock.", "figure.", "filemenu.", "menubar.",
+        "point.3.", "rectangle.inset.", "rectangle.split.",
+        "signpost.", "wave.3.", "widget.",
+    };
+    static const char *const kPost13Symbols[] = {
+        "airpodsmax", "airpodspro", "allergens", "ant", "applescript", "applewatch",
+        "banknote", "barometer", "bicycle", "binoculars", "books.vertical", "brain.head.profile",
+        "building.columns", "bus", "case", "character", "checklist", "comb", "cpu",
+        "cross.case", "crown", "cup.and.saucer", "cursorarrow", "diamond", "esim",
+        "externaldrive", "ferry", "figure.walk", "fingerprint", "fork.knife", "fuelpump",
+        "gearshape", "giftcard", "graduationcap", "guitars", "gyroscope", "hifispeaker",
+        "homepod", "horn", "humidity", "hurricane", "internaldrive", "ladybug",
+        "lanyardcard", "laptopcomputer", "leaf", "level", "list.bullet.rectangle", "lungs",
+        "macmini", "macpro", "macstudio", "megaphone", "memorychip", "menucard",
+        "metronome", "newspaper", "note.text", "octagon", "opticaldisc", "opticid",
+        "paintpalette", "parkingsign", "pawprint", "pc", "pianokeys", "pills",
+        "puzzlepiece", "radio", "recordingtape", "ruler", "scroll", "seal",
+        "server.rack", "shareplay", "shippingbox", "sidebar.leading", "sidebar.trailing", "simcard",
+        "sparkles.tv", "swift", "tablecells", "takeoutbag", "terminal", "theatermasks",
+        "tornado", "touchid", "tram", "tropicalstorm", "tuningfork", "visionpro",
+        "wallet.pass", "wrench.and.screwdriver", "xserve"
+    };
+    size_t n = sizeof(kPost13Symbols) / sizeof(kPost13Symbols[0]);
+    for (size_t i = 1; i < n; i++) {
+        assert(strcmp(kPost13Symbols[i - 1], kPost13Symbols[i]) < 0);
+    }
+    for (size_t i = 0; i < sizeof(kPost13Prefixes) / sizeof(kPost13Prefixes[0]); i++) {
+        if (strncmp(s, kPost13Prefixes[i], strlen(kPost13Prefixes[i])) == 0) return 1;
+    }
+    char base[128];
+    snprintf(base, sizeof(base), "%s", s);
+    if (bsearch(base, kPost13Symbols, n, sizeof(kPost13Symbols[0]), sf_cmp) != NULL) return 1;
+    static const char *const kSuffixes[] = { ".fill", ".circle", ".square", ".slash" };
+    for (size_t i = 0; i < sizeof(kSuffixes) / sizeof(kSuffixes[0]); i++) {
+        size_t sl = strlen(kSuffixes[i]), bl = strlen(base);
+        if (bl > sl && strcmp(base + bl - sl, kSuffixes[i]) == 0) {
+            base[bl - sl] = '\0';
+            if (bsearch(base, kPost13Symbols, n, sizeof(kPost13Symbols[0]), sf_cmp) != NULL) return 1;
+            break;
+        }
+    }
+    return 0;
+}
+
+static void test_sf_symbols_and_versions(void) {
+    assert(is_post13_sf_symbol("brain.head.profile") == 1);
+    assert(is_post13_sf_symbol("sparkles.tv.fill") == 1);
+    assert(is_post13_sf_symbol("wrench.and.screwdriver.fill") == 1);
+    assert(is_post13_sf_symbol("gearshape.fill") == 1);
+    /* iOS 13.0 (SF Symbols 1.x) must remain allowed */
+    assert(is_post13_sf_symbol("gear") == 0);
+    assert(is_post13_sf_symbol("sparkles") == 0);
+    assert(is_post13_sf_symbol("house.fill") == 0);
+
+    int32_t fnd13 = (1677 << 16) | (104 << 8);
+    int32_t uik13 = (3698 << 16) | (54 << 8);
+    assert((fnd13 >> 16) == 1677);
+    assert((uik13 >> 16) == 3698);
+}
+
 int main(void) {
     test_der_entitlements_encoding_and_superblob_rewrite();
     test_attr_ref_zero_fill();
     test_getgroups_filter();
     test_sysctl_filters();
     test_ioreg_compat13_sanitize();
+    test_sf_symbols_and_versions();
     printf("All compat104 unit tests passed.\n");
     return 0;
 }

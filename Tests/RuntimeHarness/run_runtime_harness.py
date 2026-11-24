@@ -2277,6 +2277,7 @@ int main(int argc, const char *argv[]) {
         BOOL s12ExtensionKitHiddenOK = NO;
         BOOL s12MetalCompat13GateOK = NO;
         BOOL s12IORegGpuSanitizedOK = NO;
+        BOOL s12Post13EpochCleanOK = NO;
         const char *testS12Env = getenv("HARNESS_TEST_SCENARIO12");
         if (testS12Env != NULL && strcmp(testS12Env, "1") == 0) {
             s12FreadlinkHiddenOK = (dlsym(RTLD_DEFAULT, "freadlink") == NULL);
@@ -2419,6 +2420,46 @@ int main(int argc, const char *argv[]) {
                     }
                 }
             }
+
+            {
+                BOOL noEnum = (dlsym(RTLD_DEFAULT, "objc_enumerateClasses") == NULL);
+                BOOL noLazyV = (dlsym(RTLD_DEFAULT, "$s7SwiftUI10LazyVStackVMa") == NULL);
+                BOOL noWKWorld = (NSClassFromString(@"WKContentWorld") == Nil);
+                BOOL noGC = (NSClassFromString(@"GCMouse") == Nil && NSClassFromString(@"GCKeyboard") == Nil);
+                BOOL piClsNameOK = (strcmp(class_getName([NSProcessInfo processInfo].class), "NSProcessInfo") == 0);
+                BOOL noVision = ![NSProcessInfo.processInfo respondsToSelector:NSSelectorFromString(@"isiOSAppOnVision")];
+                BOOL noMacSel = ![NSProcessInfo.processInfo respondsToSelector:NSSelectorFromString(@"isiOSAppOnMac")];
+                typedef int32_t (*NSVerFn)(const char *);
+                NSVerFn fnNSVer = (NSVerFn)dlsym(RTLD_DEFAULT, "NSVersionOfRunTimeLibrary");
+                BOOL rtVerOK = (fnNSVer != NULL && (fnNSVer("Foundation") >> 16) == 1677 && (fnNSVer("UIKit") >> 16) == 3698);
+                typedef void (*UVerFn)(uint8_t[4]);
+                UVerFn fnUVer = (UVerFn)dlsym(RTLD_DEFAULT, "u_getVersion");
+                UVerFn fnUniVer = (UVerFn)dlsym(RTLD_DEFAULT, "u_getUnicodeVersion");
+                BOOL icuOK = NO;
+                if (fnUVer != NULL && fnUniVer != NULL) {
+                    uint8_t iv[4] = {0}, uv[4] = {0};
+                    fnUVer(iv);
+                    fnUniVer(uv);
+                    icuOK = (iv[0] == 64 && iv[1] == 2 && uv[0] == 12 && uv[1] == 1);
+                }
+                BOOL jscOK = NO;
+                void *jscH = dlopen("/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore", RTLD_LAZY);
+                if (jscH != NULL) {
+                    Class jscCls = objc_getClass("JSContext");
+                    if (jscCls != Nil) {
+                        id ctx = [jscCls new];
+                        if (ctx != nil) {
+                            SEL evalSel = sel_registerName("evaluateScript:");
+                            id wr = ((id (*)(id, SEL, NSString *))objc_msgSend)(ctx, evalSel, @"typeof WeakRef");
+                            id bi = ((id (*)(id, SEL, NSString *))objc_msgSend)(ctx, evalSel, @"typeof BigInt");
+                            jscOK = ([[wr description] isEqualToString:@"undefined"] &&
+                                     [[bi description] isEqualToString:@"undefined"]);
+                        }
+                    }
+                }
+                s12Post13EpochCleanOK = (noEnum && noLazyV && noWKWorld && noGC &&
+                                         piClsNameOK && noVision && noMacSel && rtVerOK && icuOK && jscOK);
+            }
         }
 
         NSString *stateDir = pt_state_dir();
@@ -2559,6 +2600,7 @@ int main(int argc, const char *argv[]) {
             @"s12ExtensionKitHiddenOK": s12ExtensionKitHiddenOK ? @YES : @NO,
             @"s12MetalCompat13GateOK": s12MetalCompat13GateOK ? @YES : @NO,
             @"s12IORegGpuSanitizedOK": s12IORegGpuSanitizedOK ? @YES : @NO,
+            @"s12Post13EpochCleanOK": s12Post13EpochCleanOK ? @YES : @NO,
             @"provPath": provPath,
             @"hidPCInstallGen": (hidPCInstallGenNS && hidPCInstallGenCF) ? @YES : @NO,
             @"provURLPath": provURLPath,
@@ -3832,6 +3874,7 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info12["s12ExtensionKitHiddenOK"] is True,
         info12["s12MetalCompat13GateOK"] is True,
         info12["s12IORegGpuSanitizedOK"] is True,
+        info12["s12Post13EpochCleanOK"] is True,
     ]
     results.append(ScenarioResult(
         name="12. compat13_7 parity (freadlink, ExtensionKit, Metal 2.3 gate, AGX IORegistry)",

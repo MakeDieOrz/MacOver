@@ -2630,6 +2630,7 @@ static BOOL pt_ensure_synthesized_system_version_plist(const char *ver,
         }
     }
 
+    const char *copyright = pt_is_compat13_7_active() ? "1983-2020 Apple Inc." : "1983-2025 Apple Inc.";
     char xml[1024];
     int xml_len = snprintf(xml, sizeof(xml),
                            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
@@ -2640,7 +2641,7 @@ static BOOL pt_ensure_synthesized_system_version_plist(const char *ver,
                            "\t<key>ProductBuildVersion</key>\n"
                            "\t<string>%s</string>\n"
                            "\t<key>ProductCopyright</key>\n"
-                           "\t<string>1983-2025 Apple Inc.</string>\n"
+                           "\t<string>%s</string>\n"
                            "\t<key>ProductName</key>\n"
                            "\t<string>iPhone OS</string>\n"
                            "\t<key>ProductUserVisibleVersion</key>\n"
@@ -2649,7 +2650,7 @@ static BOOL pt_ensure_synthesized_system_version_plist(const char *ver,
                            "\t<string>%s</string>\n"
                            "</dict>\n"
                            "</plist>\n",
-                           build, ver, ver);
+                           build, copyright, ver, ver);
     if (xml_len <= 0 || (size_t)xml_len >= sizeof(xml)) {
         os_unfair_lock_unlock(&s_synth_sysver_lock);
         return NO;

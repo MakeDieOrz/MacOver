@@ -4628,6 +4628,192 @@ static BOOL ps_is_faceid_device_model(void) {
     return [self pm_ps_gc_respondsToSelector:aSelector];
 }
 
++ (NSArray *) pm_ps_gc_mice {
+    if (pt_is_bypass_enabled() &&
+        (pt_is_compat13_7_active() || ps_is_reported_ios_13_or_older()) &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return @[];
+    }
+    return [self pm_ps_gc_mice];
+}
+
++ (id) pm_ps_gc_currentMouse {
+    if (pt_is_bypass_enabled() &&
+        (pt_is_compat13_7_active() || ps_is_reported_ios_13_or_older()) &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return nil;
+    }
+    return [self pm_ps_gc_currentMouse];
+}
+
++ (id) pm_ps_gc_coalescedKeyboard {
+    if (pt_is_bypass_enabled() &&
+        (pt_is_compat13_7_active() || ps_is_reported_ios_13_or_older()) &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return nil;
+    }
+    return [self pm_ps_gc_coalescedKeyboard];
+}
+
+static void ps_sanitize_jscontext_for_compat13(id ctx, const void *caller) {
+    static _Thread_local BOOL s_tls_in_jsc_sanitize = NO;
+    if (ctx == nil || s_tls_in_jsc_sanitize ||
+        !pt_is_bypass_enabled() ||
+        !pt_is_compat13_7_active() ||
+        ps_is_effective_system_or_playtools_caller(caller)) {
+        return;
+    }
+    SEL evalSel = sel_registerName("evaluateScript:");
+    if (![ctx respondsToSelector:evalSel]) {
+        return;
+    }
+    s_tls_in_jsc_sanitize = YES;
+    @try {
+        NSString *cleanupJS =
+            @"try{"
+             "delete globalThis.WeakRef;"
+             "delete globalThis.FinalizationRegistry;"
+             "delete globalThis.BigInt;"
+             "if(typeof Promise==='function'){delete Promise.any;}"
+             "if(typeof Object==='function'){delete Object.hasOwn;}"
+             "if(typeof Array==='function'&&Array.prototype){delete Array.prototype.at;}"
+             "}catch(e){}";
+        ((void (*)(id, SEL, NSString *))objc_msgSend)(ctx, evalSel, cleanupJS);
+        SEL setExcSel = sel_registerName("setException:");
+        if ([ctx respondsToSelector:setExcSel]) {
+            ((void (*)(id, SEL, id))objc_msgSend)(ctx, setExcSel, nil);
+        }
+    } @catch (NSException *ignored) {
+        (void)ignored;
+    }
+    s_tls_in_jsc_sanitize = NO;
+}
+
+- (instancetype) pm_ps_jsc_init {
+    const void *caller = __builtin_return_address(0);
+    self = [self pm_ps_jsc_init];
+    if (self != nil) {
+        ps_sanitize_jscontext_for_compat13(self, caller);
+    }
+    return self;
+}
+
+- (instancetype) pm_ps_jsc_initWithVirtualMachine:(id)virtualMachine {
+    const void *caller = __builtin_return_address(0);
+    self = [self pm_ps_jsc_initWithVirtualMachine:virtualMachine];
+    if (self != nil) {
+        ps_sanitize_jscontext_for_compat13(self, caller);
+    }
+    return self;
+}
+
+static int ps_sf_symbol_bsearch_cmp(const void *key, const void *elem) {
+    const char *k = (const char *)key;
+    const char *e = *(const char * const *)elem;
+    return strcmp(k, e);
+}
+
+static BOOL ps_is_post13_7_sf_symbol_name(NSString *name) {
+    if (name == nil || name.length == 0) {
+        return NO;
+    }
+    const char *s = [name UTF8String];
+    if (s == NULL || s[0] == '\0') {
+        return NO;
+    }
+    static const char *const kPost13Prefixes[] = {
+        "aqi.",
+        "arrow.triangle.",
+        "camera.metering.",
+        "contextualmenu.",
+        "die.face.",
+        "dock.",
+        "figure.",
+        "filemenu.",
+        "menubar.",
+        "point.3.",
+        "rectangle.inset.",
+        "rectangle.split.",
+        "signpost.",
+        "wave.3.",
+        "widget.",
+    };
+    for (size_t i = 0; i < sizeof(kPost13Prefixes) / sizeof(kPost13Prefixes[0]); i++) {
+        size_t plen = strlen(kPost13Prefixes[i]);
+        if (strncmp(s, kPost13Prefixes[i], plen) == 0) {
+            return YES;
+        }
+    }
+    static const char *const kPost13Symbols[] = {
+        "airpodsmax", "airpodspro", "allergens", "ant", "applescript", "applewatch",
+        "banknote", "barometer", "bicycle", "binoculars", "books.vertical", "brain.head.profile",
+        "building.columns", "bus", "case", "character", "checklist", "comb", "cpu",
+        "cross.case", "crown", "cup.and.saucer", "cursorarrow", "diamond", "esim",
+        "externaldrive", "ferry", "figure.walk", "fingerprint", "fork.knife", "fuelpump",
+        "gearshape", "giftcard", "graduationcap", "guitars", "gyroscope", "hifispeaker",
+        "homepod", "horn", "humidity", "hurricane", "internaldrive", "ladybug",
+        "lanyardcard", "laptopcomputer", "leaf", "level", "list.bullet.rectangle", "lungs",
+        "macmini", "macpro", "macstudio", "megaphone", "memorychip", "menucard",
+        "metronome", "newspaper", "note.text", "octagon", "opticaldisc", "opticid",
+        "paintpalette", "parkingsign", "pawprint", "pc", "pianokeys", "pills",
+        "puzzlepiece", "radio", "recordingtape", "ruler", "scroll", "seal",
+        "server.rack", "shareplay", "shippingbox", "sidebar.leading", "sidebar.trailing", "simcard",
+        "sparkles.tv", "swift", "tablecells", "takeoutbag", "terminal", "theatermasks",
+        "tornado", "touchid", "tram", "tropicalstorm", "tuningfork", "visionpro",
+        "wallet.pass", "wrench.and.screwdriver", "xserve"
+    };
+    char base[128];
+    strlcpy(base, s, sizeof(base));
+    if (bsearch(base, kPost13Symbols, sizeof(kPost13Symbols) / sizeof(kPost13Symbols[0]),
+                sizeof(kPost13Symbols[0]), ps_sf_symbol_bsearch_cmp) != NULL) {
+        return YES;
+    }
+    static const char *const kSuffixes[] = { ".fill", ".circle", ".square", ".slash" };
+    for (size_t i = 0; i < sizeof(kSuffixes) / sizeof(kSuffixes[0]); i++) {
+        size_t slen = strlen(kSuffixes[i]);
+        size_t blen = strlen(base);
+        if (blen > slen && strcmp(base + blen - slen, kSuffixes[i]) == 0) {
+            base[blen - slen] = '\0';
+            if (bsearch(base, kPost13Symbols, sizeof(kPost13Symbols) / sizeof(kPost13Symbols[0]),
+                        sizeof(kPost13Symbols[0]), ps_sf_symbol_bsearch_cmp) != NULL) {
+                return YES;
+            }
+            break;
+        }
+    }
+    return NO;
+}
+
++ (UIImage *) pm_ps_uiimage_systemImageNamed:(NSString *)name {
+    if (pt_is_bypass_enabled() &&
+        pt_is_compat13_7_active() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        ps_is_post13_7_sf_symbol_name(name)) {
+        return nil;
+    }
+    return [self pm_ps_uiimage_systemImageNamed:name];
+}
+
++ (UIImage *) pm_ps_uiimage_systemImageNamed:(NSString *)name withConfiguration:(UIImageConfiguration *)configuration {
+    if (pt_is_bypass_enabled() &&
+        pt_is_compat13_7_active() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        ps_is_post13_7_sf_symbol_name(name)) {
+        return nil;
+    }
+    return [self pm_ps_uiimage_systemImageNamed:name withConfiguration:configuration];
+}
+
++ (UIImage *) pm_ps_uiimage_systemImageNamed:(NSString *)name compatibleWithTraitCollection:(UITraitCollection *)traitCollection {
+    if (pt_is_bypass_enabled() &&
+        pt_is_compat13_7_active() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        ps_is_post13_7_sf_symbol_name(name)) {
+        return nil;
+    }
+    return [self pm_ps_uiimage_systemImageNamed:name compatibleWithTraitCollection:traitCollection];
+}
+
 + (NSArray<NSString *> *) pm_ps_uifont_familyNames {
     NSArray<NSString *> *orig = [self pm_ps_uifont_familyNames];
     if (orig.count == 0 ||
@@ -5091,22 +5277,48 @@ static void ps_install_avcapture_hooks_if_loaded(void) {
 
 static _Atomic bool s_ps_dynamic_hooks_ready = false;
 
+static IMP s_safe_false_foundation_imp = NULL;
+
+static void ps_init_safe_false_foundation_imp(Class piClass) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        SEL visionSel = NSSelectorFromString(@"isiOSAppOnVision");
+        Method vm = (piClass != Nil && visionSel != NULL) ? class_getInstanceMethod(piClass, visionSel) : NULL;
+        IMP imp = (vm != NULL) ? method_getImplementation(vm) : NULL;
+        if (imp != NULL) {
+            Dl_info info;
+            if (dladdr((const void *)imp, &info) != 0 &&
+                info.dli_fname != NULL &&
+                strstr(info.dli_fname, "/Foundation.framework/") != NULL) {
+                id proc = [NSProcessInfo processInfo];
+                if (proc != nil && ((BOOL (*)(id, SEL))imp)(proc, visionSel) == NO) {
+                    s_safe_false_foundation_imp = imp;
+                }
+            }
+        }
+    });
+}
+
 static void ps_register_safe_false_cf_imp(Class cls, SEL hookSel) {
-    Method safeFalseM = class_getInstanceMethod([NSObject class], NSSelectorFromString(@"isNSString__"));
-    IMP safeFalseCFImp = (safeFalseM != NULL) ? method_getImplementation(safeFalseM) : NULL;
-    if (safeFalseCFImp == NULL) {
+    IMP safeImp = s_safe_false_foundation_imp;
+    if (safeImp == NULL) {
+        Method safeFalseM = class_getInstanceMethod([NSObject class], NSSelectorFromString(@"isNSString__"));
+        safeImp = (safeFalseM != NULL) ? method_getImplementation(safeFalseM) : NULL;
+    }
+    if (safeImp == NULL) {
         return;
     }
     Method hookM = class_getInstanceMethod(cls, hookSel);
     if (hookM != NULL) {
         pt_register_swizzled_imp((const void *)method_getImplementation(hookM),
-                                 (const void *)safeFalseCFImp);
+                                 (const void *)safeImp);
     }
 }
 
 __attribute__((visibility("hidden")))
 void ps_load_environment_bypass_hooks(void) {
     Class piClass = objc_getClass("NSProcessInfo");
+    ps_init_safe_false_foundation_imp(piClass);
     ps_register_safe_false_cf_imp([PSSwizzleHooks class], @selector(pm_isMacCatalystApp));
     ps_register_safe_false_cf_imp([PSSwizzleHooks class], @selector(pm_isiOSAppOnMac));
     ps_swizzle_instance_method(piClass, @selector(isMacCatalystApp), @selector(pm_isMacCatalystApp));
@@ -7421,6 +7633,22 @@ static void ps_install_local_auth_hooks_if_loaded(void) {
     }
 }
 
+static void ps_install_jscontext_hooks_if_loaded(void) {
+    Class jscCls = objc_getClass("JSContext");
+    if (jscCls != Nil) {
+        static dispatch_once_t jscOnce;
+        dispatch_once(&jscOnce, ^{
+            if (class_getInstanceMethod(jscCls, @selector(init)) != NULL) {
+                ps_swizzle_instance_method(jscCls, @selector(init), @selector(pm_ps_jsc_init));
+            }
+            SEL initVMSel = NSSelectorFromString(@"initWithVirtualMachine:");
+            if (class_getInstanceMethod(jscCls, initVMSel) != NULL) {
+                ps_swizzle_instance_method(jscCls, initVMSel, @selector(pm_ps_jsc_initWithVirtualMachine:));
+            }
+        });
+    }
+}
+
 static void ps_install_game_controller_hooks_if_loaded(void) {
     Class gcCls = objc_getClass("GCController");
     if (gcCls != Nil) {
@@ -7436,6 +7664,30 @@ static void ps_install_game_controller_hooks_if_loaded(void) {
                 ps_swizzle_class_method(gcCls,
                                         @selector(respondsToSelector:),
                                         @selector(pm_ps_gc_respondsToSelector:));
+            }
+        });
+    }
+    Class gcMouseCls = objc_getClass("GCMouse");
+    if (gcMouseCls != Nil) {
+        static dispatch_once_t gcMouseOnce;
+        dispatch_once(&gcMouseOnce, ^{
+            SEL miceSel = NSSelectorFromString(@"mice");
+            if (class_getClassMethod(gcMouseCls, miceSel) != NULL) {
+                ps_swizzle_class_method(gcMouseCls, miceSel, @selector(pm_ps_gc_mice));
+            }
+            SEL curSel = NSSelectorFromString(@"current");
+            if (class_getClassMethod(gcMouseCls, curSel) != NULL) {
+                ps_swizzle_class_method(gcMouseCls, curSel, @selector(pm_ps_gc_currentMouse));
+            }
+        });
+    }
+    Class gcKeyCls = objc_getClass("GCKeyboard");
+    if (gcKeyCls != Nil) {
+        static dispatch_once_t gcKeyOnce;
+        dispatch_once(&gcKeyOnce, ^{
+            SEL coalescedSel = NSSelectorFromString(@"coalescedKeyboard");
+            if (class_getClassMethod(gcKeyCls, coalescedSel) != NULL) {
+                ps_swizzle_class_method(gcKeyCls, coalescedSel, @selector(pm_ps_gc_coalescedKeyboard));
             }
         });
     }
@@ -7600,6 +7852,7 @@ void ps_install_dynamic_system_bundle_hooks(void) {
         ps_install_coremotion_hooks_if_loaded();
         ps_install_local_auth_hooks_if_loaded();
         ps_install_game_controller_hooks_if_loaded();
+        ps_install_jscontext_hooks_if_loaded();
     } while (s_tls_needs_rescan);
     s_tls_installing_dynamic_hooks = false;
 }
@@ -7633,6 +7886,23 @@ void ps_install_system_jailbreak_bypass_hooks(void) {
         }
     }
     ps_swizzle_instance_method(objc_getClass("UITraitCollection"), @selector(userInterfaceIdiom), @selector(pm_hook_traitUserInterfaceIdiom));
+    {
+        Class imgCls = objc_getClass("UIImage");
+        if (imgCls != Nil) {
+            SEL sys1 = sel_registerName("systemImageNamed:");
+            SEL sys2 = sel_registerName("systemImageNamed:withConfiguration:");
+            SEL sys3 = sel_registerName("systemImageNamed:compatibleWithTraitCollection:");
+            if (class_getClassMethod(imgCls, sys1) != NULL) {
+                ps_swizzle_class_method(imgCls, sys1, @selector(pm_ps_uiimage_systemImageNamed:));
+            }
+            if (class_getClassMethod(imgCls, sys2) != NULL) {
+                ps_swizzle_class_method(imgCls, sys2, @selector(pm_ps_uiimage_systemImageNamed:withConfiguration:));
+            }
+            if (class_getClassMethod(imgCls, sys3) != NULL) {
+                ps_swizzle_class_method(imgCls, sys3, @selector(pm_ps_uiimage_systemImageNamed:compatibleWithTraitCollection:));
+            }
+        }
+    }
     ps_install_nsobject_reflection_hooks();
     ps_replace_instance_method(objc_getClass("RNDeviceInfo"), @selector(getDeviceType), @selector(pm_hook_deviceType));
 

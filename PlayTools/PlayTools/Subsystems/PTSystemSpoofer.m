@@ -5257,6 +5257,65 @@ __attribute__((visibility("hidden"))) BOOL pt_is_info_plist_dict(NSDictionary *d
            (dict[@"CFBundleIdentifier"] != nil || dict[@"CFBundleExecutable"] != nil);
 }
 
+static NSString *pt_compat13_framework_bundle_version(NSString *bid) {
+    if (![bid isKindOfClass:[NSString class]] || !pt_is_compat13_7_active()) {
+        return nil;
+    }
+    if ([bid isEqualToString:@"com.apple.Foundation"] ||
+        [bid isEqualToString:@"com.apple.CoreFoundation"]) {
+        return @"1677.104";
+    }
+    if ([bid isEqualToString:@"com.apple.UIKitCore"] ||
+        [bid isEqualToString:@"com.apple.UIKit"]) {
+        return @"3698.54.4";
+    }
+    if ([bid isEqualToString:@"com.apple.CoreMotion"]) {
+        return @"2394.0.33";
+    }
+    if ([bid isEqualToString:@"com.apple.WebKit"] ||
+        [bid isEqualToString:@"com.apple.JavaScriptCore"]) {
+        return @"609.4.1";
+    }
+    if ([bid isEqualToString:@"com.apple.CFNetwork"]) {
+        return @"1128.0.1";
+    }
+    if ([bid isEqualToString:@"com.apple.Photos"]) {
+        return @"3652.30.210";
+    }
+    if ([bid isEqualToString:@"com.apple.GameController"]) {
+        return @"1.0";
+    }
+    return nil;
+}
+
+static NSString *pt_sanitized_dtsdk_name(NSString *sdkStr, NSString *bid) {
+    if (![sdkStr isKindOfClass:[NSString class]]) {
+        return nil;
+    }
+    const char *ovVer = pt_get_reported_ios_version_override(NULL);
+    const char *verCStr = (ovVer != NULL && ovVer[0] != '\0') ? ovVer : pt_get_spoofed_ios_version_cstr();
+    NSString *iosSdk = (verCStr != NULL && verCStr[0] != '\0')
+        ? [NSString stringWithFormat:@"iphoneos%s", verCStr]
+        : @"iphoneos";
+    BOOL isApple = ([bid isKindOfClass:[NSString class]] && [bid hasPrefix:@"com.apple."]);
+    if (isApple && pt_is_compat13_7_active()) {
+        return iosSdk;
+    }
+    NSString *cleaned = sdkStr;
+    if ([cleaned rangeOfString:@"macosx" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+        cleaned = [cleaned stringByReplacingOccurrencesOfString:@"macosx"
+                                                     withString:@"iphoneos"
+                                                        options:NSCaseInsensitiveSearch
+                                                          range:NSMakeRange(0, cleaned.length)];
+    } else if ([cleaned rangeOfString:@"maccatalyst" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+        cleaned = iosSdk;
+    }
+    if ([cleaned hasSuffix:@".internal"]) {
+        cleaned = isApple ? iosSdk : [cleaned substringToIndex:(cleaned.length - 9U)];
+    }
+    return cleaned;
+}
+
 __attribute__((visibility("hidden"))) BOOL pt_info_dict_needs_sanitize(NSDictionary *dict) {
     if (![dict isKindOfClass:[NSDictionary class]]) {
         return NO;
@@ -5290,10 +5349,22 @@ __attribute__((visibility("hidden"))) BOOL pt_info_dict_needs_sanitize(NSDiction
             return YES;
         }
     }
+    id bid = dict[@"CFBundleIdentifier"];
+    NSString *bidStr = [bid isKindOfClass:[NSString class]] ? (NSString *)bid : nil;
     id dtSdk = dict[@"DTSDKName"];
-    if ([dtSdk isKindOfClass:[NSString class]] &&
-        ([dtSdk rangeOfString:@"macosx" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-         [dtSdk rangeOfString:@"maccatalyst" options:NSCaseInsensitiveSearch].location != NSNotFound)) {
+    if ([dtSdk isKindOfClass:[NSString class]]) {
+        NSString *sdkStr = (NSString *)dtSdk;
+        if ([sdkStr rangeOfString:@"macosx" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [sdkStr rangeOfString:@"maccatalyst" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [sdkStr hasSuffix:@".internal"] ||
+            ([bidStr hasPrefix:@"com.apple."] && pt_is_compat13_7_active() && ![sdkStr isEqualToString:@"iphoneos13.7"])) {
+            return YES;
+        }
+    }
+    NSString *targetVer = pt_compat13_framework_bundle_version(bidStr);
+    if (targetVer != nil &&
+        [dict[@"CFBundleVersion"] isKindOfClass:[NSString class]] &&
+        ![(NSString *)dict[@"CFBundleVersion"] isEqualToString:targetVer]) {
         return YES;
     }
     id sup = dict[@"CFBundleSupportedPlatforms"];
@@ -5343,17 +5414,17 @@ __attribute__((visibility("hidden"))) NSMutableDictionary *pt_build_sanitized_mu
             m[@"DTPlatformName"] = @"iphoneos";
         }
     }
+    NSString *bidStr = [m[@"CFBundleIdentifier"] isKindOfClass:[NSString class]] ? (NSString *)m[@"CFBundleIdentifier"] : nil;
     id dtSdk = m[@"DTSDKName"];
     if ([dtSdk isKindOfClass:[NSString class]]) {
-        NSString *sdkStr = (NSString *)dtSdk;
-        if ([sdkStr rangeOfString:@"macosx" options:NSCaseInsensitiveSearch].location != NSNotFound) {
-            m[@"DTSDKName"] = [sdkStr stringByReplacingOccurrencesOfString:@"macosx"
-                                                                withString:@"iphoneos"
-                                                                   options:NSCaseInsensitiveSearch
-                                                                     range:NSMakeRange(0, sdkStr.length)];
-        } else if ([sdkStr rangeOfString:@"maccatalyst" options:NSCaseInsensitiveSearch].location != NSNotFound) {
-            m[@"DTSDKName"] = @"iphoneos";
+        NSString *cleanSdk = pt_sanitized_dtsdk_name((NSString *)dtSdk, bidStr);
+        if (cleanSdk != nil && ![cleanSdk isEqualToString:(NSString *)dtSdk]) {
+            m[@"DTSDKName"] = cleanSdk;
         }
+    }
+    NSString *targetVer = pt_compat13_framework_bundle_version(bidStr);
+    if (targetVer != nil && [m[@"CFBundleVersion"] isKindOfClass:[NSString class]]) {
+        m[@"CFBundleVersion"] = targetVer;
     }
     id sup = m[@"CFBundleSupportedPlatforms"];
     if ([sup isKindOfClass:[NSArray class]]) {
@@ -8240,10 +8311,60 @@ static pid_t pt_responsibility_get_pid_responsible_for_pid(pid_t pid) {
     return -1;
 }
 
+static void pt_u_getVersion(uint8_t versionArray[4]) {
+    if (versionArray != NULL &&
+        pt_is_compat13_7_active() &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        versionArray[0] = 64U;
+        versionArray[1] = 2U;
+        versionArray[2] = 0U;
+        versionArray[3] = 0U;
+        return;
+    }
+    typedef void (*UGetVerFn)(uint8_t[4]);
+    static UGetVerFn s_orig = NULL;
+    static dispatch_once_t s_once;
+    dispatch_once(&s_once, ^{
+        s_orig = (UGetVerFn)dlsym(RTLD_NEXT, "u_getVersion");
+    });
+    if (s_orig != NULL) {
+        s_orig(versionArray);
+    }
+}
+
+static void pt_u_getUnicodeVersion(uint8_t versionArray[4]) {
+    if (versionArray != NULL &&
+        pt_is_compat13_7_active() &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        versionArray[0] = 12U;
+        versionArray[1] = 1U;
+        versionArray[2] = 0U;
+        versionArray[3] = 0U;
+        return;
+    }
+    typedef void (*UGetUniVerFn)(uint8_t[4]);
+    static UGetUniVerFn s_orig = NULL;
+    static dispatch_once_t s_once;
+    dispatch_once(&s_once, ^{
+        s_orig = (UGetUniVerFn)dlsym(RTLD_NEXT, "u_getUnicodeVersion");
+    });
+    if (s_orig != NULL) {
+        s_orig(versionArray);
+    }
+}
+
 __attribute__((visibility("hidden")))
 void *pt_spoofer_dlsym_route(const char *symbol) {
     if (symbol == NULL) {
         return NULL;
+    }
+    if (strcmp(symbol, "u_getVersion") == 0) {
+        return (void *)&pt_u_getVersion;
+    }
+    if (strcmp(symbol, "u_getUnicodeVersion") == 0) {
+        return (void *)&pt_u_getUnicodeVersion;
     }
     if (strcmp(symbol, "MGCopyAnswerWithError") == 0) {
         return (void *)&pt_MGCopyAnswerWithError;

@@ -108,9 +108,16 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_class(const char *n
                     return YES;
                 }
                 break;
+            case 'G':
+                if (strcmp(name, "GCMouse") == 0 ||
+                    strcmp(name, "GCMouseInput") == 0 ||
+                    strcmp(name, "GCKeyboard") == 0 ||
+                    strcmp(name, "GCKeyboardInput") == 0) {
+                    return YES;
+                }
+                break;
             case 'P':
-                if (strcmp(name, "PHPickerViewController") == 0 ||
-                    strcmp(name, "PHPickerConfiguration") == 0) {
+                if (PT_HAS_PREFIX_LIT(name, "PHPicker")) {
                     return YES;
                 }
                 break;
@@ -122,6 +129,11 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_class(const char *n
             case 'U':
                 if (strcmp(name, "UIColorWell") == 0 ||
                     strcmp(name, "UIColorPickerViewController") == 0) {
+                    return YES;
+                }
+                break;
+            case 'W':
+                if (strcmp(name, "WKContentWorld") == 0) {
                     return YES;
                 }
                 break;
@@ -1310,6 +1322,61 @@ static int pt_objc_getClassList(Class *buffer, int bufferCount) {
     return (int)count;
 }
 
+static BOOL pt_class_is_or_inherits_from(Class cls, const char *targetName) {
+    if (cls == Nil || targetName == NULL) {
+        return NO;
+    }
+    for (Class cur = cls; cur != Nil; cur = class_getSuperclass(cur)) {
+        const char *cname = class_getName(cur);
+        if (cname != NULL && strcmp(cname, targetName) == 0) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static BOOL pt_is_hidden_post13_7_method(Class cls, SEL sel, BOOL isClassMethod) {
+    if (cls == Nil || sel == NULL || !pt_is_compat13_7_active() || !pt_is_bypass_enabled()) {
+        return NO;
+    }
+    const char *sname = sel_getName(sel);
+    if (sname == NULL || sname[0] == '\0') {
+        return NO;
+    }
+    if (!isClassMethod) {
+        if (strcmp(sname, "addAction:forControlEvents:") == 0 ||
+            strcmp(sname, "removeAction:forControlEvents:") == 0 ||
+            strcmp(sname, "removeActionForIdentifier:forControlEvents:") == 0 ||
+            strcmp(sname, "enumerateEventHandlers:") == 0 ||
+            strcmp(sname, "contextMenuInteraction") == 0 ||
+            strcmp(sname, "isContextMenuInteractionEnabled") == 0 ||
+            strcmp(sname, "setContextMenuInteractionEnabled:") == 0 ||
+            strcmp(sname, "showsMenuAsPrimaryAction") == 0 ||
+            strcmp(sname, "setShowsMenuAsPrimaryAction:") == 0) {
+            return pt_class_is_or_inherits_from(cls, "UIControl");
+        }
+        if (strcmp(sname, "initWithFrame:primaryAction:") == 0 ||
+            strcmp(sname, "menu") == 0 ||
+            strcmp(sname, "setMenu:") == 0) {
+            return pt_class_is_or_inherits_from(cls, "UIButton");
+        }
+        if (strcmp(sname, "isiOSAppOnMac") == 0 ||
+            strcmp(sname, "isiOSAppOnVision") == 0) {
+            return pt_class_is_or_inherits_from(cls, "NSProcessInfo") ||
+                   pt_class_is_or_inherits_from(cls, "_NSSwiftProcessInfo");
+        }
+    } else {
+        if (strcmp(sname, "buttonWithType:primaryAction:") == 0 ||
+            strcmp(sname, "systemButtonWithPrimaryAction:") == 0) {
+            return pt_class_is_or_inherits_from(cls, "UIButton");
+        }
+        if (strcmp(sname, "actionWithHandler:") == 0) {
+            return pt_class_is_or_inherits_from(cls, "UIAction");
+        }
+    }
+    return NO;
+}
+
 static inline BOOL pt_is_playtools_injected_method(Method m, SEL sel) {
     if (m == NULL || sel == NULL) {
         return NO;
@@ -1327,6 +1394,10 @@ static Method pt_class_getInstanceMethod(Class cls, SEL name) {
         !pt_is_valid_user_pointer((const void *)name)) {
         return NULL;
     }
+    if (!pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_is_hidden_post13_7_method(cls, name, NO)) {
+        return NULL;
+    }
     Method m = class_getInstanceMethod(cls, name);
     if (m != NULL && pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
@@ -1339,6 +1410,10 @@ static Method pt_class_getInstanceMethod(Class cls, SEL name) {
 static Method pt_class_getClassMethod(Class cls, SEL name) {
     if (!pt_is_valid_user_pointer((__bridge const void *)cls) ||
         !pt_is_valid_user_pointer((const void *)name)) {
+        return NULL;
+    }
+    if (!pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_is_hidden_post13_7_method(cls, name, YES)) {
         return NULL;
     }
     Method m = class_getClassMethod(cls, name);
@@ -1374,6 +1449,10 @@ static IMP pt_class_getMethodImplementation(Class cls, SEL name) {
         !pt_is_valid_user_pointer((const void *)name)) {
         return NULL;
     }
+    if (!pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_is_hidden_post13_7_method(cls, name, class_isMetaClass(cls))) {
+        return class_getMethodImplementation(cls, sel_registerName("__pt_ps_nonexistent_sel_lookup__"));
+    }
     IMP imp = class_getMethodImplementation(cls, name);
     if (imp != NULL && pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
@@ -1394,12 +1473,15 @@ static Method *pt_class_copyMethodList(Class cls, unsigned int *outCount) {
     Method *methods = class_copyMethodList(cls, &count);
     if (methods != NULL && pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        BOOL isMeta = class_isMetaClass(cls);
         unsigned int writeIdx = 0;
         for (unsigned int i = 0; i < count; i++) {
             Method m = methods[i];
             if (m != NULL) {
                 SEL sel = method_getName(m);
-                if (sel != NULL && pt_is_playtools_injected_method(m, sel)) {
+                if (sel != NULL &&
+                    (pt_is_playtools_injected_method(m, sel) ||
+                     pt_is_hidden_post13_7_method(cls, sel, isMeta))) {
                     continue;
                 }
             }
@@ -1422,6 +1504,10 @@ static BOOL pt_class_respondsToSelector(Class cls, SEL sel) {
         !pt_is_valid_user_pointer((const void *)sel)) {
         return NO;
     }
+    if (!pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_is_hidden_post13_7_method(cls, sel, class_isMetaClass(cls))) {
+        return NO;
+    }
     BOOL orig = class_respondsToSelector(cls, sel);
     if (orig && pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
@@ -1431,6 +1517,42 @@ static BOOL pt_class_respondsToSelector(Class cls, SEL sel) {
         }
     }
     return orig;
+}
+
+static const char *pt_class_getName(Class cls) {
+    const char *orig = class_getName(cls);
+    if (orig != NULL &&
+        orig[0] == '_' &&
+        pt_is_compat13_7_active() &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        strcmp(orig, "_NSSwiftProcessInfo") == 0) {
+        return "NSProcessInfo";
+    }
+    return orig;
+}
+
+extern int32_t NSVersionOfRunTimeLibrary(const char *libraryName);
+
+static int32_t pt_NSVersionOfRunTimeLibrary(const char *libraryName) {
+    if (libraryName != NULL &&
+        pt_is_compat13_7_active() &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (strcmp(libraryName, "Foundation") == 0 || strcmp(libraryName, "CoreFoundation") == 0) {
+            return (1677 << 16) | (104 << 8);
+        }
+        if (strcmp(libraryName, "UIKit") == 0 || strcmp(libraryName, "UIKitCore") == 0) {
+            return (3698 << 16) | (54 << 8);
+        }
+        if (strcmp(libraryName, "WebKit") == 0 || strcmp(libraryName, "JavaScriptCore") == 0) {
+            return (609 << 16) | (4 << 8);
+        }
+        if (strcmp(libraryName, "CFNetwork") == 0) {
+            return (1128 << 16);
+        }
+    }
+    return NSVersionOfRunTimeLibrary(libraryName);
 }
 
 static uint32_t pt_dyld_image_count(void) {
@@ -3044,7 +3166,16 @@ static void *pt_dlsym(void *handle, const char *symbol) {
                    strcmp(symbol, "_LSGetCurrentApplicationASN") == 0 ||
                    strncmp(symbol, "_LSASN", 6) == 0 ||
                    strncmp(symbol, "_LSCopyApplicationInformation", 29) == 0 ||
-                   (pt_is_compat13_7_active() && strcmp(symbol, "freadlink") == 0)) {
+                   (pt_is_compat13_7_active() &&
+                    (strcmp(symbol, "freadlink") == 0 ||
+                     strcmp(symbol, "objc_enumerateClasses") == 0 ||
+                     strncmp(symbol, "$s7SwiftUI10LazyVStack", 22) == 0 ||
+                     strncmp(symbol, "$s7SwiftUI12ProgressView", 24) == 0 ||
+                     strncmp(symbol, "$s7SwiftUI10LazyHStack", 22) == 0 ||
+                     strncmp(symbol, "$s7SwiftUI9LazyVGrid", 21) == 0 ||
+                     strncmp(symbol, "$s7SwiftUI9LazyHGrid", 21) == 0 ||
+                     strncmp(symbol, "$s7SwiftUI10TextEditor", 22) == 0 ||
+                     strncmp(symbol, "$s7SwiftUI11ColorPicker", 23) == 0))) {
             PT_DEBUG_TRACE("dyld", "hid macOS-only symbol=%s", symbol);
             pt_set_synthetic_dlerror("symbol not found");
             return NULL;
@@ -3129,6 +3260,12 @@ static void *pt_dlsym(void *handle, const char *symbol) {
             }
             if (strcmp(symbol, "objc_copyImageNames") == 0) {
                 return (void *)&pt_objc_copyImageNames;
+            }
+            if (strcmp(symbol, "class_getName") == 0) {
+                return (void *)&pt_class_getName;
+            }
+            if (strcmp(symbol, "NSVersionOfRunTimeLibrary") == 0) {
+                return (void *)&pt_NSVersionOfRunTimeLibrary;
             }
             void *routed = pt_fs_dlsym_route(symbol);
             if (routed != NULL) {
@@ -3249,6 +3386,8 @@ DYLD_INTERPOSE(pt_method_getImplementation, method_getImplementation)
 DYLD_INTERPOSE(pt_class_getMethodImplementation, class_getMethodImplementation)
 DYLD_INTERPOSE(pt_class_copyMethodList, class_copyMethodList)
 DYLD_INTERPOSE(pt_class_respondsToSelector, class_respondsToSelector)
+DYLD_INTERPOSE(pt_class_getName, class_getName)
+DYLD_INTERPOSE(pt_NSVersionOfRunTimeLibrary, NSVersionOfRunTimeLibrary)
 DYLD_INTERPOSE(pt_objc_getProtocol, objc_getProtocol)
 DYLD_INTERPOSE(pt_objc_copyProtocolList, objc_copyProtocolList)
 DYLD_INTERPOSE(pt_dyld_image_count, _dyld_image_count)
@@ -3287,6 +3426,9 @@ static inline BOOL ps_should_hide_selector_for_target_class(Class targetCls, SEL
         !pt_is_bypass_enabled() ||
         pt_is_effective_system_or_playtools_caller(caller)) {
         return NO;
+    }
+    if (pt_is_hidden_post13_7_method(targetCls, aSelector, class_isMetaClass(targetCls))) {
+        return YES;
     }
     Method m = class_getInstanceMethod(targetCls, aSelector);
     if (m == NULL) {
