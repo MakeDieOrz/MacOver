@@ -2740,7 +2740,7 @@ __attribute__((visibility("hidden"))) BOOL pt_is_reverse_mapped_iossupport(const
     if (orig_path == NULL || resolved_path == NULL || orig_path == resolved_path) {
         return NO;
     }
-    return (strncmp(resolved_path, "/System/iOSSupport/System/Library/", 36) == 0 &&
+    return (strncmp(resolved_path, "/System/iOSSupport/System/Library/", 34) == 0 &&
             strncmp(orig_path, "/System/iOSSupport", 18) != 0);
 }
 
@@ -4399,6 +4399,71 @@ static int pt_proc_pidpath(int pid, void *buffer, uint32_t buffersize) {
     return ret;
 }
 
+static BOOL pt_is_sensitive_unix_socket_path(const char *sun_path, const void *caller) {
+    if (sun_path == NULL || sun_path[0] == '\0') {
+        return NO;
+    }
+    if (strstr(sun_path, "/var/folders/") != NULL ||
+        strstr(sun_path, "com.apple.launchd") != NULL ||
+        strstr(sun_path, "discord-ipc") != NULL ||
+        strcasestr(sun_path, "PlayCover") != NULL ||
+        strcasestr(sun_path, "PlayTools") != NULL ||
+        strcasestr(sun_path, "MacOver") != NULL ||
+        strcasestr(sun_path, "app.makedie") != NULL) {
+        return YES;
+    }
+    char vout[PATH_MAX];
+    const char *virt = pt_virtualize_path_for_app(sun_path, vout, sizeof(vout), YES);
+    const char *eff = (virt != NULL) ? virt : sun_path;
+    if (strstr(eff, "/Users/") != NULL || pt_is_sensitive_host_fd_path(eff, caller)) {
+        return YES;
+    }
+    return NO;
+}
+
+static BOOL pt_sanitize_sockaddr_un_in_place(pt_sockaddr_un_t *sa, const void *caller) {
+    if (sa == NULL || sa->sun_path[0] == '\0') {
+        return NO;
+    }
+    char pathbuf[sizeof(sa->sun_path) + 1];
+    size_t plen = strnlen(sa->sun_path, sizeof(sa->sun_path));
+    memcpy(pathbuf, sa->sun_path, plen);
+    pathbuf[plen] = '\0';
+    if (pt_is_sensitive_unix_socket_path(pathbuf, caller)) {
+        return YES;
+    }
+    char vout[PATH_MAX];
+    const char *virt = pt_virtualize_path_for_app(pathbuf, vout, sizeof(vout), YES);
+    if (virt != NULL && virt != pathbuf && strcmp(virt, pathbuf) != 0) {
+        size_t vlen = strlcpy(sa->sun_path, virt, sizeof(sa->sun_path));
+        if (vlen >= sizeof(sa->sun_path)) {
+            vlen = sizeof(sa->sun_path) - 1U;
+        }
+        size_t total = offsetof(pt_sockaddr_un_t, sun_path) + vlen + 1U;
+        sa->sun_len = (uint8_t)((total < 255U) ? total : 255U);
+    }
+    return NO;
+}
+
+static int pt_count_hidden_threads_for_self(void) {
+    int self_pid = getpid();
+    uint64_t stack_tids[512];
+    int nbytes = proc_pidinfo(self_pid, PROC_PIDLISTTHREADS, 0, stack_tids, (int)sizeof(stack_tids));
+    if (nbytes <= 0) {
+        return 0;
+    }
+    int count = nbytes / (int)sizeof(uint64_t);
+    int hidden = 0;
+    for (int i = 0; i < count; i++) {
+        struct proc_threadinfo ti;
+        int tr = proc_pidinfo(self_pid, PROC_PIDTHREADINFO, stack_tids[i], &ti, (int)sizeof(ti));
+        if (tr > 0 && (size_t)tr >= sizeof(ti) && pt_is_hidden_thread_name(ti.pth_name)) {
+            hidden++;
+        }
+    }
+    return hidden;
+}
+
 static int pt_fs_proc_pidfdinfo_ex(int pid,
                                      int fd,
                                      int flavor,
@@ -4436,6 +4501,21 @@ static int pt_fs_proc_pidfdinfo_ex(int pid,
             const char *virt = pt_virtualize_path_for_app(info->pvip.vip_path, vout, sizeof(vout), YES);
             if (virt != info->pvip.vip_path) {
                 strlcpy(info->pvip.vip_path, virt, sizeof(info->pvip.vip_path));
+            }
+        } else if (flavor == PROC_PIDFDSOCKETINFO &&
+                   pt_is_bypass_enabled() &&
+                   (size_t)ret >= sizeof(pt_socket_fdinfo_t)) {
+            pt_socket_fdinfo_t sfi;
+            memcpy(&sfi, buffer, sizeof(sfi));
+            if (sfi.psi.soi_family == AF_UNIX || sfi.psi.soi_kind == SOCKINFO_UN) {
+                BOOL drop_a = pt_sanitize_sockaddr_un_in_place(&sfi.psi.soi_proto.pri_un.unsi_addr.ua_sun, caller);
+                BOOL drop_c = pt_sanitize_sockaddr_un_in_place(&sfi.psi.soi_proto.pri_un.unsi_caddr.ua_sun, caller);
+                if (drop_a || drop_c) {
+                    memset(buffer, 0, sizeof(pt_socket_fdinfo_t));
+                    errno = EBADF;
+                    return raw_syscall_abi ? -1 : 0;
+                }
+                memcpy(buffer, &sfi, sizeof(sfi));
             }
         }
     }
@@ -4547,9 +4627,11 @@ static int pt_fs_proc_pidinfo_ex(int pid,
                 if (rsize >= sizeof(struct mach_header_64) &&
                     (rprot & VM_PROT_READ) != 0 &&
                     dyld_image_header_containing_address((const void *)(uintptr_t)raddr) == NULL) {
+                    int probe_saved_errno = errno;
                     struct proc_regionwithpathinfo probe_rp;
                     memset(&probe_rp, 0, sizeof(probe_rp));
                     int pr = proc_pidinfo(pid, PROC_PIDREGIONPATHINFO, raddr, &probe_rp, (int)sizeof(probe_rp));
+                    errno = probe_saved_errno;
                     if (pr >= (int)sizeof(probe_rp) && probe_rp.prp_vip.vip_path[0] != '\0' &&
                         (pt_is_hidden_dyld_image_name(probe_rp.prp_vip.vip_path) ||
                          pt_is_sensitive_host_fd_path(probe_rp.prp_vip.vip_path, caller))) {
@@ -4632,6 +4714,25 @@ static int pt_fs_proc_pidinfo_ex(int pid,
                             pt_is_sensitive_host_fd_path(vfi.pvip.vip_path, caller)) {
                             continue;
                         }
+                    } else if (bypass_active && fds[i].proc_fdtype == PROX_FDTYPE_SOCKET) {
+                        pt_socket_fdinfo_t sfi;
+                        memset(&sfi, 0, sizeof(sfi));
+                        int sret = proc_pidfdinfo(self_pid, fds[i].proc_fd, PROC_PIDFDSOCKETINFO, &sfi, (int)sizeof(sfi));
+                        if (sret > 0 && (size_t)sret >= sizeof(sfi) &&
+                            (sfi.psi.soi_family == AF_UNIX || sfi.psi.soi_kind == SOCKINFO_UN)) {
+                            char pa[sizeof(sfi.psi.soi_proto.pri_un.unsi_addr.ua_sun.sun_path) + 1];
+                            char pc[sizeof(sfi.psi.soi_proto.pri_un.unsi_caddr.ua_sun.sun_path) + 1];
+                            size_t la = strnlen(sfi.psi.soi_proto.pri_un.unsi_addr.ua_sun.sun_path, sizeof(pa) - 1U);
+                            size_t lc = strnlen(sfi.psi.soi_proto.pri_un.unsi_caddr.ua_sun.sun_path, sizeof(pc) - 1U);
+                            memcpy(pa, sfi.psi.soi_proto.pri_un.unsi_addr.ua_sun.sun_path, la);
+                            pa[la] = '\0';
+                            memcpy(pc, sfi.psi.soi_proto.pri_un.unsi_caddr.ua_sun.sun_path, lc);
+                            pc[lc] = '\0';
+                            if (pt_is_sensitive_unix_socket_path(pa, caller) ||
+                                pt_is_sensitive_unix_socket_path(pc, caller)) {
+                                continue;
+                            }
+                        }
                     }
                     if (kept != i) {
                         fds[kept] = fds[i];
@@ -4706,6 +4807,17 @@ static int pt_fs_proc_pidinfo_ex(int pid,
             }
             break;
 
+        case PROC_PIDTASKINFO:
+            if (bypass_active && (size_t)ret >= sizeof(struct proc_taskinfo)) {
+                struct proc_taskinfo *pti = (struct proc_taskinfo *)buffer;
+                int hidden = pt_count_hidden_threads_for_self();
+                if (hidden > 0 && pti->pti_threadnum > 1) {
+                    int adj = pti->pti_threadnum - hidden;
+                    pti->pti_threadnum = (adj >= 1) ? adj : 1;
+                }
+            }
+            break;
+
         case PROC_PIDTASKALLINFO:
             if ((size_t)ret >= sizeof(struct proc_taskallinfo)) {
                 struct proc_taskallinfo *tinfo = (struct proc_taskallinfo *)buffer;
@@ -4720,6 +4832,11 @@ static int pt_fs_proc_pidinfo_ex(int pid,
                     }
                     if (tinfo->pbsd.pbi_svgid == 20U) {
                         tinfo->pbsd.pbi_svgid = 501U;
+                    }
+                    int hidden = pt_count_hidden_threads_for_self();
+                    if (hidden > 0 && tinfo->ptinfo.pti_threadnum > 1) {
+                        int adj = tinfo->ptinfo.pti_threadnum - hidden;
+                        tinfo->ptinfo.pti_threadnum = (adj >= 1) ? adj : 1;
                     }
                 }
             }
@@ -5056,7 +5173,7 @@ ssize_t pt_fs_getdirentries64_syscall_with_caller(int fd, void *buf, size_t bufs
     }
     int is_sys_int = 0;
     int in_data_root = (dirpath[0] != '\0') ? (pt_path_equals_real_data_root(dirpath) ? 1 : 0) : -1;
-    for (;;) {
+    for (int guard = 0; guard < 256; guard++) {
         ssize_t nbytes = pt_orig_getdirentries64(fd, buf, bufsize, position);
         if (nbytes <= 0 || buf == NULL) {
             return nbytes;
@@ -5097,6 +5214,11 @@ ssize_t pt_fs_getdirentries64_syscall_with_caller(int fd, void *buf, size_t bufs
             return (ssize_t)write_off;
         }
     }
+    return 0;
+}
+
+static ssize_t pt_getdirentries64(int fd, void *buf, size_t bufsize, off_t *position) {
+    return pt_fs_getdirentries64_syscall_with_caller(fd, buf, bufsize, position, __builtin_return_address(0));
 }
 
 static struct dirent *pt_readdir(DIR *dirp) {
@@ -6207,7 +6329,7 @@ int pt_fs_getfsstat_with_caller(struct statfs *buf, int bufsize, int mode, const
         if (raw_cnt <= 0) {
             return raw_cnt;
         }
-        int cap = (raw_cnt < 128) ? raw_cnt : 128;
+        int cap = (raw_cnt < 512) ? raw_cnt : 512;
         struct statfs *tmp = (struct statfs *)calloc((size_t)cap, sizeof(struct statfs));
         if (tmp != NULL) {
             int got = getfsstat(tmp, (int)((size_t)cap * sizeof(struct statfs)), mode);
@@ -6246,10 +6368,34 @@ static int pt_getmntinfo_r_np(struct statfs **mntbufp, int mode) {
     return count;
 }
 
+static void pt_align_statvfs_with_statfs(struct statvfs *vbuf, const struct statfs *sbuf) {
+    if (vbuf == NULL || sbuf == NULL) {
+        return;
+    }
+    vbuf->f_bsize = (unsigned long)sbuf->f_iosize;
+    vbuf->f_frsize = (unsigned long)sbuf->f_bsize;
+    vbuf->f_blocks = (fsblkcnt_t)sbuf->f_blocks;
+    vbuf->f_bfree = (fsblkcnt_t)sbuf->f_bfree;
+    vbuf->f_bavail = (fsblkcnt_t)sbuf->f_bavail;
+    vbuf->f_files = (fsfilcnt_t)sbuf->f_files;
+    vbuf->f_ffree = (fsfilcnt_t)sbuf->f_ffree;
+    vbuf->f_favail = (fsfilcnt_t)sbuf->f_ffree;
+    unsigned long flags = 0;
+    if ((sbuf->f_flags & MNT_RDONLY) != 0) {
+        flags |= ST_RDONLY;
+    }
+    if ((sbuf->f_flags & MNT_NOSUID) != 0) {
+        flags |= ST_NOSUID;
+    }
+    vbuf->f_flag = flags;
+}
+
 static int pt_statvfs(const char * restrict path, struct statvfs * restrict buf) {
+    const void *caller = __builtin_return_address(0);
+    int is_sys_caller = -1;
     char vbuf[PATH_MAX];
     const char *resolved = NULL;
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path(path, __builtin_return_address(0), vbuf, sizeof(vbuf), &resolved);
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_cached_caller(path, caller, vbuf, sizeof(vbuf), &resolved, &is_sys_caller);
     if (disp == PT_FS_PATH_HIDDEN) {
         errno = ENOENT;
         return -1;
@@ -6258,15 +6404,39 @@ static int pt_statvfs(const char * restrict path, struct statvfs * restrict buf)
         pt_ensure_data_container_map();
         resolved = (s_real_data_container_len > 0) ? s_real_data_container_dir : "/private/var";
     }
-    return statvfs(resolved, buf);
+    int ret = statvfs(resolved, buf);
+    if (ret == 0 && buf != NULL && pt_is_bypass_enabled()) {
+        if (is_sys_caller < 0) {
+            is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
+        }
+        if (is_sys_caller == 0) {
+            struct statfs sf;
+            if (statfs(resolved, &sf) == 0) {
+                pt_sanitize_statfs_entry(&sf, caller, &is_sys_caller);
+                pt_align_statvfs_with_statfs(buf, &sf);
+            }
+        }
+    }
+    return ret;
 }
 
 static int pt_fstatvfs(int fd, struct statvfs *buf) {
-    if (pt_fd_is_sensitive(fd, __builtin_return_address(0))) {
+    const void *caller = __builtin_return_address(0);
+    if (pt_fd_is_sensitive(fd, caller)) {
         errno = EBADF;
         return -1;
     }
-    return fstatvfs(fd, buf);
+    int ret = fstatvfs(fd, buf);
+    if (ret == 0 && buf != NULL && pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(caller)) {
+        struct statfs sf;
+        if (fstatfs(fd, &sf) == 0) {
+            int is_sys = 0;
+            pt_sanitize_statfs_entry(&sf, caller, &is_sys);
+            pt_align_statvfs_with_statfs(buf, &sf);
+        }
+    }
+    return ret;
 }
 
 
@@ -7179,9 +7349,17 @@ static inline BOOL pt_is_hidden_xattr_name(const char *name) {
     if (name == NULL || name[0] == '\0') {
         return NO;
     }
+    if (strncmp(name, "com.apple.metadata:", 19) == 0) {
+        return YES;
+    }
     return (strcmp(name, "com.apple.quarantine") == 0 ||
             strcmp(name, "com.apple.provenance") == 0 ||
-            strcmp(name, "com.apple.macl") == 0);
+            strcmp(name, "com.apple.macl") == 0 ||
+            strcmp(name, "com.apple.FinderInfo") == 0 ||
+            strcmp(name, "com.apple.ResourceFork") == 0 ||
+            strcmp(name, "com.apple.TextEncoding") == 0 ||
+            strcmp(name, "com.apple.lastuseddate#PS") == 0 ||
+            strcmp(name, "com.apple.LaunchServices.OpenWith") == 0);
 }
 
 static ssize_t pt_filter_xattr_list_buffer(char *buf, ssize_t raw_len) {
@@ -7914,14 +8092,17 @@ void *pt_fs_dlsym_route(const char *symbol) {
     if (strcmp(symbol, "getattrlistbulk") == 0) {
         return (void *)&pt_getattrlistbulk;
     }
-    if (strcmp(symbol, "statfs") == 0) {
+    if (strcmp(symbol, "statfs") == 0 || strcmp(symbol, "statfs64") == 0) {
         return (void *)&pt_statfs;
     }
-    if (strcmp(symbol, "fstatfs") == 0) {
+    if (strcmp(symbol, "fstatfs") == 0 || strcmp(symbol, "fstatfs64") == 0) {
         return (void *)&pt_fstatfs;
     }
-    if (strcmp(symbol, "getfsstat") == 0) {
+    if (strcmp(symbol, "getfsstat") == 0 || strcmp(symbol, "getfsstat64") == 0) {
         return (void *)&pt_getfsstat;
+    }
+    if (strcmp(symbol, "__getdirentries64") == 0) {
+        return (void *)&pt_getdirentries64;
     }
     if (strcmp(symbol, "getmntinfo") == 0) {
         return (void *)&pt_getmntinfo;

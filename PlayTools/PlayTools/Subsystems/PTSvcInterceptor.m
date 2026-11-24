@@ -1697,11 +1697,106 @@ static BOOL pt_svc_handle_exception_msg(const pt_mach_exc_req_t *req, pt_mach_ex
                        !pt_is_bypass_enabled() ||
                        (x16 < 0);
     if (passthrough) {
+        BOOL intercept_mach_msg = ((x16 == -31 || x16 == -47) &&
+                                   !atomic_load_explicit(&s_svc_safe_mode_passthrough, memory_order_acquire) &&
+                                   pt_is_bypass_enabled() &&
+                                   !pt_is_effective_system_or_playtools_caller((const void *)pc));
+        bool mig_sending = false;
+        bool mig_receiving = false;
+        bool mig_had_req = false;
+        int mig_req_id = 0;
+        int32_t mig_req_flavor = 0;
+        bool mig_target_is_self = false;
+        mach_port_t mig_reply_port = MACH_PORT_NULL;
+        void *mig_rcv_buf = NULL;
+        size_t mig_rcv_cap = 0;
+        mach_port_t mig_rcv_name = MACH_PORT_NULL;
+
+        if (intercept_mach_msg && in_x[0] != 0 && pt_is_valid_user_pointer((const void *)(uintptr_t)in_x[0])) {
+            if (x16 == -31) {
+                // mach_msg_trap(msg, option, send_size, rcv_size, rcv_name, timeout, notify)
+                mach_msg_header_t *hdr = (mach_msg_header_t *)(uintptr_t)in_x[0];
+                mach_msg_option_t option = (mach_msg_option_t)in_x[1];
+                mach_msg_size_t send_size = (mach_msg_size_t)in_x[2];
+                mach_msg_size_t rcv_size = (mach_msg_size_t)in_x[3];
+                mig_rcv_name = (mach_port_t)in_x[4];
+                mig_sending = (option & MACH_SEND_MSG) != 0;
+                mig_receiving = (option & MACH_RCV_MSG) != 0;
+                mig_rcv_buf = hdr;
+                mig_rcv_cap = (size_t)rcv_size;
+                if (mig_sending) {
+                    mach_msg_size_t eff_sz = (send_size > 0) ? send_size : hdr->msgh_size;
+                    mig_req_id = hdr->msgh_id;
+                    mig_reply_port = hdr->msgh_local_port;
+                    mig_had_req = pt_mig_prepare_trap_request(hdr,
+                                                              hdr->msgh_bits,
+                                                              eff_sz,
+                                                              hdr->msgh_remote_port,
+                                                              mig_reply_port,
+                                                              mig_req_id,
+                                                              mig_receiving,
+                                                              &mig_req_flavor,
+                                                              &mig_target_is_self);
+                }
+            } else if (x16 == -47) {
+                // mach_msg2_trap(data, option64, bits_and_send_sz, remote_and_local, voucher_and_id, desc_and_rcv_name, rcv_size, prio_timeout)
+                void *data = (void *)(uintptr_t)in_x[0];
+                uint64_t option64 = in_x[1];
+                bool is_vector = (option64 & 0x0000000100000000ULL) != 0;
+                mig_sending = !is_vector && ((option64 & MACH_SEND_MSG) != 0);
+                mig_receiving = !is_vector && ((option64 & MACH_RCV_MSG) != 0);
+                mig_rcv_buf = data;
+                mig_rcv_cap = (size_t)(uint32_t)(in_x[6] & 0xFFFFFFFFULL);
+                mig_rcv_name = (mach_port_t)(in_x[5] >> 32);
+                if (mig_sending) {
+                    const mach_msg_header_t *hdr = (const mach_msg_header_t *)data;
+                    mach_msg_bits_t bits = (mach_msg_bits_t)(in_x[2] & 0xFFFFFFFFU);
+                    mach_msg_size_t send_size = (mach_msg_size_t)(in_x[2] >> 32);
+                    if (send_size == 0) {
+                        send_size = hdr->msgh_size;
+                    }
+                    mach_port_t remote_port = (mach_port_t)(in_x[3] & 0xFFFFFFFFU);
+                    mach_port_t local_port = (mach_port_t)(in_x[3] >> 32);
+                    int parsed_id = (int)(in_x[4] >> 32);
+                    if (parsed_id == 0) {
+                        parsed_id = hdr->msgh_id;
+                    }
+                    if (local_port == MACH_PORT_NULL) {
+                        local_port = hdr->msgh_local_port;
+                    }
+                    mig_req_id = parsed_id;
+                    mig_reply_port = local_port;
+                    mig_had_req = pt_mig_prepare_trap_request(data,
+                                                              bits,
+                                                              send_size,
+                                                              remote_port,
+                                                              local_port,
+                                                              parsed_id,
+                                                              mig_receiving,
+                                                              &mig_req_flavor,
+                                                              &mig_target_is_self);
+                }
+            }
+        }
+
         uint64_t out_x[2] = {0, 0};
         bool carry = false;
         pt_raw_arm64_svc80(x16, in_x, out_x, &carry);
         PT_TS_X(state)[0] = out_x[0];
         PT_TS_X(state)[1] = out_x[1];
+        if (intercept_mach_msg && (mig_sending || mig_receiving)) {
+            pt_mig_finish_trap_reply(mig_rcv_buf,
+                                     mig_rcv_cap,
+                                     mig_rcv_name,
+                                     mig_sending,
+                                     mig_receiving,
+                                     mig_had_req,
+                                     mig_req_id,
+                                     mig_req_flavor,
+                                     mig_target_is_self,
+                                     mig_reply_port,
+                                     (kern_return_t)(int32_t)out_x[0]);
+        }
         if (x16 > 0) {
             if (carry) {
                 PT_TS_CPSR(state) |= PT_ARM64_CPSR_C;
@@ -2194,6 +2289,59 @@ DYLD_INTERPOSE(pt_task_get_exception_ports, task_get_exception_ports)
 DYLD_INTERPOSE(pt_thread_set_exception_ports, thread_set_exception_ports)
 DYLD_INTERPOSE(pt_thread_swap_exception_ports, thread_swap_exception_ports)
 DYLD_INTERPOSE(pt_thread_get_exception_ports, thread_get_exception_ports)
+
+__attribute__((visibility("hidden")))
+BOOL pt_svc_get_redaction_info(mach_port_t *out_svc_port,
+                               mach_port_t *out_saved_port,
+                               exception_mask_t *out_saved_mask,
+                               exception_behavior_t *out_saved_beh,
+                               thread_state_flavor_t *out_saved_flavor) {
+    if (out_svc_port != NULL) {
+        *out_svc_port = MACH_PORT_NULL;
+    }
+    if (out_saved_port != NULL) {
+        *out_saved_port = MACH_PORT_NULL;
+    }
+    if (out_saved_mask != NULL) {
+        *out_saved_mask = 0;
+    }
+    if (out_saved_beh != NULL) {
+        *out_saved_beh = 0;
+    }
+    if (out_saved_flavor != NULL) {
+        *out_saved_flavor = 0;
+    }
+    if (!atomic_load_explicit(&s_svc_interceptor_active, memory_order_acquire)) {
+        return NO;
+    }
+    mach_port_t svc_port = atomic_load_explicit(&s_svc_exc_port, memory_order_acquire);
+    if (!MACH_PORT_VALID(svc_port)) {
+        return NO;
+    }
+    if (out_svc_port != NULL) {
+        *out_svc_port = svc_port;
+    }
+    pt_svc_saved_exc_handler_t saved = pt_svc_copy_retained_task_bp();
+    if (saved.valid && MACH_PORT_VALID(saved.port) && saved.port != svc_port) {
+        if (out_saved_port != NULL) {
+            *out_saved_port = saved.port;
+        } else {
+            pt_svc_release_send_right(saved.port);
+        }
+        if (out_saved_mask != NULL) {
+            *out_saved_mask = saved.mask;
+        }
+        if (out_saved_beh != NULL) {
+            *out_saved_beh = saved.behavior;
+        }
+        if (out_saved_flavor != NULL) {
+            *out_saved_flavor = saved.flavor;
+        }
+    } else {
+        pt_svc_release_send_right(saved.port);
+    }
+    return YES;
+}
 
 __attribute__((visibility("hidden")))
 void *pt_svc_dlsym_route(const char *symbol) {

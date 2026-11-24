@@ -94,8 +94,10 @@ MOCK_TARGET_M = r"""
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mount.h>
 #include <sys/socket.h>
+#include <sys/sockio.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <sys/un.h>
@@ -1661,6 +1663,9 @@ int main(int argc, const char *argv[]) {
         BOOL s11Round1DlsymAndProcOK = NO;
         BOOL s11Round1VolumeAndCodeResOK = NO;
         BOOL s11Round1AppKitAndSuperBlobOK = NO;
+        BOOL s11Round2CGAndHIDBlockedOK = NO;
+        BOOL s11Round2FontsAndDlopenOK = NO;
+        BOOL s11Round2MigThreadNetIopsOK = NO;
         const char *testS11Env = getenv("HARNESS_TEST_SCENARIO11");
         if (testS11Env != NULL && strcmp(testS11Env, "1") == 0) {
             // 1. PROC_PIDPATHINFO (libproc + SYS_proc_info) returns 0 and virtualized iOS bundle path
@@ -2426,6 +2431,242 @@ int main(int argc, const char *argv[]) {
                 }
                 s11Round1AppKitAndSuperBlobOK = (appkitHidden && hdrClean && superBlobCDMatch);
             }
+
+            // 19. Round 2 parity: CG/IOHID dlsym blacklist, dlopen_preflight macOS frameworks, CTFontCollection,
+            //     thread_info(THREAD_EXTENDED_INFO), MIG 219/3414, ioctl(SIOCGIFCONF), IOPS, AMFI, imageHeader parity
+            {
+                s11Round2CGAndHIDBlockedOK = (dlsym(RTLD_DEFAULT, "CGMainDisplayID") == NULL &&
+                                              dlsym(RTLD_DEFAULT, "CGGetActiveDisplayList") == NULL &&
+                                              dlsym(RTLD_DEFAULT, "CGWindowListCopyWindowInfo") == NULL &&
+                                              dlsym(RTLD_DEFAULT, "CGPreflightScreenCaptureAccess") == NULL &&
+                                              dlsym(RTLD_DEFAULT, "IOHIDManagerCreate") == NULL &&
+                                              dlsym(RTLD_DEFAULT, "IOHIDManagerCopyDevices") == NULL);
+
+                BOOL macFwBlocked = (!dlopen_preflight("/System/Library/Frameworks/Cocoa.framework/Cocoa") &&
+                                     !dlopen_preflight("/System/Library/Frameworks/ServiceManagement.framework/ServiceManagement") &&
+                                     !dlopen_preflight("/System/Library/Frameworks/DiskArbitration.framework/DiskArbitration") &&
+                                     !dlopen_preflight("/System/Library/Frameworks/CoreWLAN.framework/CoreWLAN") &&
+                                     !dlopen_preflight("/System/Library/Frameworks/EndpointSecurity.framework/EndpointSecurity"));
+
+                BOOL ctCollectionClean = YES;
+                void *ctHandle = dlopen("/System/Library/Frameworks/CoreText.framework/CoreText", RTLD_LAZY);
+                if (ctHandle != NULL) {
+                    typedef CFTypeRef (*CreateColFn)(CFDictionaryRef);
+                    typedef CFArrayRef (*CopyMatchFn)(CFTypeRef);
+                    typedef CFTypeRef (*CopyAttrFn)(CFTypeRef, CFStringRef);
+                    CreateColFn fnCreateCol = (CreateColFn)dlsym(RTLD_DEFAULT, "CTFontCollectionCreateFromAvailableFonts");
+                    CopyMatchFn fnMatch = (CopyMatchFn)dlsym(RTLD_DEFAULT, "CTFontCollectionCreateMatchingFontDescriptors");
+                    CopyAttrFn fnAttr = (CopyAttrFn)dlsym(RTLD_DEFAULT, "CTFontDescriptorCopyAttribute");
+                    CFStringRef *pFamKey = (CFStringRef *)dlsym(RTLD_DEFAULT, "kCTFontFamilyNameAttribute");
+                    if (fnCreateCol != NULL && fnMatch != NULL && fnAttr != NULL && pFamKey != NULL && *pFamKey != NULL) {
+                        CFTypeRef col = fnCreateCol(NULL);
+                        if (col != NULL) {
+                            NSArray *descs = CFBridgingRelease(fnMatch(col));
+                            CFRelease(col);
+                            for (id d in descs) {
+                                NSString *fam = CFBridgingRelease(fnAttr((__bridge CFTypeRef)d, *pFamKey));
+                                if ([fam isKindOfClass:[NSString class]]) {
+                                    NSString *low = fam.lowercaseString;
+                                    if ([low isEqualToString:@"monaco"] ||
+                                        [low isEqualToString:@"skia"] ||
+                                        [low isEqualToString:@"osaka"] ||
+                                        [low isEqualToString:@"wingdings"]) {
+                                        ctCollectionClean = NO;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                s11Round2FontsAndDlopenOK = (macFwBlocked && ctCollectionClean);
+
+                BOOL threadsClean = YES;
+                thread_act_array_t thList = NULL;
+                mach_msg_type_number_t thCount = 0;
+                if (task_threads(mach_task_self(), &thList, &thCount) == KERN_SUCCESS && thList != NULL) {
+                    for (mach_msg_type_number_t ti = 0; ti < thCount; ti++) {
+                        thread_extended_info_data_t extInfo = {0};
+                        mach_msg_type_number_t extCnt = THREAD_EXTENDED_INFO_COUNT;
+                        if (thread_info(thList[ti], THREAD_EXTENDED_INFO, (thread_info_t)&extInfo, &extCnt) == KERN_SUCCESS) {
+                            extInfo.pth_name[sizeof(extInfo.pth_name) - 1] = '\0';
+                            if (strstr(extInfo.pth_name, "NSEventThread") != NULL ||
+                                strstr(extInfo.pth_name, "PlayTools") != NULL ||
+                                strstr(extInfo.pth_name, "MacOver") != NULL) {
+                                threadsClean = NO;
+                            }
+                        }
+                        mach_port_deallocate(mach_task_self(), thList[ti]);
+                    }
+                    vm_deallocate(mach_task_self(), (vm_address_t)thList, thCount * sizeof(thread_act_t));
+                }
+
+                BOOL mig219SwapZeroOK = YES;
+                BOOL mig3414NoBrkOK = YES;
+                {
+                    // MIG 219 (HOST_VM_INFO64)
+                    struct {
+                        mach_msg_header_t hdr;
+                        NDR_record_t ndr;
+                        int flavor;
+                        mach_msg_type_number_t count;
+                    } req219 = {0};
+                    union {
+                        mach_msg_header_t hdr;
+                        uint8_t bytes[1024];
+                    } rep219 = {0};
+                    mach_port_t rport = MACH_PORT_NULL;
+                    if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &rport) == KERN_SUCCESS) {
+                        host_t h = mach_host_self();
+                        req219.hdr.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE);
+                        req219.hdr.msgh_size = sizeof(req219);
+                        req219.hdr.msgh_remote_port = h;
+                        req219.hdr.msgh_local_port = rport;
+                        req219.hdr.msgh_id = 219;
+                        req219.ndr = NDR_record;
+                        req219.flavor = HOST_VM_INFO64;
+                        req219.count = HOST_VM_INFO64_COUNT;
+                        kern_return_t kr = mach_msg(&req219.hdr, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(req219), 0, MACH_PORT_NULL, 500, MACH_PORT_NULL);
+                        if (kr == KERN_SUCCESS) {
+                            kr = mach_msg(&rep219.hdr, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(rep219), rport, 500, MACH_PORT_NULL);
+                        }
+                        mach_port_mod_refs(mach_task_self(), rport, MACH_PORT_RIGHT_RECEIVE, -1);
+                        if (MACH_PORT_VALID(h)) mach_port_deallocate(mach_task_self(), h);
+                        const size_t pfx219 = sizeof(mach_msg_header_t) + sizeof(NDR_record_t);
+                        if (kr == KERN_SUCCESS && rep219.hdr.msgh_id == 319 &&
+                            !(rep219.hdr.msgh_bits & MACH_MSGH_BITS_COMPLEX) &&
+                            rep219.hdr.msgh_size >= pfx219 + 8 + sizeof(vm_statistics64_data_t)) {
+                            kern_return_t innerRC = KERN_FAILURE;
+                            memcpy(&innerRC, rep219.bytes + pfx219, sizeof(innerRC));
+                            if (innerRC == KERN_SUCCESS) {
+                                vm_statistics64_data_t vm64 = {0};
+                                memcpy(&vm64, rep219.bytes + pfx219 + 8, sizeof(vm64));
+                                if (vm64.swapins != 0 || vm64.swapouts != 0) mig219SwapZeroOK = NO;
+                            }
+                        } else if (kr == KERN_SUCCESS && (rep219.hdr.msgh_bits & MACH_MSGH_BITS_COMPLEX)) {
+                            mach_msg_destroy(&rep219.hdr);
+                        }
+                    }
+
+                    // MIG 3414 (task_get_exception_ports for EXC_MASK_BREAKPOINT -> reply 3514)
+                    struct {
+                        mach_msg_header_t hdr;
+                        NDR_record_t ndr;
+                        exception_mask_t mask;
+                    } req3414 = {0};
+                    union {
+                        mach_msg_header_t hdr;
+                        uint8_t bytes[1024];
+                    } rep3414 = {0};
+                    mach_port_t eport = MACH_PORT_NULL;
+                    if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &eport) == KERN_SUCCESS) {
+                        req3414.hdr.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE);
+                        req3414.hdr.msgh_size = sizeof(req3414);
+                        req3414.hdr.msgh_remote_port = mach_task_self();
+                        req3414.hdr.msgh_local_port = eport;
+                        req3414.hdr.msgh_id = 3414;
+                        req3414.ndr = NDR_record;
+                        req3414.mask = EXC_MASK_BREAKPOINT;
+                        kern_return_t kr = mach_msg(&req3414.hdr, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(req3414), 0, MACH_PORT_NULL, 500, MACH_PORT_NULL);
+                        if (kr == KERN_SUCCESS) {
+                            kr = mach_msg(&rep3414.hdr, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(rep3414), eport, 500, MACH_PORT_NULL);
+                        }
+                        mach_port_mod_refs(mach_task_self(), eport, MACH_PORT_RIGHT_RECEIVE, -1);
+                        if (kr == KERN_SUCCESS && rep3414.hdr.msgh_id == 3514 &&
+                            (rep3414.hdr.msgh_bits & MACH_MSGH_BITS_COMPLEX)) {
+                            mach_msg_body_t body = {0};
+                            memcpy(&body, rep3414.bytes + sizeof(mach_msg_header_t), sizeof(body));
+                            size_t off = sizeof(mach_msg_header_t) + sizeof(mach_msg_body_t);
+                            for (unsigned di = 0; di < body.msgh_descriptor_count && di < EXC_TYPES_COUNT; di++) {
+                                if (off + (di + 1) * sizeof(mach_msg_port_descriptor_t) > rep3414.hdr.msgh_size) break;
+                                mach_msg_port_descriptor_t d = {0};
+                                memcpy(&d, rep3414.bytes + off + di * sizeof(d), sizeof(d));
+                                if (d.type == MACH_MSG_PORT_DESCRIPTOR && MACH_PORT_VALID(d.name)) {
+                                    mig3414NoBrkOK = NO;
+                                }
+                            }
+                            mach_msg_destroy(&rep3414.hdr);
+                        }
+                    }
+                }
+
+                BOOL siocgifconfClean = YES;
+                int sockFd = socket(AF_INET, SOCK_DGRAM, 0);
+                if (sockFd >= 0) {
+                    char ifBuf[16384] = {0};
+                    struct ifconf ifc = {0};
+                    ifc.ifc_len = (int)sizeof(ifBuf);
+                    ifc.ifc_buf = ifBuf;
+                    if (ioctl(sockFd, SIOCGIFCONF, &ifc) == 0 && ifc.ifc_len > 0) {
+                        char *p = ifBuf, *end = ifBuf + ifc.ifc_len;
+                        while (p + sizeof(struct ifreq) <= end) {
+                            struct ifreq *ifr = (struct ifreq *)p;
+                            size_t step = sizeof(ifr->ifr_name) + ifr->ifr_addr.sa_len;
+                            if (step < sizeof(struct ifreq)) step = sizeof(struct ifreq);
+                            char nm[IFNAMSIZ + 1] = {0};
+                            memcpy(nm, ifr->ifr_name, IFNAMSIZ);
+                            if (strncmp(nm, "bridge", 6) == 0 ||
+                                strncmp(nm, "vmenet", 6) == 0 ||
+                                strncmp(nm, "anpi", 4) == 0) {
+                                siocgifconfClean = NO;
+                            }
+                            p += step;
+                        }
+                    }
+                    close(sockFd);
+                }
+
+                BOOL iopsNonEmptyOK = YES;
+                {
+                    CFTypeRef (*fnPSInfo)(void) = (CFTypeRef (*)(void))dlsym(RTLD_DEFAULT, "IOPSCopyPowerSourcesInfo");
+                    CFArrayRef (*fnPSList)(CFTypeRef) = (CFArrayRef (*)(CFTypeRef))dlsym(RTLD_DEFAULT, "IOPSCopyPowerSourcesList");
+                    if (fnPSInfo != NULL && fnPSList != NULL) {
+                        CFTypeRef psInfo = fnPSInfo();
+                        if (psInfo != NULL) {
+                            NSArray *psList = CFBridgingRelease(fnPSList(psInfo));
+                            CFRelease(psInfo);
+                            if (psList == nil || psList.count == 0) iopsNonEmptyOK = NO;
+                        }
+                    }
+                }
+
+                BOOL amfiOK = YES;
+                {
+                    typedef int (*AmfiFn)(uint64_t, uint64_t *);
+                    AmfiFn fnAmfi = (AmfiFn)dlsym(RTLD_DEFAULT, "amfi_check_dyld_policy_self");
+                    if (fnAmfi != NULL) {
+                        uint64_t amfiOut = 0;
+                        int arc = fnAmfi(1ULL, &amfiOut);
+                        if (arc != 0) amfiOK = NO;
+                    }
+                }
+
+                BOOL hdrImgParityOK = YES;
+                {
+                    const char **(*fnCopyHdr2)(const void *, unsigned int *) =
+                        (const char **(*)(const void *, unsigned int *))dlsym(RTLD_DEFAULT, "objc_copyClassNamesForImageHeader");
+                    const char **(*fnCopyImg2)(const char *, unsigned int *) =
+                        (const char **(*)(const char *, unsigned int *))dlsym(RTLD_DEFAULT, "objc_copyClassNamesForImage");
+                    const struct mach_header *mh0 = _dyld_get_image_header(0);
+                    const char *img0 = _dyld_get_image_name(0);
+                    if (fnCopyHdr2 != NULL && fnCopyImg2 != NULL && mh0 != NULL && img0 != NULL) {
+                        unsigned int cnHdr = 0, cnImg = 0;
+                        const char **lHdr = fnCopyHdr2(mh0, &cnHdr);
+                        const char **lImg = fnCopyImg2(img0, &cnImg);
+                        if (lHdr != NULL && lImg != NULL) {
+                            if (cnHdr != cnImg) hdrImgParityOK = NO;
+                            for (unsigned int ci = 0; ci < cnHdr; ci++) {
+                                if (lHdr[ci] != NULL && strstr(lHdr[ci], "PlayTools") != NULL) hdrImgParityOK = NO;
+                            }
+                        }
+                        if (lHdr != NULL) free((void *)lHdr);
+                        if (lImg != NULL) free((void *)lImg);
+                    }
+                }
+
+                s11Round2MigThreadNetIopsOK = (threadsClean && mig219SwapZeroOK && mig3414NoBrkOK &&
+                                               siocgifconfClean && iopsNonEmptyOK && amfiOK && hdrImgParityOK);
+            }
         }
 
         // Scenario 12: compat13_7 parity checks
@@ -2436,6 +2677,7 @@ int main(int argc, const char *argv[]) {
         BOOL s12Post13EpochCleanOK = NO;
         BOOL s12Round1JscCAPICleanOK = NO;
         BOOL s12Round1ReflectionParityOK = NO;
+        BOOL s12Round2Compat13EpochOK = NO;
         const char *testS12Env = getenv("HARNESS_TEST_SCENARIO12");
         if (testS12Env != NULL && strcmp(testS12Env, "1") == 0) {
             s12FreadlinkHiddenOK = (dlsym(RTLD_DEFAULT, "freadlink") == NULL);
@@ -2658,6 +2900,64 @@ int main(int argc, const char *argv[]) {
                 NSVerFn fnLinkVer = (NSVerFn)dlsym(RTLD_DEFAULT, "NSVersionOfLinkTimeLibrary");
                 BOOL linkVerOK = (fnLinkVer == NULL || (fnLinkVer("Foundation") >> 16) == 1677);
                 s12Round1ReflectionParityOK = (noMacProp && clsNamesParity && metaMethodHidden && linkVerOK);
+
+                // Round 2 compat13_7: JSC structuredClone/AggregateError hidden (ObjC + C API) & Metal raytracing rejected
+                BOOL r2JscObjcOK = NO;
+                BOOL r2JscCOK = NO;
+                if (jscH != NULL) {
+                    Class jscCls2 = objc_getClass("JSContext");
+                    if (jscCls2 != Nil) {
+                        id ctx2 = [jscCls2 new];
+                        if (ctx2 != nil) {
+                            SEL evalSel2 = sel_registerName("evaluateScript:");
+                            id sc = ((id (*)(id, SEL, NSString *))objc_msgSend)(ctx2, evalSel2, @"typeof structuredClone");
+                            id ae = ((id (*)(id, SEL, NSString *))objc_msgSend)(ctx2, evalSel2, @"typeof AggregateError");
+                            r2JscObjcOK = ([[sc description] isEqualToString:@"undefined"] &&
+                                           [[ae description] isEqualToString:@"undefined"]);
+                        }
+                    }
+                    typedef void *(*JSCCreateFn2)(void *);
+                    typedef void (*JSCReleaseFn2)(void *);
+                    typedef void *(*JSCStrCreateFn2)(const char *);
+                    typedef void (*JSCStrReleaseFn2)(void *);
+                    typedef void *(*JSCEvalFn2)(void *, void *, void *, void *, int, void **);
+                    typedef bool (*JSCToBoolFn2)(void *, void *);
+                    JSCCreateFn2 fnC2 = (JSCCreateFn2)dlsym(RTLD_DEFAULT, "JSGlobalContextCreate");
+                    JSCReleaseFn2 fnR2 = (JSCReleaseFn2)dlsym(RTLD_DEFAULT, "JSGlobalContextRelease");
+                    JSCStrCreateFn2 fnS2 = (JSCStrCreateFn2)dlsym(RTLD_DEFAULT, "JSStringCreateWithUTF8CString");
+                    JSCStrReleaseFn2 fnSR2 = (JSCStrReleaseFn2)dlsym(RTLD_DEFAULT, "JSStringRelease");
+                    JSCEvalFn2 fnE2 = (JSCEvalFn2)dlsym(RTLD_DEFAULT, "JSEvaluateScript");
+                    JSCToBoolFn2 fnB2 = (JSCToBoolFn2)dlsym(RTLD_DEFAULT, "JSValueToBoolean");
+                    if (fnC2 != NULL && fnR2 != NULL && fnS2 != NULL && fnSR2 != NULL && fnE2 != NULL && fnB2 != NULL) {
+                        void *gc2 = fnC2(NULL);
+                        if (gc2 != NULL) {
+                            void *s2 = fnS2("typeof structuredClone === 'undefined' && typeof AggregateError === 'undefined'");
+                            void *ex2 = NULL;
+                            void *rv2 = fnE2(gc2, s2, NULL, NULL, 1, &ex2);
+                            r2JscCOK = (rv2 != NULL && ex2 == NULL && fnB2(gc2, rv2));
+                            fnSR2(s2);
+                            fnR2(gc2);
+                        }
+                    }
+                }
+                BOOL r2MetalRtBlockedOK = NO;
+                {
+                    typedef CFTypeRef (*CreateDevFn2)(void);
+                    CreateDevFn2 fnDev2 = (CreateDevFn2)dlsym(RTLD_DEFAULT, "MTLCreateSystemDefaultDevice");
+                    Class optsCls2 = objc_getClass("MTLCompileOptions");
+                    id dev2 = (fnDev2 != NULL) ? CFBridgingRelease(fnDev2()) : nil;
+                    if (dev2 != nil && optsCls2 != Nil) {
+                        SEL newLibSel2 = sel_registerName("newLibraryWithSource:options:error:");
+                        typedef id (*NewLibMsgSendFn2)(id, SEL, NSString *, id, NSError * __autoreleasing *);
+                        NSError * __autoreleasing errRt = nil;
+                        id optsRt = [optsCls2 new];
+                        NSString *rtSrc = @"#include <metal_stdlib>\n#include <metal_raytracing>\nusing namespace metal;\nkernel void rt() {}\n";
+                        id libRt = ((NewLibMsgSendFn2)objc_msgSend)(dev2, newLibSel2, rtSrc, optsRt, &errRt);
+                        r2MetalRtBlockedOK = (libRt == nil && errRt != nil &&
+                                              [errRt.domain isEqualToString:@"MTLLibraryErrorDomain"] && errRt.code == 3);
+                    }
+                }
+                s12Round2Compat13EpochOK = (r2JscObjcOK && r2JscCOK && r2MetalRtBlockedOK);
             }
         }
 
@@ -2798,6 +3098,9 @@ int main(int argc, const char *argv[]) {
             @"s11Round1DlsymAndProcOK": s11Round1DlsymAndProcOK ? @YES : @NO,
             @"s11Round1VolumeAndCodeResOK": s11Round1VolumeAndCodeResOK ? @YES : @NO,
             @"s11Round1AppKitAndSuperBlobOK": s11Round1AppKitAndSuperBlobOK ? @YES : @NO,
+            @"s11Round2CGAndHIDBlockedOK": s11Round2CGAndHIDBlockedOK ? @YES : @NO,
+            @"s11Round2FontsAndDlopenOK": s11Round2FontsAndDlopenOK ? @YES : @NO,
+            @"s11Round2MigThreadNetIopsOK": s11Round2MigThreadNetIopsOK ? @YES : @NO,
             @"s12FreadlinkHiddenOK": s12FreadlinkHiddenOK ? @YES : @NO,
             @"s12ExtensionKitHiddenOK": s12ExtensionKitHiddenOK ? @YES : @NO,
             @"s12MetalCompat13GateOK": s12MetalCompat13GateOK ? @YES : @NO,
@@ -2805,6 +3108,7 @@ int main(int argc, const char *argv[]) {
             @"s12Post13EpochCleanOK": s12Post13EpochCleanOK ? @YES : @NO,
             @"s12Round1JscCAPICleanOK": s12Round1JscCAPICleanOK ? @YES : @NO,
             @"s12Round1ReflectionParityOK": s12Round1ReflectionParityOK ? @YES : @NO,
+            @"s12Round2Compat13EpochOK": s12Round2Compat13EpochOK ? @YES : @NO,
             @"provPath": provPath,
             @"hidPCInstallGen": (hidPCInstallGenNS && hidPCInstallGenCF) ? @YES : @NO,
             @"provURLPath": provURLPath,
@@ -4022,6 +4326,9 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info11["s11Round1DlsymAndProcOK"] is True,
         info11["s11Round1VolumeAndCodeResOK"] is True,
         info11["s11Round1AppKitAndSuperBlobOK"] is True,
+        info11["s11Round2CGAndHIDBlockedOK"] is True,
+        info11["s11Round2FontsAndDlopenOK"] is True,
+        info11["s11Round2MigThreadNetIopsOK"] is True,
     ]
     results.append(ScenarioResult(
         name="11. 1.0.4 audit & detect-v2 parity checks",
@@ -4084,6 +4391,7 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info12["s12Post13EpochCleanOK"] is True,
         info12["s12Round1JscCAPICleanOK"] is True,
         info12["s12Round1ReflectionParityOK"] is True,
+        info12["s12Round2Compat13EpochOK"] is True,
     ]
     results.append(ScenarioResult(
         name="12. compat13_7 parity (freadlink, ExtensionKit, Metal 2.3 gate, AGX IORegistry)",

@@ -105,7 +105,8 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_class(const char *n
     if (pt_is_compat13_7_active()) {
         switch (name[0]) {
             case 'A':
-                if (strcmp(name, "ATTrackingManager") == 0) {
+                if (strcmp(name, "ATTrackingManager") == 0 ||
+                    strcmp(name, "ASAuthorizationPlatformPublicKeyCredentialProvider") == 0) {
                     return YES;
                 }
                 break;
@@ -145,7 +146,8 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_class(const char *n
                 }
                 break;
             case 'S':
-                if (strcmp(name, "SKOverlay") == 0) {
+                if (strcmp(name, "SKOverlay") == 0 ||
+                    strcmp(name, "SKAdImpression") == 0) {
                     return YES;
                 }
                 break;
@@ -159,6 +161,11 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_class(const char *n
                     strcmp(name, "UIDeferredMenuElement") == 0 ||
                     strcmp(name, "UISheetPresentationController") == 0 ||
                     strcmp(name, "UICalendarView") == 0 ||
+                    strcmp(name, "UICalendarSelection") == 0 ||
+                    strcmp(name, "UIEditMenuInteraction") == 0 ||
+                    strcmp(name, "UIFindInteraction") == 0 ||
+                    strcmp(name, "UIShape") == 0 ||
+                    strcmp(name, "UIContentUnavailableConfiguration") == 0 ||
                     strcmp(name, "UIPasteControl") == 0 ||
                     strcmp(name, "UIHoverStyle") == 0 ||
                     strcmp(name, "UTType") == 0) {
@@ -166,7 +173,9 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_class(const char *n
                 }
                 break;
             case 'W':
-                if (strcmp(name, "WKContentWorld") == 0) {
+                if (strcmp(name, "WKContentWorld") == 0 ||
+                    strcmp(name, "WKFindConfiguration") == 0 ||
+                    strcmp(name, "WKPDFConfiguration") == 0) {
                     return YES;
                 }
                 break;
@@ -247,6 +256,43 @@ BOOL pt_is_hidden_objc_selector_name(const char *selName) {
     }
 }
 
+static BOOL pt_is_macos_only_framework_path(const char *name) {
+    if (name == NULL || name[0] == '\0') {
+        return NO;
+    }
+    return (strstr(name, "AppKit.framework") != NULL ||
+            strstr(name, "UIKitMacHelper.framework") != NULL ||
+            strstr(name, "ViewBridge.framework") != NULL ||
+            strstr(name, "SkyLight.framework") != NULL ||
+            strstr(name, "HIToolbox.framework") != NULL ||
+            strstr(name, "Carbon.framework") != NULL ||
+            strstr(name, "Cocoa.framework") != NULL ||
+            strstr(name, "ApplicationServices.framework") != NULL ||
+            strstr(name, "IOBluetooth.framework") != NULL ||
+            strstr(name, "ServiceManagement.framework") != NULL ||
+            strstr(name, "ScriptingBridge.framework") != NULL ||
+            strstr(name, "DiskArbitration.framework") != NULL ||
+            strstr(name, "EndpointSecurity.framework") != NULL ||
+            strstr(name, "Hypervisor.framework") != NULL ||
+            strstr(name, "Virtualization.framework") != NULL ||
+            strstr(name, "CoreWLAN.framework") != NULL ||
+            strstr(name, "CoreDisplay.framework") != NULL ||
+            strstr(name, "OpenDirectory.framework") != NULL ||
+            strstr(name, "DirectoryService.framework") != NULL ||
+            strstr(name, "FinderSync.framework") != NULL ||
+            strstr(name, "SystemAdministration.framework") != NULL ||
+            strstr(name, "Automator.framework") != NULL ||
+            strstr(name, "AppleScriptObjC.framework") != NULL ||
+            strstr(name, "InputMethodKit.framework") != NULL ||
+            strstr(name, "PreferencePanes.framework") != NULL ||
+            strstr(name, "ScreenSaver.framework") != NULL ||
+            strstr(name, "SecurityInterface.framework") != NULL ||
+            strstr(name, "OSAKit.framework") != NULL ||
+            strstr(name, "NetFS.framework") != NULL ||
+            strstr(name, "ParavirtualizedGraphics.framework") != NULL ||
+            strstr(name, "DriverKit.framework") != NULL);
+}
+
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_dyld_image_name(const char *name) {
     if (name == NULL) {
         return NO;
@@ -259,12 +305,7 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_dyld_image_name(const ch
             strstr(name, "UserPlugins") != NULL ||
             strstr(name, "AGXMetal") != NULL ||
             strstr(name, "/System/Library/Extensions/") != NULL ||
-            strstr(name, "AppKit.framework") != NULL ||
-            strstr(name, "UIKitMacHelper.framework") != NULL ||
-            strstr(name, "ViewBridge.framework") != NULL ||
-            strstr(name, "SkyLight.framework") != NULL ||
-            strstr(name, "HIToolbox.framework") != NULL ||
-            strstr(name, "Carbon.framework") != NULL);
+            pt_is_macos_only_framework_path(name));
 }
 
 __attribute__((visibility("hidden"))) BOOL pt_should_hide_dyld_image(const char *name) {
@@ -756,6 +797,23 @@ static BOOL pt_path_is_post13_7_framework(const char *path) {
             strstr(path, "/NearbyInteraction.framework") != NULL ||
             strstr(path, "/Charts.framework") != NULL ||
             strstr(path, "/OSLog.framework") != NULL ||
+            strstr(path, "/WeatherKit.framework") != NULL ||
+            strstr(path, "/MusicKit.framework") != NULL ||
+            strstr(path, "/RoomPlan.framework") != NULL ||
+            strstr(path, "/WorkoutKit.framework") != NULL ||
+            strstr(path, "/Translation.framework") != NULL ||
+            strstr(path, "/FamilyControls.framework") != NULL ||
+            strstr(path, "/ManagedSettings.framework") != NULL ||
+            strstr(path, "/DeviceActivity.framework") != NULL ||
+            strstr(path, "/Cinematic.framework") != NULL ||
+            strstr(path, "/CoreTransferable.framework") != NULL ||
+            strstr(path, "/Spatial.framework") != NULL ||
+            strstr(path, "/DockKit.framework") != NULL ||
+            strstr(path, "/FinanceKit.framework") != NULL ||
+            strstr(path, "/JournalingSuggestions.framework") != NULL ||
+            strstr(path, "/SensitiveContentAnalysis.framework") != NULL ||
+            strstr(path, "/LockedCameraCapture.framework") != NULL ||
+            strstr(path, "/MarketplaceKit.framework") != NULL ||
             strstr(path, "libswift_Concurrency.dylib") != NULL ||
             strstr(path, "libswift_StringProcessing.dylib") != NULL);
 }
@@ -1256,6 +1314,144 @@ static unsigned int pt_filter_class_names_in_place(const char **names, unsigned 
     return writeIdx;
 }
 
+static const char **pt_objc_copy_merged_class_names_for_path(const char *image, unsigned int *outCount) {
+    const char *cand_paths[6] = { NULL, NULL, NULL, NULL, NULL, NULL };
+    char ver_path[PATH_MAX];
+    char ios_ver_path[PATH_MAX];
+    char ios_path[PATH_MAX];
+    char stripped_ver_path[PATH_MAX];
+    size_t cand_count = 0;
+    pt_append_unique_cand_path(cand_paths, &cand_count, 6, image);
+
+    // Derive canonical non-/System/iOSSupport base path so both macOS & Catalyst slices are queried.
+    const char *canon = image;
+    if (strncmp(image, "/System/iOSSupport/", 19) == 0) {
+        canon = image + 18;
+        pt_append_unique_cand_path(cand_paths, &cand_count, 6, canon);
+    }
+    if (strncmp(canon, "/System/", 8) == 0) {
+        const char *fw = strstr(canon, ".framework/");
+        if (fw != NULL && strstr(fw, ".framework/Versions/") == NULL) {
+            size_t prefix_len = (size_t)(fw + 10 - canon);
+            int vn = snprintf(ver_path, sizeof(ver_path), "%.*s/Versions/A%s",
+                              (int)prefix_len, canon, fw + 10);
+            if (vn > 0 && (size_t)vn < sizeof(ver_path)) {
+                pt_append_unique_cand_path(cand_paths, &cand_count, 6, ver_path);
+                int ivn = snprintf(ios_ver_path, sizeof(ios_ver_path),
+                                   "/System/iOSSupport%s", ver_path);
+                if (ivn > 0 && (size_t)ivn < sizeof(ios_ver_path)) {
+                    pt_append_unique_cand_path(cand_paths, &cand_count, 6, ios_ver_path);
+                }
+            }
+        } else if (fw != NULL) {
+            const char *ver_a = strstr(fw, ".framework/Versions/A/");
+            if (ver_a != NULL) {
+                size_t prefix_len = (size_t)(ver_a + 10 - canon);
+                int sn = snprintf(stripped_ver_path, sizeof(stripped_ver_path), "%.*s%s",
+                                  (int)prefix_len, canon, ver_a + 21);
+                if (sn > 0 && (size_t)sn < sizeof(stripped_ver_path)) {
+                    pt_append_unique_cand_path(cand_paths, &cand_count, 6, stripped_ver_path);
+                }
+            }
+        }
+        int isn = snprintf(ios_path, sizeof(ios_path), "/System/iOSSupport%s", canon);
+        if (isn > 0 && (size_t)isn < sizeof(ios_path)) {
+            pt_append_unique_cand_path(cand_paths, &cand_count, 6, ios_path);
+        }
+    }
+
+    const char **arrays[6] = { NULL, NULL, NULL, NULL, NULL, NULL };
+    unsigned int counts[6] = { 0, 0, 0, 0, 0, 0 };
+    size_t total_raw = 0;
+    size_t non_null_arrays = 0;
+    size_t first_idx = 0;
+    for (size_t c = 0; c < cand_count; c++) {
+        const char *cp = cand_paths[c];
+        if (cp == NULL) {
+            continue;
+        }
+        arrays[c] = objc_copyClassNamesForImage(cp, &counts[c]);
+        if (arrays[c] != NULL) {
+            if (non_null_arrays == 0) {
+                first_idx = c;
+            }
+            non_null_arrays++;
+            total_raw += counts[c];
+        }
+    }
+
+    const char **names = NULL;
+    unsigned int count = 0;
+    if (non_null_arrays == 1) {
+        names = arrays[first_idx];
+        count = counts[first_idx];
+    } else if (non_null_arrays > 1) {
+        names = (const char **)malloc((total_raw + 1U) * sizeof(const char *));
+        if (names != NULL) {
+            size_t ht_cap = 64U;
+            while (ht_cap < total_raw * 2U && ht_cap < (1U << 22)) {
+                ht_cap <<= 1U;
+            }
+            const char **ht = (const char **)calloc(ht_cap, sizeof(const char *));
+            size_t ht_mask = ht_cap - 1U;
+            for (size_t c = 0; c < cand_count; c++) {
+                if (arrays[c] == NULL) {
+                    continue;
+                }
+                for (unsigned int k = 0; k < counts[c]; k++) {
+                    const char *cname = arrays[c][k];
+                    if (cname == NULL) {
+                        continue;
+                    }
+                    BOOL dup = NO;
+                    if (ht != NULL) {
+                        size_t slot = (size_t)pt_fnv1a_cstr(cname) & ht_mask;
+                        for (size_t probe = 0; probe < ht_cap; probe++) {
+                            const char *entry = ht[slot];
+                            if (entry == NULL) {
+                                ht[slot] = cname;
+                                break;
+                            }
+                            if (entry == cname || strcmp(entry, cname) == 0) {
+                                dup = YES;
+                                break;
+                            }
+                            slot = (slot + 1U) & ht_mask;
+                        }
+                    } else {
+                        for (unsigned int m = 0; m < count; m++) {
+                            if (names[m] == cname || strcmp(names[m], cname) == 0) {
+                                dup = YES;
+                                break;
+                            }
+                        }
+                    }
+                    if (!dup) {
+                        names[count++] = cname;
+                    }
+                }
+                free((void *)arrays[c]);
+            }
+            free((void *)ht);
+            names[count] = NULL;
+        } else {
+            for (size_t c = 0; c < cand_count; c++) {
+                free((void *)arrays[c]);
+            }
+        }
+    }
+
+    if (names != NULL) {
+        unsigned int writeIdx = pt_filter_class_names_in_place(names, count);
+        if (outCount != NULL) {
+            *outCount = writeIdx;
+        }
+    } else if (outCount != NULL) {
+        *outCount = 0;
+    }
+    return names;
+}
+
 static const char **pt_objc_copyClassNamesForImage(const char *image, unsigned int *outCount) {
     if (image == NULL) {
         if (outCount != NULL) {
@@ -1287,141 +1483,7 @@ static const char **pt_objc_copyClassNamesForImage(const char *image, unsigned i
             }
             return NULL;
         }
-        const char *cand_paths[6] = { NULL, NULL, NULL, NULL, NULL, NULL };
-        char ver_path[PATH_MAX];
-        char ios_ver_path[PATH_MAX];
-        char ios_path[PATH_MAX];
-        char stripped_ver_path[PATH_MAX];
-        size_t cand_count = 0;
-        pt_append_unique_cand_path(cand_paths, &cand_count, 6, image);
-
-        // Derive canonical non-/System/iOSSupport base path so both macOS & Catalyst slices are queried.
-        const char *canon = image;
-        if (strncmp(image, "/System/iOSSupport/", 19) == 0) {
-            canon = image + 18;
-            pt_append_unique_cand_path(cand_paths, &cand_count, 6, canon);
-        }
-        if (strncmp(canon, "/System/", 8) == 0) {
-            const char *fw = strstr(canon, ".framework/");
-            if (fw != NULL && strstr(fw, ".framework/Versions/") == NULL) {
-                size_t prefix_len = (size_t)(fw + 10 - canon);
-                int vn = snprintf(ver_path, sizeof(ver_path), "%.*s/Versions/A%s",
-                                  (int)prefix_len, canon, fw + 10);
-                if (vn > 0 && (size_t)vn < sizeof(ver_path)) {
-                    pt_append_unique_cand_path(cand_paths, &cand_count, 6, ver_path);
-                    int ivn = snprintf(ios_ver_path, sizeof(ios_ver_path),
-                                       "/System/iOSSupport%s", ver_path);
-                    if (ivn > 0 && (size_t)ivn < sizeof(ios_ver_path)) {
-                        pt_append_unique_cand_path(cand_paths, &cand_count, 6, ios_ver_path);
-                    }
-                }
-            } else if (fw != NULL) {
-                const char *ver_a = strstr(fw, ".framework/Versions/A/");
-                if (ver_a != NULL) {
-                    size_t prefix_len = (size_t)(ver_a + 10 - canon);
-                    int sn = snprintf(stripped_ver_path, sizeof(stripped_ver_path), "%.*s%s",
-                                      (int)prefix_len, canon, ver_a + 21);
-                    if (sn > 0 && (size_t)sn < sizeof(stripped_ver_path)) {
-                        pt_append_unique_cand_path(cand_paths, &cand_count, 6, stripped_ver_path);
-                    }
-                }
-            }
-            int isn = snprintf(ios_path, sizeof(ios_path), "/System/iOSSupport%s", canon);
-            if (isn > 0 && (size_t)isn < sizeof(ios_path)) {
-                pt_append_unique_cand_path(cand_paths, &cand_count, 6, ios_path);
-            }
-        }
-
-        const char **arrays[6] = { NULL, NULL, NULL, NULL, NULL, NULL };
-        unsigned int counts[6] = { 0, 0, 0, 0, 0, 0 };
-        size_t total_raw = 0;
-        size_t non_null_arrays = 0;
-        size_t first_idx = 0;
-        for (size_t c = 0; c < cand_count; c++) {
-            const char *cp = cand_paths[c];
-            if (cp == NULL) {
-                continue;
-            }
-            arrays[c] = objc_copyClassNamesForImage(cp, &counts[c]);
-            if (arrays[c] != NULL) {
-                if (non_null_arrays == 0) {
-                    first_idx = c;
-                }
-                non_null_arrays++;
-                total_raw += counts[c];
-            }
-        }
-
-        const char **names = NULL;
-        unsigned int count = 0;
-        if (non_null_arrays == 1) {
-            names = arrays[first_idx];
-            count = counts[first_idx];
-        } else if (non_null_arrays > 1) {
-            names = (const char **)malloc((total_raw + 1U) * sizeof(const char *));
-            if (names != NULL) {
-                size_t ht_cap = 64U;
-                while (ht_cap < total_raw * 2U && ht_cap < (1U << 22)) {
-                    ht_cap <<= 1U;
-                }
-                const char **ht = (const char **)calloc(ht_cap, sizeof(const char *));
-                size_t ht_mask = ht_cap - 1U;
-                for (size_t c = 0; c < cand_count; c++) {
-                    if (arrays[c] == NULL) {
-                        continue;
-                    }
-                    for (unsigned int k = 0; k < counts[c]; k++) {
-                        const char *cname = arrays[c][k];
-                        if (cname == NULL) {
-                            continue;
-                        }
-                        BOOL dup = NO;
-                        if (ht != NULL) {
-                            size_t slot = (size_t)pt_fnv1a_cstr(cname) & ht_mask;
-                            for (size_t probe = 0; probe < ht_cap; probe++) {
-                                const char *entry = ht[slot];
-                                if (entry == NULL) {
-                                    ht[slot] = cname;
-                                    break;
-                                }
-                                if (entry == cname || strcmp(entry, cname) == 0) {
-                                    dup = YES;
-                                    break;
-                                }
-                                slot = (slot + 1U) & ht_mask;
-                            }
-                        } else {
-                            for (unsigned int m = 0; m < count; m++) {
-                                if (names[m] == cname || strcmp(names[m], cname) == 0) {
-                                    dup = YES;
-                                    break;
-                                }
-                            }
-                        }
-                        if (!dup) {
-                            names[count++] = cname;
-                        }
-                    }
-                    free((void *)arrays[c]);
-                }
-                free((void *)ht);
-                names[count] = NULL;
-            } else {
-                for (size_t c = 0; c < cand_count; c++) {
-                    free((void *)arrays[c]);
-                }
-            }
-        }
-
-        if (names != NULL) {
-            unsigned int writeIdx = pt_filter_class_names_in_place(names, count);
-            if (outCount != NULL) {
-                *outCount = writeIdx;
-            }
-        } else if (outCount != NULL) {
-            *outCount = 0;
-        }
-        return names;
+        return pt_objc_copy_merged_class_names_for_path(image, outCount);
     }
     return objc_copyClassNamesForImage(image, outCount);
 }
@@ -1441,13 +1503,27 @@ static const char **pt_objc_copyClassNamesForImageHeader(const void *mh, unsigne
     const void *caller = __builtin_return_address(0);
     if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller)) {
         const char *img_name = pt_dyld_lookup_image_name_for_mh(real_mh);
+        const char *sanitized_img = (img_name != NULL && strncmp(img_name, "/System/iOSSupport/", 19) == 0)
+            ? (img_name + 18)
+            : img_name;
         if (pt_is_hidden_dyld_image_header(real_mh) ||
             (img_name != NULL && (pt_is_hidden_dyld_image_name(img_name) ||
-                                  pt_is_post13_7_hidden_framework_path(img_name)))) {
+                                  pt_is_post13_7_hidden_framework_path(img_name) ||
+                                  pt_is_hidden_path(sanitized_img, caller)))) {
             if (outCount != NULL) {
                 *outCount = 0;
             }
             return NULL;
+        }
+        if (img_name != NULL && strncmp(img_name, "/System/", 8) == 0) {
+            unsigned int mergedCount = 0;
+            const char **merged = pt_objc_copy_merged_class_names_for_path(img_name, &mergedCount);
+            if (merged != NULL) {
+                if (outCount != NULL) {
+                    *outCount = mergedCount;
+                }
+                return merged;
+            }
         }
         unsigned int count = 0;
         const char **names = pt_orig_objc_copyClassNamesForImageHeader((const void *)real_mh, &count);
@@ -1642,7 +1718,8 @@ static BOOL pt_is_hidden_objc_property(Class cls, const char *pname) {
         strcmp(pname, "locationNumber") == 0 ||
         strcmp(pname, "peerGroupID") == 0 ||
         strcmp(pname, "peerIndex") == 0 ||
-        strcmp(pname, "peerCount") == 0) {
+        strcmp(pname, "peerCount") == 0 ||
+        strcmp(pname, "supportsBCTextureCompression") == 0) {
         return pt_class_is_mtl_device(cls);
     }
     if (!pt_is_compat13_7_active()) {
@@ -1683,7 +1760,8 @@ static BOOL pt_is_hidden_objc_property(Class cls, const char *pname) {
         strcmp(pname, "supportsFunctionPointersFromRender") == 0 ||
         strcmp(pname, "supportsPullModelInterpolation") == 0 ||
         strcmp(pname, "supportsShaderBarycentricCoordinates") == 0 ||
-        strcmp(pname, "supportsQueryTextureLOD") == 0) {
+        strcmp(pname, "supportsQueryTextureLOD") == 0 ||
+        strcmp(pname, "supports32BitMSAA") == 0) {
         return pt_class_is_mtl_device(cls);
     }
     return NO;
@@ -1887,6 +1965,12 @@ static objc_property_t pt_class_getProperty(Class cls, const char *name) {
 }
 
 static objc_property_t *pt_class_copyPropertyList(Class cls, unsigned int *outCount) {
+    if (!pt_is_valid_user_pointer((__bridge const void *)cls)) {
+        if (outCount != NULL) {
+            *outCount = 0;
+        }
+        return NULL;
+    }
     unsigned int count = 0;
     objc_property_t *props = class_copyPropertyList(cls, &count);
     if (props != NULL && count > 0 && pt_is_bypass_enabled() &&
@@ -3666,6 +3750,60 @@ static const void *pt_swift_typeByName(uint64_t w0, uint64_t w1) __attribute__((
     return pt_orig_swift_typeByName(w0, w1);
 }
 
+static BOOL pt_is_hidden_macos_only_dlsym_symbol(const char *symbol) {
+    if (symbol == NULL || symbol[0] == '\0') {
+        return NO;
+    }
+    if (PT_HAS_PREFIX_LIT(symbol, "SecCode") ||
+        PT_HAS_PREFIX_LIT(symbol, "SecStaticCode") ||
+        PT_HAS_PREFIX_LIT(symbol, "SecRequirementCreate") ||
+        PT_HAS_PREFIX_LIT(symbol, "MTLCopyAllDevices") ||
+        PT_HAS_PREFIX_LIT(symbol, "AudioObject") ||
+        PT_HAS_PREFIX_LIT(symbol, "AudioHardware") ||
+        strcmp(symbol, "AudioDeviceCreateIOProcID") == 0 ||
+        strcmp(symbol, "AudioDeviceDestroyIOProcID") == 0 ||
+        strcmp(symbol, "AudioDeviceStart") == 0 ||
+        strcmp(symbol, "AudioDeviceStop") == 0 ||
+        PT_HAS_PREFIX_LIT(symbol, "AudioDeviceGetProperty") ||
+        strcmp(symbol, "AudioDeviceSetProperty") == 0 ||
+        strcmp(symbol, "SCDynamicStoreCopyComputerName") == 0 ||
+        strcmp(symbol, "SCDynamicStoreCopyLocalHostName") == 0 ||
+        strcmp(symbol, "SCNetworkInterfaceCopyAll") == 0 ||
+        strcmp(symbol, "_LSCopyApplicationInformation") == 0 ||
+        strcmp(symbol, "_LSGetCurrentApplicationASN") == 0 ||
+        PT_HAS_PREFIX_LIT(symbol, "_LSASN") ||
+        PT_HAS_PREFIX_LIT(symbol, "_LSCopyApplicationInformation") ||
+        PT_HAS_PREFIX_LIT(symbol, "IOHIDManager") ||
+        PT_HAS_PREFIX_LIT(symbol, "IOHIDDevice")) {
+        return YES;
+    }
+    if (symbol[0] == 'C' && symbol[1] == 'G') {
+        if (strcmp(symbol, "CGMainDisplayID") == 0 ||
+            strcmp(symbol, "CGGetActiveDisplayList") == 0 ||
+            strcmp(symbol, "CGGetOnlineDisplayList") == 0 ||
+            PT_HAS_PREFIX_LIT(symbol, "CGGetDisplaysWith") ||
+            PT_HAS_PREFIX_LIT(symbol, "CGDisplay") ||
+            PT_HAS_PREFIX_LIT(symbol, "CGWindowList") ||
+            PT_HAS_PREFIX_LIT(symbol, "CGEventCreate") ||
+            PT_HAS_PREFIX_LIT(symbol, "CGEventPost") ||
+            PT_HAS_PREFIX_LIT(symbol, "CGEventSource") ||
+            PT_HAS_PREFIX_LIT(symbol, "CGEventTap") ||
+            strcmp(symbol, "CGPreflightScreenCaptureAccess") == 0 ||
+            strcmp(symbol, "CGRequestScreenCaptureAccess") == 0 ||
+            strcmp(symbol, "CGPreflightListenEventAccess") == 0 ||
+            strcmp(symbol, "CGRequestListenEventAccess") == 0 ||
+            strcmp(symbol, "CGPreflightPostEventAccess") == 0 ||
+            strcmp(symbol, "CGRequestPostEventAccess") == 0 ||
+            strcmp(symbol, "CGWarpMouseCursorPosition") == 0 ||
+            strcmp(symbol, "CGAssociateMouseAndMouseCursorPosition") == 0 ||
+            strcmp(symbol, "CGCursorIsVisible") == 0 ||
+            strcmp(symbol, "CGSessionCopyCurrentDictionary") == 0) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
 static void *pt_dlsym(void *handle, const char *symbol) {
     if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire)) {
         return dlsym(handle, symbol);
@@ -3689,25 +3827,7 @@ static void *pt_dlsym(void *handle, const char *symbol) {
                 pt_set_synthetic_dlerror("symbol not found");
                 return NULL;
             }
-        } else if (strncmp(symbol, "SecCode", 7) == 0 ||
-                   strncmp(symbol, "SecStaticCode", 13) == 0 ||
-                   strncmp(symbol, "SecRequirementCreate", 20) == 0 ||
-                   strncmp(symbol, "MTLCopyAllDevices", 17) == 0 ||
-                   strncmp(symbol, "AudioObject", 11) == 0 ||
-                   strncmp(symbol, "AudioHardware", 13) == 0 ||
-                   strcmp(symbol, "AudioDeviceCreateIOProcID") == 0 ||
-                   strcmp(symbol, "AudioDeviceDestroyIOProcID") == 0 ||
-                   strcmp(symbol, "AudioDeviceStart") == 0 ||
-                   strcmp(symbol, "AudioDeviceStop") == 0 ||
-                   strncmp(symbol, "AudioDeviceGetProperty", 22) == 0 ||
-                   strcmp(symbol, "AudioDeviceSetProperty") == 0 ||
-                   strcmp(symbol, "SCDynamicStoreCopyComputerName") == 0 ||
-                   strcmp(symbol, "SCDynamicStoreCopyLocalHostName") == 0 ||
-                   strcmp(symbol, "SCNetworkInterfaceCopyAll") == 0 ||
-                   strcmp(symbol, "_LSCopyApplicationInformation") == 0 ||
-                   strcmp(symbol, "_LSGetCurrentApplicationASN") == 0 ||
-                   strncmp(symbol, "_LSASN", 6) == 0 ||
-                   strncmp(symbol, "_LSCopyApplicationInformation", 29) == 0 ||
+        } else if (pt_is_hidden_macos_only_dlsym_symbol(symbol) ||
                    (pt_is_compat13_7_active() &&
                     (strcmp(symbol, "freadlink") == 0 ||
                      strcmp(symbol, "objc_enumerateClasses") == 0 ||

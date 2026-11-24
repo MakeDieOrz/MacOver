@@ -2161,6 +2161,42 @@ static id ps_sanitize_url_resource_value(NSURL *origURL,
     return [self pm_mountedVolumeURLsIncludingResourceValuesForKeys:propertyKeys options:options];
 }
 
+- (NSDictionary<NSFileAttributeKey, id> *) pm_attributesOfFileSystemForPath:(NSString *)path
+                                                                      error:(NSError * _Nullable __autoreleasing *)error {
+    const void *caller = __builtin_return_address(0);
+    if (!pt_is_bypass_enabled() || ps_is_effective_system_or_playtools_caller(caller)) {
+        return [self pm_attributesOfFileSystemForPath:path error:error];
+    }
+    BOOL hidden = NO, ancestor = NO, usedBackup = NO;
+    BOOL usePrivatePrefix = [path isKindOfClass:[NSString class]] && [path hasPrefix:@"/private/"];
+    BOOL wasVirtual = [path isKindOfClass:[NSString class]] && ps_path_is_virtual_container(path);
+    NSString *resolved = path;
+    ps_prepare_fm_path_mode(path, caller, YES, &resolved, &hidden, &ancestor, &usedBackup);
+    if (hidden) {
+        if (error != NULL) {
+            *error = [NSError errorWithDomain:NSCocoaErrorDomain
+                                         code:NSFileReadNoSuchFileError
+                                     userInfo:(path != nil ? @{NSFilePathErrorKey: path} : nil)];
+        }
+        return nil;
+    }
+    if (ancestor) {
+        pt_ensure_data_container_map();
+        if (s_real_data_container_len > 0) {
+            resolved = [NSString stringWithUTF8String:s_real_data_container_dir];
+        } else {
+            resolved = @"/private/var";
+        }
+    }
+    NSError *localErr = nil;
+    NSDictionary<NSFileAttributeKey, id> *attrs =
+        [self pm_attributesOfFileSystemForPath:resolved error:(error != NULL ? &localErr : NULL)];
+    if (attrs == nil) {
+        ps_assign_virtualized_nserror(error, localErr, usePrivatePrefix, wasVirtual, caller);
+    }
+    return attrs;
+}
+
 - (BOOL) pm_fileExistsAtPath:(NSString *)path {
     BOOL hidden = NO, ancestor = NO, usedBackup = NO;
     ps_prepare_fm_path_mode(path, __builtin_return_address(0), YES, &path, &hidden, &ancestor, &usedBackup);
@@ -3308,6 +3344,12 @@ static void pt_fs_objc_install_volume_hooks(void) {
             ps_swizzle_instance_method(fmCls,
                                        @selector(mountedVolumeURLsIncludingResourceValuesForKeys:options:),
                                        @selector(pm_mountedVolumeURLsIncludingResourceValuesForKeys:options:));
+        }
+        if (fmCls != Nil &&
+            class_getInstanceMethod(fmCls, @selector(attributesOfFileSystemForPath:error:)) != NULL) {
+            ps_swizzle_instance_method(fmCls,
+                                       @selector(attributesOfFileSystemForPath:error:),
+                                       @selector(pm_attributesOfFileSystemForPath:error:));
         }
     });
 }

@@ -8,6 +8,8 @@
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <net/if_media.h>
+#include <netinet/in.h>
+#include <stdarg.h>
 #include <sys/ioctl.h>
 #include <time.h>
 
@@ -2324,15 +2326,35 @@ static BOOL pt_network_ifname_is_inactive(const char *name) {
         struct ifreq aifr;
         memset(&aifr, 0, sizeof(aifr));
         strlcpy(aifr.ifr_name, name, sizeof(aifr.ifr_name));
-        BOOL has_routable_v4 = NO;
+        BOOL has_routable_ip = NO;
         if (ioctl(fd, SIOCGIFADDR, &aifr) == 0 && aifr.ifr_addr.sa_family == AF_INET) {
             const struct sockaddr_in *sin = (const struct sockaddr_in *)&aifr.ifr_addr;
             uint32_t ip = ntohl(sin->sin_addr.s_addr);
             if (ip != 0U && (ip & 0xFFFF0000U) != 0xA9FE0000U) {
-                has_routable_v4 = YES;
+                has_routable_ip = YES;
             }
         }
-        if (!has_routable_v4) {
+        if (!has_routable_ip) {
+            struct ifaddrs *iflist = NULL;
+            if (getifaddrs(&iflist) == 0 && iflist != NULL) {
+                for (struct ifaddrs *cur = iflist; cur != NULL; cur = cur->ifa_next) {
+                    if (cur->ifa_name != NULL &&
+                        strcmp(cur->ifa_name, name) == 0 &&
+                        cur->ifa_addr != NULL &&
+                        cur->ifa_addr->sa_family == AF_INET6) {
+                        const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)cur->ifa_addr;
+                        if (!IN6_IS_ADDR_LINKLOCAL(&sin6->sin6_addr) &&
+                            !IN6_IS_ADDR_UNSPECIFIED(&sin6->sin6_addr) &&
+                            !IN6_IS_ADDR_LOOPBACK(&sin6->sin6_addr)) {
+                            has_routable_ip = YES;
+                            break;
+                        }
+                    }
+                }
+                freeifaddrs(iflist);
+            }
+        }
+        if (!has_routable_ip) {
             inactive = YES;
         }
     }
@@ -2378,7 +2400,13 @@ BOOL pt_is_hidden_network_ifname(const char *name) {
     if (strncmp(name, "vmenet", 6) == 0 ||
         strncmp(name, "vmnet", 5) == 0 ||
         strncmp(name, "bridge", 6) == 0 ||
-        strncmp(name, "anpi", 4) == 0) {
+        strncmp(name, "anpi", 4) == 0 ||
+        strncmp(name, "feth", 4) == 0 ||
+        strncmp(name, "XHC", 3) == 0 ||
+        strncmp(name, "gif", 3) == 0 ||
+        strncmp(name, "stf", 3) == 0 ||
+        strncmp(name, "pktap", 5) == 0 ||
+        strncmp(name, "iptap", 5) == 0) {
         return YES;
     }
     if (name[0] == 'e' && name[1] == 'n' &&
@@ -2620,10 +2648,88 @@ static char *pt_if_indextoname(unsigned int ifindex, char *ifname) {
     return ret;
 }
 
+static void pt_filter_ifconf_buffer(struct ifconf *ifc) {
+    if (ifc == NULL || !pt_is_valid_user_pointer(ifc) ||
+        ifc->ifc_buf == NULL || !pt_is_valid_user_pointer(ifc->ifc_buf) ||
+        ifc->ifc_len <= 0) {
+        return;
+    }
+    uint8_t *base = (uint8_t *)ifc->ifc_buf;
+    size_t total = (size_t)ifc->ifc_len;
+    size_t read_off = 0;
+    size_t write_off = 0;
+    const size_t min_entry = sizeof(struct ifreq);
+    const size_t addr_off = offsetof(struct ifreq, ifr_addr);
+    while (read_off + min_entry <= total) {
+        const struct ifreq *ifr = (const struct ifreq *)(base + read_off);
+        size_t sa_len = (size_t)ifr->ifr_addr.sa_len;
+        size_t step = (addr_off + sa_len > min_entry) ? (addr_off + sa_len) : min_entry;
+        if (step > total - read_off) {
+            size_t rem = total - read_off;
+            if (write_off != read_off) {
+                memmove(base + write_off, base + read_off, rem);
+            }
+            write_off += rem;
+            break;
+        }
+        char namebuf[IFNAMSIZ + 1];
+        memcpy(namebuf, ifr->ifr_name, IFNAMSIZ);
+        namebuf[IFNAMSIZ] = '\0';
+        if (!pt_is_hidden_network_ifname(namebuf)) {
+            if (write_off != read_off) {
+                memmove(base + write_off, base + read_off, step);
+            }
+            write_off += step;
+        }
+        read_off += step;
+    }
+    ifc->ifc_len = (int)write_off;
+}
+
+static int pt_ioctl(int fd, unsigned long request, ...) {
+    va_list ap;
+    va_start(ap, request);
+    uintptr_t arg = va_arg(ap, uintptr_t);
+    va_end(ap);
+
+    const void *caller = __builtin_return_address(0);
+    BOOL filter = (pt_is_bypass_enabled() &&
+                   !pt_is_effective_system_or_playtools_caller(caller));
+    if (filter && arg != 0 && pt_is_valid_user_pointer((const void *)arg)) {
+        if (request == SIOCGIFFLAGS ||
+            request == SIOCGIFADDR ||
+            request == SIOCGIFNETMASK ||
+            request == SIOCGIFBRDADDR ||
+            request == SIOCGIFDSTADDR ||
+            request == SIOCGIFMTU
+#ifdef SIOCGIFMEDIA
+            || request == SIOCGIFMEDIA
+#endif
+        ) {
+            const struct ifreq *ifr = (const struct ifreq *)arg;
+            char namebuf[IFNAMSIZ + 1];
+            memcpy(namebuf, ifr->ifr_name, IFNAMSIZ);
+            namebuf[IFNAMSIZ] = '\0';
+            if (pt_is_hidden_network_ifname(namebuf)) {
+                errno = ENXIO;
+                return -1;
+            }
+        }
+    }
+    int ret = ioctl(fd, request, (void *)arg);
+    if (ret == 0 && filter && request == SIOCGIFCONF && arg != 0 && pt_is_valid_user_pointer((const void *)arg)) {
+        pt_filter_ifconf_buffer((struct ifconf *)arg);
+    }
+    return ret;
+}
+
 __attribute__((visibility("hidden")))
 void *pt_network_dlsym_route(const char *symbol) {
     if (symbol == NULL) {
         return NULL;
+    }
+    if (strcmp(symbol, "ioctl") == 0) {
+        return (void *)&pt_ioctl;
     }
     if (strcmp(symbol, "getifaddrs") == 0) {
         return (void *)&pt_getifaddrs;
@@ -2683,6 +2789,7 @@ void *pt_network_dlsym_route(const char *symbol) {
 }
 
 DYLD_INTERPOSE(pt_getaddrinfo, getaddrinfo)
+DYLD_INTERPOSE(pt_ioctl, ioctl)
 DYLD_INTERPOSE(pt_gethostbyname, gethostbyname)
 DYLD_INTERPOSE(pt_gethostbyname2, gethostbyname2)
 DYLD_INTERPOSE(pt_DNSServiceGetAddrInfo, DNSServiceGetAddrInfo)

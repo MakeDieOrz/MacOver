@@ -107,6 +107,18 @@ static inline BOOL pt_is_valid_user_pointer(const void *ptr) {
 #ifndef PROX_FDTYPE_VNODE
 #define PROX_FDTYPE_VNODE 1
 #endif
+#ifndef PROX_FDTYPE_SOCKET
+#define PROX_FDTYPE_SOCKET 2
+#endif
+#ifndef PROC_PIDFDSOCKETINFO
+#define PROC_PIDFDSOCKETINFO 3
+#endif
+#ifndef PROC_PIDTASKINFO
+#define PROC_PIDTASKINFO 4
+#endif
+#ifndef SOCKINFO_UN
+#define SOCKINFO_UN 3
+#endif
 #ifndef MAXCOMLEN
 #define MAXCOMLEN 16
 #endif
@@ -303,6 +315,71 @@ struct proc_threadwithpathinfo {
     struct proc_threadinfo pt;
     struct vnode_info_path pvip;
 };
+
+typedef struct {
+    uint32_t sbi_cc;
+    uint32_t sbi_hiwat;
+    uint32_t sbi_mbcnt;
+    uint32_t sbi_mbmax;
+    uint32_t sbi_lowat;
+    short    sbi_flags;
+    short    sbi_timeo;
+} pt_sockbuf_info_t;
+
+typedef struct {
+    uint8_t  sun_len;
+    uint8_t  sun_family;
+    char     sun_path[104];
+} pt_sockaddr_un_t;
+
+typedef struct {
+    uint64_t unsi_conn_so;
+    uint64_t unsi_conn_pcb;
+    union {
+        pt_sockaddr_un_t ua_sun;
+        char             ua_dummy[255];
+    } unsi_addr;
+    union {
+        pt_sockaddr_un_t ua_sun;
+        char             ua_dummy[255];
+    } unsi_caddr;
+} pt_un_sockinfo_t;
+
+typedef struct {
+    struct vinfo_stat soi_stat;
+    uint64_t          soi_so;
+    uint64_t          soi_pcb;
+    int               soi_type;
+    int               soi_protocol;
+    int               soi_family;
+    short             soi_options;
+    short             soi_linger;
+    short             soi_state;
+    short             soi_qlen;
+    short             soi_incqlen;
+    short             soi_qlimit;
+    short             soi_timeo;
+    uint16_t          soi_error;
+    uint32_t          soi_oobmark;
+    pt_sockbuf_info_t soi_rcv;
+    pt_sockbuf_info_t soi_snd;
+    int               soi_kind;
+    uint32_t          rfu_1;
+    union {
+        pt_un_sockinfo_t pri_un;
+        uint8_t          pri_raw[528];
+    } soi_proto;
+} pt_socket_info_t;
+
+typedef struct {
+    struct proc_fileinfo pfi;
+    pt_socket_info_t     psi;
+} pt_socket_fdinfo_t;
+
+_Static_assert(sizeof(pt_sockbuf_info_t) == 24, "pt_sockbuf_info_t size mismatch");
+_Static_assert(sizeof(pt_un_sockinfo_t) == 528, "pt_un_sockinfo_t size mismatch");
+_Static_assert(sizeof(pt_socket_info_t) == 768, "pt_socket_info_t size mismatch");
+_Static_assert(sizeof(pt_socket_fdinfo_t) == 792, "pt_socket_fdinfo_t size mismatch");
 
 extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
 extern int proc_pidfdinfo(int pid, int fd, int flavor, void *buffer, int buffersize);
@@ -563,11 +640,14 @@ __attribute__((visibility("hidden"))) int pt_sysctl_with_caller(int *name, u_int
 __attribute__((visibility("hidden"))) int pt_sysctlbyname_with_caller(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen, const void *caller);
 __attribute__((visibility("hidden"))) intptr_t pt_syscall_dispatch_with_caller(int number, const uintptr_t args[8], const void *caller, BOOL *out_handled);
 __attribute__((visibility("hidden"))) char ***pt_get_app_shadow_environ_ptr(void);
+__attribute__((visibility("hidden"))) bool pt_mig_prepare_trap_request(const void *req_buf, mach_msg_bits_t bits, mach_msg_size_t send_size, mach_port_t remote_port, mach_port_t local_port, int req_id, bool receiving, int32_t *out_flavor, bool *out_target_is_self);
+__attribute__((visibility("hidden"))) void pt_mig_finish_trap_reply(void *rcv_buf, size_t rcv_cap, mach_port_t rcv_name, bool sending, bool receiving, bool had_req, int req_id, int32_t req_flavor, bool target_is_self, mach_port_t reply_port, kern_return_t kr);
 
 // Entitlements exports
 __attribute__((visibility("hidden"))) int pt_csops_with_caller(pid_t pid, unsigned int ops, void *useraddr, size_t usersize, const void *caller);
 __attribute__((visibility("hidden"))) int pt_csops_audittoken_with_caller(pid_t pid, unsigned int ops, void *useraddr, size_t usersize, audit_token_t *token, const void *caller);
 __attribute__((visibility("hidden"))) int pt_ptrace_with_caller(int request, pid_t pid, caddr_t addr, int data, const void *caller);
+__attribute__((visibility("hidden"))) int pt_mac_syscall_with_caller(const char *policy, int call, void *arg, const void *caller, BOOL *out_handled);
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_macos_mach_service(const char *name);
 
 // FSVirtualizer exports
@@ -655,6 +735,7 @@ __attribute__((visibility("hidden"))) void *pt_network_dlsym_route(const char *s
 // SvcInterceptor exports
 __attribute__((visibility("hidden"))) void pt_svc_interceptor_init_early(void);
 __attribute__((visibility("hidden"))) void pt_svc_restore_patched_bytes_in_buffer(uintptr_t read_start, uint8_t *dst, size_t copied);
+__attribute__((visibility("hidden"))) BOOL pt_svc_get_redaction_info(mach_port_t *out_svc_port, mach_port_t *out_saved_port, exception_mask_t *out_saved_mask, exception_behavior_t *out_saved_beh, thread_state_flavor_t *out_saved_flavor);
 __attribute__((visibility("hidden"))) void *pt_svc_dlsym_route(const char *symbol);
 
 // Entitlements exports

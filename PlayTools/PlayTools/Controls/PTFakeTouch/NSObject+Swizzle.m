@@ -261,6 +261,7 @@ static id (*s_orig_screen_currentMode)(id, SEL) = NULL;
 static id (*s_orig_screen_preferredMode)(id, SEL) = NULL;
 static NSArray *(*s_orig_screen_availableModes)(id, SEL) = NULL;
 static NSArray *(*s_orig_screen_screens)(id, SEL) = NULL;
+static id (*s_orig_screen_mirroredScreen)(id, SEL) = NULL;
 static NSString *(*s_orig_screen_description)(id, SEL) = NULL;
 static id (*s_orig_screen_dispCfg)(id, SEL) = NULL;
 static id (*s_orig_screen_privDispCfg)(id, SEL) = NULL;
@@ -350,7 +351,23 @@ static NSInteger pt_spoofed_max_fps(void) {
         return (NSInteger)profileFPS;
     }
     const char *m = pt_get_device_model_cstr();
-    if (m != NULL && (strcmp(m, "iPad6,7") == 0 || strcmp(m, "iPhone12,5") == 0)) {
+    if (m != NULL &&
+        (strncmp(m, "iPad6,", 6) == 0 ||
+         strncmp(m, "iPad7,", 6) == 0 ||
+         strncmp(m, "iPad11,", 7) == 0 ||
+         strncmp(m, "iPad12,", 7) == 0 ||
+         strcmp(m, "iPad13,1") == 0 ||
+         strcmp(m, "iPad13,2") == 0 ||
+         strncmp(m, "iPhone11,", 9) == 0 ||
+         strncmp(m, "iPhone12,", 9) == 0 ||
+         strncmp(m, "iPhone13,", 9) == 0 ||
+         strcmp(m, "iPhone14,4") == 0 ||
+         strcmp(m, "iPhone14,5") == 0 ||
+         strcmp(m, "iPhone14,6") == 0 ||
+         strcmp(m, "iPhone14,7") == 0 ||
+         strcmp(m, "iPhone14,8") == 0 ||
+         strcmp(m, "iPhone15,4") == 0 ||
+         strcmp(m, "iPhone15,5") == 0)) {
         return 60;
     }
     return 120;
@@ -560,6 +577,13 @@ static NSArray *pt_hook_screen_screens(id self, SEL _cmd) {
         return @[orig.firstObject];
     }
     return orig;
+}
+
+static id pt_hook_screen_mirroredScreen(id self, SEL _cmd) {
+    if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return nil;
+    }
+    return s_orig_screen_mirroredScreen ? s_orig_screen_mirroredScreen(self, _cmd) : nil;
 }
 
 static CGRect pt_hook_fixed_coord_bounds(id self, SEL _cmd) {
@@ -824,6 +848,7 @@ static void pt_install_bypass_screen_hooks(BOOL hookBounds) {
             pt_replace_instance_imp(screenCls, @selector(preferredMode), (IMP)pt_hook_screen_preferredMode, (IMP *)&s_orig_screen_preferredMode);
             pt_replace_instance_imp(screenCls, @selector(availableModes), (IMP)pt_hook_screen_availableModes, (IMP *)&s_orig_screen_availableModes);
             pt_replace_class_imp(screenCls, @selector(screens), (IMP)pt_hook_screen_screens, (IMP *)&s_orig_screen_screens);
+            pt_replace_instance_imp(screenCls, @selector(mirroredScreen), (IMP)pt_hook_screen_mirroredScreen, (IMP *)&s_orig_screen_mirroredScreen);
             pt_replace_instance_imp(screenCls, @selector(description), (IMP)pt_hook_screen_description, (IMP *)&s_orig_screen_description);
             pt_replace_instance_imp(screenCls, sel_registerName("displayConfiguration"), (IMP)pt_hook_screen_dispCfg, (IMP *)&s_orig_screen_dispCfg);
             pt_replace_instance_imp(screenCls, sel_registerName("_displayConfiguration"), (IMP)pt_hook_screen_privDispCfg, (IMP *)&s_orig_screen_privDispCfg);

@@ -23,6 +23,9 @@ static CFMutableDictionaryRef s_mtl_orig_supports_family_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_supports_fset_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_supports_bc_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_supports_32f_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_supports_32bit_msaa_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_arg_buffers_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_rw_tex_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_is_low_power_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_is_headless_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_is_removable_imps = NULL;
@@ -114,7 +117,9 @@ static BOOL pt_mtl_should_reject_source_for_compat13(NSString *source, id option
     }
     if (!reject && source != nil && [source isKindOfClass:[NSString class]]) {
         if ([source containsString:@"metal_simdgroup_matrix"] ||
-            [source containsString:@"simdgroup_multiply_accumulate"]) {
+            [source containsString:@"simdgroup_multiply_accumulate"] ||
+            [source containsString:@"metal_raytracing"] ||
+            [source containsString:@"raytracing::intersector"]) {
             reject = YES;
         }
     }
@@ -125,6 +130,7 @@ static BOOL pt_mtl_should_reject_source_for_compat13(NSString *source, id option
         NSString *msg = @"Compilation failed:\nInvalid languageVersion";
         if (source != nil && [source isKindOfClass:[NSString class]]) {
             NSRange hdrRange = [source rangeOfString:@"metal_simdgroup_matrix"];
+            NSRange rtHdrRange = [source rangeOfString:@"metal_raytracing"];
             if (hdrRange.location != NSNotFound) {
                 NSUInteger line = 1, col = 10;
                 pt_mtl_line_and_col_for_location(source, hdrRange.location, &line, &col);
@@ -133,13 +139,28 @@ static BOOL pt_mtl_should_reject_source_for_compat13(NSString *source, id option
                         "#include <metal_simdgroup_matrix>\n"
                         "         ^~~~~~~~~~~~~~~~~~~~~~~~",
                        (unsigned long)line, (unsigned long)col];
+            } else if (rtHdrRange.location != NSNotFound) {
+                NSUInteger line = 1, col = 10;
+                pt_mtl_line_and_col_for_location(source, rtHdrRange.location, &line, &col);
+                msg = [NSString stringWithFormat:
+                       @"program_source:%lu:%lu: fatal error: 'metal_raytracing' file not found\n"
+                        "#include <metal_raytracing>\n"
+                        "         ^~~~~~~~~~~~~~~~~~",
+                       (unsigned long)line, (unsigned long)col];
             } else {
                 NSRange symRange = [source rangeOfString:@"simdgroup_multiply_accumulate"];
+                NSRange rtSymRange = [source rangeOfString:@"raytracing::intersector"];
                 if (symRange.location != NSNotFound) {
                     NSUInteger line = 1, col = 1;
                     pt_mtl_line_and_col_for_location(source, symRange.location, &line, &col);
                     msg = [NSString stringWithFormat:
                            @"program_source:%lu:%lu: error: use of undeclared identifier 'simdgroup_multiply_accumulate'",
+                           (unsigned long)line, (unsigned long)col];
+                } else if (rtSymRange.location != NSNotFound) {
+                    NSUInteger line = 1, col = 1;
+                    pt_mtl_line_and_col_for_location(source, rtSymRange.location, &line, &col);
+                    msg = [NSString stringWithFormat:
+                           @"program_source:%lu:%lu: error: use of undeclared identifier 'raytracing'",
                            (unsigned long)line, (unsigned long)col];
                 }
             }
@@ -609,8 +630,8 @@ static uint64_t ps_mtl_memory_cap(void) {
 
 - (BOOL) pm_ps_mtl_supportsPullModelInterpolation {
     if (pt_is_bypass_enabled() &&
-        pt_is_compat13_7_active() &&
-        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        (pt_is_compat13_7_active() || pt_get_spoofed_max_apple_gpu_family() < 1007)) {
         return NO;
     }
     SEL sel = sel_registerName("supportsPullModelInterpolation");
@@ -628,8 +649,8 @@ static uint64_t ps_mtl_memory_cap(void) {
 
 - (BOOL) pm_ps_mtl_supportsShaderBarycentricCoordinates {
     if (pt_is_bypass_enabled() &&
-        pt_is_compat13_7_active() &&
-        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        (pt_is_compat13_7_active() || pt_get_spoofed_max_apple_gpu_family() < 1007)) {
         return NO;
     }
     SEL sel = sel_registerName("supportsShaderBarycentricCoordinates");
@@ -647,8 +668,8 @@ static uint64_t ps_mtl_memory_cap(void) {
 
 - (BOOL) pm_ps_mtl_supportsQueryTextureLOD {
     if (pt_is_bypass_enabled() &&
-        pt_is_compat13_7_active() &&
-        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        (pt_is_compat13_7_active() || pt_get_spoofed_max_apple_gpu_family() < 1004)) {
         return NO;
     }
     SEL sel = sel_registerName("supportsQueryTextureLOD");
@@ -662,6 +683,63 @@ static uint64_t ps_mtl_memory_cap(void) {
         }
     }
     return NO;
+}
+
+- (BOOL) pm_ps_mtl_supports32BitMSAA {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        (pt_is_compat13_7_active() || pt_get_spoofed_max_apple_gpu_family() < 1007)) {
+        return NO;
+    }
+    SEL sel = sel_registerName("supports32BitMSAA");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_supports_32bit_msaa_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            return ((BOOL (*)(id, SEL))origIMP)(self, sel);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    return NO;
+}
+
+- (NSUInteger) pm_ps_mtl_argumentBuffersSupport {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_get_spoofed_max_apple_gpu_family() <= 1005) {
+        return 0U; // MTLArgumentBuffersTier1
+    }
+    SEL sel = sel_registerName("argumentBuffersSupport");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_arg_buffers_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            return ((NSUInteger (*)(id, SEL))origIMP)(self, sel);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    return 0U;
+}
+
+- (NSUInteger) pm_ps_mtl_readWriteTextureSupport {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_get_spoofed_max_apple_gpu_family() <= 1003) {
+        return 1U; // MTLReadWriteTextureTier1
+    }
+    SEL sel = sel_registerName("readWriteTextureSupport");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_rw_tex_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            return ((NSUInteger (*)(id, SEL))origIMP)(self, sel);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    return 1U;
 }
 
 - (PSMTLSize) pm_ps_mtl_maxThreadsPerThreadgroup {
@@ -887,6 +965,15 @@ static void ps_swizzle_mtl_device_class(Class cls) {
     ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_supports_32f_imps, cls,
                                      sel_registerName("supports32BitFloatFiltering"),
                                      @selector(pm_ps_mtl_supports32BitFloatFiltering));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_supports_32bit_msaa_imps, cls,
+                                     sel_registerName("supports32BitMSAA"),
+                                     @selector(pm_ps_mtl_supports32BitMSAA));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_arg_buffers_imps, cls,
+                                     sel_registerName("argumentBuffersSupport"),
+                                     @selector(pm_ps_mtl_argumentBuffersSupport));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_rw_tex_imps, cls,
+                                     sel_registerName("readWriteTextureSupport"),
+                                     @selector(pm_ps_mtl_readWriteTextureSupport));
     ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_is_low_power_imps, cls,
                                      sel_registerName("isLowPower"),
                                      @selector(pm_ps_mtl_isLowPower));
