@@ -17,8 +17,73 @@ static CFMutableDictionaryRef s_mtl_orig_supports_family_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_supports_fset_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_architecture_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_arch_name_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_new_lib_sync_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_new_lib_async_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_opts_langver_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_opts_set_langver_imps = NULL;
+static const char kPSMTLCompileOptionsExplicitLangVerKey = 0;
 
 static void ps_swizzle_mtl_arch_class(Class archCls);
+
+static NSUInteger pt_mtl_default_compile_language_version(void) {
+    static NSUInteger s_default_lang_ver = 0;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        Class optsCls = NSClassFromString(@"MTLCompileOptions");
+        SEL langSel = sel_registerName("languageVersion");
+        id opts = (optsCls != Nil) ? [optsCls new] : nil;
+        if (opts != nil && [opts respondsToSelector:langSel]) {
+            s_default_lang_ver = ((NSUInteger (*)(id, SEL))objc_msgSend)(opts, langSel);
+        }
+    });
+    return s_default_lang_ver;
+}
+
+static BOOL pt_mtl_should_reject_source_for_compat13(NSString *source, id options, NSError **outError) {
+    if (!pt_is_bypass_enabled() || !pt_is_compat13_7_active()) {
+        return NO;
+    }
+    BOOL reject = NO;
+    if (options != nil) {
+        NSNumber *explicitVer = objc_getAssociatedObject(options, &kPSMTLCompileOptionsExplicitLangVerKey);
+        if (explicitVer != nil) {
+            if (explicitVer.unsignedIntegerValue > ((2U << 16) | 2U)) {
+                reject = YES;
+            }
+        } else {
+            os_unfair_lock_lock(&s_mtl_swizzle_lock);
+            BOOL hasOptsSetterHook = (s_mtl_orig_opts_set_langver_imps != NULL);
+            os_unfair_lock_unlock(&s_mtl_swizzle_lock);
+            if (!hasOptsSetterHook) {
+                SEL langSel = sel_registerName("languageVersion");
+                if ([options respondsToSelector:langSel]) {
+                    NSUInteger langVer = ((NSUInteger (*)(id, SEL))objc_msgSend)(options, langSel);
+                    NSUInteger defaultVer = pt_mtl_default_compile_language_version();
+                    if (langVer > ((2U << 16) | 2U) && (defaultVer == 0 || langVer != defaultVer)) {
+                        reject = YES;
+                    }
+                }
+            }
+        }
+    }
+    if (!reject && source != nil && [source isKindOfClass:[NSString class]]) {
+        if ([source containsString:@"metal_simdgroup_matrix"] ||
+            [source containsString:@"simdgroup_multiply_accumulate"]) {
+            reject = YES;
+        }
+    }
+    if (!reject) {
+        return NO;
+    }
+    if (outError != NULL) {
+        *outError = [NSError errorWithDomain:@"MTLLibraryErrorDomain"
+                                        code:3
+                                    userInfo:@{
+                                        NSLocalizedDescriptionKey : @"Metal language feature unsupported on iOS 13.7 target"
+                                    }];
+    }
+    return YES;
+}
 
 static uint64_t ps_mtl_memory_cap(void) {
     uint64_t mem = pt_get_spoofed_physical_memory();
@@ -210,8 +275,112 @@ static uint64_t ps_mtl_memory_cap(void) {
     return arch;
 }
 
+- (id) pm_ps_mtl_newLibraryWithSource:(NSString *)source options:(id)options error:(NSError **)error NS_RETURNS_RETAINED {
+    if (!ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        NSError *rejectError = nil;
+        if (pt_mtl_should_reject_source_for_compat13(source, options, &rejectError)) {
+            if (error != NULL) {
+                *error = rejectError;
+            }
+            return nil;
+        }
+    }
+    SEL sel = sel_registerName("newLibraryWithSource:options:error:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_new_lib_sync_imps, self, &pushed);
+    if (origIMP != NULL) {
+        typedef id (*PTMTLNewLibSyncOrigFn)(id, SEL, NSString *, id, NSError **) NS_RETURNS_RETAINED;
+        @try {
+            return ((PTMTLNewLibSyncOrigFn)origIMP)(self, sel, source, options, error);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    return nil;
+}
+
+- (void) pm_ps_mtl_newLibraryWithSource:(NSString *)source
+                                options:(id)options
+                      completionHandler:(void (^)(id library, NSError *error))completionHandler {
+    if (!ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        NSError *rejectError = nil;
+        if (pt_mtl_should_reject_source_for_compat13(source, options, &rejectError)) {
+            if (completionHandler != nil) {
+                completionHandler(nil, rejectError);
+            }
+            return;
+        }
+    }
+    SEL sel = sel_registerName("newLibraryWithSource:options:completionHandler:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_new_lib_async_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            ((void (*)(id, SEL, NSString *, id, id))origIMP)(self, sel, source, options, completionHandler);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+}
+
+- (void) pm_ps_mtl_opts_setLanguageVersion:(NSUInteger)ver {
+    if (!ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        objc_setAssociatedObject(self, &kPSMTLCompileOptionsExplicitLangVerKey, @(ver),
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    SEL sel = sel_registerName("setLanguageVersion:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_opts_set_langver_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            ((void (*)(id, SEL, NSUInteger))origIMP)(self, sel, ver);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+}
+
+- (NSUInteger) pm_ps_mtl_opts_languageVersion {
+    if (pt_is_bypass_enabled() &&
+        pt_is_compat13_7_active() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        objc_getAssociatedObject(self, &kPSMTLCompileOptionsExplicitLangVerKey) == nil) {
+        return ((2U << 16) | 2U);
+    }
+    SEL sel = sel_registerName("languageVersion");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_opts_langver_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            return ((NSUInteger (*)(id, SEL))origIMP)(self, sel);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    return ((2U << 16) | 2U);
+}
 
 @end
+
+static void ps_swizzle_mtl_compile_options_if_loaded(void) {
+    Class optsCls = NSClassFromString(@"MTLCompileOptions");
+    if (optsCls == Nil) {
+        return;
+    }
+    static dispatch_once_t optsOnce;
+    dispatch_once(&optsOnce, ^{
+        id sample = [optsCls new];
+        Class targetCls = (sample != nil) ? object_getClass(sample) : optsCls;
+        if (targetCls != Nil) {
+            ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_opts_langver_imps, targetCls,
+                                             sel_registerName("languageVersion"),
+                                             @selector(pm_ps_mtl_opts_languageVersion));
+            ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_opts_set_langver_imps, targetCls,
+                                             sel_registerName("setLanguageVersion:"),
+                                             @selector(pm_ps_mtl_opts_setLanguageVersion:));
+        }
+    });
+}
 
 static void ps_swizzle_mtl_arch_class(Class archCls) {
     if (archCls == Nil) {
@@ -242,9 +411,16 @@ static void ps_swizzle_mtl_device_class(Class cls) {
     ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_architecture_imps, cls,
                                      sel_registerName("architecture"),
                                      @selector(pm_ps_mtl_architecture));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_new_lib_sync_imps, cls,
+                                     sel_registerName("newLibraryWithSource:options:error:"),
+                                     @selector(pm_ps_mtl_newLibraryWithSource:options:error:));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_new_lib_async_imps, cls,
+                                     sel_registerName("newLibraryWithSource:options:completionHandler:"),
+                                     @selector(pm_ps_mtl_newLibraryWithSource:options:completionHandler:));
 }
 
 __attribute__((visibility("hidden"))) void ps_install_metal_hooks_if_loaded(void) {
+    ps_swizzle_mtl_compile_options_if_loaded();
     typedef CFTypeRef (*ps_mtl_create_default_fn)(void);
     ps_mtl_create_default_fn mtlCreateDefault = (ps_mtl_create_default_fn)dlsym(RTLD_DEFAULT, "MTLCreateSystemDefaultDevice");
 #if TARGET_OS_MACCATALYST

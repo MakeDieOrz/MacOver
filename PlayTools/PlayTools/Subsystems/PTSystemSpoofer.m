@@ -3566,6 +3566,27 @@ static BOOL pt_is_hidden_io_class_or_name(const char *cls_name, const char *entr
     return NO;
 }
 
+static void pt_sanitize_io_gpu_name_for_compat13(io_name_t buf) {
+    if (buf == NULL || !pt_is_compat13_7_active()) {
+        return;
+    }
+    const char *digits = NULL;
+    const char *replacement = NULL;
+    if (strncmp(buf, "AGXAcceleratorG", 15) == 0) {
+        digits = buf + 15;
+        replacement = "AGXAcceleratorG11G";
+    } else if (strncmp(buf, "AGXMetalG", 9) == 0) {
+        digits = buf + 9;
+        replacement = "AGXMetalG11G";
+    }
+    if (digits != NULL && digits[0] >= '0' && digits[0] <= '9') {
+        unsigned long gen = strtoul(digits, NULL, 10);
+        if (gen >= 13UL) {
+            strlcpy(buf, replacement, sizeof(io_name_t));
+        }
+    }
+}
+
 static kern_return_t pt_IOObjectGetClass(io_object_t object, io_name_t className) {
     kern_return_t kr = IOObjectGetClass(object, className);
     if (kr == KERN_SUCCESS && className != NULL &&
@@ -3575,6 +3596,22 @@ static kern_return_t pt_IOObjectGetClass(io_object_t object, io_name_t className
             strlcpy(className, "AppleARMPE", sizeof(io_name_t));
         } else if (pt_is_hidden_io_class_or_name(className, NULL)) {
             strlcpy(className, "IOService", sizeof(io_name_t));
+        } else {
+            pt_sanitize_io_gpu_name_for_compat13(className);
+        }
+    }
+    return kr;
+}
+
+static kern_return_t pt_IORegistryEntryGetName(io_registry_entry_t entry, io_name_t name) {
+    kern_return_t kr = IORegistryEntryGetName(entry, name);
+    if (kr == KERN_SUCCESS && name != NULL &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (pt_is_hidden_io_class_or_name(NULL, name)) {
+            strlcpy(name, "IOService", sizeof(io_name_t));
+        } else {
+            pt_sanitize_io_gpu_name_for_compat13(name);
         }
     }
     return kr;
@@ -6144,20 +6181,25 @@ static int pt_usleep(useconds_t usec) {
 
 extern size_t os_proc_available_memory(void);
 
-static uint64_t pt_compute_spoofed_available_memory(void) {
+static uint64_t pt_compute_spoofed_available_memory_with_footprint(uint64_t footprint) {
     uint64_t limit = (pt_get_spoofed_physical_memory() * 65ULL) / 100ULL;
+    limit &= ~(16384ULL - 1ULL);
+    uint64_t floor_bytes = 128ULL << 20;
+    if (limit > footprint + floor_bytes) {
+        return (limit - footprint) & ~(16384ULL - 1ULL);
+    }
+    return floor_bytes;
+}
+
+static uint64_t pt_compute_spoofed_available_memory(void) {
+    uint64_t limit = ((pt_get_spoofed_physical_memory() * 65ULL) / 100ULL) & ~(16384ULL - 1ULL);
     task_vm_info_data_t vm_info;
     mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
     if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vm_info, &count) == KERN_SUCCESS &&
         count >= TASK_VM_INFO_REV1_COUNT) {
-        uint64_t footprint = (uint64_t)vm_info.phys_footprint;
-        uint64_t floor_bytes = 128ULL << 20;
-        if (limit > footprint + floor_bytes) {
-            return limit - footprint;
-        }
-        return floor_bytes;
+        return pt_compute_spoofed_available_memory_with_footprint((uint64_t)vm_info.phys_footprint);
     }
-    return limit / 2ULL;
+    return (limit / 2ULL) & ~(16384ULL - 1ULL);
 }
 
 static size_t pt_os_proc_available_memory(void) {
@@ -6217,6 +6259,39 @@ static inline natural_t pt_scale_vm_page_count(natural_t count, uint64_t spoof_p
     return (scaled > UINT32_MAX) ? UINT32_MAX : (natural_t)scaled;
 }
 
+static void pt_sanitize_host_basic_info_buf(host_basic_info_data_t *info, size_t out_bytes) {
+    if (info == NULL) {
+        return;
+    }
+    const pt_device_profile_t *profile = pt_get_active_device_profile();
+    integer_t spoof_cores = (integer_t)profile->cores;
+    uint64_t spoof_ram = profile->ram_bytes;
+    if (out_bytes >= offsetof(host_basic_info_data_t, max_cpus) + sizeof(info->max_cpus)) {
+        info->max_cpus = spoof_cores;
+    }
+    if (out_bytes >= offsetof(host_basic_info_data_t, avail_cpus) + sizeof(info->avail_cpus)) {
+        info->avail_cpus = spoof_cores;
+    }
+    if (out_bytes >= offsetof(host_basic_info_data_t, memory_size) + sizeof(info->memory_size)) {
+        info->memory_size = (natural_t)((spoof_ram > 0x80000000ULL) ? 0x80000000ULL : spoof_ram);
+    }
+    if (out_bytes >= offsetof(host_basic_info_data_t, physical_cpu) + sizeof(info->physical_cpu)) {
+        info->physical_cpu = spoof_cores;
+    }
+    if (out_bytes >= offsetof(host_basic_info_data_t, physical_cpu_max) + sizeof(info->physical_cpu_max)) {
+        info->physical_cpu_max = spoof_cores;
+    }
+    if (out_bytes >= offsetof(host_basic_info_data_t, logical_cpu) + sizeof(info->logical_cpu)) {
+        info->logical_cpu = spoof_cores;
+    }
+    if (out_bytes >= offsetof(host_basic_info_data_t, logical_cpu_max) + sizeof(info->logical_cpu_max)) {
+        info->logical_cpu_max = spoof_cores;
+    }
+    if (out_bytes >= offsetof(host_basic_info_data_t, max_mem) + sizeof(info->max_mem)) {
+        info->max_mem = spoof_ram;
+    }
+}
+
 static kern_return_t pt_host_info(host_t host,
                                   host_flavor_t flavor,
                                   host_info_t host_info_out,
@@ -6228,35 +6303,8 @@ static kern_return_t pt_host_info(host_t host,
         host_info_outCnt != NULL &&
         pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        const pt_device_profile_t *profile = pt_get_active_device_profile();
-        host_basic_info_data_t *info = (host_basic_info_data_t *)host_info_out;
         size_t out_bytes = (size_t)(*host_info_outCnt) * sizeof(integer_t);
-        integer_t spoof_cores = (integer_t)profile->cores;
-        uint64_t spoof_ram = profile->ram_bytes;
-        if (out_bytes >= offsetof(host_basic_info_data_t, max_cpus) + sizeof(info->max_cpus)) {
-            info->max_cpus = spoof_cores;
-        }
-        if (out_bytes >= offsetof(host_basic_info_data_t, avail_cpus) + sizeof(info->avail_cpus)) {
-            info->avail_cpus = spoof_cores;
-        }
-        if (out_bytes >= offsetof(host_basic_info_data_t, memory_size) + sizeof(info->memory_size)) {
-            info->memory_size = (natural_t)((spoof_ram > 0x80000000ULL) ? 0x80000000ULL : spoof_ram);
-        }
-        if (out_bytes >= offsetof(host_basic_info_data_t, physical_cpu) + sizeof(info->physical_cpu)) {
-            info->physical_cpu = spoof_cores;
-        }
-        if (out_bytes >= offsetof(host_basic_info_data_t, physical_cpu_max) + sizeof(info->physical_cpu_max)) {
-            info->physical_cpu_max = spoof_cores;
-        }
-        if (out_bytes >= offsetof(host_basic_info_data_t, logical_cpu) + sizeof(info->logical_cpu)) {
-            info->logical_cpu = spoof_cores;
-        }
-        if (out_bytes >= offsetof(host_basic_info_data_t, logical_cpu_max) + sizeof(info->logical_cpu_max)) {
-            info->logical_cpu_max = spoof_cores;
-        }
-        if (out_bytes >= offsetof(host_basic_info_data_t, max_mem) + sizeof(info->max_mem)) {
-            info->max_mem = spoof_ram;
-        }
+        pt_sanitize_host_basic_info_buf((host_basic_info_data_t *)host_info_out, out_bytes);
     }
     return kr;
 }
@@ -6268,16 +6316,26 @@ static kern_return_t pt_host_processor_info(host_t host,
                                             mach_msg_type_number_t *out_processor_infoCnt) {
     kern_return_t kr = host_processor_info(host, flavor, out_processor_count, out_processor_info, out_processor_infoCnt);
     if (kr == KERN_SUCCESS &&
-        out_processor_count != NULL &&
         pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         natural_t spoof_cores = (natural_t)pt_get_active_device_profile()->cores;
-        natural_t real_cores = *out_processor_count;
-        if (spoof_cores > 0 && real_cores > spoof_cores) {
-            if (out_processor_infoCnt != NULL && real_cores > 0 && (*out_processor_infoCnt % real_cores) == 0) {
-                *out_processor_infoCnt = (*out_processor_infoCnt / real_cores) * spoof_cores;
+        if (out_processor_count != NULL) {
+            natural_t real_cores = *out_processor_count;
+            if (spoof_cores > 0 && real_cores > spoof_cores) {
+                if (out_processor_infoCnt != NULL && real_cores > 0 && (*out_processor_infoCnt % real_cores) == 0) {
+                    *out_processor_infoCnt = (*out_processor_infoCnt / real_cores) * spoof_cores;
+                }
+                *out_processor_count = spoof_cores;
             }
-            *out_processor_count = spoof_cores;
+        }
+        if (out_processor_info != NULL && *out_processor_info != NULL &&
+            out_processor_infoCnt != NULL && *out_processor_infoCnt > 0 && vm_page_size > 0) {
+            size_t used_bytes = (size_t)(*out_processor_infoCnt) * sizeof(integer_t);
+            size_t page_sz = (size_t)vm_page_size;
+            size_t alloc_bytes = ((used_bytes + page_sz - 1U) / page_sz) * page_sz;
+            if (alloc_bytes > used_bytes) {
+                memset((uint8_t *)(*out_processor_info) + used_bytes, 0, alloc_bytes - used_bytes);
+            }
         }
     }
     return kr;
@@ -6360,9 +6418,40 @@ static kern_return_t pt_host_statistics64(host_t host,
                     v->internal_page_count = pt_scale_vm_page_count(v->internal_page_count, spoof_pages, total_pages);
                 }
             }
+            if (flavor == HOST_VM_INFO64) {
+                if (out_bytes >= offsetof(vm_statistics64_data_t, swapins) + sizeof(v->swapins)) {
+                    v->swapins = 0;
+                }
+                if (out_bytes >= offsetof(vm_statistics64_data_t, swapouts) + sizeof(v->swapouts)) {
+                    v->swapouts = 0;
+                }
+            }
         }
     }
     return kr;
+}
+
+static void pt_sanitize_task_vm_info_buf(task_vm_info_data_t *vm, size_t out_bytes) {
+    if (vm == NULL) {
+        return;
+    }
+    size_t min_bytes = offsetof(task_vm_info_data_t, limit_bytes_remaining) +
+                       sizeof(vm->limit_bytes_remaining);
+    if (out_bytes >= min_bytes) {
+        vm->limit_bytes_remaining = (mach_vm_size_t)pt_compute_spoofed_available_memory_with_footprint(
+            (uint64_t)vm->phys_footprint);
+    }
+}
+
+static void pt_sanitize_task_audit_token_buf(audit_token_t *tok, size_t out_bytes) {
+    if (tok != NULL && out_bytes >= sizeof(audit_token_t)) {
+        if (tok->val[2] == 20U) {
+            tok->val[2] = 501U;
+        }
+        if (tok->val[4] == 20U) {
+            tok->val[4] = 501U;
+        }
+    }
 }
 
 static kern_return_t pt_task_info(task_name_t target_task,
@@ -6381,22 +6470,9 @@ static kern_return_t pt_task_info(task_name_t target_task,
 
     size_t out_bytes = (size_t)(*task_info_outCnt) * sizeof(natural_t);
     if (flavor == TASK_VM_INFO) {
-        size_t min_bytes = offsetof(task_vm_info_data_t, limit_bytes_remaining) +
-                           sizeof(((task_vm_info_data_t *)0)->limit_bytes_remaining);
-        if (out_bytes >= min_bytes) {
-            task_vm_info_data_t *vm = (task_vm_info_data_t *)task_info_out;
-            if (vm->limit_bytes_remaining == 0) {
-                vm->limit_bytes_remaining = (mach_vm_size_t)pt_compute_spoofed_available_memory();
-            }
-        }
-    } else if (flavor == TASK_AUDIT_TOKEN && out_bytes >= sizeof(audit_token_t)) {
-        audit_token_t *tok = (audit_token_t *)task_info_out;
-        if (tok->val[2] == 20U) {
-            tok->val[2] = 501U;
-        }
-        if (tok->val[4] == 20U) {
-            tok->val[4] = 501U;
-        }
+        pt_sanitize_task_vm_info_buf((task_vm_info_data_t *)task_info_out, out_bytes);
+    } else if (flavor == TASK_AUDIT_TOKEN) {
+        pt_sanitize_task_audit_token_buf((audit_token_t *)task_info_out, out_bytes);
     } else if (flavor == TASK_DYLD_INFO && out_bytes >= sizeof(task_dyld_info_data_t)) {
         task_dyld_info_data_t *dyld_info = (task_dyld_info_data_t *)task_info_out;
         if (dyld_info->all_image_info_addr != 0 &&
@@ -7355,6 +7431,409 @@ static intptr_t pt_syscall(int number, ...) {
     return pt_orig_syscall(number, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]);
 }
 
+#pragma mark - MIG Reply Sanitization
+
+#ifndef PT_MIG_REQ_RING_SIZE
+#define PT_MIG_REQ_RING_SIZE 16U
+#endif
+
+typedef kern_return_t (*PTMachMsg2InternalFn)(void *data,
+                                              uint64_t option64,
+                                              uint64_t msgh_bits_and_send_size,
+                                              uint64_t msgh_remote_and_local_port,
+                                              uint64_t msgh_voucher_and_id,
+                                              uint64_t desc_count_and_rcv_name,
+                                              uint64_t rcv_size,
+                                              uint64_t priority_and_timeout);
+
+typedef struct {
+    mach_port_t reply_port;
+    int req_id;
+    int32_t req_flavor;
+    bool target_is_self;
+    bool valid;
+} PTMIGPendingRequest;
+
+static os_unfair_lock s_mig_req_ring_lock = OS_UNFAIR_LOCK_INIT;
+static PTMIGPendingRequest s_mig_req_ring[PT_MIG_REQ_RING_SIZE];
+static uint32_t s_mig_req_ring_next = 0;
+
+static void pt_mig_ring_push(mach_port_t reply_port, int req_id, int32_t req_flavor, bool target_is_self) {
+    if (reply_port == MACH_PORT_NULL || !target_is_self) {
+        return;
+    }
+    if (req_id != 200 && req_id != 3405) {
+        return;
+    }
+    os_unfair_lock_lock(&s_mig_req_ring_lock);
+    for (uint32_t i = 0; i < PT_MIG_REQ_RING_SIZE; i++) {
+        if (s_mig_req_ring[i].valid && s_mig_req_ring[i].reply_port == reply_port) {
+            s_mig_req_ring[i].req_id = req_id;
+            s_mig_req_ring[i].req_flavor = req_flavor;
+            s_mig_req_ring[i].target_is_self = target_is_self;
+            os_unfair_lock_unlock(&s_mig_req_ring_lock);
+            return;
+        }
+    }
+    uint32_t slot = s_mig_req_ring_next % PT_MIG_REQ_RING_SIZE;
+    s_mig_req_ring_next = (s_mig_req_ring_next + 1U) % PT_MIG_REQ_RING_SIZE;
+    s_mig_req_ring[slot].reply_port = reply_port;
+    s_mig_req_ring[slot].req_id = req_id;
+    s_mig_req_ring[slot].req_flavor = req_flavor;
+    s_mig_req_ring[slot].target_is_self = target_is_self;
+    s_mig_req_ring[slot].valid = true;
+    os_unfair_lock_unlock(&s_mig_req_ring_lock);
+}
+
+static bool pt_mig_ring_pop(mach_port_t reply_port, int *out_req_id, int32_t *out_req_flavor, bool *out_target_is_self) {
+    if (reply_port == MACH_PORT_NULL) {
+        return false;
+    }
+    os_unfair_lock_lock(&s_mig_req_ring_lock);
+    for (uint32_t i = 0; i < PT_MIG_REQ_RING_SIZE; i++) {
+        if (s_mig_req_ring[i].valid && s_mig_req_ring[i].reply_port == reply_port) {
+            if (out_req_id != NULL) {
+                *out_req_id = s_mig_req_ring[i].req_id;
+            }
+            if (out_req_flavor != NULL) {
+                *out_req_flavor = s_mig_req_ring[i].req_flavor;
+            }
+            if (out_target_is_self != NULL) {
+                *out_target_is_self = s_mig_req_ring[i].target_is_self;
+            }
+            s_mig_req_ring[i].valid = false;
+            os_unfair_lock_unlock(&s_mig_req_ring_lock);
+            return true;
+        }
+    }
+    os_unfair_lock_unlock(&s_mig_req_ring_lock);
+    return false;
+}
+
+static void pt_mig_ring_erase(mach_port_t reply_port, int req_id, int32_t req_flavor) {
+    if (reply_port == MACH_PORT_NULL) {
+        return;
+    }
+    os_unfair_lock_lock(&s_mig_req_ring_lock);
+    for (uint32_t i = 0; i < PT_MIG_REQ_RING_SIZE; i++) {
+        if (s_mig_req_ring[i].valid &&
+            s_mig_req_ring[i].reply_port == reply_port &&
+            s_mig_req_ring[i].req_id == req_id &&
+            s_mig_req_ring[i].req_flavor == req_flavor) {
+            s_mig_req_ring[i].valid = false;
+            break;
+        }
+    }
+    os_unfair_lock_unlock(&s_mig_req_ring_lock);
+}
+
+static bool pt_extract_mig_request_meta(const void *req_buf,
+                                        mach_msg_bits_t bits,
+                                        mach_msg_size_t send_size,
+                                        mach_port_t remote_port,
+                                        int req_id,
+                                        int32_t *out_flavor,
+                                        bool *out_target_is_self) {
+    if (req_buf == NULL || (bits & MACH_MSGH_BITS_COMPLEX) != 0) {
+        return false;
+    }
+    if (req_id != 200 && req_id != 3405) {
+        return false;
+    }
+    const size_t min_req_size = sizeof(mach_msg_header_t) + sizeof(NDR_record_t) + sizeof(int32_t);
+    if (send_size < min_req_size) {
+        return false;
+    }
+    int32_t flavor = 0;
+    memcpy(&flavor, (const uint8_t *)req_buf + sizeof(mach_msg_header_t) + sizeof(NDR_record_t), sizeof(flavor));
+    if (out_flavor != NULL) {
+        *out_flavor = flavor;
+    }
+    if (out_target_is_self != NULL) {
+        *out_target_is_self = (req_id == 200) ? true : (remote_port == mach_task_self());
+    }
+    return true;
+}
+
+static void pt_sanitize_mig_reply_if_needed(void *rcv_buf,
+                                            size_t rcv_cap,
+                                            mach_port_t rcv_name,
+                                            bool had_inline_req,
+                                            int inline_req_id,
+                                            int32_t inline_req_flavor,
+                                            bool inline_target_is_self) {
+    if (rcv_buf == NULL || rcv_cap < sizeof(mach_msg_header_t)) {
+        return;
+    }
+    const mach_msg_header_t *hdr = (const mach_msg_header_t *)rcv_buf;
+    if ((hdr->msgh_bits & MACH_MSGH_BITS_COMPLEX) != 0) {
+        return;
+    }
+    int reply_id = hdr->msgh_id;
+    if (reply_id != 300 && reply_id != 3505) {
+        return;
+    }
+    const size_t prefix = sizeof(mach_msg_header_t) + sizeof(NDR_record_t);
+    size_t usable_bytes = (hdr->msgh_size > 0 && hdr->msgh_size < rcv_cap) ? (size_t)hdr->msgh_size : rcv_cap;
+    if (usable_bytes < prefix + sizeof(kern_return_t) + sizeof(natural_t)) {
+        return;
+    }
+
+    int req_id = inline_req_id;
+    int32_t req_flavor = inline_req_flavor;
+    bool target_is_self = inline_target_is_self;
+    if (!had_inline_req) {
+        bool matched = false;
+        if (hdr->msgh_local_port != MACH_PORT_NULL) {
+            matched = pt_mig_ring_pop(hdr->msgh_local_port, &req_id, &req_flavor, &target_is_self);
+        }
+        if (!matched && rcv_name != MACH_PORT_NULL && rcv_name != hdr->msgh_local_port) {
+            matched = pt_mig_ring_pop(rcv_name, &req_id, &req_flavor, &target_is_self);
+        }
+        if (!matched) {
+            return;
+        }
+    }
+
+    const uint8_t *bytes = (const uint8_t *)rcv_buf;
+    kern_return_t reply_rc = KERN_FAILURE;
+    memcpy(&reply_rc, bytes + prefix, sizeof(reply_rc));
+    if (reply_rc != KERN_SUCCESS) {
+        return;
+    }
+    natural_t payload_count = 0;
+    memcpy(&payload_count, bytes + prefix + sizeof(kern_return_t), sizeof(payload_count));
+    size_t payload_offset = prefix + sizeof(kern_return_t) + sizeof(natural_t);
+    if (payload_count == 0 || (size_t)payload_count > (SIZE_MAX - payload_offset) / sizeof(natural_t)) {
+        return;
+    }
+    size_t payload_bytes = (size_t)payload_count * sizeof(natural_t);
+    if (payload_offset + payload_bytes > usable_bytes) {
+        return;
+    }
+    uint8_t *payload = (uint8_t *)rcv_buf + payload_offset;
+
+    if (reply_id == 300 && req_id == 200 && req_flavor == HOST_BASIC_INFO) {
+        host_basic_info_data_t info_local;
+        memset(&info_local, 0, sizeof(info_local));
+        size_t copy_bytes = (payload_bytes < sizeof(info_local)) ? payload_bytes : sizeof(info_local);
+        memcpy(&info_local, payload, copy_bytes);
+        pt_sanitize_host_basic_info_buf(&info_local, copy_bytes);
+        memcpy(payload, &info_local, copy_bytes);
+    } else if (reply_id == 3505 && target_is_self && req_id == 3405) {
+        if (req_flavor == TASK_VM_INFO) {
+            task_vm_info_data_t vm_local;
+            memset(&vm_local, 0, sizeof(vm_local));
+            size_t copy_bytes = (payload_bytes < sizeof(vm_local)) ? payload_bytes : sizeof(vm_local);
+            memcpy(&vm_local, payload, copy_bytes);
+            pt_sanitize_task_vm_info_buf(&vm_local, copy_bytes);
+            memcpy(payload, &vm_local, copy_bytes);
+        } else if (req_flavor == TASK_AUDIT_TOKEN) {
+            audit_token_t tok_local;
+            memset(&tok_local, 0, sizeof(tok_local));
+            size_t copy_bytes = (payload_bytes < sizeof(tok_local)) ? payload_bytes : sizeof(tok_local);
+            memcpy(&tok_local, payload, copy_bytes);
+            pt_sanitize_task_audit_token_buf(&tok_local, copy_bytes);
+            memcpy(payload, &tok_local, copy_bytes);
+        }
+    }
+}
+
+static PTMachMsg2InternalFn pt_get_real_mach_msg2_internal(void) {
+    static PTMachMsg2InternalFn s_real_mach_msg2_internal = NULL;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        s_real_mach_msg2_internal = (PTMachMsg2InternalFn)dlsym(RTLD_DEFAULT, "mach_msg2_internal");
+    });
+    return s_real_mach_msg2_internal;
+}
+
+static mach_msg_return_t pt_mach_msg_overwrite(mach_msg_header_t *msg,
+                                               mach_msg_option_t option,
+                                               mach_msg_size_t send_size,
+                                               mach_msg_size_t rcv_size,
+                                               mach_port_name_t rcv_name,
+                                               mach_msg_timeout_t timeout,
+                                               mach_port_name_t notify,
+                                               mach_msg_header_t *rcv_msg,
+                                               mach_msg_size_t rcv_limit) {
+    if (!pt_is_bypass_enabled() || pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return mach_msg_overwrite(msg, option, send_size, rcv_size, rcv_name, timeout, notify, rcv_msg, rcv_limit);
+    }
+    bool sending = (option & MACH_SEND_MSG) != 0 && msg != NULL;
+    bool receiving = (option & MACH_RCV_MSG) != 0;
+    mach_msg_header_t *actual_rcv = (rcv_msg != NULL) ? rcv_msg : msg;
+    mach_msg_size_t actual_rcv_cap = (rcv_msg != NULL) ? rcv_limit : rcv_size;
+    if (actual_rcv == NULL) {
+        receiving = false;
+    }
+    if (!sending && !receiving) {
+        return mach_msg_overwrite(msg, option, send_size, rcv_size, rcv_name, timeout, notify, rcv_msg, rcv_limit);
+    }
+
+    bool had_req = false;
+    int req_id = 0;
+    int32_t req_flavor = 0;
+    bool target_is_self = false;
+    mach_port_t reply_port = MACH_PORT_NULL;
+    if (sending) {
+        mach_msg_size_t effective_send_size = (send_size > 0) ? send_size : msg->msgh_size;
+        had_req = pt_extract_mig_request_meta(msg,
+                                              msg->msgh_bits,
+                                              effective_send_size,
+                                              msg->msgh_remote_port,
+                                              msg->msgh_id,
+                                              &req_flavor,
+                                              &target_is_self);
+        if (had_req) {
+            req_id = msg->msgh_id;
+            reply_port = msg->msgh_local_port;
+            if (!receiving) {
+                pt_mig_ring_push(reply_port, req_id, req_flavor, target_is_self);
+            }
+        }
+    }
+
+    mach_msg_return_t kr = mach_msg_overwrite(msg, option, send_size, rcv_size, rcv_name, timeout, notify, rcv_msg, rcv_limit);
+    if (sending && !receiving && had_req && kr != MACH_MSG_SUCCESS) {
+        pt_mig_ring_erase(reply_port, req_id, req_flavor);
+    }
+    if (kr == MACH_MSG_SUCCESS && receiving) {
+        pt_sanitize_mig_reply_if_needed(actual_rcv,
+                                        (size_t)actual_rcv_cap,
+                                        rcv_name,
+                                        had_req,
+                                        req_id,
+                                        req_flavor,
+                                        target_is_self);
+    }
+    return kr;
+}
+
+static mach_msg_return_t pt_mach_msg(mach_msg_header_t *msg,
+                                     mach_msg_option_t option,
+                                     mach_msg_size_t send_size,
+                                     mach_msg_size_t rcv_size,
+                                     mach_port_name_t rcv_name,
+                                     mach_msg_timeout_t timeout,
+                                     mach_port_name_t notify) {
+    if (!pt_is_bypass_enabled() || pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return mach_msg(msg, option, send_size, rcv_size, rcv_name, timeout, notify);
+    }
+    bool sending = (option & MACH_SEND_MSG) != 0 && msg != NULL;
+    bool receiving = (option & MACH_RCV_MSG) != 0 && msg != NULL;
+    if (!sending && !receiving) {
+        return mach_msg(msg, option, send_size, rcv_size, rcv_name, timeout, notify);
+    }
+
+    bool had_req = false;
+    int req_id = 0;
+    int32_t req_flavor = 0;
+    bool target_is_self = false;
+    mach_port_t reply_port = MACH_PORT_NULL;
+    if (sending) {
+        mach_msg_size_t effective_send_size = (send_size > 0) ? send_size : msg->msgh_size;
+        had_req = pt_extract_mig_request_meta(msg,
+                                              msg->msgh_bits,
+                                              effective_send_size,
+                                              msg->msgh_remote_port,
+                                              msg->msgh_id,
+                                              &req_flavor,
+                                              &target_is_self);
+        if (had_req) {
+            req_id = msg->msgh_id;
+            reply_port = msg->msgh_local_port;
+            if (!receiving) {
+                pt_mig_ring_push(reply_port, req_id, req_flavor, target_is_self);
+            }
+        }
+    }
+
+    mach_msg_return_t kr = mach_msg(msg, option, send_size, rcv_size, rcv_name, timeout, notify);
+    if (sending && !receiving && had_req && kr != MACH_MSG_SUCCESS) {
+        pt_mig_ring_erase(reply_port, req_id, req_flavor);
+    }
+    if (kr == MACH_MSG_SUCCESS && receiving) {
+        pt_sanitize_mig_reply_if_needed(msg,
+                                        (size_t)rcv_size,
+                                        rcv_name,
+                                        had_req,
+                                        req_id,
+                                        req_flavor,
+                                        target_is_self);
+    }
+    return kr;
+}
+
+static kern_return_t pt_mach_msg2_internal(void *data,
+                                           uint64_t option64,
+                                           uint64_t msgh_bits_and_send_size,
+                                           uint64_t msgh_remote_and_local_port,
+                                           uint64_t msgh_voucher_and_id,
+                                           uint64_t desc_count_and_rcv_name,
+                                           uint64_t rcv_size,
+                                           uint64_t priority_and_timeout) {
+    PTMachMsg2InternalFn real_fn = pt_get_real_mach_msg2_internal();
+    if (real_fn == NULL) {
+        return KERN_NOT_SUPPORTED;
+    }
+    if (!pt_is_bypass_enabled() || pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return real_fn(data, option64, msgh_bits_and_send_size, msgh_remote_and_local_port,
+                       msgh_voucher_and_id, desc_count_and_rcv_name, rcv_size, priority_and_timeout);
+    }
+
+    bool is_vector = (option64 & 0x0000000100000000ULL) != 0;
+    bool sending = !is_vector && (option64 & MACH_SEND_MSG) != 0 && data != NULL;
+    bool receiving = !is_vector && (option64 & MACH_RCV_MSG) != 0 && data != NULL;
+    if (!sending && !receiving) {
+        return real_fn(data, option64, msgh_bits_and_send_size, msgh_remote_and_local_port,
+                       msgh_voucher_and_id, desc_count_and_rcv_name, rcv_size, priority_and_timeout);
+    }
+
+    bool had_req = false;
+    int req_id = 0;
+    int32_t req_flavor = 0;
+    bool target_is_self = false;
+    mach_port_t reply_port = MACH_PORT_NULL;
+    if (sending) {
+        const mach_msg_header_t *hdr = (const mach_msg_header_t *)data;
+        mach_msg_bits_t bits = (mach_msg_bits_t)(msgh_bits_and_send_size & 0xFFFFFFFFU);
+        mach_msg_size_t send_size = (mach_msg_size_t)(msgh_bits_and_send_size >> 32);
+        if (send_size == 0) {
+            send_size = hdr->msgh_size;
+        }
+        mach_port_t remote_port = (mach_port_t)(msgh_remote_and_local_port & 0xFFFFFFFFU);
+        mach_port_t local_port = (mach_port_t)(msgh_remote_and_local_port >> 32);
+        int parsed_id = (int)(msgh_voucher_and_id >> 32);
+        if (parsed_id == 0) {
+            parsed_id = hdr->msgh_id;
+        }
+        if (local_port == MACH_PORT_NULL) {
+            local_port = hdr->msgh_local_port;
+        }
+        had_req = pt_extract_mig_request_meta(data, bits, send_size, remote_port, parsed_id, &req_flavor, &target_is_self);
+        if (had_req) {
+            req_id = parsed_id;
+            reply_port = local_port;
+            if (!receiving) {
+                pt_mig_ring_push(reply_port, req_id, req_flavor, target_is_self);
+            }
+        }
+    }
+
+    kern_return_t kr = real_fn(data, option64, msgh_bits_and_send_size, msgh_remote_and_local_port,
+                               msgh_voucher_and_id, desc_count_and_rcv_name, rcv_size, priority_and_timeout);
+    if (sending && !receiving && had_req && kr != KERN_SUCCESS) {
+        pt_mig_ring_erase(reply_port, req_id, req_flavor);
+    }
+    if (kr == KERN_SUCCESS && receiving) {
+        mach_port_t rcv_name = (mach_port_t)(desc_count_and_rcv_name >> 32);
+        size_t rcv_cap = (rcv_size > (uint64_t)SIZE_MAX) ? SIZE_MAX : (size_t)rcv_size;
+        pt_sanitize_mig_reply_if_needed(data, rcv_cap, rcv_name, had_req, req_id, req_flavor, target_is_self);
+    }
+    return kr;
+}
+
 __attribute__((visibility("hidden")))
 void *pt_spoofer_dlsym_route(const char *symbol) {
     if (symbol == NULL) {
@@ -7386,6 +7865,36 @@ void *pt_spoofer_dlsym_route(const char *symbol) {
     }
     if (strcmp(symbol, "IOObjectGetClass") == 0) {
         return (void *)&pt_IOObjectGetClass;
+    }
+    if (strcmp(symbol, "IORegistryEntryGetName") == 0) {
+        return (void *)&pt_IORegistryEntryGetName;
+    }
+    if (strcmp(symbol, "host_info") == 0) {
+        return (void *)&pt_host_info;
+    }
+    if (strcmp(symbol, "host_processor_info") == 0) {
+        return (void *)&pt_host_processor_info;
+    }
+    if (strcmp(symbol, "host_statistics") == 0) {
+        return (void *)&pt_host_statistics;
+    }
+    if (strcmp(symbol, "host_statistics64") == 0) {
+        return (void *)&pt_host_statistics64;
+    }
+    if (strcmp(symbol, "task_info") == 0) {
+        return (void *)&pt_task_info;
+    }
+    if (strcmp(symbol, "mach_msg") == 0) {
+        return (void *)&pt_mach_msg;
+    }
+    if (strcmp(symbol, "mach_msg_overwrite") == 0) {
+        return (void *)&pt_mach_msg_overwrite;
+    }
+    if (strcmp(symbol, "mach_msg2_internal") == 0) {
+        if (pt_get_real_mach_msg2_internal() != NULL) {
+            return (void *)&pt_mach_msg2_internal;
+        }
+        return NULL;
     }
     if (strcmp(symbol, "getgid") == 0) {
         return (void *)&pt_getgid;
@@ -7514,3 +8023,6 @@ DYLD_INTERPOSE(pt_host_statistics64, host_statistics64)
 DYLD_INTERPOSE(pt_task_info, task_info)
 DYLD_INTERPOSE(pt_task_threads, task_threads)
 DYLD_INTERPOSE(pt_pthread_getname_np, pthread_getname_np)
+DYLD_INTERPOSE(pt_IORegistryEntryGetName, IORegistryEntryGetName)
+DYLD_INTERPOSE(pt_mach_msg, mach_msg)
+DYLD_INTERPOSE(pt_mach_msg_overwrite, mach_msg_overwrite)

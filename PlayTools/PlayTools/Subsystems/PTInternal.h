@@ -630,6 +630,9 @@ __attribute__((visibility("hidden"))) void *pt_network_dlsym_route(const char *s
 __attribute__((visibility("hidden"))) void pt_svc_interceptor_init_early(void);
 __attribute__((visibility("hidden"))) void pt_svc_restore_patched_bytes_in_buffer(uintptr_t read_start, uint8_t *dst, size_t copied);
 
+// Entitlements exports
+__attribute__((visibility("hidden"))) void *pt_entitlements_dlsym_route(const char *symbol);
+
 #ifdef __cplusplus
 }
 #endif

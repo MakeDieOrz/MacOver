@@ -74,6 +74,7 @@ MOCK_TARGET_M = r"""
 #include <libproc.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#include <mach/ndr.h>
 #include <mach-o/dyld.h>
 #include <mach-o/fat.h>
 #include <mach-o/getsect.h>
@@ -1647,6 +1648,10 @@ int main(int argc, const char *argv[]) {
         NSString *s11FileRefPathValue = @"";
         BOOL s11MGCopyAnswerWithErrorOK = NO;
         BOOL s11AudioAndUTTypeHiddenOK = NO;
+        BOOL s11SwapZeroOK = NO;
+        BOOL s11SandboxDlsymOK = NO;
+        BOOL s11CoreMotionPullCacheOK = NO;
+        BOOL s11MigHostAndTaskOK = NO;
         const char *testS11Env = getenv("HARNESS_TEST_SCENARIO11");
         if (testS11Env != NULL && strcmp(testS11Env, "1") == 0) {
             // 1. PROC_PIDPATHINFO (libproc + SYS_proc_info) returns 0 and virtualized iOS bundle path
@@ -2037,6 +2042,329 @@ int main(int argc, const char *argv[]) {
                 }
                 s11AudioAndUTTypeHiddenOK = (noHAL && noAhal && utOK);
             }
+
+            // 13. host_statistics64(HOST_VM_INFO64) zeros swapins/swapouts
+            {
+                vm_statistics64_data_t vmstat64;
+                memset(&vmstat64, 0xff, sizeof(vmstat64));
+                mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+                kern_return_t kr = host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t)&vmstat64, &count);
+                s11SwapZeroOK = (kr == KERN_SUCCESS && vmstat64.swapins == 0 && vmstat64.swapouts == 0);
+            }
+
+            // 14. dlsym("sandbox_check") routes and denies desktop Mach services under SANDBOX_FILTER_GLOBAL_NAME (2)
+            {
+                typedef int (*SandboxCheckFn)(pid_t, const char *, int, ...);
+                SandboxCheckFn fnSandbox = (SandboxCheckFn)dlsym(RTLD_DEFAULT, "sandbox_check");
+                if (fnSandbox != NULL) {
+                    int dockRC = fnSandbox(getpid(), "mach-lookup", 2, "com.apple.dock.server");
+                    int wsRC = fnSandbox(getpid(), "mach-lookup", 2, "com.apple.windowserver.active");
+                    s11SandboxDlsymOK = (dockRC == 1 && wsRC == 1);
+                }
+            }
+
+            // 15. CoreMotion availableAttitudeReferenceFrames, attitudeReferenceFrame, and pull-mode updateInterval cache
+            {
+                CMMotionManager *mgr11 = [CMMotionManager new];
+                CMAttitudeReferenceFrame availFrames = [CMMotionManager availableAttitudeReferenceFrames];
+                CMAttitudeReferenceFrame instFrame = mgr11.attitudeReferenceFrame;
+                NSMutableSet *ptrs = [NSMutableSet set];
+                NSMutableSet *tss = [NSMutableSet set];
+                NSUInteger samplesSeen = 0;
+                if (mgr11.deviceMotionAvailable && (availFrames & CMAttitudeReferenceFrameXArbitraryZVertical) != 0) {
+                    mgr11.deviceMotionUpdateInterval = 1.0;
+                    [mgr11 startDeviceMotionUpdatesUsingReferenceFrame:CMAttitudeReferenceFrameXArbitraryZVertical];
+                    @try {
+                        for (int i = 0; i < 16; i++) {
+                            CMDeviceMotion *s = mgr11.deviceMotion;
+                            if (s == nil) {
+                                break;
+                            }
+                            samplesSeen++;
+                            [ptrs addObject:[NSValue valueWithPointer:(__bridge const void *)s]];
+                            [tss addObject:@(s.timestamp)];
+                        }
+                    } @finally {
+                        [mgr11 stopDeviceMotionUpdates];
+                    }
+                }
+                s11CoreMotionPullCacheOK = ((availFrames & CMAttitudeReferenceFrameXArbitraryZVertical) != 0 &&
+                                            instFrame == CMAttitudeReferenceFrameXArbitraryZVertical &&
+                                            samplesSeen == 16 &&
+                                            ptrs.count == 1 &&
+                                            tss.count == 1);
+            }
+
+            // 16. mach_msg2_internal MIG HOST_BASIC_INFO (200/300) and TASK_VM_INFO (3405/3505) rewriting + 16 KiB Jetsam alignment
+            {
+                typedef kern_return_t (*Msg2Fn)(void *, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+                typedef mach_port_t (*GetReplyFn)(void);
+                typedef void (*ReplyOpFn)(mach_port_t);
+                Msg2Fn fnMsg2 = (Msg2Fn)dlsym(RTLD_DEFAULT, "mach_msg2_internal");
+                GetReplyFn fnGetReply = (GetReplyFn)dlsym(RTLD_DEFAULT, "mig_get_reply_port");
+                ReplyOpFn fnPutReply = (ReplyOpFn)dlsym(RTLD_DEFAULT, "mig_put_reply_port");
+                ReplyOpFn fnDeallocReply = (ReplyOpFn)dlsym(RTLD_DEFAULT, "mig_dealloc_reply_port");
+
+                uint64_t sysctlMem = 0;
+                size_t sysctlMemLen = sizeof(sysctlMem);
+                sysctlbyname("hw.memsize", &sysctlMem, &sysctlMemLen, NULL, 0);
+
+                host_basic_info_data_t wrappedHost = {0};
+                mach_msg_type_number_t whc = HOST_BASIC_INFO_COUNT;
+                kern_return_t whr = host_info(mach_host_self(), HOST_BASIC_INFO, (host_info_t)&wrappedHost, &whc);
+
+                task_vm_info_data_t wrappedVm = {0};
+                mach_msg_type_number_t wvc = TASK_VM_INFO_COUNT;
+                kern_return_t wvr = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&wrappedVm, &wvc);
+
+                BOOL hostMigOK = NO;
+                BOOL taskMigOK = NO;
+                if (fnMsg2 != NULL && fnGetReply != NULL && whr == KERN_SUCCESS && wvr == KERN_SUCCESS) {
+                    const uint32_t bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE);
+                    const uint64_t opt64 = 0x0000000200000003ULL;
+                    const size_t prefix = sizeof(mach_msg_header_t) + sizeof(NDR_record_t);
+
+                    // HOST_BASIC_INFO (200 -> 300)
+                    {
+                        union {
+                            mach_msg_header_t hdr;
+                            uint8_t bytes[512];
+                        } buf = {0};
+                        struct {
+                            mach_msg_header_t hdr;
+                            NDR_record_t ndr;
+                            int flavor;
+                            mach_msg_type_number_t count;
+                        } req = {0};
+                        mach_port_t reply = fnGetReply();
+                        if (MACH_PORT_VALID(reply)) {
+                            req.ndr = NDR_record;
+                            req.flavor = HOST_BASIC_INFO;
+                            req.count = HOST_BASIC_INFO_COUNT;
+                            memcpy(buf.bytes, &req, sizeof(req));
+                            buf.hdr.msgh_bits = bits;
+                            buf.hdr.msgh_size = sizeof(req);
+                            buf.hdr.msgh_remote_port = mach_host_self();
+                            buf.hdr.msgh_local_port = reply;
+                            buf.hdr.msgh_id = 200;
+                            kern_return_t rc = fnMsg2(buf.bytes, opt64,
+                                                      (uint64_t)bits | ((uint64_t)sizeof(req) << 32),
+                                                      (uint64_t)mach_host_self() | ((uint64_t)reply << 32),
+                                                      (uint64_t)200U << 32,
+                                                      (uint64_t)reply << 32,
+                                                      (uint64_t)sizeof(buf), 0);
+                            if (rc == KERN_SUCCESS) {
+                                if (fnPutReply != NULL) fnPutReply(reply);
+                            } else if (fnDeallocReply != NULL) {
+                                fnDeallocReply(reply);
+                            }
+                            kern_return_t rrc = KERN_FAILURE;
+                            natural_t rcnt = 0;
+                            if (rc == KERN_SUCCESS && buf.hdr.msgh_id == 300 &&
+                                buf.hdr.msgh_size >= prefix + 8 + sizeof(host_basic_info_data_t)) {
+                                memcpy(&rrc, buf.bytes + prefix, sizeof(rrc));
+                                memcpy(&rcnt, buf.bytes + prefix + 4, sizeof(rcnt));
+                                host_basic_info_data_t migHost = {0};
+                                memcpy(&migHost, buf.bytes + prefix + 8, sizeof(migHost));
+                                hostMigOK = (rrc == KERN_SUCCESS && rcnt == HOST_BASIC_INFO_COUNT &&
+                                             migHost.max_mem == sysctlMem &&
+                                             migHost.max_mem == wrappedHost.max_mem &&
+                                             migHost.max_cpus == wrappedHost.max_cpus);
+                            }
+                        }
+                    }
+
+                    // TASK_VM_INFO (3405 -> 3505)
+                    {
+                        union {
+                            mach_msg_header_t hdr;
+                            uint8_t bytes[1024];
+                        } buf = {0};
+                        struct {
+                            mach_msg_header_t hdr;
+                            NDR_record_t ndr;
+                            int flavor;
+                            mach_msg_type_number_t count;
+                        } req = {0};
+                        mach_port_t reply = fnGetReply();
+                        if (MACH_PORT_VALID(reply)) {
+                            req.ndr = NDR_record;
+                            req.flavor = TASK_VM_INFO;
+                            req.count = TASK_VM_INFO_COUNT;
+                            memcpy(buf.bytes, &req, sizeof(req));
+                            buf.hdr.msgh_bits = bits;
+                            buf.hdr.msgh_size = sizeof(req);
+                            buf.hdr.msgh_remote_port = mach_task_self();
+                            buf.hdr.msgh_local_port = reply;
+                            buf.hdr.msgh_id = 3405;
+                            kern_return_t rc = fnMsg2(buf.bytes, opt64,
+                                                      (uint64_t)bits | ((uint64_t)sizeof(req) << 32),
+                                                      (uint64_t)mach_task_self() | ((uint64_t)reply << 32),
+                                                      (uint64_t)3405U << 32,
+                                                      (uint64_t)reply << 32,
+                                                      (uint64_t)sizeof(buf), 0);
+                            if (rc == KERN_SUCCESS) {
+                                if (fnPutReply != NULL) fnPutReply(reply);
+                            } else if (fnDeallocReply != NULL) {
+                                fnDeallocReply(reply);
+                            }
+                            kern_return_t rrc = KERN_FAILURE;
+                            natural_t rcnt = 0;
+                            size_t need = offsetof(task_vm_info_data_t, limit_bytes_remaining) + sizeof(mach_vm_size_t);
+                            if (rc == KERN_SUCCESS && buf.hdr.msgh_id == 3505 &&
+                                buf.hdr.msgh_size >= prefix + 8 + need) {
+                                memcpy(&rrc, buf.bytes + prefix, sizeof(rrc));
+                                memcpy(&rcnt, buf.bytes + prefix + 4, sizeof(rcnt));
+                                task_vm_info_data_t migVm = {0};
+                                size_t cbytes = ((size_t)rcnt * sizeof(natural_t) < sizeof(migVm))
+                                    ? (size_t)rcnt * sizeof(natural_t) : sizeof(migVm);
+                                memcpy(&migVm, buf.bytes + prefix + 8, cbytes);
+                                uint64_t migRem = (uint64_t)migVm.limit_bytes_remaining;
+                                uint64_t wrapRem = (uint64_t)wrappedVm.limit_bytes_remaining;
+                                taskMigOK = (rrc == KERN_SUCCESS &&
+                                             migRem > 0 &&
+                                             wrapRem > 0 &&
+                                             (migRem & 16383ULL) == 0 &&
+                                             (wrapRem & 16383ULL) == 0 &&
+                                             ((migRem + wrapRem) & 4095ULL) == 0);
+                            }
+                        }
+                    }
+                }
+                s11MigHostAndTaskOK = (hostMigOK && taskMigOK);
+            }
+        }
+
+        // Scenario 12: compat13_7 parity checks
+        BOOL s12FreadlinkHiddenOK = NO;
+        BOOL s12ExtensionKitHiddenOK = NO;
+        BOOL s12MetalCompat13GateOK = NO;
+        BOOL s12IORegGpuSanitizedOK = NO;
+        const char *testS12Env = getenv("HARNESS_TEST_SCENARIO12");
+        if (testS12Env != NULL && strcmp(testS12Env, "1") == 0) {
+            s12FreadlinkHiddenOK = (dlsym(RTLD_DEFAULT, "freadlink") == NULL);
+
+            {
+                unsigned int clsCount = 0;
+                Class *classes = objc_copyClassList(&clsCount);
+                unsigned int extKitCount = 0;
+                if (classes != NULL) {
+                    for (unsigned int i = 0; i < clsCount; i++) {
+                        const char *img = class_getImageName(classes[i]);
+                        if (img != NULL &&
+                            (strstr(img, "ExtensionKit.framework") != NULL ||
+                             strstr(img, "ExtensionFoundation.framework") != NULL)) {
+                            extKitCount++;
+                        }
+                    }
+                    free(classes);
+                }
+                s12ExtensionKitHiddenOK = (clsCount > 0 &&
+                                           extKitCount == 0 &&
+                                           NSClassFromString(@"_EXRunningExtension") == Nil);
+            }
+
+            {
+                dlopen("/System/Library/Frameworks/Metal.framework/Metal", RTLD_LAZY);
+                typedef CFTypeRef (*CreateDevFn)(void);
+                CreateDevFn fnDev = (CreateDevFn)dlsym(RTLD_DEFAULT, "MTLCreateSystemDefaultDevice");
+                Class optsCls = objc_getClass("MTLCompileOptions");
+                id dev = (fnDev != NULL) ? CFBridgingRelease(fnDev()) : nil;
+                if (dev != nil && optsCls != Nil) {
+                    SEL langSel = sel_registerName("languageVersion");
+                    SEL setLangSel = sel_registerName("setLanguageVersion:");
+                    SEL newLibSel = sel_registerName("newLibraryWithSource:options:error:");
+
+                    id defaultOpts = [optsCls new];
+                    NSUInteger defaultVer = 0;
+                    if (defaultOpts != nil && [defaultOpts respondsToSelector:langSel]) {
+                        defaultVer = ((NSUInteger (*)(id, SEL))objc_msgSend)(defaultOpts, langSel);
+                    }
+
+                    id opts23 = [optsCls new];
+                    if (opts23 != nil && [opts23 respondsToSelector:setLangSel]) {
+                        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(opts23, setLangSel, ((2U << 16) | 3U));
+                    }
+
+                    typedef id (*NewLibMsgSendFn)(id, SEL, NSString *, id, NSError * __autoreleasing *);
+                    NewLibMsgSendFn fnNewLib = (NewLibMsgSendFn)objc_msgSend;
+
+                    NSError * __autoreleasing err23 = nil;
+                    NSString *trivialSrc = @"#include <metal_stdlib>\nusing namespace metal;\nkernel void k(device float *a [[buffer(0)]]) { a[0] = 1.0f; }\n";
+                    id lib23 = fnNewLib(dev, newLibSel, trivialSrc, opts23, &err23);
+
+                    NSError * __autoreleasing errSimd = nil;
+                    id optsSimd = [optsCls new];
+                    NSString *simdSrc = @"#include <metal_stdlib>\n#include <metal_simdgroup_matrix>\nusing namespace metal;\nkernel void mat() {}\n";
+                    id libSimd = fnNewLib(dev, newLibSel, simdSrc, optsSimd, &errSimd);
+
+                    NSError * __autoreleasing errBenign = nil;
+                    id optsBenign = [optsCls new];
+                    id libBenign = fnNewLib(dev, newLibSel, trivialSrc, optsBenign, &errBenign);
+
+                    s12MetalCompat13GateOK = (defaultVer == ((2U << 16) | 2U) &&
+                                              lib23 == nil && err23 != nil &&
+                                              [err23.domain isEqualToString:@"MTLLibraryErrorDomain"] && err23.code == 3 &&
+                                              libSimd == nil && errSimd != nil &&
+                                              [errSimd.domain isEqualToString:@"MTLLibraryErrorDomain"] && errSimd.code == 3 &&
+                                              libBenign != nil && errBenign == nil);
+                }
+            }
+
+            {
+                dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY);
+                typedef CFMutableDictionaryRef (*MatchFn)(const char *);
+                typedef kern_return_t (*GetServicesFn)(mach_port_t, CFDictionaryRef, mach_port_t *);
+                typedef mach_port_t (*IterNextFn)(mach_port_t);
+                typedef kern_return_t (*GetNameFn)(mach_port_t, char *);
+                typedef kern_return_t (*ObjReleaseFn)(mach_port_t);
+
+                MatchFn fnMatch = (MatchFn)dlsym(RTLD_DEFAULT, "IOServiceMatching");
+                GetServicesFn fnGetSvcs = (GetServicesFn)dlsym(RTLD_DEFAULT, "IOServiceGetMatchingServices");
+                IterNextFn fnNext = (IterNextFn)dlsym(RTLD_DEFAULT, "IOIteratorNext");
+                GetNameFn fnGetClass = (GetNameFn)dlsym(RTLD_DEFAULT, "IOObjectGetClass");
+                GetNameFn fnGetName = (GetNameFn)dlsym(RTLD_DEFAULT, "IORegistryEntryGetName");
+                ObjReleaseFn fnRelease = (ObjReleaseFn)dlsym(RTLD_DEFAULT, "IOObjectRelease");
+
+                if (fnMatch != NULL && fnGetSvcs != NULL && fnNext != NULL &&
+                    fnGetClass != NULL && fnGetName != NULL && fnRelease != NULL) {
+                    mach_port_t iter = 0;
+                    CFMutableDictionaryRef matching = fnMatch("IOService");
+                    if (matching != NULL && fnGetSvcs(0, matching, &iter) == KERN_SUCCESS && iter != 0) {
+                        BOOL foundBad = NO;
+                        int scanned = 0;
+                        mach_port_t entry = 0;
+                        while ((entry = fnNext(iter)) != 0) {
+                            scanned++;
+                            char clsBuf[128] = {0};
+                            char nameBuf[128] = {0};
+                            const char *namesToCheck[2] = {NULL, NULL};
+                            if (fnGetClass(entry, clsBuf) == KERN_SUCCESS) {
+                                namesToCheck[0] = clsBuf;
+                            }
+                            if (fnGetName(entry, nameBuf) == KERN_SUCCESS) {
+                                namesToCheck[1] = nameBuf;
+                            }
+                            for (int idx = 0; idx < 2; idx++) {
+                                const char *s = namesToCheck[idx];
+                                if (s == NULL) continue;
+                                const char *digits = NULL;
+                                if (strncmp(s, "AGXAcceleratorG", 15) == 0) digits = s + 15;
+                                else if (strncmp(s, "AGXMetalG", 9) == 0) digits = s + 9;
+                                if (digits != NULL && digits[0] >= '0' && digits[0] <= '9') {
+                                    unsigned long gen = strtoul(digits, NULL, 10);
+                                    if (gen >= 13UL) {
+                                        foundBad = YES;
+                                    }
+                                }
+                            }
+                            fnRelease(entry);
+                        }
+                        fnRelease(iter);
+                        s12IORegGpuSanitizedOK = (scanned > 0 && !foundBad);
+                    }
+                }
+            }
         }
 
         NSString *stateDir = pt_state_dir();
@@ -2164,6 +2492,14 @@ int main(int argc, const char *argv[]) {
             @"s11FileRefPathValue": s11FileRefPathValue ?: @"",
             @"s11MGCopyAnswerWithErrorOK": s11MGCopyAnswerWithErrorOK ? @YES : @NO,
             @"s11AudioAndUTTypeHiddenOK": s11AudioAndUTTypeHiddenOK ? @YES : @NO,
+            @"s11SwapZeroOK": s11SwapZeroOK ? @YES : @NO,
+            @"s11SandboxDlsymOK": s11SandboxDlsymOK ? @YES : @NO,
+            @"s11CoreMotionPullCacheOK": s11CoreMotionPullCacheOK ? @YES : @NO,
+            @"s11MigHostAndTaskOK": s11MigHostAndTaskOK ? @YES : @NO,
+            @"s12FreadlinkHiddenOK": s12FreadlinkHiddenOK ? @YES : @NO,
+            @"s12ExtensionKitHiddenOK": s12ExtensionKitHiddenOK ? @YES : @NO,
+            @"s12MetalCompat13GateOK": s12MetalCompat13GateOK ? @YES : @NO,
+            @"s12IORegGpuSanitizedOK": s12IORegGpuSanitizedOK ? @YES : @NO,
             @"provPath": provPath,
             @"hidPCInstallGen": (hidPCInstallGenNS && hidPCInstallGenCF) ? @YES : @NO,
             @"provURLPath": provURLPath,
@@ -3369,6 +3705,10 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info11["s11FileRefAndFsgetpathOK"] is True,
         info11["s11MGCopyAnswerWithErrorOK"] is True,
         info11["s11AudioAndUTTypeHiddenOK"] is True,
+        info11["s11SwapZeroOK"] is True,
+        info11["s11SandboxDlsymOK"] is True,
+        info11["s11CoreMotionPullCacheOK"] is True,
+        info11["s11MigHostAndTaskOK"] is True,
     ]
     results.append(ScenarioResult(
         name="11. 1.0.4 audit & detect-v2 parity checks",
@@ -3382,6 +3722,64 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
     ))
     if verbose:
         print("  Scenario 11 payload:", {k: v for k, v in info11.items() if k.startswith("s11")})
+
+    # Scenario 12: compat13_7 parity (freadlink, ExtensionKit, Metal 2.3 gate, AGX IORegistry)
+    t12 = time.monotonic()
+    isolated_root_12 = work_dir / "IsolatedHome12"
+    container_data_12 = isolated_root_12 / "Library/Containers/app.makedie.harness.mockapp/Data"
+    container_data_12.mkdir(parents=True, exist_ok=True)
+    plist12_dir = isolated_root_12 / "Library/Containers/app.makedie.MacOver/PlayTools"
+    plist12_dir.mkdir(parents=True, exist_ok=True)
+    plist12 = plist12_dir / "app.makedie.harness.mockapp.plist"
+    with open(plist12, "wb") as fp:
+        plistlib.dump({
+            "bypass": False,
+            "strictEmulationMode": True,
+            "strictViewportOrientation": "landscape",
+            "strictViewportScaleMode": "fitScreen",
+            "reportedIOSVersion": "compat13_7",
+            "playChain": True,
+        }, fp)
+    marker12 = work_dir / "marker_12.txt"
+    env12 = env9(
+        marker12,
+        HARNESS_TEST_SCENARIO12="1",
+        APP_SANDBOX_CONTAINER_ID="app.makedie.harness.mockapp",
+        HARNESS_GRACEFUL_EXIT="1",
+    )
+    env12["HOME"] = str(container_data_12)
+    env12["CFFIXED_USER_HOME"] = str(container_data_12)
+    env12["PLAYTOOLS_SETTINGS_PLIST"] = str(plist12)
+    proc12 = run_cmd([str(patched_bin)], env=env12, check=False)
+    if proc12.returncode != 0:
+        results.append(ScenarioResult(
+            name="12. compat13_7 parity (freadlink, ExtensionKit, Metal 2.3 gate, AGX IORegistry)",
+            passed=False,
+            duration_sec=time.monotonic() - t12,
+            details=f"rc={proc12.returncode}\nstdout={proc12.stdout}\nstderr={proc12.stderr}",
+        ))
+        return results
+
+    info12 = parse_harness_json(proc12.stdout)
+    checks12 = [
+        info12["safeModeActive"] is False,
+        info12["reportedIOSVersion"] == "compat13_7",
+        info12["s12FreadlinkHiddenOK"] is True,
+        info12["s12ExtensionKitHiddenOK"] is True,
+        info12["s12MetalCompat13GateOK"] is True,
+        info12["s12IORegGpuSanitizedOK"] is True,
+    ]
+    results.append(ScenarioResult(
+        name="12. compat13_7 parity (freadlink, ExtensionKit, Metal 2.3 gate, AGX IORegistry)",
+        passed=all(checks12),
+        duration_sec=time.monotonic() - t12,
+        details=json.dumps({
+            "reportedIOSVersion": info12["reportedIOSVersion"],
+            **{k: v for k, v in info12.items() if k.startswith("s12")},
+        }, sort_keys=True),
+    ))
+    if verbose:
+        print("  Scenario 12 payload:", {k: v for k, v in info12.items() if k.startswith("s12")})
 
     return results
 

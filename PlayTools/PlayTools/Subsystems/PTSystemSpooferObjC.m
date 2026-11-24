@@ -5292,6 +5292,15 @@ __attribute__((visibility("hidden")))
 @property (nonatomic, assign) uint64_t dmGen;
 @property (nonatomic, assign) BOOL hasExplicitMagUpdateInterval;
 @property (nonatomic, assign) NSTimeInterval explicitMagUpdateInterval;
+@property (nonatomic, assign) CMAttitudeReferenceFrame dmReferenceFrame;
+@property (nonatomic, strong) id lastAccelSample;
+@property (nonatomic, assign) double lastAccelMonoSec;
+@property (nonatomic, strong) id lastGyroSample;
+@property (nonatomic, assign) double lastGyroMonoSec;
+@property (nonatomic, strong) id lastMagSample;
+@property (nonatomic, assign) double lastMagMonoSec;
+@property (nonatomic, strong) id lastDMSample;
+@property (nonatomic, assign) double lastDMMonoSec;
 @property (nonatomic, strong) dispatch_source_t accelTimer;
 @property (nonatomic, strong) dispatch_source_t gyroTimer;
 @property (nonatomic, strong) dispatch_source_t magTimer;
@@ -6635,6 +6644,61 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
     return [self pm_ps_cm_isRelativeAltitudeAvailable];
 }
 
+static CMAttitudeReferenceFrame ps_cm_default_reference_frames_mask(void) {
+    return (CMAttitudeReferenceFrame)(CMAttitudeReferenceFrameXArbitraryZVertical |
+                                      CMAttitudeReferenceFrameXArbitraryCorrectedZVertical |
+                                      CMAttitudeReferenceFrameXMagneticNorthZVertical |
+                                      CMAttitudeReferenceFrameXTrueNorthZVertical);
+}
+
+static CMAttitudeReferenceFrame ps_cm_fallback_availableAttitudeReferenceFrames(id self __unused, SEL _cmd __unused) {
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return ps_cm_default_reference_frames_mask();
+    }
+    return 0;
+}
+
++ (CMAttitudeReferenceFrame) pm_ps_cm_availableAttitudeReferenceFrames {
+    CMAttitudeReferenceFrame orig = [self pm_ps_cm_availableAttitudeReferenceFrames];
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        orig == 0) {
+        return ps_cm_default_reference_frames_mask();
+    }
+    return orig;
+}
+
+static CMAttitudeReferenceFrame ps_cm_fallback_attitudeReferenceFrame(id self, SEL _cmd __unused) {
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        PSVirtualMotionState *st = ps_motion_state(self, NO);
+        if (st != nil) {
+            @synchronized (st) {
+                if (st.dmActive && st.dmReferenceFrame != 0) {
+                    return st.dmReferenceFrame;
+                }
+            }
+        }
+        return CMAttitudeReferenceFrameXArbitraryZVertical;
+    }
+    return 0;
+}
+
+- (CMAttitudeReferenceFrame) pm_ps_cm_attitudeReferenceFrame {
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        PSVirtualMotionState *st = ps_motion_state(self, NO);
+        if (st != nil) {
+            @synchronized (st) {
+                if (st.dmActive && st.dmReferenceFrame != 0) {
+                    return st.dmReferenceFrame;
+                }
+            }
+        }
+        CMAttitudeReferenceFrame orig = [self pm_ps_cm_attitudeReferenceFrame];
+        return (orig != 0) ? orig : CMAttitudeReferenceFrameXArbitraryZVertical;
+    }
+    return [self pm_ps_cm_attitudeReferenceFrame];
+}
+
 - (NSTimeInterval) pm_ps_cm_magnetometerUpdateInterval {
     if (pt_is_bypass_enabled() &&
         !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
@@ -6719,19 +6783,45 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
     return orig;
 }
 
+static inline id ps_cm_cached_pull_sample(BOOL active,
+                                          id currentSample,
+                                          double currentMono,
+                                          NSTimeInterval rawInterval,
+                                          const char *className,
+                                          void (^saveBlock)(id sample, double mono)) {
+    if (!active) {
+        return nil;
+    }
+    double eff = (isfinite(rawInterval) && rawInterval >= 0.01) ? rawInterval : 0.01;
+    double now = [[NSProcessInfo processInfo] systemUptime];
+    if (currentSample != nil && now >= currentMono && (now - currentMono) < eff) {
+        return currentSample;
+    }
+    id fresh = ps_make_virtual_sample_instance(objc_getClass(className));
+    if (fresh != nil && saveBlock != nil) {
+        saveBlock(fresh, now);
+    }
+    return fresh;
+}
+
 - (CMAccelerometerData *) pm_ps_cm_accelerometerData {
     CMAccelerometerData *orig = [self pm_ps_cm_accelerometerData];
     ps_cm_observe_real_sample(orig);
     if (orig == nil && pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         PSVirtualMotionState *st = ps_motion_state(self, NO);
-        BOOL active = NO;
         if (st != nil) {
+            NSTimeInterval iv = ((CMMotionManager *)self).accelerometerUpdateInterval;
             @synchronized (st) {
-                active = st.accelActive;
+                return ps_cm_cached_pull_sample(st.accelActive,
+                                                st.lastAccelSample,
+                                                st.lastAccelMonoSec,
+                                                iv,
+                                                "CMAccelerometerData",
+                                                ^(id sample, double mono) {
+                                                    st.lastAccelSample = sample;
+                                                    st.lastAccelMonoSec = mono;
+                                                });
             }
-        }
-        if (active) {
-            return ps_make_virtual_sample_instance(objc_getClass("CMAccelerometerData"));
         }
     }
     return orig;
@@ -6742,14 +6832,19 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
     ps_cm_observe_real_sample(orig);
     if (orig == nil && pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         PSVirtualMotionState *st = ps_motion_state(self, NO);
-        BOOL active = NO;
         if (st != nil) {
+            NSTimeInterval iv = ((CMMotionManager *)self).gyroUpdateInterval;
             @synchronized (st) {
-                active = st.gyroActive;
+                return ps_cm_cached_pull_sample(st.gyroActive,
+                                                st.lastGyroSample,
+                                                st.lastGyroMonoSec,
+                                                iv,
+                                                "CMGyroData",
+                                                ^(id sample, double mono) {
+                                                    st.lastGyroSample = sample;
+                                                    st.lastGyroMonoSec = mono;
+                                                });
             }
-        }
-        if (active) {
-            return ps_make_virtual_sample_instance(objc_getClass("CMGyroData"));
         }
     }
     return orig;
@@ -6760,14 +6855,19 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
     ps_cm_observe_real_sample(orig);
     if (orig == nil && pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         PSVirtualMotionState *st = ps_motion_state(self, NO);
-        BOOL active = NO;
         if (st != nil) {
+            NSTimeInterval iv = ps_effective_mag_update_interval(self);
             @synchronized (st) {
-                active = st.magActive;
+                return ps_cm_cached_pull_sample(st.magActive,
+                                                st.lastMagSample,
+                                                st.lastMagMonoSec,
+                                                iv,
+                                                "CMMagnetometerData",
+                                                ^(id sample, double mono) {
+                                                    st.lastMagSample = sample;
+                                                    st.lastMagMonoSec = mono;
+                                                });
             }
-        }
-        if (active) {
-            return ps_make_virtual_sample_instance(objc_getClass("CMMagnetometerData"));
         }
     }
     return orig;
@@ -6778,14 +6878,19 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
     ps_cm_observe_real_sample(orig);
     if (orig == nil && pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         PSVirtualMotionState *st = ps_motion_state(self, NO);
-        BOOL active = NO;
         if (st != nil) {
+            NSTimeInterval iv = ((CMMotionManager *)self).deviceMotionUpdateInterval;
             @synchronized (st) {
-                active = st.dmActive;
+                return ps_cm_cached_pull_sample(st.dmActive,
+                                                st.lastDMSample,
+                                                st.lastDMMonoSec,
+                                                iv,
+                                                "CMDeviceMotion",
+                                                ^(id sample, double mono) {
+                                                    st.lastDMSample = sample;
+                                                    st.lastDMMonoSec = mono;
+                                                });
             }
-        }
-        if (active) {
-            return ps_make_virtual_sample_instance(objc_getClass("CMDeviceMotion"));
         }
     }
     return orig;
@@ -6798,6 +6903,8 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
         PSVirtualMotionState *st = ps_motion_state(self, YES);
         @synchronized (st) {
             st.accelActive = YES;
+            st.lastAccelSample = nil;
+            st.lastAccelMonoSec = 0.0;
         }
     }
     [self pm_ps_cm_startAccelerometerUpdates];
@@ -6810,6 +6917,8 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
         PSVirtualMotionState *st = ps_motion_state(self, YES);
         @synchronized (st) {
             st.accelActive = YES;
+            st.lastAccelSample = nil;
+            st.lastAccelMonoSec = 0.0;
             uint64_t gen = ++st.accelGen;
             if (st.accelTimer) { dispatch_source_cancel(st.accelTimer); st.accelTimer = nil; }
             if (handler != nil) {
@@ -6856,6 +6965,8 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
         @synchronized (st) {
             st.accelActive = NO;
             st.accelGen++;
+            st.lastAccelSample = nil;
+            st.lastAccelMonoSec = 0.0;
             if (st.accelTimer) { dispatch_source_cancel(st.accelTimer); st.accelTimer = nil; }
         }
     }
@@ -6869,6 +6980,8 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
         PSVirtualMotionState *st = ps_motion_state(self, YES);
         @synchronized (st) {
             st.gyroActive = YES;
+            st.lastGyroSample = nil;
+            st.lastGyroMonoSec = 0.0;
         }
     }
     [self pm_ps_cm_startGyroUpdates];
@@ -6881,6 +6994,8 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
         PSVirtualMotionState *st = ps_motion_state(self, YES);
         @synchronized (st) {
             st.gyroActive = YES;
+            st.lastGyroSample = nil;
+            st.lastGyroMonoSec = 0.0;
             uint64_t gen = ++st.gyroGen;
             if (st.gyroTimer) { dispatch_source_cancel(st.gyroTimer); st.gyroTimer = nil; }
             if (handler != nil) {
@@ -6927,6 +7042,8 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
         @synchronized (st) {
             st.gyroActive = NO;
             st.gyroGen++;
+            st.lastGyroSample = nil;
+            st.lastGyroMonoSec = 0.0;
             if (st.gyroTimer) { dispatch_source_cancel(st.gyroTimer); st.gyroTimer = nil; }
         }
     }
@@ -6940,6 +7057,8 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
         PSVirtualMotionState *st = ps_motion_state(self, YES);
         @synchronized (st) {
             st.magActive = YES;
+            st.lastMagSample = nil;
+            st.lastMagMonoSec = 0.0;
         }
     }
     [self pm_ps_cm_startMagnetometerUpdates];
@@ -6952,6 +7071,8 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
         PSVirtualMotionState *st = ps_motion_state(self, YES);
         @synchronized (st) {
             st.magActive = YES;
+            st.lastMagSample = nil;
+            st.lastMagMonoSec = 0.0;
             uint64_t gen = ++st.magGen;
             if (st.magTimer) { dispatch_source_cancel(st.magTimer); st.magTimer = nil; }
             if (handler != nil) {
@@ -6998,6 +7119,8 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
         @synchronized (st) {
             st.magActive = NO;
             st.magGen++;
+            st.lastMagSample = nil;
+            st.lastMagMonoSec = 0.0;
             if (st.magTimer) { dispatch_source_cancel(st.magTimer); st.magTimer = nil; }
         }
     }
@@ -7011,6 +7134,9 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
         PSVirtualMotionState *st = ps_motion_state(self, YES);
         @synchronized (st) {
             st.dmActive = YES;
+            st.dmReferenceFrame = CMAttitudeReferenceFrameXArbitraryZVertical;
+            st.lastDMSample = nil;
+            st.lastDMMonoSec = 0.0;
         }
     }
     [self pm_ps_cm_startDeviceMotionUpdates];
@@ -7023,6 +7149,9 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
         PSVirtualMotionState *st = ps_motion_state(self, YES);
         @synchronized (st) {
             st.dmActive = YES;
+            st.dmReferenceFrame = (frame != 0) ? frame : CMAttitudeReferenceFrameXArbitraryZVertical;
+            st.lastDMSample = nil;
+            st.lastDMMonoSec = 0.0;
         }
     }
     [self pm_ps_cm_startDeviceMotionUpdatesUsingReferenceFrame:frame];
@@ -7035,6 +7164,9 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
         PSVirtualMotionState *st = ps_motion_state(self, YES);
         @synchronized (st) {
             st.dmActive = YES;
+            st.dmReferenceFrame = CMAttitudeReferenceFrameXArbitraryZVertical;
+            st.lastDMSample = nil;
+            st.lastDMMonoSec = 0.0;
             uint64_t gen = ++st.dmGen;
             if (st.dmTimer) { dispatch_source_cancel(st.dmTimer); st.dmTimer = nil; }
             if (handler != nil) {
@@ -7084,6 +7216,9 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
         PSVirtualMotionState *st = ps_motion_state(self, YES);
         @synchronized (st) {
             st.dmActive = YES;
+            st.dmReferenceFrame = (frame != 0) ? frame : CMAttitudeReferenceFrameXArbitraryZVertical;
+            st.lastDMSample = nil;
+            st.lastDMMonoSec = 0.0;
             uint64_t gen = ++st.dmGen;
             if (st.dmTimer) { dispatch_source_cancel(st.dmTimer); st.dmTimer = nil; }
             if (handler != nil) {
@@ -7130,6 +7265,9 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
         @synchronized (st) {
             st.dmActive = NO;
             st.dmGen++;
+            st.dmReferenceFrame = 0;
+            st.lastDMSample = nil;
+            st.lastDMMonoSec = 0.0;
             if (st.dmTimer) { dispatch_source_cancel(st.dmTimer); st.dmTimer = nil; }
         }
     }
@@ -7368,6 +7506,29 @@ static void ps_install_coremotion_hooks_if_loaded(void) {
     if (cmCls != Nil) {
         static dispatch_once_t cmOnce;
         dispatch_once(&cmOnce, ^{
+            char frameTypes[32];
+            snprintf(frameTypes, sizeof(frameTypes), "%s@:", @encode(CMAttitudeReferenceFrame));
+            SEL availFramesSel = sel_registerName("availableAttitudeReferenceFrames");
+            if (class_getClassMethod(cmCls, availFramesSel) != NULL) {
+                ps_swizzle_class_method(cmCls, availFramesSel, @selector(pm_ps_cm_availableAttitudeReferenceFrames));
+            } else {
+                Class metaCls = object_getClass(cmCls);
+                if (metaCls != Nil) {
+                    class_addMethod(metaCls,
+                                    availFramesSel,
+                                    (IMP)ps_cm_fallback_availableAttitudeReferenceFrames,
+                                    frameTypes);
+                }
+            }
+            SEL attFrameSel = sel_registerName("attitudeReferenceFrame");
+            if (class_getInstanceMethod(cmCls, attFrameSel) != NULL) {
+                ps_swizzle_instance_method(cmCls, attFrameSel, @selector(pm_ps_cm_attitudeReferenceFrame));
+            } else {
+                class_addMethod(cmCls,
+                                attFrameSel,
+                                (IMP)ps_cm_fallback_attitudeReferenceFrame,
+                                frameTypes);
+            }
             ps_swizzle_instance_method(cmCls, @selector(isAccelerometerAvailable), @selector(pm_ps_cm_isAccelerometerAvailable));
             ps_swizzle_instance_method(cmCls, @selector(isGyroAvailable), @selector(pm_ps_cm_isGyroAvailable));
             ps_swizzle_instance_method(cmCls, @selector(isMagnetometerAvailable), @selector(pm_ps_cm_isMagnetometerAvailable));

@@ -1411,6 +1411,15 @@ static int pt_sandbox_check_impl(BOOL use_audit_token,
             strcasestr(sarg, "akinterface") != NULL) {
             return 1;
         }
+        if (filter == 2 &&
+            (strcmp(sarg, "com.apple.dock.server") == 0 ||
+             strncmp(sarg, "com.apple.dock.", 15) == 0 ||
+             strncmp(sarg, "com.apple.windowserver.", 23) == 0 ||
+             strncmp(sarg, "com.apple.finder.", 17) == 0 ||
+             strncmp(sarg, "com.apple.coreservices.launchservicesd", 38) == 0 ||
+             strncmp(sarg, "com.apple.loginwindow", 21) == 0)) {
+            return 1;
+        }
     }
     return use_audit_token ? sandbox_check_by_audit_token(au, operation, type, arg1)
                            : sandbox_check(pid, operation, type, arg1);
@@ -1431,6 +1440,20 @@ static int pt_sandbox_check_by_audit_token(audit_token_t au, const char *operati
     int ret = pt_sandbox_check_impl(YES, 0, au, operation, type, ap, __builtin_return_address(0));
     va_end(ap);
     return ret;
+}
+
+__attribute__((visibility("hidden")))
+void *pt_entitlements_dlsym_route(const char *symbol) {
+    if (symbol == NULL) {
+        return NULL;
+    }
+    if (strcmp(symbol, "sandbox_check") == 0) {
+        return (void *)&pt_sandbox_check;
+    }
+    if (strcmp(symbol, "sandbox_check_by_audit_token") == 0) {
+        return (void *)&pt_sandbox_check_by_audit_token;
+    }
+    return NULL;
 }
 
 
