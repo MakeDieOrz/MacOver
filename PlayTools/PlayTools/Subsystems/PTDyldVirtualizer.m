@@ -1115,69 +1115,86 @@ typedef uint32_t (*pt_dyld_process_info_get_platform_fn)(pt_dyld_process_info_t 
 typedef void (*pt_dyld_process_info_get_cache_fn)(pt_dyld_process_info_t info, void *cacheInfo);
 typedef void (*pt_dyld_process_info_get_state_fn)(pt_dyld_process_info_t info, void *stateInfo);
 
-static pt_dyld_process_info_create_fn pt_resolve_dyld_process_info_create(void) {
-    static pt_dyld_process_info_create_fn s_fn = NULL;
+typedef struct {
+    void *plain_fn;
+    void *underscored_fn;
+} pt_dyld_proc_info_sym_t;
+
+static void pt_resolve_dual_dyld_sym(pt_dyld_proc_info_sym_t *out,
+                                     const char *plainName,
+                                     const char *underscoredName) {
+    out->plain_fn = dlsym(RTLD_NEXT, plainName);
+    out->underscored_fn = dlsym(RTLD_NEXT, underscoredName);
+}
+
+static const pt_dyld_proc_info_sym_t *pt_dyld_process_info_create_sym(void) {
+    static pt_dyld_proc_info_sym_t s_sym = { NULL, NULL };
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        void *p = dlsym(RTLD_NEXT, "dyld_process_info_create");
-        if (p == NULL) {
-            p = dlsym(RTLD_NEXT, "_dyld_process_info_create");
-        }
-        s_fn = (pt_dyld_process_info_create_fn)p;
+        pt_resolve_dual_dyld_sym(&s_sym, "dyld_process_info_create", "_dyld_process_info_create");
     });
-    return s_fn;
+    return &s_sym;
+}
+
+static pt_dyld_process_info_create_fn pt_resolve_dyld_process_info_create(void) {
+    const pt_dyld_proc_info_sym_t *sym = pt_dyld_process_info_create_sym();
+    return (pt_dyld_process_info_create_fn)(sym->underscored_fn != NULL ? sym->underscored_fn : sym->plain_fn);
+}
+
+static const pt_dyld_proc_info_sym_t *pt_dyld_process_info_for_each_image_sym(void) {
+    static pt_dyld_proc_info_sym_t s_sym = { NULL, NULL };
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        pt_resolve_dual_dyld_sym(&s_sym, "dyld_process_info_for_each_image", "_dyld_process_info_for_each_image");
+    });
+    return &s_sym;
 }
 
 static pt_dyld_process_info_for_each_image_fn pt_resolve_dyld_process_info_for_each_image(void) {
-    static pt_dyld_process_info_for_each_image_fn s_fn = NULL;
+    const pt_dyld_proc_info_sym_t *sym = pt_dyld_process_info_for_each_image_sym();
+    return (pt_dyld_process_info_for_each_image_fn)(sym->underscored_fn != NULL ? sym->underscored_fn : sym->plain_fn);
+}
+
+static const pt_dyld_proc_info_sym_t *pt_dyld_process_info_get_platform_sym(void) {
+    static pt_dyld_proc_info_sym_t s_sym = { NULL, NULL };
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        void *p = dlsym(RTLD_NEXT, "dyld_process_info_for_each_image");
-        if (p == NULL) {
-            p = dlsym(RTLD_NEXT, "_dyld_process_info_for_each_image");
-        }
-        s_fn = (pt_dyld_process_info_for_each_image_fn)p;
+        pt_resolve_dual_dyld_sym(&s_sym, "dyld_process_info_get_platform", "_dyld_process_info_get_platform");
     });
-    return s_fn;
+    return &s_sym;
 }
 
 static pt_dyld_process_info_get_platform_fn pt_resolve_dyld_process_info_get_platform(void) {
-    static pt_dyld_process_info_get_platform_fn s_fn = NULL;
+    const pt_dyld_proc_info_sym_t *sym = pt_dyld_process_info_get_platform_sym();
+    return (pt_dyld_process_info_get_platform_fn)(sym->underscored_fn != NULL ? sym->underscored_fn : sym->plain_fn);
+}
+
+static const pt_dyld_proc_info_sym_t *pt_dyld_process_info_get_cache_sym(void) {
+    static pt_dyld_proc_info_sym_t s_sym = { NULL, NULL };
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        void *p = dlsym(RTLD_NEXT, "dyld_process_info_get_platform");
-        if (p == NULL) {
-            p = dlsym(RTLD_NEXT, "_dyld_process_info_get_platform");
-        }
-        s_fn = (pt_dyld_process_info_get_platform_fn)p;
+        pt_resolve_dual_dyld_sym(&s_sym, "dyld_process_info_get_cache", "_dyld_process_info_get_cache");
     });
-    return s_fn;
+    return &s_sym;
 }
 
 static pt_dyld_process_info_get_cache_fn pt_resolve_dyld_process_info_get_cache(void) {
-    static pt_dyld_process_info_get_cache_fn s_fn = NULL;
+    const pt_dyld_proc_info_sym_t *sym = pt_dyld_process_info_get_cache_sym();
+    return (pt_dyld_process_info_get_cache_fn)(sym->underscored_fn != NULL ? sym->underscored_fn : sym->plain_fn);
+}
+
+static const pt_dyld_proc_info_sym_t *pt_dyld_process_info_get_state_sym(void) {
+    static pt_dyld_proc_info_sym_t s_sym = { NULL, NULL };
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        void *p = dlsym(RTLD_NEXT, "dyld_process_info_get_cache");
-        if (p == NULL) {
-            p = dlsym(RTLD_NEXT, "_dyld_process_info_get_cache");
-        }
-        s_fn = (pt_dyld_process_info_get_cache_fn)p;
+        pt_resolve_dual_dyld_sym(&s_sym, "dyld_process_info_get_state", "_dyld_process_info_get_state");
     });
-    return s_fn;
+    return &s_sym;
 }
 
 static pt_dyld_process_info_get_state_fn pt_resolve_dyld_process_info_get_state(void) {
-    static pt_dyld_process_info_get_state_fn s_fn = NULL;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        void *p = dlsym(RTLD_NEXT, "dyld_process_info_get_state");
-        if (p == NULL) {
-            p = dlsym(RTLD_NEXT, "_dyld_process_info_get_state");
-        }
-        s_fn = (pt_dyld_process_info_get_state_fn)p;
-    });
-    return s_fn;
+    const pt_dyld_proc_info_sym_t *sym = pt_dyld_process_info_get_state_sym();
+    return (pt_dyld_process_info_get_state_fn)(sym->underscored_fn != NULL ? sym->underscored_fn : sym->plain_fn);
 }
 
 static pt_dyld_process_info_t pt_dyld_process_info_create(task_t task, uint64_t timestamp, kern_return_t *kernelError) {
@@ -1326,17 +1343,19 @@ static uintptr_t s_post13_dsc_start = 0;
 static uintptr_t s_post13_dsc_end = 0;
 static _Atomic uint32_t s_post13_cached_image_count = 0;
 
-static void pt_rebuild_post13_range_cache_locked(uint32_t cur_ic) {
-    s_post13_range_count = 0;
-    s_post13_range_overflow = NO;
-    s_post13_dsc_start = 0;
-    s_post13_dsc_end = 0;
+static void pt_rebuild_post13_range_cache(uint32_t cur_ic) {
+    // Collect ranges outside s_post13_range_lock to avoid ABBA lock inversion with dyld.
+    PTPost13AddrRange local_ranges[PT_POST13_MAX_RANGES];
+    uint32_t local_count = 0;
+    BOOL local_overflow = NO;
+    uintptr_t local_dsc_start = 0;
+    uintptr_t local_dsc_end = 0;
     if (_dyld_get_shared_cache_range != NULL) {
         size_t dsc_len = 0;
         const void *dsc_base = _dyld_get_shared_cache_range(&dsc_len);
         if (dsc_base != NULL && dsc_len > 0 && (uintptr_t)dsc_base <= UINTPTR_MAX - dsc_len) {
-            s_post13_dsc_start = (uintptr_t)dsc_base;
-            s_post13_dsc_end = s_post13_dsc_start + (uintptr_t)dsc_len;
+            local_dsc_start = (uintptr_t)dsc_base;
+            local_dsc_end = local_dsc_start + (uintptr_t)dsc_len;
         }
     }
     for (uint32_t i = 0; i < cur_ic; i++) {
@@ -1364,13 +1383,13 @@ static void pt_rebuild_post13_range_cache_locked(uint32_t cur_ic) {
                 if (seg->vmsize > 0 && strcmp(seg->segname, "__LINKEDIT") != 0) {
                     uintptr_t start = (uintptr_t)((int64_t)seg->vmaddr + (int64_t)slide);
                     if (seg->vmsize <= UINTPTR_MAX - start) {
-                        if (s_post13_range_count < PT_POST13_MAX_RANGES) {
-                            s_post13_ranges[s_post13_range_count++] = (PTPost13AddrRange){
+                        if (local_count < PT_POST13_MAX_RANGES) {
+                            local_ranges[local_count++] = (PTPost13AddrRange){
                                 .start = start,
                                 .end = start + (uintptr_t)seg->vmsize
                             };
                         } else {
-                            s_post13_range_overflow = YES;
+                            local_overflow = YES;
                         }
                     }
                 }
@@ -1378,7 +1397,16 @@ static void pt_rebuild_post13_range_cache_locked(uint32_t cur_ic) {
             p += lc->cmdsize;
         }
     }
+    os_unfair_lock_lock(&s_post13_range_lock);
+    if (local_count > 0) {
+        memcpy(s_post13_ranges, local_ranges, (size_t)local_count * sizeof(PTPost13AddrRange));
+    }
+    s_post13_range_count = local_count;
+    s_post13_range_overflow = local_overflow;
+    s_post13_dsc_start = local_dsc_start;
+    s_post13_dsc_end = local_dsc_end;
     atomic_store_explicit(&s_post13_cached_image_count, cur_ic, memory_order_release);
+    os_unfair_lock_unlock(&s_post13_range_lock);
 }
 
 static BOOL pt_is_hidden_post13_7_class(Class cls) {
@@ -1387,11 +1415,7 @@ static BOOL pt_is_hidden_post13_7_class(Class cls) {
     }
     uint32_t cur_ic = _dyld_image_count();
     if (cur_ic != atomic_load_explicit(&s_post13_cached_image_count, memory_order_acquire)) {
-        os_unfair_lock_lock(&s_post13_range_lock);
-        if (cur_ic != atomic_load_explicit(&s_post13_cached_image_count, memory_order_relaxed)) {
-            pt_rebuild_post13_range_cache_locked(cur_ic);
-        }
-        os_unfair_lock_unlock(&s_post13_range_lock);
+        pt_rebuild_post13_range_cache(cur_ic);
     }
 
     uintptr_t addr = (uintptr_t)cls;
@@ -1427,62 +1451,77 @@ static uintptr_t s_hidden_img_dsc_end = 0;
 static _Atomic uint32_t s_hidden_img_cached_image_count = 0;
 static _Atomic uint64_t s_hidden_img_cached_reg_gen = UINT64_MAX;
 
-static void pt_rebuild_hidden_img_range_cache_locked(uint32_t cur_ic, uint64_t cur_reg_gen) {
-    s_hidden_img_range_count = 0;
-    s_hidden_img_range_overflow = NO;
-    s_hidden_img_dsc_start = 0;
-    s_hidden_img_dsc_end = 0;
+static void pt_rebuild_hidden_img_range_cache(uint32_t cur_ic, uint64_t cur_reg_gen) {
+    // Collect ranges outside s_hidden_img_range_lock to avoid ABBA lock inversion with dyld/PTRegistration.
+    PTPost13AddrRange *local_ranges =
+        (PTPost13AddrRange *)malloc(PT_HIDDEN_IMG_MAX_RANGES * sizeof(PTPost13AddrRange));
+    uint32_t local_count = 0;
+    BOOL local_overflow = (local_ranges == NULL);
+    uintptr_t local_dsc_start = 0;
+    uintptr_t local_dsc_end = 0;
     if (_dyld_get_shared_cache_range != NULL) {
         size_t dsc_len = 0;
         const void *dsc_base = _dyld_get_shared_cache_range(&dsc_len);
         if (dsc_base != NULL && dsc_len > 0 && (uintptr_t)dsc_base <= UINTPTR_MAX - dsc_len) {
-            s_hidden_img_dsc_start = (uintptr_t)dsc_base;
-            s_hidden_img_dsc_end = s_hidden_img_dsc_start + (uintptr_t)dsc_len;
+            local_dsc_start = (uintptr_t)dsc_base;
+            local_dsc_end = local_dsc_start + (uintptr_t)dsc_len;
         }
     }
-    for (uint32_t i = 0; i < cur_ic; i++) {
-        const char *name = _dyld_get_image_name(i);
-        const struct mach_header *raw_mh = _dyld_get_image_header(i);
-        if ((name == NULL || !pt_is_hidden_dyld_image_name(name)) &&
-            (raw_mh == NULL || !pt_is_hidden_dyld_image_header(raw_mh))) {
-            continue;
-        }
-        const struct mach_header_64 *mh = (const struct mach_header_64 *)raw_mh;
-        if (mh == NULL || mh->magic != MH_MAGIC_64) {
-            continue;
-        }
-        intptr_t slide = _dyld_get_image_vmaddr_slide(i);
-        const uint8_t *p = (const uint8_t *)(mh + 1);
-        const uint8_t *cmds_end = p + mh->sizeofcmds;
-        for (uint32_t c = 0; c < mh->ncmds; c++) {
-            if ((size_t)(cmds_end - p) < sizeof(struct load_command)) {
-                break;
+    if (local_ranges != NULL) {
+        for (uint32_t i = 0; i < cur_ic; i++) {
+            const char *name = _dyld_get_image_name(i);
+            const struct mach_header *raw_mh = _dyld_get_image_header(i);
+            if ((name == NULL || !pt_is_hidden_dyld_image_name(name)) &&
+                (raw_mh == NULL || !pt_is_hidden_dyld_image_header(raw_mh))) {
+                continue;
             }
-            const struct load_command *lc = (const struct load_command *)p;
-            if (lc->cmdsize < sizeof(struct load_command) || (size_t)(cmds_end - p) < lc->cmdsize) {
-                break;
+            const struct mach_header_64 *mh = (const struct mach_header_64 *)raw_mh;
+            if (mh == NULL || mh->magic != MH_MAGIC_64) {
+                continue;
             }
-            if (lc->cmd == LC_SEGMENT_64 && lc->cmdsize >= sizeof(struct segment_command_64)) {
-                const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
-                if (seg->vmsize > 0 && strcmp(seg->segname, "__LINKEDIT") != 0) {
-                    uintptr_t start = (uintptr_t)((int64_t)seg->vmaddr + (int64_t)slide);
-                    if (seg->vmsize <= UINTPTR_MAX - start) {
-                        if (s_hidden_img_range_count < PT_HIDDEN_IMG_MAX_RANGES) {
-                            s_hidden_img_ranges[s_hidden_img_range_count++] = (PTPost13AddrRange){
-                                .start = start,
-                                .end = start + (uintptr_t)seg->vmsize
-                            };
-                        } else {
-                            s_hidden_img_range_overflow = YES;
+            intptr_t slide = _dyld_get_image_vmaddr_slide(i);
+            const uint8_t *p = (const uint8_t *)(mh + 1);
+            const uint8_t *cmds_end = p + mh->sizeofcmds;
+            for (uint32_t c = 0; c < mh->ncmds; c++) {
+                if ((size_t)(cmds_end - p) < sizeof(struct load_command)) {
+                    break;
+                }
+                const struct load_command *lc = (const struct load_command *)p;
+                if (lc->cmdsize < sizeof(struct load_command) || (size_t)(cmds_end - p) < lc->cmdsize) {
+                    break;
+                }
+                if (lc->cmd == LC_SEGMENT_64 && lc->cmdsize >= sizeof(struct segment_command_64)) {
+                    const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+                    if (seg->vmsize > 0 && strcmp(seg->segname, "__LINKEDIT") != 0) {
+                        uintptr_t start = (uintptr_t)((int64_t)seg->vmaddr + (int64_t)slide);
+                        if (seg->vmsize <= UINTPTR_MAX - start) {
+                            if (local_count < PT_HIDDEN_IMG_MAX_RANGES) {
+                                local_ranges[local_count++] = (PTPost13AddrRange){
+                                    .start = start,
+                                    .end = start + (uintptr_t)seg->vmsize
+                                };
+                            } else {
+                                local_overflow = YES;
+                            }
                         }
                     }
                 }
+                p += lc->cmdsize;
             }
-            p += lc->cmdsize;
         }
     }
+    os_unfair_lock_lock(&s_hidden_img_range_lock);
+    if (local_ranges != NULL && local_count > 0) {
+        memcpy(s_hidden_img_ranges, local_ranges, (size_t)local_count * sizeof(PTPost13AddrRange));
+    }
+    s_hidden_img_range_count = local_count;
+    s_hidden_img_range_overflow = local_overflow;
+    s_hidden_img_dsc_start = local_dsc_start;
+    s_hidden_img_dsc_end = local_dsc_end;
     atomic_store_explicit(&s_hidden_img_cached_image_count, cur_ic, memory_order_release);
     atomic_store_explicit(&s_hidden_img_cached_reg_gen, cur_reg_gen, memory_order_release);
+    os_unfair_lock_unlock(&s_hidden_img_range_lock);
+    free(local_ranges);
 }
 
 static BOOL pt_is_class_in_hidden_image(Class cls) {
@@ -1493,12 +1532,7 @@ static BOOL pt_is_class_in_hidden_image(Class cls) {
     uint64_t cur_reg_gen = pt_hidden_registry_generation();
     if (cur_ic != atomic_load_explicit(&s_hidden_img_cached_image_count, memory_order_acquire) ||
         cur_reg_gen != atomic_load_explicit(&s_hidden_img_cached_reg_gen, memory_order_acquire)) {
-        os_unfair_lock_lock(&s_hidden_img_range_lock);
-        if (cur_ic != atomic_load_explicit(&s_hidden_img_cached_image_count, memory_order_relaxed) ||
-            cur_reg_gen != atomic_load_explicit(&s_hidden_img_cached_reg_gen, memory_order_relaxed)) {
-            pt_rebuild_hidden_img_range_cache_locked(cur_ic, cur_reg_gen);
-        }
-        os_unfair_lock_unlock(&s_hidden_img_range_lock);
+        pt_rebuild_hidden_img_range_cache(cur_ic, cur_reg_gen);
     }
     uintptr_t addr = (uintptr_t)cls;
     os_unfair_lock_lock(&s_hidden_img_range_lock);
@@ -1939,6 +1973,9 @@ static BOOL pt_is_hidden_mtl_device_selector_name(const char *sname, BOOL includ
     }
     if (includeCompat13) {
         if (strcmp(sname, "architecture") == 0 ||
+            strcmp(sname, "supportsBCTextureCompression") == 0 ||
+            strcmp(sname, "supports32BitFloatFiltering") == 0 ||
+            strcmp(sname, "supports32BitMSAA") == 0 ||
             strcmp(sname, "supportsRaytracing") == 0 ||
             strcmp(sname, "supportsRaytracingFromRender") == 0 ||
             strcmp(sname, "supportsPrimitiveMotionBlur") == 0 ||
@@ -1969,12 +2006,14 @@ static BOOL pt_is_hidden_mtl_device_property_name(const char *pname, BOOL includ
         strcmp(pname, "locationNumber") == 0 ||
         strcmp(pname, "peerGroupID") == 0 ||
         strcmp(pname, "peerIndex") == 0 ||
-        strcmp(pname, "peerCount") == 0 ||
-        strcmp(pname, "supportsBCTextureCompression") == 0) {
+        strcmp(pname, "peerCount") == 0) {
         return YES;
     }
     if (includeCompat13) {
         if (strcmp(pname, "architecture") == 0 ||
+            strcmp(pname, "supportsBCTextureCompression") == 0 ||
+            strcmp(pname, "supports32BitFloatFiltering") == 0 ||
+            strcmp(pname, "supports32BitMSAA") == 0 ||
             strcmp(pname, "supportsDynamicLibraries") == 0 ||
             strcmp(pname, "supportsRenderDynamicLibraries") == 0 ||
             strcmp(pname, "supportsRaytracing") == 0 ||
@@ -1985,7 +2024,6 @@ static BOOL pt_is_hidden_mtl_device_property_name(const char *pname, BOOL includ
             strcmp(pname, "supportsPullModelInterpolation") == 0 ||
             strcmp(pname, "supportsShaderBarycentricCoordinates") == 0 ||
             strcmp(pname, "supportsQueryTextureLOD") == 0 ||
-            strcmp(pname, "supports32BitMSAA") == 0 ||
             strcmp(pname, "counterSets") == 0 ||
             strcmp(pname, "sparseTileSizeInBytes") == 0) {
             return YES;
@@ -2131,7 +2169,13 @@ static struct objc_method_description *pt_protocol_copyMethodDescriptionList(Pro
             }
             descs[writeIdx++] = descs[i];
         }
-        descs[writeIdx] = (struct objc_method_description){ NULL, NULL };
+        if (writeIdx == 0) {
+            free(descs);
+            if (outCount != NULL) {
+                *outCount = 0;
+            }
+            return NULL;
+        }
         if (outCount != NULL) {
             *outCount = writeIdx;
         }
@@ -3097,26 +3141,61 @@ static int32_t pt_compat13_library_version(const char *libraryName) {
     return -1;
 }
 
+static BOOL pt_is_hidden_short_library_name(const char *libraryName) {
+    if (libraryName == NULL || libraryName[0] == '\0') {
+        return NO;
+    }
+    if (pt_is_registered_hidden_module(libraryName) ||
+        strstr(libraryName, "PlayTools") != NULL ||
+        strstr(libraryName, "AKInterface") != NULL ||
+        strstr(libraryName, "UserPlugins") != NULL ||
+        PT_HAS_PREFIX_LIT(libraryName, "AGXMetal")) {
+        return YES;
+    }
+    if (pt_is_compat13_7_active() &&
+        (strcmp(libraryName, "swift_Concurrency") == 0 ||
+         strcmp(libraryName, "libswift_Concurrency") == 0 ||
+         strcmp(libraryName, "swift_StringProcessing") == 0 ||
+         strcmp(libraryName, "libswift_StringProcessing") == 0)) {
+        return YES;
+    }
+    char fwPath[256];
+    int n = snprintf(fwPath, sizeof(fwPath), "/%s.framework/%s", libraryName, libraryName);
+    if (n > 0 && (size_t)n < sizeof(fwPath)) {
+        if (pt_is_macos_only_framework_path(fwPath) ||
+            pt_is_post13_7_hidden_framework_path(fwPath)) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
 static int32_t pt_NSVersionOfRunTimeLibrary(const char *libraryName) {
-    if (libraryName != NULL &&
-        pt_is_compat13_7_active() &&
-        pt_is_bypass_enabled() &&
-        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    BOOL appCaller = (libraryName != NULL &&
+                      pt_is_bypass_enabled() &&
+                      !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
+    if (appCaller && pt_is_hidden_short_library_name(libraryName)) {
+        return -1;
+    }
+    int32_t orig = NSVersionOfRunTimeLibrary(libraryName);
+    if (orig != -1 && appCaller && pt_is_compat13_7_active()) {
         int32_t spoofed = pt_compat13_library_version(libraryName);
         if (spoofed != -1) {
             return spoofed;
         }
     }
-    return NSVersionOfRunTimeLibrary(libraryName);
+    return orig;
 }
 
 static int32_t pt_NSVersionOfLinkTimeLibrary(const char *libraryName) {
+    BOOL appCaller = (libraryName != NULL &&
+                      pt_is_bypass_enabled() &&
+                      !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
+    if (appCaller && pt_is_hidden_short_library_name(libraryName)) {
+        return -1;
+    }
     int32_t orig = NSVersionOfLinkTimeLibrary(libraryName);
-    if (orig != -1 &&
-        libraryName != NULL &&
-        pt_is_compat13_7_active() &&
-        pt_is_bypass_enabled() &&
-        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (orig != -1 && appCaller && pt_is_compat13_7_active()) {
         int32_t spoofed = pt_compat13_library_version(libraryName);
         if (spoofed != -1) {
             return spoofed;
@@ -5217,24 +5296,34 @@ __attribute__((visibility("hidden"))) void *pt_route_dlsym_symbol_for_app(const 
     if (strcmp(symbol, "_dyld_find_unwind_sections") == 0 && pt_resolve_dyld_find_unwind_sections() != NULL) {
         return (void *)&pt_dyld_find_unwind_sections;
     }
-    if ((strcmp(symbol, "dyld_process_info_create") == 0 || strcmp(symbol, "_dyld_process_info_create") == 0) &&
-        pt_resolve_dyld_process_info_create() != NULL) {
+    if ((strcmp(symbol, "dyld_process_info_create") == 0 &&
+         pt_dyld_process_info_create_sym()->plain_fn != NULL) ||
+        (strcmp(symbol, "_dyld_process_info_create") == 0 &&
+         pt_dyld_process_info_create_sym()->underscored_fn != NULL)) {
         return (void *)&pt_dyld_process_info_create;
     }
-    if ((strcmp(symbol, "dyld_process_info_for_each_image") == 0 || strcmp(symbol, "_dyld_process_info_for_each_image") == 0) &&
-        pt_resolve_dyld_process_info_for_each_image() != NULL) {
+    if ((strcmp(symbol, "dyld_process_info_for_each_image") == 0 &&
+         pt_dyld_process_info_for_each_image_sym()->plain_fn != NULL) ||
+        (strcmp(symbol, "_dyld_process_info_for_each_image") == 0 &&
+         pt_dyld_process_info_for_each_image_sym()->underscored_fn != NULL)) {
         return (void *)&pt_dyld_process_info_for_each_image;
     }
-    if ((strcmp(symbol, "dyld_process_info_get_platform") == 0 || strcmp(symbol, "_dyld_process_info_get_platform") == 0) &&
-        pt_resolve_dyld_process_info_get_platform() != NULL) {
+    if ((strcmp(symbol, "dyld_process_info_get_platform") == 0 &&
+         pt_dyld_process_info_get_platform_sym()->plain_fn != NULL) ||
+        (strcmp(symbol, "_dyld_process_info_get_platform") == 0 &&
+         pt_dyld_process_info_get_platform_sym()->underscored_fn != NULL)) {
         return (void *)&pt_dyld_process_info_get_platform;
     }
-    if ((strcmp(symbol, "dyld_process_info_get_cache") == 0 || strcmp(symbol, "_dyld_process_info_get_cache") == 0) &&
-        pt_resolve_dyld_process_info_get_cache() != NULL) {
+    if ((strcmp(symbol, "dyld_process_info_get_cache") == 0 &&
+         pt_dyld_process_info_get_cache_sym()->plain_fn != NULL) ||
+        (strcmp(symbol, "_dyld_process_info_get_cache") == 0 &&
+         pt_dyld_process_info_get_cache_sym()->underscored_fn != NULL)) {
         return (void *)&pt_dyld_process_info_get_cache;
     }
-    if ((strcmp(symbol, "dyld_process_info_get_state") == 0 || strcmp(symbol, "_dyld_process_info_get_state") == 0) &&
-        pt_resolve_dyld_process_info_get_state() != NULL) {
+    if ((strcmp(symbol, "dyld_process_info_get_state") == 0 &&
+         pt_dyld_process_info_get_state_sym()->plain_fn != NULL) ||
+        (strcmp(symbol, "_dyld_process_info_get_state") == 0 &&
+         pt_dyld_process_info_get_state_sym()->underscored_fn != NULL)) {
         return (void *)&pt_dyld_process_info_get_state;
     }
     if (strcmp(symbol, "dyld_shared_cache_file_path") == 0 && &dyld_shared_cache_file_path != NULL) {

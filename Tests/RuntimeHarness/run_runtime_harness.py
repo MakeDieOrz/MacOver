@@ -2482,6 +2482,7 @@ int main(int argc, const char *argv[]) {
                             }
                         }
                     }
+                    dlclose(ctHandle);
                 }
                 s11Round2FontsAndDlopenOK = (macFwBlocked && ctCollectionClean);
 
@@ -2505,8 +2506,8 @@ int main(int argc, const char *argv[]) {
                     vm_deallocate(mach_task_self(), (vm_address_t)thList, thCount * sizeof(thread_act_t));
                 }
 
-                BOOL mig219SwapZeroOK = YES;
-                BOOL mig3414NoBrkOK = YES;
+                BOOL mig219SwapZeroOK = NO;
+                BOOL mig3414NoBrkOK = NO;
                 {
                     // MIG 219 (HOST_VM_INFO64)
                     struct {
@@ -2545,7 +2546,7 @@ int main(int argc, const char *argv[]) {
                             if (innerRC == KERN_SUCCESS) {
                                 vm_statistics64_data_t vm64 = {0};
                                 memcpy(&vm64, rep219.bytes + pfx219 + 8, sizeof(vm64));
-                                if (vm64.swapins != 0 || vm64.swapouts != 0) mig219SwapZeroOK = NO;
+                                mig219SwapZeroOK = (vm64.swapins == 0 && vm64.swapouts == 0);
                             }
                         } else if (kr == KERN_SUCCESS && (rep219.hdr.msgh_bits & MACH_MSGH_BITS_COMPLEX)) {
                             mach_msg_destroy(&rep219.hdr);
@@ -2576,19 +2577,24 @@ int main(int argc, const char *argv[]) {
                             kr = mach_msg(&rep3414.hdr, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(rep3414), eport, 500, MACH_PORT_NULL);
                         }
                         mach_port_mod_refs(mach_task_self(), eport, MACH_PORT_RIGHT_RECEIVE, -1);
-                        if (kr == KERN_SUCCESS && rep3414.hdr.msgh_id == 3514 &&
-                            (rep3414.hdr.msgh_bits & MACH_MSGH_BITS_COMPLEX)) {
-                            mach_msg_body_t body = {0};
-                            memcpy(&body, rep3414.bytes + sizeof(mach_msg_header_t), sizeof(body));
-                            size_t off = sizeof(mach_msg_header_t) + sizeof(mach_msg_body_t);
-                            for (unsigned di = 0; di < body.msgh_descriptor_count && di < EXC_TYPES_COUNT; di++) {
-                                if (off + (di + 1) * sizeof(mach_msg_port_descriptor_t) > rep3414.hdr.msgh_size) break;
-                                mach_msg_port_descriptor_t d = {0};
-                                memcpy(&d, rep3414.bytes + off + di * sizeof(d), sizeof(d));
-                                if (d.type == MACH_MSG_PORT_DESCRIPTOR && MACH_PORT_VALID(d.name)) {
-                                    mig3414NoBrkOK = NO;
+                        if (kr == KERN_SUCCESS && rep3414.hdr.msgh_id == 3514) {
+                            BOOL foundBrkPort = NO;
+                            if (rep3414.hdr.msgh_bits & MACH_MSGH_BITS_COMPLEX) {
+                                mach_msg_body_t body = {0};
+                                memcpy(&body, rep3414.bytes + sizeof(mach_msg_header_t), sizeof(body));
+                                size_t off = sizeof(mach_msg_header_t) + sizeof(mach_msg_body_t);
+                                for (unsigned di = 0; di < body.msgh_descriptor_count && di < EXC_TYPES_COUNT; di++) {
+                                    if (off + (di + 1) * sizeof(mach_msg_port_descriptor_t) > rep3414.hdr.msgh_size) break;
+                                    mach_msg_port_descriptor_t d = {0};
+                                    memcpy(&d, rep3414.bytes + off + di * sizeof(d), sizeof(d));
+                                    if (d.type == MACH_MSG_PORT_DESCRIPTOR && MACH_PORT_VALID(d.name)) {
+                                        foundBrkPort = YES;
+                                    }
                                 }
+                                mach_msg_destroy(&rep3414.hdr);
                             }
+                            mig3414NoBrkOK = !foundBrkPort;
+                        } else if (kr == KERN_SUCCESS && (rep3414.hdr.msgh_bits & MACH_MSGH_BITS_COMPLEX)) {
                             mach_msg_destroy(&rep3414.hdr);
                         }
                     }
@@ -2634,14 +2640,14 @@ int main(int argc, const char *argv[]) {
                     }
                 }
 
-                BOOL amfiOK = YES;
+                BOOL amfiOK = NO;
                 {
                     typedef int (*AmfiFn)(uint64_t, uint64_t *);
                     AmfiFn fnAmfi = (AmfiFn)dlsym(RTLD_DEFAULT, "amfi_check_dyld_policy_self");
                     if (fnAmfi != NULL) {
-                        uint64_t amfiOut = 0;
+                        uint64_t amfiOut = 0xFFFFFFFFFFFFFFFFULL;
                         int arc = fnAmfi(1ULL, &amfiOut);
-                        if (arc != 0) amfiOK = NO;
+                        amfiOK = (arc == 0 && (amfiOut & 0xF6ULL) == 0ULL);
                     }
                 }
 
@@ -2677,7 +2683,7 @@ int main(int argc, const char *argv[]) {
             //     dlopen_from(AppKit), _dyld_find_unwind_sections, pathconf(_PC_CASE_SENSITIVE)==1,
             //     F_GETPROTECTIONCLASS>0, resolv.conf/firmlinks/Dock.app hidden, IORegistryEntryFromPath
             {
-                BOOL cdhashMatchOK = YES;
+                BOOL cdhashMatchOK = NO;
                 uint8_t cdh5[20] = {0};
                 NSMutableData *sb3 = [NSMutableData dataWithLength:(1U << 19)];
                 if (pt_harness_csops(0, 5U, cdh5, sizeof(cdh5)) == 0 &&
@@ -2692,15 +2698,23 @@ int main(int argc, const char *argv[]) {
                             memcpy(&st, b + 12U + si * 8U, 4);
                             memcpy(&so, b + 16U + si * 8U, 4);
                             st = ntohl(st); so = ntohl(so);
-                            if (st != 0U || so + 44U > sl) continue;
+                            BOOL isCD = (st == 0U || (st >= 0x1000U && st <= 0x1004U));
+                            if (!isCD || so + 44U > sl) continue;
                             uint32_t cm = 0, cl = 0;
                             memcpy(&cm, b + so, 4); memcpy(&cl, b + so + 4, 4);
                             cm = ntohl(cm); cl = ntohl(cl);
-                            if (cm == 0xfade0c02U && cl >= 44U && so + cl <= sl && b[so + 37U] == 2U && b[so + 36U] == 32U) {
+                            if (cm != 0xfade0c02U || cl < 44U || so + cl > sl) continue;
+                            if (b[so + 37U] == 2U && b[so + 36U] == 32U) {
                                 uint8_t d[32] = {0};
                                 CC_SHA256(b + so, (CC_LONG)cl, d);
-                                if (memcmp(cdh5, d, 20U) != 0) cdhashMatchOK = NO;
-                                break;
+                                if (memcmp(cdh5, d, 20U) == 0) { cdhashMatchOK = YES; break; }
+                            } else if (b[so + 37U] == 1U && b[so + 36U] == 20U) {
+                                uint8_t d[20] = {0};
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+                                CC_SHA1(b + so, (CC_LONG)cl, d);
+#pragma clang diagnostic pop
+                                if (memcmp(cdh5, d, 20U) == 0) { cdhashMatchOK = YES; break; }
                             }
                         }
                     }
@@ -2723,12 +2737,16 @@ int main(int argc, const char *argv[]) {
 
                 void *mtlH = dlopen("/System/Library/Frameworks/Metal.framework/Metal", RTLD_LAZY | RTLD_NOLOAD);
                 BOOL explicitHandleOK = (mtlH == NULL || dlsym(mtlH, "uname") == NULL);
+                if (mtlH != NULL) dlclose(mtlH);
                 CFBundleRef cgB = CFBundleGetBundleWithIdentifier(CFSTR("com.apple.CoreGraphics"));
                 BOOL cfBundleOK = (cgB == NULL || CFBundleGetFunctionPointerForName(cgB, CFSTR("CGMainDisplayID")) == NULL);
                 typedef void *(*DlopenFromFn3)(const char *, int, void *);
                 DlopenFromFn3 fnDF = (DlopenFromFn3)dlsym(RTLD_DEFAULT, "dlopen_from");
-                BOOL dlopenFromOK = (fnDF == NULL ||
-                                     fnDF("/System/Library/Frameworks/AppKit.framework/AppKit", RTLD_LAZY | RTLD_NOLOAD, (void *)&main) == NULL);
+                void *akFromH = (fnDF != NULL)
+                    ? fnDF("/System/Library/Frameworks/AppKit.framework/AppKit", RTLD_LAZY | RTLD_NOLOAD, (void *)&main)
+                    : NULL;
+                BOOL dlopenFromOK = (akFromH == NULL);
+                if (akFromH != NULL) dlclose(akFromH);
                 typedef struct { const void *mh; const void *d; uintptr_t dl; const void *c; uintptr_t cl; } HarnessUnwindT;
                 typedef bool (*UnwindFn3)(void *, HarnessUnwindT *);
                 typedef const void *(*HdrAddrFn3)(const void *);
@@ -2746,13 +2764,14 @@ int main(int argc, const char *argv[]) {
 
                 NSString *home3 = NSHomeDirectory();
                 BOOL caseSensOK = (pathconf(home3.fileSystemRepresentation, _PC_CASE_SENSITIVE) == 1);
-                int hfd3 = open(home3.fileSystemRepresentation, O_RDONLY | O_CLOEXEC);
+                NSString *exec3 = [NSBundle mainBundle].executablePath;
+                int efd3 = (exec3.length > 0) ? open(exec3.fileSystemRepresentation, O_RDONLY | O_CLOEXEC) : -1;
                 int prot3 = -1;
-                if (hfd3 >= 0) {
+                if (efd3 >= 0) {
 #ifdef F_GETPROTECTIONCLASS
-                    prot3 = fcntl(hfd3, F_GETPROTECTIONCLASS);
+                    prot3 = fcntl(efd3, F_GETPROTECTIONCLASS);
 #endif
-                    close(hfd3);
+                    close(efd3);
                 }
                 BOOL protOK = (prot3 > 0);
                 struct stat st3 = {0};
@@ -3080,12 +3099,12 @@ int main(int argc, const char *argv[]) {
                 s12Round2Compat13EpochOK = (r2JscObjcOK && r2JscCOK && r2MetalRtBlockedOK);
 
                 // Round 3 compat13_7: u_charAge(0x1F972)==0, AttributedString/Duration hidden, ___isPlatformVersionAtLeast(2,14,0,0)==0
-                BOOL r3IcuAgeOK = YES;
+                BOOL r3IcuAgeOK = NO;
                 {
                     typedef void (*UCharAgeFn3)(int32_t, uint8_t[4]);
                     UCharAgeFn3 fnAge = (UCharAgeFn3)dlsym(RTLD_DEFAULT, "u_charAge");
                     if (fnAge != NULL) {
-                        uint8_t age[4] = {0};
+                        uint8_t age[4] = {0xFF, 0xFF, 0xFF, 0xFF};
                         fnAge(0x1F972, age);
                         r3IcuAgeOK = (age[0] == 0);
                     }
@@ -3105,7 +3124,7 @@ int main(int argc, const char *argv[]) {
                     }
                 }
 #endif
-                BOOL r3AvailOK = YES;
+                BOOL r3AvailOK = NO;
                 {
                     typedef int32_t (*AvailFn3)(uint32_t, uint32_t, uint32_t, uint32_t);
                     AvailFn3 fnAv = (AvailFn3)dlsym(RTLD_DEFAULT, "__isPlatformVersionAtLeast");

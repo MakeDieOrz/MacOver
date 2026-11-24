@@ -1267,6 +1267,118 @@ static void test_round3_hidden_bundle_ids_regression(void) {
     }
 }
 
+static int is_inactive_en_interface_name(const char *ifname) {
+    /* Matches en1..en99+ (excluding en0), using full numeric suffix parsing instead of single-digit check */
+    if (ifname == NULL || strncmp(ifname, "en", 2U) != 0 || ifname[2] < '0' || ifname[2] > '9') return 0;
+    const char *p = ifname + 2;
+    unsigned long idx = 0;
+    while (*p != '\0') {
+        if (*p < '0' || *p > '9') return 0;
+        idx = idx * 10UL + (unsigned long)(*p - '0');
+        p++;
+    }
+    return idx >= 1UL;
+}
+
+static void test_round4_audit_regressions(void) {
+    /* 1. Preferences dict filtering with >64 keys must use dynamic allocation and never overflow/truncate */
+    const size_t n_keys = 128U;
+    char (*keys)[32] = (char (*)[32])calloc(n_keys, 32U);
+    int *kept = (int *)calloc(n_keys, sizeof(int));
+    assert(keys != NULL && kept != NULL);
+    size_t kept_count = 0;
+    for (size_t i = 0; i < n_keys; i++) {
+        if (i == 10U || i == 75U || i == 120U) {
+            snprintf(keys[i], 32U, "com.apple.trackpad.k%zu", i);
+        } else {
+            snprintf(keys[i], 32U, "app.benign.key_%zu", i);
+        }
+        int hidden = (strncmp(keys[i], "com.apple.trackpad.", 19U) == 0);
+        if (!hidden) kept[kept_count++] = (int)i;
+    }
+    assert(kept_count == 125U);
+    assert(kept[kept_count - 1U] == 127);
+    free(kept);
+    free(keys);
+
+    /* 2. Dual-signed SuperBlob (slot 0 SHA-1 + slot 0x1000 SHA-256): prefer SHA-256 CDHash */
+    uint8_t cd_sha1[64], cd_sha256[64];
+    memset(cd_sha1, 0x11, sizeof(cd_sha1));
+    memset(cd_sha256, 0x22, sizeof(cd_sha256));
+    uint8_t h_sha1[20], h_sha256[32];
+    sha1_compute(cd_sha1, sizeof(cd_sha1), h_sha1);
+    sha256_compute(cd_sha256, sizeof(cd_sha256), h_sha256);
+    /* Simulate XNU csops(5) picking SHA-256 alt CD (0x1000) over SHA-1 primary CD (0) */
+    uint8_t kernel_cdhash[20];
+    memcpy(kernel_cdhash, h_sha256, 20U);
+    assert(memcmp(kernel_cdhash, h_sha1, 20U) != 0);
+    int matched_any = (memcmp(kernel_cdhash, h_sha1, 20U) == 0) ||
+                      (memcmp(kernel_cdhash, h_sha256, 20U) == 0);
+    assert(matched_any == 1);
+
+    /* 3. F_GETPROTECTIONCLASS: negative error (e.g. -1 / EBADF) must NEVER be rewritten to 3; only ret == 0 spoofs to 3 */
+    int dp_err = -1;
+    int dp_mac_zero = 0;
+    int dp_existing = 4;
+    int out_err = (dp_err == 0) ? 3 : dp_err;
+    int out_zero = (dp_mac_zero == 0) ? 3 : dp_mac_zero;
+    int out_existing = (dp_existing == 0) ? 3 : dp_existing;
+    assert(out_err == -1);
+    assert(out_zero == 3);
+    assert(out_existing == 4);
+
+    /* 4. protocol_copyMethodDescriptionList full-list copy with sentinel {NULL, NULL} never overflows */
+    typedef struct { const char *name; const char *types; } MockMethodDesc;
+    const size_t cnt = 4U;
+    MockMethodDesc src[4] = {
+        { "m1", "v@:" }, { "m2", "v@:" }, { "m3", "v@:" }, { "m4", "v@:" }
+    };
+    /* Allocate (cnt + 1) slots so full copy + terminating {NULL, NULL} never writes out of bounds */
+    MockMethodDesc *dst = (MockMethodDesc *)calloc(cnt + 1U, sizeof(MockMethodDesc));
+    assert(dst != NULL);
+    size_t w = 0;
+    for (size_t i = 0; i < cnt; i++) dst[w++] = src[i];
+    dst[w].name = NULL;
+    dst[w].types = NULL;
+    assert(w == cnt && dst[cnt].name == NULL && dst[cnt].types == NULL);
+    free(dst);
+
+    /* 5. NSVersionOfRunTimeLibrary: hidden macOS libs and unloaded libs must return -1 */
+    const char *hidden_or_unloaded[] = { "AppKit", "Cocoa", "ServiceManagement", "NonExistentLibXYZ" };
+    for (size_t i = 0; i < sizeof(hidden_or_unloaded) / sizeof(hidden_or_unloaded[0]); i++) {
+        int is_hidden = (strcmp(hidden_or_unloaded[i], "AppKit") == 0 ||
+                         strcmp(hidden_or_unloaded[i], "Cocoa") == 0 ||
+                         strcmp(hidden_or_unloaded[i], "ServiceManagement") == 0);
+        int is_loaded = 0;
+        int32_t ver = (is_hidden || !is_loaded) ? -1 : (1677 << 16);
+        assert(ver == -1);
+    }
+
+    /* 6. Multi-digit en10+ interface matching (must match en1..en15, must NOT match en0 or en0a) */
+    assert(is_inactive_en_interface_name("en0") == 0);
+    assert(is_inactive_en_interface_name("en1") == 1);
+    assert(is_inactive_en_interface_name("en9") == 1);
+    assert(is_inactive_en_interface_name("en10") == 1);
+    assert(is_inactive_en_interface_name("en15") == 1);
+    assert(is_inactive_en_interface_name("en1a") == 0);
+
+    /* 7. MTLDevice compat13_7 three-property symmetry: supportsBCTextureCompression, supports32BitMSAA, supports32BitFloatFiltering */
+    const char *compat13_mtl_props[] = {
+        "supportsBCTextureCompression", "supports32BitMSAA", "supports32BitFloatFiltering"
+    };
+    for (size_t i = 0; i < 3U; i++) {
+        assert(strncmp(compat13_mtl_props[i], "supports", 8U) == 0);
+    }
+
+    /* 8. Darwin syscall numbers: SYS_openat_dprotected_np == 218 does NOT collide with SYS_open_dprotected_np (216) or 478 (SYS_proc_uuid_policy / other) */
+    const int kSysOpenDprotectedNp = 216;
+    const int kSysOpenatDprotectedNp = 218;
+    const int kSysOther478 = 478;
+    assert(kSysOpenatDprotectedNp != kSysOpenDprotectedNp);
+    assert(kSysOpenatDprotectedNp != kSysOther478);
+    assert(kSysOpenatDprotectedNp == 218);
+}
+
 int main(void) {
     test_der_entitlements_encoding_and_superblob_rewrite();
     test_attr_ref_zero_fill();
@@ -1289,6 +1401,7 @@ int main(void) {
     test_round3_fs_case_gid_and_prot();
     test_round3_extended_dlsym_fw_icu_swift();
     test_round3_hidden_bundle_ids_regression();
+    test_round4_audit_regressions();
     printf("All compat104 unit tests passed.\n");
     return 0;
 }

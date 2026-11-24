@@ -712,6 +712,7 @@ __attribute__((visibility("hidden"))) int pt_fs_clonefileat_with_caller(int src_
 __attribute__((visibility("hidden"))) int pt_fs_stat_with_caller(const char *path, struct stat *buf, BOOL follow_symlinks, const void *caller);
 __attribute__((visibility("hidden"))) int pt_fs_fstat_with_caller(int fd, struct stat *buf, const void *caller);
 __attribute__((visibility("hidden"))) int pt_fs_fstatat_with_caller(int fd, const char *path, struct stat *buf, int flag, const void *caller);
+__attribute__((visibility("hidden"))) int pt_fs_prepare_legacy_stat_path_with_caller(int dirfd, BOOL is_at, const char *path, const void *caller, char *vbuf, size_t vbuf_size, const char **out_resolved, BOOL *out_virtual_ancestor);
 __attribute__((visibility("hidden"))) long pt_fs_pathconf_with_caller(const char *path, int name, const void *caller);
 __attribute__((visibility("hidden"))) long pt_fs_fpathconf_with_caller(int fd, int name, const void *caller);
 __attribute__((visibility("hidden"))) BOOL pt_fs_probe_hidden_region_path(uintptr_t addr, const void *caller);
@@ -731,6 +732,9 @@ __attribute__((visibility("hidden"))) int pt_fs_getattrlistbulk_with_caller(int 
 __attribute__((visibility("hidden"))) int pt_fs_statfs_with_caller(const char *path, struct statfs *buf, const void *caller);
 __attribute__((visibility("hidden"))) int pt_fs_fstatfs_with_caller(int fd, struct statfs *buf, const void *caller);
 __attribute__((visibility("hidden"))) int pt_fs_getfsstat_with_caller(struct statfs *buf, int bufsize, int mode, const void *caller);
+__attribute__((visibility("hidden"))) int pt_fs_prepare_statfs_path_with_caller(const char *path, const void *caller, char *vbuf, size_t vbuf_size, const char **out_resolved);
+__attribute__((visibility("hidden"))) void pt_fs_sanitize_legacy_statfs_strings(char *mnton, size_t mnton_cap, char *mntfrom, size_t mntfrom_cap, const void *caller);
+__attribute__((visibility("hidden"))) BOOL pt_fs_legacy_statfs_entry_is_hidden(const char *mnton, const char *mntfrom, const void *caller);
 __attribute__((visibility("hidden"))) ssize_t pt_fs_getdirentries64_syscall_with_caller(int fd, void *buf, size_t bufsize, off_t *position, const void *caller);
 __attribute__((visibility("hidden"))) ssize_t pt_fs_getxattr_with_caller(const char *path, const char *name, void *value, size_t size, u_int32_t position, int options, const void *caller);
 __attribute__((visibility("hidden"))) ssize_t pt_fs_fgetxattr_with_caller(int fd, const char *name, void *value, size_t size, u_int32_t position, int options, const void *caller);
@@ -767,6 +771,7 @@ __attribute__((visibility("hidden"))) int ps_should_block_host_cstr(const char *
 __attribute__((visibility("hidden"))) void ps_notify_dynamic_image_loaded(void);
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_network_ifname(const char *name);
 __attribute__((visibility("hidden"))) void pt_network_notify_fd_dup(int oldfd, int newfd);
+__attribute__((visibility("hidden"))) int pt_network_ioctl_with_caller(int fd, unsigned long request, uintptr_t arg, const void *caller);
 __attribute__((visibility("hidden"))) void *pt_network_dlsym_route(const char *symbol);
 
 // SvcInterceptor exports

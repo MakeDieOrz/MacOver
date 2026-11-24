@@ -354,7 +354,7 @@ static uint64_t ps_mtl_memory_cap(void) {
 - (BOOL) pm_ps_mtl_supports32BitFloatFiltering {
     if (pt_is_bypass_enabled() &&
         !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
-        pt_get_spoofed_max_apple_gpu_family() < 1007) {
+        (pt_is_compat13_7_active() || pt_get_spoofed_max_apple_gpu_family() < 1007)) {
         return NO;
     }
     SEL sel = sel_registerName("supports32BitFloatFiltering");

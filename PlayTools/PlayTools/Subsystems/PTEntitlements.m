@@ -1186,6 +1186,7 @@ static int pt_handle_spoofed_csops_blob(pid_t pid,
         errno = ERANGE;
         return -1;
     }
+    int saved_errno = errno;
     uint32_t probe[2] = {0, 0};
     errno = 0;
     int pr = use_audittoken
@@ -1199,6 +1200,7 @@ static int pt_handle_spoofed_csops_blob(pid_t pid,
     uint32_t raw_magic = ntohl(probe[0]);
     uint32_t raw_len = ntohl(probe[1]);
     if (raw_magic != PT_CSMAGIC_EMBEDDED_SIGNATURE || raw_len < 12U || raw_len > (16U << 20)) {
+        errno = saved_errno;
         return use_audittoken
             ? csops_audittoken(pid, PT_CS_OPS_BLOB, useraddr, usersize, token)
             : csops(pid, PT_CS_OPS_BLOB, useraddr, usersize);
@@ -1222,6 +1224,7 @@ static int pt_handle_spoofed_csops_blob(pid_t pid,
     slot_count = ntohl(slot_count);
     if (slot_count == 0 || slot_count > 256U || (size_t)slot_count * 8U > (size_t)(raw_len - 12U)) {
         free(raw_buf);
+        errno = saved_errno;
         return use_audittoken
             ? csops_audittoken(pid, PT_CS_OPS_BLOB, useraddr, usersize, token)
             : csops(pid, PT_CS_OPS_BLOB, useraddr, usersize);
@@ -1340,6 +1343,9 @@ static int pt_handle_spoofed_csops_blob(pid_t pid,
         pt_sha256_cs_blob(PT_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS, (const uint8_t *)derData.bytes, derData.length, der_hash);
         pt_sha1_cs_blob(PT_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS, (const uint8_t *)derData.bytes, derData.length, der_sha1);
     }
+    const uint8_t *best_cd_bytes = NULL;
+    size_t best_cd_len = 0;
+    BOOL best_cd_is_sha256 = NO;
     for (uint32_t i = 0; i < out_count; i++) {
         uint32_t stype = slots[i].type;
         if (slots[i].mutable_bytes != NULL &&
@@ -1348,10 +1354,20 @@ static int pt_handle_spoofed_csops_blob(pid_t pid,
               stype < PT_CSSLOT_ALTERNATE_CODEDIRECTORIES + PT_CSSLOT_ALTERNATE_CODEDIRECTORY_MAX))) {
             pt_patch_code_directory_entitlement_hashes(
                 slots[i].mutable_bytes, slots[i].len, has_xml, xml_hash, xml_sha1, has_der, der_hash, der_sha1);
-            if (stype == PT_CSSLOT_CODEDIRECTORY) {
-                pt_store_spoofed_primary_cdhash(slots[i].mutable_bytes, slots[i].len, compat13);
+            if (slots[i].len >= 40U) {
+                uint8_t ht = slots[i].mutable_bytes[37];
+                BOOL is_sha256 = (ht == PT_CS_HASHTYPE_SHA256 || ht == PT_CS_HASHTYPE_SHA256_TRUNCATED);
+                if ((is_sha256 && !best_cd_is_sha256) ||
+                    (best_cd_bytes == NULL && stype == PT_CSSLOT_CODEDIRECTORY)) {
+                    best_cd_bytes = slots[i].mutable_bytes;
+                    best_cd_len = slots[i].len;
+                    best_cd_is_sha256 = is_sha256;
+                }
             }
         }
+    }
+    if (best_cd_bytes != NULL) {
+        pt_store_spoofed_primary_cdhash(best_cd_bytes, best_cd_len, compat13);
     }
 
     size_t header_len = 12U + (size_t)out_count * 8U;
@@ -1396,6 +1412,7 @@ static int pt_handle_spoofed_csops_blob(pid_t pid,
     }
     free(slots);
     free(raw_buf);
+    errno = saved_errno;
     return 0;
 }
 
@@ -2072,9 +2089,18 @@ static int pt_sandbox_check_impl(BOOL use_audit_token,
     BOOL bypass = pt_is_bypass_enabled();
     BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
 
-    if (!is_sys && bypass && !use_audit_token && pid != 0 && pid != getpid()) {
-        errno = EPERM;
-        return -1;
+    if (!is_sys && bypass) {
+        if (!use_audit_token && pid != 0 && pid != getpid()) {
+            errno = EPERM;
+            return -1;
+        }
+        if (use_audit_token) {
+            pid_t au_pid = (pid_t)au.val[5];
+            if (au_pid != 0 && au_pid != getpid()) {
+                errno = EPERM;
+                return -1;
+            }
+        }
     }
 
     if (filter == PT_SANDBOX_FILTER_NONE) {
@@ -2306,6 +2332,14 @@ int pt_mac_syscall_with_caller(const char *policy, int call, void *arg, const vo
         } sb_au_req;
         memset(&sb_au_req, 0, sizeof(sb_au_req));
         memcpy(&sb_au_req, arg, sizeof(sb_au_req));
+        pid_t au_pid = (pid_t)sb_au_req.au.val[5];
+        if (au_pid != 0 && au_pid != getpid()) {
+            if (out_handled != NULL) {
+                *out_handled = YES;
+            }
+            errno = EPERM;
+            return -1;
+        }
         if (pt_mac_sandbox_should_deny(sb_au_req.operation, sb_au_req.type, sb_au_req.arg0, caller)) {
             if (out_handled != NULL) {
                 *out_handled = YES;

@@ -634,6 +634,18 @@ __attribute__((visibility("hidden"))) NSUUID *ps_hook_device_identifierForVendor
     return desc;
 }
 
+- (UIDisplayGamut) pm_hook_traitDisplayGamut {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        const char *m = pt_get_device_model_cstr();
+        if (m != NULL && strcmp(m, "iPad6,7") == 0) {
+            return UIDisplayGamutSRGB;
+        }
+        return UIDisplayGamutP3;
+    }
+    return [self pm_hook_traitDisplayGamut];
+}
+
 static const char kPSProximityMonitoringEnabledKey = 0;
 
 - (void) pm_ps_setProximityMonitoringEnabled:(BOOL)enabled {
@@ -2191,7 +2203,14 @@ static CFMutableDictionaryRef s_av_orig_fov_imps = NULL;
 static CFMutableDictionaryRef s_av_orig_flash_imps = NULL;
 static CFMutableDictionaryRef s_av_orig_torch_imps = NULL;
 static os_unfair_lock s_av_uid_map_lock = OS_UNFAIR_LOCK_INIT;
-static NSMutableDictionary<NSString *, NSString *> *s_av_synth_uid_to_real = nil;
+static NSMutableDictionary<NSString *, NSString *> *ps_av_synth_uid_map(void) {
+    static NSMutableDictionary<NSString *, NSString *> *s_map = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        s_map = [[NSMutableDictionary alloc] initWithCapacity:16];
+    });
+    return s_map;
+}
 
 - (BOOL) pm_ps_av_hasFlash {
     SEL sel = sel_registerName("hasFlash");
@@ -2462,12 +2481,12 @@ static NSString *ps_sanitize_capture_device_unique_id(id dev, NSString *orig) {
         sanitized = ps_sanitize_capture_device_string(dev, orig, YES);
     }
     if (sanitized.length > 0 && ![sanitized isEqualToString:orig]) {
+        NSMutableDictionary<NSString *, NSString *> *uidMap = ps_av_synth_uid_map();
+        NSString *keyCopy = [sanitized copy];
+        NSString *origCopy = [orig copy];
         os_unfair_lock_lock(&s_av_uid_map_lock);
-        if (s_av_synth_uid_to_real == nil) {
-            s_av_synth_uid_to_real = [NSMutableDictionary dictionary];
-        }
-        if (s_av_synth_uid_to_real[sanitized] == nil) {
-            s_av_synth_uid_to_real[sanitized] = [orig copy];
+        if (uidMap[keyCopy] == nil && uidMap.count < 64U) {
+            uidMap[keyCopy] = origCopy;
         }
         os_unfair_lock_unlock(&s_av_uid_map_lock);
     }
@@ -2646,8 +2665,9 @@ static NSArray *ps_filter_capture_devices(NSArray *devices, BOOL isAppCaller) {
     BOOL isAppCaller = pt_is_bypass_enabled() &&
         !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0));
     if (isAppCaller && lookupID.length > 0) {
+        NSMutableDictionary<NSString *, NSString *> *uidMap = ps_av_synth_uid_map();
         os_unfair_lock_lock(&s_av_uid_map_lock);
-        NSString *mapped = s_av_synth_uid_to_real[lookupID];
+        NSString *mapped = uidMap[lookupID];
         os_unfair_lock_unlock(&s_av_uid_map_lock);
         if (mapped.length > 0) {
             lookupID = mapped;
@@ -9341,6 +9361,9 @@ void ps_install_system_jailbreak_bypass_hooks(void) {
     ps_swizzle_instance_method(traitCls, @selector(userInterfaceIdiom), @selector(pm_hook_traitUserInterfaceIdiom));
     if (traitCls != Nil && class_getInstanceMethod(traitCls, @selector(description)) != NULL) {
         ps_swizzle_instance_method(traitCls, @selector(description), @selector(pm_hook_traitDescription));
+    }
+    if (traitCls != Nil && class_getInstanceMethod(traitCls, @selector(displayGamut)) != NULL) {
+        ps_swizzle_instance_method(traitCls, @selector(displayGamut), @selector(pm_hook_traitDisplayGamut));
     }
     {
         Class imgCls = objc_getClass("UIImage");

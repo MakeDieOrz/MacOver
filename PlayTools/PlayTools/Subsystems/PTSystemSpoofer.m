@@ -2355,9 +2355,11 @@ static BOOL pt_handle_sysctl_name(const char *name,
             return YES;
         }
         if (strcmp(sub, "osvariant_status") == 0) {
+            int saved_errno = errno;
             uint64_t raw_status = 0x70010000f288828aULL;
             size_t rlen = sizeof(raw_status);
             (void)sysctlbyname("kern.osvariant_status", &raw_status, &rlen, NULL, 0);
+            errno = saved_errno;
             // Preserve header/version bits [32..63], fixed sentinel bits [28..31] (0xF),
             // and every 2-bit pair's "known" bit (odd bits in [0..27]), while clearing
             // every 2-bit pair's "value" bit (even bits in [0..27]) for consumer iOS release.
@@ -3180,7 +3182,10 @@ int pt_sysctl_with_caller(int *name,
                     memcpy(name_q + 2, next_oid, next_sz);
                     char oid_name[512];
                     size_t oid_name_sz = sizeof(oid_name) - 1U;
-                    if (pt_orig_kernel_sysctl(name_q, 2U + next_cnt, oid_name, &oid_name_sz, NULL, 0) == 0) {
+                    int saved_errno = errno;
+                    int name_r = pt_orig_kernel_sysctl(name_q, 2U + next_cnt, oid_name, &oid_name_sz, NULL, 0);
+                    errno = saved_errno;
+                    if (name_r == 0) {
                         oid_name[oid_name_sz < sizeof(oid_name) ? oid_name_sz : sizeof(oid_name) - 1U] = '\0';
                         if (pt_is_hidden_sysctl_name(oid_name)) {
                             cur_q[0] = 0;
@@ -6508,8 +6513,8 @@ static BOOL pt_pref_value_contains_macos_leak(CFPropertyListRef val, int depth) 
     if (tid == CFArrayGetTypeID()) {
         CFArrayRef arr = (CFArrayRef)val;
         CFIndex n = CFArrayGetCount(arr);
-        if (n > 64) {
-            n = 64;
+        if (n > 4096) {
+            n = 4096;
         }
         for (CFIndex i = 0; i < n; i++) {
             if (pt_pref_value_contains_macos_leak(CFArrayGetValueAtIndex(arr, i), depth + 1)) {
@@ -6519,19 +6524,16 @@ static BOOL pt_pref_value_contains_macos_leak(CFPropertyListRef val, int depth) 
         return NO;
     }
     if (tid == CFDictionaryGetTypeID()) {
-        CFDictionaryRef dict = (CFDictionaryRef)val;
-        CFIndex n = CFDictionaryGetCount(dict);
-        if (n <= 0) {
-            return NO;
-        }
-        if (n > 64) {
-            n = 64;
-        }
-        const void *keys[64];
-        const void *vals[64];
-        CFDictionaryGetKeysAndValues(dict, keys, vals);
-        for (CFIndex i = 0; i < n; i++) {
-            if (pt_pref_value_contains_macos_leak(vals[i], depth + 1)) {
+        NSDictionary *nsDict = (__bridge NSDictionary *)val;
+        for (id k in nsDict) {
+            if ([k isKindOfClass:[NSString class]]) {
+                const char *kc = [(NSString *)k UTF8String];
+                if (kc != NULL && pt_is_hidden_macos_pref_key(kc)) {
+                    return YES;
+                }
+            }
+            id v = nsDict[k];
+            if (v != nil && pt_pref_value_contains_macos_leak((__bridge CFPropertyListRef)v, depth + 1)) {
                 return YES;
             }
         }
@@ -7799,16 +7801,19 @@ static int pt_getgrouplist(const char *name, int basegid, int *groups, int *ngro
 }
 
 struct utmpx;
-extern struct utmpx *pt_orig_getutxent(void) __asm("_getutxent");
-extern struct utmpx *pt_orig_getutxid(const struct utmpx *) __asm("_getutxid");
-extern struct utmpx *pt_orig_getutxline(const struct utmpx *) __asm("_getutxline");
 
 static struct utmpx *pt_getutxent(void) {
     if (pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return NULL;
     }
-    return pt_orig_getutxent();
+    typedef struct utmpx *(*GetUtxEntFn)(void);
+    static GetUtxEntFn s_orig = NULL;
+    static dispatch_once_t s_once;
+    dispatch_once(&s_once, ^{
+        s_orig = (GetUtxEntFn)dlsym(RTLD_NEXT, "getutxent");
+    });
+    return (s_orig != NULL) ? s_orig() : NULL;
 }
 
 static struct utmpx *pt_getutxid(const struct utmpx *ut) {
@@ -7816,7 +7821,13 @@ static struct utmpx *pt_getutxid(const struct utmpx *ut) {
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return NULL;
     }
-    return pt_orig_getutxid(ut);
+    typedef struct utmpx *(*GetUtxIdFn)(const struct utmpx *);
+    static GetUtxIdFn s_orig = NULL;
+    static dispatch_once_t s_once;
+    dispatch_once(&s_once, ^{
+        s_orig = (GetUtxIdFn)dlsym(RTLD_NEXT, "getutxid");
+    });
+    return (s_orig != NULL) ? s_orig(ut) : NULL;
 }
 
 static struct utmpx *pt_getutxline(const struct utmpx *ut) {
@@ -7824,10 +7835,14 @@ static struct utmpx *pt_getutxline(const struct utmpx *ut) {
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return NULL;
     }
-    return pt_orig_getutxline(ut);
+    typedef struct utmpx *(*GetUtxLineFn)(const struct utmpx *);
+    static GetUtxLineFn s_orig = NULL;
+    static dispatch_once_t s_once;
+    dispatch_once(&s_once, ^{
+        s_orig = (GetUtxLineFn)dlsym(RTLD_NEXT, "getutxline");
+    });
+    return (s_orig != NULL) ? s_orig(ut) : NULL;
 }
-
-extern int pt_orig_gethostuuid(uuid_t id, const struct timespec *wait) __asm("_gethostuuid");
 
 __attribute__((visibility("hidden")))
 int pt_gethostuuid_with_caller(uuid_t id, const struct timespec *wait, const void *caller) {
@@ -7835,7 +7850,17 @@ int pt_gethostuuid_with_caller(uuid_t id, const struct timespec *wait, const voi
         errno = EPERM;
         return -1;
     }
-    return pt_orig_gethostuuid(id, wait);
+    typedef int (*GetHostUuidFn)(uuid_t, const struct timespec *);
+    static GetHostUuidFn s_orig = NULL;
+    static dispatch_once_t s_once;
+    dispatch_once(&s_once, ^{
+        s_orig = (GetHostUuidFn)dlsym(RTLD_NEXT, "gethostuuid");
+    });
+    if (s_orig != NULL) {
+        return s_orig(id, wait);
+    }
+    errno = ENOSYS;
+    return -1;
 }
 
 static int pt_gethostuuid(uuid_t id, const struct timespec *wait) {
@@ -7908,15 +7933,16 @@ _Static_assert(offsetof(pt_kevent_qos_s, data) == 32, "pt_kevent_qos_s data offs
 #define PT_KEVENT_FLAG_IMMEDIATE 0x000001U
 #endif
 
-static int pt_kevent(int kq,
-                     const struct kevent *changelist,
-                     int nchanges,
-                     struct kevent *eventlist,
-                     int nevents,
-                     const struct timespec *timeout) {
+static int pt_kevent_with_caller(int kq,
+                                 const struct kevent *changelist,
+                                 int nchanges,
+                                 struct kevent *eventlist,
+                                 int nevents,
+                                 const struct timespec *timeout,
+                                 const void *caller) {
     if (changelist != NULL && nchanges > 0 &&
         pt_is_bypass_enabled() &&
-        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        !pt_is_effective_system_or_playtools_caller(caller)) {
         uintptr_t self_pid = (uintptr_t)getpid();
         int blocked = 0;
         for (int i = 0; i < nchanges; i++) {
@@ -7955,14 +7981,35 @@ static int pt_kevent(int kq,
             }
             int extra = 0;
             if (kept_cnt > 0 && reported < nevents) {
+                int saved_errno = errno;
                 struct timespec zero_ts = {0, 0};
                 int r = kevent(kq, kept, kept_cnt, eventlist + reported, nevents - reported, &zero_ts);
-                if (r > 0) {
+                if (r < 0) {
+                    if (errno == EBADF) {
+                        if (kept != stack_kept) {
+                            free(kept);
+                        }
+                        errno = EBADF;
+                        return -1;
+                    }
+                    errno = saved_errno;
+                } else if (r > 0) {
                     extra = r;
                 }
             } else if (kept_cnt > 0) {
+                int saved_errno = errno;
                 struct timespec zero_ts = {0, 0};
-                (void)kevent(kq, kept, kept_cnt, NULL, 0, &zero_ts);
+                int r = kevent(kq, kept, kept_cnt, NULL, 0, &zero_ts);
+                if (r < 0) {
+                    if (errno == EBADF) {
+                        if (kept != stack_kept) {
+                            free(kept);
+                        }
+                        errno = EBADF;
+                        return -1;
+                    }
+                    errno = saved_errno;
+                }
             }
             if (kept != stack_kept) {
                 free(kept);
@@ -7973,16 +8020,26 @@ static int pt_kevent(int kq,
     return kevent(kq, changelist, nchanges, eventlist, nevents, timeout);
 }
 
-static int pt_kevent64(int kq,
-                       const struct kevent64_s *changelist,
-                       int nchanges,
-                       struct kevent64_s *eventlist,
-                       int nevents,
-                       unsigned int flags,
-                       const struct timespec *timeout) {
+static int pt_kevent(int kq,
+                     const struct kevent *changelist,
+                     int nchanges,
+                     struct kevent *eventlist,
+                     int nevents,
+                     const struct timespec *timeout) {
+    return pt_kevent_with_caller(kq, changelist, nchanges, eventlist, nevents, timeout, __builtin_return_address(0));
+}
+
+static int pt_kevent64_with_caller(int kq,
+                                   const struct kevent64_s *changelist,
+                                   int nchanges,
+                                   struct kevent64_s *eventlist,
+                                   int nevents,
+                                   unsigned int flags,
+                                   const struct timespec *timeout,
+                                   const void *caller) {
     if (changelist != NULL && nchanges > 0 &&
         pt_is_bypass_enabled() &&
-        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        !pt_is_effective_system_or_playtools_caller(caller)) {
         uint64_t self_pid = (uint64_t)getpid();
         int blocked = 0;
         for (int i = 0; i < nchanges; i++) {
@@ -8021,14 +8078,35 @@ static int pt_kevent64(int kq,
             }
             int extra = 0;
             if (kept_cnt > 0 && reported < nevents) {
+                int saved_errno = errno;
                 struct timespec zero_ts = {0, 0};
                 int r = kevent64(kq, kept, kept_cnt, eventlist + reported, nevents - reported, flags, &zero_ts);
-                if (r > 0) {
+                if (r < 0) {
+                    if (errno == EBADF) {
+                        if (kept != stack_kept) {
+                            free(kept);
+                        }
+                        errno = EBADF;
+                        return -1;
+                    }
+                    errno = saved_errno;
+                } else if (r > 0) {
                     extra = r;
                 }
             } else if (kept_cnt > 0) {
+                int saved_errno = errno;
                 struct timespec zero_ts = {0, 0};
-                (void)kevent64(kq, kept, kept_cnt, NULL, 0, flags, &zero_ts);
+                int r = kevent64(kq, kept, kept_cnt, NULL, 0, flags, &zero_ts);
+                if (r < 0) {
+                    if (errno == EBADF) {
+                        if (kept != stack_kept) {
+                            free(kept);
+                        }
+                        errno = EBADF;
+                        return -1;
+                    }
+                    errno = saved_errno;
+                }
             }
             if (kept != stack_kept) {
                 free(kept);
@@ -8039,14 +8117,25 @@ static int pt_kevent64(int kq,
     return kevent64(kq, changelist, nchanges, eventlist, nevents, flags, timeout);
 }
 
-static int pt_kevent_qos(int kq,
-                         const pt_kevent_qos_s *changelist,
-                         int nchanges,
-                         pt_kevent_qos_s *eventlist,
-                         int nevents,
-                         void *data_out,
-                         size_t *data_available,
-                         unsigned int flags) {
+static int pt_kevent64(int kq,
+                       const struct kevent64_s *changelist,
+                       int nchanges,
+                       struct kevent64_s *eventlist,
+                       int nevents,
+                       unsigned int flags,
+                       const struct timespec *timeout) {
+    return pt_kevent64_with_caller(kq, changelist, nchanges, eventlist, nevents, flags, timeout, __builtin_return_address(0));
+}
+
+static int pt_kevent_qos_with_caller(int kq,
+                                     const pt_kevent_qos_s *changelist,
+                                     int nchanges,
+                                     pt_kevent_qos_s *eventlist,
+                                     int nevents,
+                                     void *data_out,
+                                     size_t *data_available,
+                                     unsigned int flags,
+                                     const void *caller) {
     typedef int (*KeventQosFn)(int, const pt_kevent_qos_s *, int, pt_kevent_qos_s *, int, void *, size_t *, unsigned int);
     static KeventQosFn s_orig = NULL;
     static dispatch_once_t s_once;
@@ -8059,7 +8148,7 @@ static int pt_kevent_qos(int kq,
     }
     if (changelist != NULL && nchanges > 0 &&
         pt_is_bypass_enabled() &&
-        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        !pt_is_effective_system_or_playtools_caller(caller)) {
         uint64_t self_pid = (uint64_t)getpid();
         int blocked = 0;
         for (int i = 0; i < nchanges; i++) {
@@ -8098,14 +8187,35 @@ static int pt_kevent_qos(int kq,
             }
             int extra = 0;
             if (kept_cnt > 0 && reported < nevents) {
+                int saved_errno = errno;
                 int r = s_orig(kq, kept, kept_cnt, eventlist + reported, nevents - reported,
                                data_out, data_available, flags | PT_KEVENT_FLAG_IMMEDIATE);
-                if (r > 0) {
+                if (r < 0) {
+                    if (errno == EBADF) {
+                        if (kept != stack_kept) {
+                            free(kept);
+                        }
+                        errno = EBADF;
+                        return -1;
+                    }
+                    errno = saved_errno;
+                } else if (r > 0) {
                     extra = r;
                 }
             } else if (kept_cnt > 0) {
-                (void)s_orig(kq, kept, kept_cnt, NULL, 0, data_out, data_available,
-                             flags | PT_KEVENT_FLAG_IMMEDIATE);
+                int saved_errno = errno;
+                int r = s_orig(kq, kept, kept_cnt, NULL, 0, data_out, data_available,
+                               flags | PT_KEVENT_FLAG_IMMEDIATE);
+                if (r < 0) {
+                    if (errno == EBADF) {
+                        if (kept != stack_kept) {
+                            free(kept);
+                        }
+                        errno = EBADF;
+                        return -1;
+                    }
+                    errno = saved_errno;
+                }
             }
             if (kept != stack_kept) {
                 free(kept);
@@ -8114,6 +8224,18 @@ static int pt_kevent_qos(int kq,
         }
     }
     return s_orig(kq, changelist, nchanges, eventlist, nevents, data_out, data_available, flags);
+}
+
+static int pt_kevent_qos(int kq,
+                         const pt_kevent_qos_s *changelist,
+                         int nchanges,
+                         pt_kevent_qos_s *eventlist,
+                         int nevents,
+                         void *data_out,
+                         size_t *data_available,
+                         unsigned int flags) {
+    return pt_kevent_qos_with_caller(kq, changelist, nchanges, eventlist, nevents,
+                                     data_out, data_available, flags, __builtin_return_address(0));
 }
 
 #define PT_THERMAL_NOTIFY_TOKEN_CAP 64U
@@ -9807,6 +9929,130 @@ static inline BOOL pt_fcntl_cmd_has_no_arg(int cmd) {
     }
 }
 
+typedef struct {
+    int16_t  f_otype;
+    int16_t  f_oflags;
+    int64_t  f_bsize;
+    int64_t  f_iosize;
+    int64_t  f_blocks;
+    int64_t  f_bfree;
+    int64_t  f_bavail;
+    int64_t  f_files;
+    int64_t  f_ffree;
+    fsid_t   f_fsid;
+    uid_t    f_owner;
+    int16_t  f_reserved1;
+    int16_t  f_type;
+    int64_t  f_flags;
+    int64_t  f_reserved2[2];
+    char     f_fstypename[15];
+    char     f_mntonname[90];
+    char     f_mntfromname[90];
+    char     f_reserved3;
+    int64_t  f_reserved4[4];
+} pt_user64_statfs_t;
+
+_Static_assert(sizeof(pt_user64_statfs_t) == 336, "pt_user64_statfs_t ABI size mismatch");
+_Static_assert(offsetof(pt_user64_statfs_t, f_fstypename) == 104, "pt_user64_statfs_t f_fstypename offset mismatch");
+_Static_assert(offsetof(pt_user64_statfs_t, f_mntonname) == 119, "pt_user64_statfs_t f_mntonname offset mismatch");
+_Static_assert(offsetof(pt_user64_statfs_t, f_mntfromname) == 209, "pt_user64_statfs_t f_mntfromname offset mismatch");
+
+typedef struct {
+    dev_t    st_dev;
+    uint32_t st_ino;
+    uint16_t st_mode;
+    uint16_t st_nlink;
+    uint32_t st_uid;
+    uint32_t st_gid;
+    dev_t    st_rdev;
+    int64_t  st_atime_sec;
+    int64_t  st_atime_nsec;
+    int64_t  st_mtime_sec;
+    int64_t  st_mtime_nsec;
+    int64_t  st_ctime_sec;
+    int64_t  st_ctime_nsec;
+    int64_t  st_size;
+    int64_t  st_blocks;
+    int32_t  st_blksize;
+    uint32_t st_flags;
+    uint32_t st_gen;
+    int32_t  st_lspare;
+    int64_t  st_qspare[2];
+} pt_user64_stat_t;
+
+_Static_assert(sizeof(pt_user64_stat_t) == 120, "pt_user64_stat_t ABI size mismatch");
+_Static_assert(offsetof(pt_user64_stat_t, st_gid) == 16, "pt_user64_stat_t st_gid offset mismatch");
+
+static BOOL pt_legacy_user64_statfs_looks_valid(const pt_user64_statfs_t *entry) {
+    if (entry == NULL) {
+        return NO;
+    }
+    if (entry->f_fstypename[0] < 'a' || entry->f_fstypename[0] > 'z' ||
+        entry->f_mntonname[0] != '/') {
+        return NO;
+    }
+    for (size_t i = 0; i < sizeof(entry->f_fstypename); i++) {
+        char c = entry->f_fstypename[i];
+        if (c == '\0') {
+            return (i >= 2U);
+        }
+        if (c < 0x20 || c > 0x7e) {
+            return NO;
+        }
+    }
+    return NO;
+}
+
+static void pt_sanitize_legacy_user64_statfs_in_place(pt_user64_statfs_t *entry, const void *caller) {
+    if (pt_legacy_user64_statfs_looks_valid(entry)) {
+        pt_fs_sanitize_legacy_statfs_strings(entry->f_mntonname,
+                                             sizeof(entry->f_mntonname),
+                                             entry->f_mntfromname,
+                                             sizeof(entry->f_mntfromname),
+                                             caller);
+    }
+}
+
+static void pt_sanitize_legacy_user64_stat_in_place(void *ub, const void *caller) {
+    if (ub == NULL || !pt_is_valid_user_pointer(ub) ||
+        !pt_is_bypass_enabled() || pt_is_effective_system_or_playtools_caller(caller)) {
+        return;
+    }
+    uint32_t g = 0;
+    memcpy(&g, (const uint8_t *)ub + offsetof(pt_user64_stat_t, st_gid), sizeof(g));
+    if (g == 20U) {
+        g = 501U;
+        memcpy((uint8_t *)ub + offsetof(pt_user64_stat_t, st_gid), &g, sizeof(g));
+    }
+}
+
+static void pt_copy_stat64_to_legacy_user64_stat(const struct stat *src, void *dst_ub) {
+    if (src == NULL || dst_ub == NULL) {
+        return;
+    }
+    pt_user64_stat_t out;
+    memset(&out, 0, sizeof(out));
+    out.st_dev = src->st_dev;
+    out.st_ino = (uint32_t)src->st_ino;
+    out.st_mode = (uint16_t)src->st_mode;
+    out.st_nlink = (uint16_t)src->st_nlink;
+    out.st_uid = (uint32_t)src->st_uid;
+    out.st_gid = (uint32_t)src->st_gid;
+    out.st_rdev = src->st_rdev;
+    out.st_atime_sec = (int64_t)src->st_atimespec.tv_sec;
+    out.st_atime_nsec = (int64_t)src->st_atimespec.tv_nsec;
+    out.st_mtime_sec = (int64_t)src->st_mtimespec.tv_sec;
+    out.st_mtime_nsec = (int64_t)src->st_mtimespec.tv_nsec;
+    out.st_ctime_sec = (int64_t)src->st_ctimespec.tv_sec;
+    out.st_ctime_nsec = (int64_t)src->st_ctimespec.tv_nsec;
+    out.st_size = (int64_t)src->st_size;
+    out.st_blocks = (int64_t)src->st_blocks;
+    out.st_blksize = (int32_t)src->st_blksize;
+    out.st_flags = (uint32_t)src->st_flags;
+    out.st_gen = (uint32_t)src->st_gen;
+    memcpy(dst_ub, &out, sizeof(out));
+}
+
 __attribute__((visibility("hidden")))
 intptr_t pt_syscall_dispatch_with_caller(int number,
                                          const uintptr_t args[PT_XNU_SYSCALL_MAX_ARGS],
@@ -9875,12 +10121,56 @@ intptr_t pt_syscall_dispatch_with_caller(int number,
             }
             return 0;
         }
-        case 18:  // SYS_getfsstat
+        case 18: { // SYS_getfsstat (legacy 336B user64_statfs ABI)
+            void *buf = (void *)(uintptr_t)args[0];
+            int bufsize = (int)args[1];
+            int mode = (int)args[2];
+            if ((buf == NULL || bufsize == 0) &&
+                pt_is_bypass_enabled() &&
+                !pt_is_effective_system_or_playtools_caller(caller)) {
+                return (intptr_t)pt_fs_getfsstat_with_caller(NULL, 0, mode, caller);
+            }
+            intptr_t r = pt_orig_syscall(18, args[0], args[1], args[2], 0, 0, 0, 0, 0);
+            if (r > 0 && buf != NULL && bufsize > 0 &&
+                pt_is_valid_user_pointer(buf) &&
+                pt_is_bypass_enabled() &&
+                !pt_is_effective_system_or_playtools_caller(caller)) {
+                const size_t stride = sizeof(pt_user64_statfs_t);
+                if ((size_t)r <= (size_t)bufsize / stride) {
+                    pt_user64_statfs_t *entries = (pt_user64_statfs_t *)buf;
+                    if (pt_legacy_user64_statfs_looks_valid(&entries[0]) &&
+                        (r == 1 || pt_legacy_user64_statfs_looks_valid(&entries[1]))) {
+                        intptr_t kept = 0;
+                        for (intptr_t i = 0; i < r; i++) {
+                            pt_user64_statfs_t cur;
+                            memcpy(&cur, &entries[i], sizeof(cur));
+                            cur.f_mntonname[sizeof(cur.f_mntonname) - 1U] = '\0';
+                            cur.f_mntfromname[sizeof(cur.f_mntfromname) - 1U] = '\0';
+                            if (pt_fs_legacy_statfs_entry_is_hidden(cur.f_mntonname, cur.f_mntfromname, caller)) {
+                                continue;
+                            }
+                            pt_sanitize_legacy_user64_statfs_in_place(&cur, caller);
+                            memcpy(&entries[kept], &cur, sizeof(cur));
+                            kept++;
+                        }
+                        return kept;
+                    }
+                }
+            }
+            return r;
+        }
         case 347: { // SYS_getfsstat64
             return (intptr_t)pt_fs_getfsstat_with_caller(
                 (struct statfs *)(uintptr_t)args[0],
                 (int)args[1],
                 (int)args[2],
+                caller);
+        }
+        case 54: { // SYS_ioctl
+            return (intptr_t)pt_network_ioctl_with_caller(
+                (int)args[0],
+                (unsigned long)args[1],
+                args[2],
                 caller);
         }
         case 142: { // SYS_gethostuuid
@@ -9889,14 +10179,39 @@ intptr_t pt_syscall_dispatch_with_caller(int number,
                 (const struct timespec *)(uintptr_t)args[1],
                 caller);
         }
-        case 157: // SYS_statfs
+        case 157: { // SYS_statfs (legacy 336B user64_statfs ABI)
+            char vbuf[PATH_MAX];
+            const char *resolved = NULL;
+            if (pt_fs_prepare_statfs_path_with_caller((const char *)(uintptr_t)args[0],
+                                                      caller,
+                                                      vbuf,
+                                                      sizeof(vbuf),
+                                                      &resolved) != 0) {
+                return -1;
+            }
+            intptr_t r = pt_orig_syscall(157, (uintptr_t)resolved, args[1], 0, 0, 0, 0, 0, 0);
+            if (r == 0 && args[1] != 0 && pt_is_valid_user_pointer((const void *)(uintptr_t)args[1])) {
+                pt_sanitize_legacy_user64_statfs_in_place((pt_user64_statfs_t *)(uintptr_t)args[1], caller);
+            }
+            return r;
+        }
         case 345: { // SYS_statfs64
             return (intptr_t)pt_fs_statfs_with_caller(
                 (const char *)(uintptr_t)args[0],
                 (struct statfs *)(uintptr_t)args[1],
                 caller);
         }
-        case 158: // SYS_fstatfs
+        case 158: { // SYS_fstatfs (legacy 336B user64_statfs ABI)
+            if (pt_fd_is_sensitive((int)args[0], caller)) {
+                errno = EBADF;
+                return -1;
+            }
+            intptr_t r = pt_orig_syscall(158, args[0], args[1], 0, 0, 0, 0, 0, 0);
+            if (r == 0 && args[1] != 0 && pt_is_valid_user_pointer((const void *)(uintptr_t)args[1])) {
+                pt_sanitize_legacy_user64_statfs_in_place((pt_user64_statfs_t *)(uintptr_t)args[1], caller);
+            }
+            return r;
+        }
         case 346: { // SYS_fstatfs64
             return (intptr_t)pt_fs_fstatfs_with_caller(
                 (int)args[0],
@@ -9971,19 +10286,61 @@ intptr_t pt_syscall_dispatch_with_caller(int number,
             mode_t mode = (oflag & O_CREAT) ? (mode_t)args[3] : 0;
             return (intptr_t)pt_fs_openat_with_caller(fd, path, oflag, mode, caller);
         }
-        case 188: // SYS_stat
+        case 188: // SYS_stat (legacy 120B user64_stat ABI)
+        case 190: { // SYS_lstat (legacy 120B user64_stat ABI)
+            const char *path = (const char *)(uintptr_t)args[0];
+            void *ub = (void *)(uintptr_t)args[1];
+            char vbuf[PATH_MAX];
+            const char *resolved = NULL;
+            BOOL virtual_anc = NO;
+            if (pt_fs_prepare_legacy_stat_path_with_caller(AT_FDCWD, NO, path, caller,
+                                                           vbuf, sizeof(vbuf),
+                                                           &resolved, &virtual_anc) != 0) {
+                return -1;
+            }
+            if (virtual_anc) {
+                if (ub == NULL || !pt_is_valid_user_pointer(ub)) {
+                    errno = EFAULT;
+                    return -1;
+                }
+                struct stat st64;
+                memset(&st64, 0, sizeof(st64));
+                int sr = pt_fs_stat_with_caller(path, &st64, number == 188, caller);
+                if (sr == 0) {
+                    pt_copy_stat64_to_legacy_user64_stat(&st64, ub);
+                }
+                return (intptr_t)sr;
+            }
+            intptr_t r = pt_orig_syscall(number, (uintptr_t)resolved, (uintptr_t)ub, 0, 0, 0, 0, 0, 0);
+            if (r == 0) {
+                pt_sanitize_legacy_user64_stat_in_place(ub, caller);
+            }
+            return r;
+        }
         case 338: { // SYS_stat64
             const char *path = (const char *)args[0];
             struct stat *ub = (struct stat *)args[1];
             return (intptr_t)pt_fs_stat_with_caller(path, ub, YES, caller);
         }
-        case 189: // SYS_fstat
+        case 189: { // SYS_fstat (legacy 120B user64_stat ABI)
+            int fd = (int)args[0];
+            void *ub = (void *)(uintptr_t)args[1];
+            BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
+            if (!is_sys && pt_fd_is_sensitive(fd, caller)) {
+                errno = EBADF;
+                return -1;
+            }
+            intptr_t r = pt_orig_syscall(189, (uintptr_t)fd, (uintptr_t)ub, 0, 0, 0, 0, 0, 0);
+            if (r == 0) {
+                pt_sanitize_legacy_user64_stat_in_place(ub, caller);
+            }
+            return r;
+        }
         case 339: { // SYS_fstat64
             int fd = (int)args[0];
             struct stat *ub = (struct stat *)args[1];
             return (intptr_t)pt_fs_fstat_with_caller(fd, ub, caller);
         }
-        case 190: // SYS_lstat
         case 340: { // SYS_lstat64
             const char *path = (const char *)args[0];
             struct stat *ub = (struct stat *)args[1];
@@ -10038,7 +10395,7 @@ intptr_t pt_syscall_dispatch_with_caller(int number,
                 (uint32_t)args[4],
                 caller);
         }
-        case 478: { // SYS_openat_dprotected_np
+        case 218: { // SYS_openat_dprotected_np
             int fd = (int)args[0];
             const char *path = (const char *)args[1];
             int flags = (int)args[2];
@@ -10047,6 +10404,39 @@ intptr_t pt_syscall_dispatch_with_caller(int number,
             mode_t mode = (flags & O_CREAT) ? (mode_t)args[5] : 0;
             return (intptr_t)pt_fs_openat_dprotected_np_with_caller(fd, path, flags, dpclass, dpflags, mode, caller);
         }
+        case 363: { // SYS_kevent
+            return (intptr_t)pt_kevent_with_caller(
+                (int)args[0],
+                (const struct kevent *)(uintptr_t)args[1],
+                (int)args[2],
+                (struct kevent *)(uintptr_t)args[3],
+                (int)args[4],
+                (const struct timespec *)(uintptr_t)args[5],
+                caller);
+        }
+        case 369: { // SYS_kevent64
+            return (intptr_t)pt_kevent64_with_caller(
+                (int)args[0],
+                (const struct kevent64_s *)(uintptr_t)args[1],
+                (int)args[2],
+                (struct kevent64_s *)(uintptr_t)args[3],
+                (int)args[4],
+                (unsigned int)args[5],
+                (const struct timespec *)(uintptr_t)args[6],
+                caller);
+        }
+        case 374: { // SYS_kevent_qos
+            return (intptr_t)pt_kevent_qos_with_caller(
+                (int)args[0],
+                (const pt_kevent_qos_s *)(uintptr_t)args[1],
+                (int)args[2],
+                (pt_kevent_qos_s *)(uintptr_t)args[3],
+                (int)args[4],
+                (void *)(uintptr_t)args[5],
+                (size_t *)(uintptr_t)args[6],
+                (unsigned int)args[7],
+                caller);
+        }
         case 483: { // SYS_csrctl
             if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller)) {
                 errno = ENOSYS;
@@ -10054,7 +10444,38 @@ intptr_t pt_syscall_dispatch_with_caller(int number,
             }
             break;
         }
-        case 469: // SYS_fstatat
+        case 469: { // SYS_fstatat (legacy 120B user64_stat ABI)
+            int fd = (int)args[0];
+            const char *path = (const char *)(uintptr_t)args[1];
+            void *ub = (void *)(uintptr_t)args[2];
+            int flag = (int)args[3];
+            char vbuf[PATH_MAX];
+            const char *resolved = NULL;
+            BOOL virtual_anc = NO;
+            if (pt_fs_prepare_legacy_stat_path_with_caller(fd, YES, path, caller,
+                                                           vbuf, sizeof(vbuf),
+                                                           &resolved, &virtual_anc) != 0) {
+                return -1;
+            }
+            if (virtual_anc) {
+                if (ub == NULL || !pt_is_valid_user_pointer(ub)) {
+                    errno = EFAULT;
+                    return -1;
+                }
+                struct stat st64;
+                memset(&st64, 0, sizeof(st64));
+                int sr = pt_fs_fstatat_with_caller(fd, path, &st64, flag, caller);
+                if (sr == 0) {
+                    pt_copy_stat64_to_legacy_user64_stat(&st64, ub);
+                }
+                return (intptr_t)sr;
+            }
+            intptr_t r = pt_orig_syscall(469, (uintptr_t)fd, (uintptr_t)resolved, (uintptr_t)ub, (uintptr_t)flag, 0, 0, 0, 0);
+            if (r == 0) {
+                pt_sanitize_legacy_user64_stat_in_place(ub, caller);
+            }
+            return r;
+        }
         case 470: { // SYS_fstatat64
             int fd = (int)args[0];
             const char *path = (const char *)args[1];
@@ -12072,10 +12493,6 @@ DYLD_INTERPOSE(pt_getgrgid_r, getgrgid_r)
 DYLD_INTERPOSE(pt_getgrnam, getgrnam)
 DYLD_INTERPOSE(pt_getgrnam_r, getgrnam_r)
 DYLD_INTERPOSE(pt_getgrouplist, pt_orig_getgrouplist)
-DYLD_INTERPOSE(pt_getutxent, pt_orig_getutxent)
-DYLD_INTERPOSE(pt_getutxid, pt_orig_getutxid)
-DYLD_INTERPOSE(pt_getutxline, pt_orig_getutxline)
-DYLD_INTERPOSE(pt_gethostuuid, pt_orig_gethostuuid)
 DYLD_INTERPOSE(pt_notify_register_check, notify_register_check)
 DYLD_INTERPOSE(pt_notify_register_dispatch, notify_register_dispatch)
 DYLD_INTERPOSE(pt_notify_cancel, notify_cancel)

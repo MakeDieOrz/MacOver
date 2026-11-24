@@ -2409,9 +2409,10 @@ BOOL pt_is_hidden_network_ifname(const char *name) {
         strncmp(name, "iptap", 5) == 0) {
         return YES;
     }
-    if (name[0] == 'e' && name[1] == 'n' &&
-        name[2] >= '1' && name[2] <= '9' && name[3] == '\0') {
-        return pt_network_ifname_is_inactive(name);
+    if (name[0] == 'e' && name[1] == 'n' && name[2] >= '1' && name[2] <= '9') {
+        if (name[3] == '\0' || (name[3] >= '0' && name[3] <= '9' && name[4] == '\0')) {
+            return pt_network_ifname_is_inactive(name);
+        }
     }
     return NO;
 }
@@ -2686,16 +2687,12 @@ static void pt_filter_ifconf_buffer(struct ifconf *ifc) {
     ifc->ifc_len = (int)write_off;
 }
 
-static int pt_ioctl(int fd, unsigned long request, ...) {
-    va_list ap;
-    va_start(ap, request);
-    uintptr_t arg = va_arg(ap, uintptr_t);
-    va_end(ap);
-
-    const void *caller = __builtin_return_address(0);
+__attribute__((visibility("hidden")))
+int pt_network_ioctl_with_caller(int fd, unsigned long request, uintptr_t arg, const void *caller) {
+    BOOL has_arg = ((request & (IOC_IN | IOC_OUT)) != 0);
     BOOL filter = (pt_is_bypass_enabled() &&
                    !pt_is_effective_system_or_playtools_caller(caller));
-    if (filter && arg != 0 && pt_is_valid_user_pointer((const void *)arg)) {
+    if (filter && has_arg && arg != 0 && pt_is_valid_user_pointer((const void *)arg)) {
         if (request == SIOCGIFFLAGS ||
             request == SIOCGIFADDR ||
             request == SIOCGIFNETMASK ||
@@ -2737,11 +2734,22 @@ static int pt_ioctl(int fd, unsigned long request, ...) {
             }
         }
     }
-    int ret = ioctl(fd, request, (void *)arg);
+    int ret = has_arg ? ioctl(fd, request, (void *)arg) : ioctl(fd, request);
     if (ret == 0 && filter && request == SIOCGIFCONF && arg != 0 && pt_is_valid_user_pointer((const void *)arg)) {
         pt_filter_ifconf_buffer((struct ifconf *)arg);
     }
     return ret;
+}
+
+static int pt_ioctl(int fd, unsigned long request, ...) {
+    uintptr_t arg = 0;
+    if ((request & (IOC_IN | IOC_OUT)) != 0) {
+        va_list ap;
+        va_start(ap, request);
+        arg = va_arg(ap, uintptr_t);
+        va_end(ap);
+    }
+    return pt_network_ioctl_with_caller(fd, request, arg, __builtin_return_address(0));
 }
 
 static const char *pt_net_get_real_host_short_name(void) {
@@ -2848,6 +2856,8 @@ static int pt_getnameinfo(const struct sockaddr *sa,
     return ret;
 }
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 static struct hostent *pt_gethostbyaddr(const void *addr, socklen_t len, int type) {
     struct hostent *he = gethostbyaddr(addr, len, type);
     if (he == NULL ||
@@ -2903,6 +2913,7 @@ static struct hostent *pt_gethostbyaddr(const void *addr, socklen_t len, int typ
     }
     return &s_tls_he;
 }
+#pragma clang diagnostic pop
 
 __attribute__((visibility("hidden")))
 void *pt_network_dlsym_route(const char *symbol) {
