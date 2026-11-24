@@ -70,12 +70,15 @@ static BOOL pt_is_hidden_entitlement_key(NSString *key) {
 }
 
 #define PT_CS_OPS_STATUS 0
+#define PT_CS_OPS_CDHASH 5U
 #define PT_CS_OPS_ENTITLEMENTS_BLOB 7
 #define PT_CS_OPS_BLOB 10U
 #define PT_CS_OPS_IDENTITY 11
 #define PT_CS_OPS_TEAMID 14
 #define PT_CS_OPS_CLEAR_LV 15U
 #define PT_CS_OPS_DER_ENTITLEMENTS_BLOB 16U
+#define PT_CS_OPS_VALIDATION_CATEGORY 17U
+#define PT_CS_VALIDATION_CATEGORY_APPSTORE 3U
 #define PT_CSMAGIC_EMBEDDED_ENTITLEMENTS 0xfade7171U
 #define PT_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS 0xfade7172U
 #define PT_CSMAGIC_EMBEDDED_SIGNATURE 0xfade0cc0U
@@ -90,7 +93,12 @@ static BOOL pt_is_hidden_entitlement_key(NSString *key) {
 #define PT_CS_VALID 0x00000001U
 #define PT_CS_ADHOC 0x00000002U
 #define PT_CS_GET_TASK_ALLOW 0x00000004U
+#define PT_CS_RUNTIME 0x00010000U
+#define PT_CS_LINKER_SIGNED 0x00020000U
+#define PT_CS_DESKTOP_CLEAR_MASK (PT_CS_ADHOC | PT_CS_GET_TASK_ALLOW | PT_CS_RUNTIME | PT_CS_LINKER_SIGNED)
 #define PT_ERR_SEC_CS_NO_SUCH_CODE ((OSStatus)-67068)
+
+static BOOL pt_get_or_compute_spoofed_primary_cdhash(uint8_t out_hash[20]);
 
 static BOOL pt_is_valid_apple_team_id_str(const char *s, size_t len) {
     if (s == NULL || len != 10) {
@@ -646,7 +654,7 @@ static uint32_t pt_SecTaskGetCodeSignStatus(SecTaskRef task) {
     uint32_t flags = SecTaskGetCodeSignStatus(task);
     if (pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        flags &= ~(PT_CS_ADHOC | PT_CS_GET_TASK_ALLOW);
+        flags &= ~PT_CS_DESKTOP_CLEAR_MASK;
         flags |= PT_CS_VALID;
     }
     return flags;
@@ -770,7 +778,8 @@ static OSStatus pt_SecCodeCopyPath(SecStaticCodeRef staticCode, SecCSFlags flags
 static OSStatus pt_SecCodeCopySigningInformation(SecStaticCodeRef code, SecCSFlags flags, CFDictionaryRef *information) {
     const void *caller = __builtin_return_address(0);
     BOOL app_caller = (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller));
-    if (app_caller && pt_static_code_is_hidden(code, caller, NULL)) {
+    BOOL in_app_bundle = NO;
+    if (app_caller && pt_static_code_is_hidden(code, caller, &in_app_bundle)) {
         if (information != NULL) {
             *information = NULL;
         }
@@ -819,15 +828,27 @@ static OSStatus pt_SecCodeCopySigningInformation(SecStaticCodeRef code, SecCSFla
             id flagsObj = clean[@"flags"];
             if ([flagsObj isKindOfClass:[NSNumber class]]) {
                 uint32_t f = [(NSNumber *)flagsObj unsignedIntValue];
-                f &= ~(PT_CS_ADHOC | PT_CS_GET_TASK_ALLOW);
+                f &= ~PT_CS_DESKTOP_CLEAR_MASK;
                 clean[@"flags"] = @(f);
             }
             id statusObj = clean[@"status"];
             if ([statusObj isKindOfClass:[NSNumber class]]) {
                 uint32_t s = [(NSNumber *)statusObj unsignedIntValue];
-                s &= ~(PT_CS_ADHOC | PT_CS_GET_TASK_ALLOW);
+                s &= ~PT_CS_DESKTOP_CLEAR_MASK;
                 s |= PT_CS_VALID;
                 clean[@"status"] = @(s);
+            }
+            if (in_app_bundle && (clean[@"cdhash"] != nil || clean[@"cdhashes"] != nil)) {
+                uint8_t cdhash[20];
+                if (pt_get_or_compute_spoofed_primary_cdhash(cdhash)) {
+                    NSData *cdData = [NSData dataWithBytes:cdhash length:sizeof(cdhash)];
+                    if (clean[@"cdhash"] != nil) {
+                        clean[@"cdhash"] = cdData;
+                    }
+                    if (clean[@"cdhashes"] != nil) {
+                        clean[@"cdhashes"] = @[ cdData ];
+                    }
+                }
             }
             id platObj = clean[@"platform-identifier"];
             if ([platObj isKindOfClass:[NSNumber class]] && [(NSNumber *)platObj intValue] > 0) {
@@ -1091,6 +1112,67 @@ static void pt_patch_code_directory_entitlement_hashes(uint8_t *cd_buf,
     }
 }
 
+static os_unfair_lock s_spoofed_cdhash_lock = OS_UNFAIR_LOCK_INIT;
+static uint8_t s_spoofed_primary_cdhash[20];
+static BOOL s_spoofed_primary_cdhash_valid = NO;
+static BOOL s_spoofed_primary_cdhash_compat13 = NO;
+
+static void pt_store_spoofed_primary_cdhash(const uint8_t *cd_bytes, size_t cd_len, BOOL compat13) {
+    if (cd_bytes == NULL || cd_len < 40U || cd_len > (16U << 20)) {
+        return;
+    }
+    uint8_t hash_type = cd_bytes[37];
+    uint8_t out20[20];
+    if (hash_type == PT_CS_HASHTYPE_SHA1) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        CC_SHA1(cd_bytes, (CC_LONG)cd_len, out20);
+#pragma clang diagnostic pop
+    } else {
+        uint8_t full[CC_SHA256_DIGEST_LENGTH];
+        CC_SHA256(cd_bytes, (CC_LONG)cd_len, full);
+        memcpy(out20, full, sizeof(out20));
+    }
+    os_unfair_lock_lock(&s_spoofed_cdhash_lock);
+    memcpy(s_spoofed_primary_cdhash, out20, sizeof(out20));
+    s_spoofed_primary_cdhash_compat13 = compat13;
+    s_spoofed_primary_cdhash_valid = YES;
+    os_unfair_lock_unlock(&s_spoofed_cdhash_lock);
+}
+
+static int pt_handle_spoofed_csops_blob(pid_t pid,
+                                        void *useraddr,
+                                        size_t usersize,
+                                        BOOL use_audittoken,
+                                        audit_token_t *token);
+
+static BOOL pt_get_or_compute_spoofed_primary_cdhash(uint8_t out_hash[20]) {
+    if (out_hash == NULL) {
+        return NO;
+    }
+    BOOL compat13 = pt_is_compat13_7_active();
+    os_unfair_lock_lock(&s_spoofed_cdhash_lock);
+    if (s_spoofed_primary_cdhash_valid && s_spoofed_primary_cdhash_compat13 == compat13) {
+        memcpy(out_hash, s_spoofed_primary_cdhash, 20U);
+        os_unfair_lock_unlock(&s_spoofed_cdhash_lock);
+        return YES;
+    }
+    os_unfair_lock_unlock(&s_spoofed_cdhash_lock);
+
+    int saved_errno = errno;
+    uint8_t probe[8] = {0};
+    (void)pt_handle_spoofed_csops_blob(getpid(), probe, sizeof(probe), NO, NULL);
+    errno = saved_errno;
+
+    os_unfair_lock_lock(&s_spoofed_cdhash_lock);
+    BOOL ok = (s_spoofed_primary_cdhash_valid && s_spoofed_primary_cdhash_compat13 == compat13);
+    if (ok) {
+        memcpy(out_hash, s_spoofed_primary_cdhash, 20U);
+    }
+    os_unfair_lock_unlock(&s_spoofed_cdhash_lock);
+    return ok;
+}
+
 static int pt_handle_spoofed_csops_blob(pid_t pid,
                                         void *useraddr,
                                         size_t usersize,
@@ -1266,6 +1348,9 @@ static int pt_handle_spoofed_csops_blob(pid_t pid,
               stype < PT_CSSLOT_ALTERNATE_CODEDIRECTORIES + PT_CSSLOT_ALTERNATE_CODEDIRECTORY_MAX))) {
             pt_patch_code_directory_entitlement_hashes(
                 slots[i].mutable_bytes, slots[i].len, has_xml, xml_hash, xml_sha1, has_der, der_hash, der_sha1);
+            if (stype == PT_CSSLOT_CODEDIRECTORY) {
+                pt_store_spoofed_primary_cdhash(slots[i].mutable_bytes, slots[i].len, compat13);
+            }
         }
     }
 
@@ -1320,6 +1405,39 @@ static int pt_handle_spoofed_csops_query(pid_t pid,
                                          size_t usersize,
                                          BOOL use_audittoken,
                                          audit_token_t *token) {
+    if (ops == PT_CS_OPS_CDHASH) {
+        if (usersize > 0 && useraddr == NULL) {
+            errno = EFAULT;
+            return -1;
+        }
+        if (usersize < 20U) {
+            errno = ERANGE;
+            return -1;
+        }
+        uint8_t cdhash[20];
+        if (pt_get_or_compute_spoofed_primary_cdhash(cdhash)) {
+            memcpy(useraddr, cdhash, sizeof(cdhash));
+            return 0;
+        }
+        return -2;
+    }
+    if (ops == PT_CS_OPS_VALIDATION_CATEGORY) {
+        if (pt_is_compat13_7_active()) {
+            errno = EINVAL;
+            return -1;
+        }
+        if (usersize > 0 && useraddr == NULL) {
+            errno = EFAULT;
+            return -1;
+        }
+        if (usersize < sizeof(uint32_t)) {
+            errno = ERANGE;
+            return -1;
+        }
+        uint32_t cat = PT_CS_VALIDATION_CATEGORY_APPSTORE;
+        memcpy(useraddr, &cat, sizeof(cat));
+        return 0;
+    }
     if (ops == PT_CS_OPS_ENTITLEMENTS_BLOB) {
         NSData *xmlData = pt_get_synthesized_entitlements_xml_data();
         if (xmlData != nil && xmlData.length > 0) {
@@ -1388,7 +1506,7 @@ int pt_csops_with_caller(pid_t pid, unsigned int ops, void *useraddr, size_t use
         int ret = csops(pid, ops, useraddr, usersize);
         if (ret == 0 && ops == PT_CS_OPS_STATUS && useraddr != NULL && usersize >= sizeof(uint32_t)) {
             uint32_t *flags = (uint32_t *)useraddr;
-            *flags &= ~(PT_CS_ADHOC | PT_CS_GET_TASK_ALLOW);
+            *flags &= ~PT_CS_DESKTOP_CLEAR_MASK;
             *flags |= PT_CS_VALID;
             PT_DEBUG_TRACE("entitlements", "spoofed csops status pid=%d flags=0x%x", pid, *flags);
         }
@@ -1419,7 +1537,7 @@ int pt_csops_audittoken_with_caller(pid_t pid,
         int ret = csops_audittoken(pid, ops, useraddr, usersize, token);
         if (ret == 0 && ops == PT_CS_OPS_STATUS && useraddr != NULL && usersize >= sizeof(uint32_t)) {
             uint32_t *flags = (uint32_t *)useraddr;
-            *flags &= ~(PT_CS_ADHOC | PT_CS_GET_TASK_ALLOW);
+            *flags &= ~PT_CS_DESKTOP_CLEAR_MASK;
             *flags |= PT_CS_VALID;
         }
         return ret;
@@ -2089,6 +2207,46 @@ static int pt_amfi_check_dyld_policy_self(uint64_t in_flags, uint64_t *out_flags
 
 extern int pt_orig_mac_syscall(const char *policy, int call, void *arg) __asm("___mac_syscall");
 
+static BOOL pt_mac_sandbox_should_deny(const char *operation,
+                                       int type,
+                                       uintptr_t arg0,
+                                       const void *caller) {
+    if (operation != NULL && pt_is_valid_user_pointer(operation) &&
+        strncmp(operation, "process-fork", 12) == 0) {
+        return YES;
+    }
+    int filter = (type & 0x0f);
+    if (filter == PT_SANDBOX_FILTER_PATH && arg0 != 0 && pt_is_valid_user_pointer((const void *)arg0)) {
+        const char *path = (const char *)arg0;
+        char vbuf[PATH_MAX];
+        const char *resolved = path;
+        int is_sys_flag = 0;
+        pt_fs_path_disposition_t disp = pt_prepare_fs_path_cached_caller(
+            path, caller, vbuf, sizeof(vbuf), &resolved, &is_sys_flag);
+        if (disp == PT_FS_PATH_HIDDEN || disp == PT_FS_PATH_VIRTUAL_ANCESTOR) {
+            return YES;
+        }
+    } else if (filter == PT_SANDBOX_FILTER_DESCRIPTOR) {
+        if (pt_fd_is_sensitive((int)arg0, caller)) {
+            return YES;
+        }
+    } else if ((filter == 2 || filter == 3 || filter == 6 || filter == 9 || filter == 12) &&
+               arg0 != 0 && pt_is_valid_user_pointer((const void *)arg0)) {
+        const char *sarg = (const char *)arg0;
+        if (strcasestr(sarg, "playcover") != NULL ||
+            strcasestr(sarg, "macover") != NULL ||
+            strcasestr(sarg, "app.makedie") != NULL ||
+            strcasestr(sarg, "playtools") != NULL ||
+            strcasestr(sarg, "akinterface") != NULL) {
+            return YES;
+        }
+        if (filter == 2 && pt_is_hidden_macos_mach_service(sarg)) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
 __attribute__((visibility("hidden")))
 int pt_mac_syscall_with_caller(const char *policy, int call, void *arg, const void *caller, BOOL *out_handled) {
     if (out_handled != NULL) {
@@ -2121,7 +2279,7 @@ int pt_mac_syscall_with_caller(const char *policy, int call, void *arg, const vo
             const char *operation;
             int type;
             uint32_t pad1;
-            const char *arg0;
+            uintptr_t arg0;
         } sb_req;
         memset(&sb_req, 0, sizeof(sb_req));
         memcpy(&sb_req, arg, sizeof(sb_req));
@@ -2132,42 +2290,48 @@ int pt_mac_syscall_with_caller(const char *policy, int call, void *arg, const vo
             errno = EPERM;
             return -1;
         }
-        int filter = (sb_req.type & 0x0f);
-        if (sb_req.operation != NULL && pt_is_valid_user_pointer(sb_req.operation) &&
-            strncmp(sb_req.operation, "process-fork", 12) == 0) {
+        if (pt_mac_sandbox_should_deny(sb_req.operation, sb_req.type, sb_req.arg0, caller)) {
             if (out_handled != NULL) {
                 *out_handled = YES;
             }
             return 1;
         }
-        if (filter == PT_SANDBOX_FILTER_PATH && sb_req.arg0 != NULL && pt_is_valid_user_pointer(sb_req.arg0)) {
-            char vbuf[PATH_MAX];
-            const char *resolved = sb_req.arg0;
-            int is_sys_flag = 0;
-            pt_fs_path_disposition_t disp = pt_prepare_fs_path_cached_caller(
-                sb_req.arg0, caller, vbuf, sizeof(vbuf), &resolved, &is_sys_flag);
-            if (disp == PT_FS_PATH_HIDDEN || disp == PT_FS_PATH_VIRTUAL_ANCESTOR) {
-                if (out_handled != NULL) {
-                    *out_handled = YES;
-                }
-                return 1;
+    } else if (strcmp(policy, "Sandbox") == 0 && call == 2 && arg != NULL && pt_is_valid_user_pointer(arg)) {
+        struct {
+            audit_token_t au;
+            const char *operation;
+            int type;
+            uint32_t pad1;
+            uintptr_t arg0;
+        } sb_au_req;
+        memset(&sb_au_req, 0, sizeof(sb_au_req));
+        memcpy(&sb_au_req, arg, sizeof(sb_au_req));
+        if (pt_mac_sandbox_should_deny(sb_au_req.operation, sb_au_req.type, sb_au_req.arg0, caller)) {
+            if (out_handled != NULL) {
+                *out_handled = YES;
             }
-        } else if (filter == 2 && sb_req.arg0 != NULL && pt_is_valid_user_pointer(sb_req.arg0)) {
-            if (pt_is_hidden_macos_mach_service(sb_req.arg0)) {
-                if (out_handled != NULL) {
-                    *out_handled = YES;
-                }
-                return 1;
-            }
+            return 1;
         }
     }
     return 0;
+}
+
+static int pt_mac_syscall(const char *policy, int call, void *arg) {
+    BOOL handled = NO;
+    int ret = pt_mac_syscall_with_caller(policy, call, arg, __builtin_return_address(0), &handled);
+    if (handled) {
+        return ret;
+    }
+    return pt_orig_mac_syscall(policy, call, arg);
 }
 
 __attribute__((visibility("hidden")))
 void *pt_entitlements_dlsym_route(const char *symbol) {
     if (symbol == NULL) {
         return NULL;
+    }
+    if (strcmp(symbol, "__mac_syscall") == 0) {
+        return (void *)&pt_mac_syscall;
     }
     if (strcmp(symbol, "amfi_check_dyld_policy_self") == 0) {
         return (void *)&pt_amfi_check_dyld_policy_self;
@@ -2262,3 +2426,4 @@ DYLD_INTERPOSE(pt_sandbox_extension_issue_file_to_process, sandbox_extension_iss
 DYLD_INTERPOSE(pt_sandbox_extension_issue_file_to_process_by_pid, sandbox_extension_issue_file_to_process_by_pid)
 DYLD_INTERPOSE(pt_sandbox_check, sandbox_check)
 DYLD_INTERPOSE(pt_sandbox_check_by_audit_token, sandbox_check_by_audit_token)
+DYLD_INTERPOSE(pt_mac_syscall, pt_orig_mac_syscall)

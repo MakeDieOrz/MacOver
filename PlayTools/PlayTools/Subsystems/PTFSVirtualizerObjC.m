@@ -1922,6 +1922,9 @@ static id ps_virtual_ancestor_resource_value_for_key(NSString *origPath, NSURLRe
         }
         return [NSURL fileURLWithPath:parent isDirectory:YES];
     }
+    if ([key isEqualToString:NSURLVolumeIsCaseSensitiveKey]) {
+        return @YES;
+    }
     if ([key isEqualToString:NSURLVolumeNameKey] ||
         [key isEqualToString:NSURLVolumeLocalizedNameKey]) {
         return @"Data";
@@ -1958,6 +1961,9 @@ static id ps_sanitize_url_resource_value(NSURL *origURL,
         !pt_is_bypass_enabled() ||
         ps_is_effective_system_or_playtools_caller(caller)) {
         return val;
+    }
+    if ([key isEqualToString:NSURLVolumeIsCaseSensitiveKey]) {
+        return @YES;
     }
     if ([key isEqualToString:NSURLVolumeNameKey] ||
         [key isEqualToString:NSURLVolumeLocalizedNameKey]) {
@@ -2072,7 +2078,12 @@ static id ps_sanitize_url_resource_value(NSURL *origURL,
                 NSURL *backingURL = [NSURL fileURLWithPath:@"/private/var" isDirectory:YES];
                 NSDictionary<NSURLResourceKey, id> *backingVals = [(id)backingURL pm_resourceValuesForKeys:fallbackKeys error:nil];
                 if (backingVals != nil) {
-                    [synth addEntriesFromDictionary:backingVals];
+                    for (NSURLResourceKey bk in backingVals) {
+                        id bval = ps_sanitize_url_resource_value(selfURL, bk, backingVals[bk], usePrivatePrefix, caller);
+                        if (bval != nil) {
+                            synth[bk] = bval;
+                        }
+                    }
                 }
             }
             return [synth copy];
@@ -2326,6 +2337,43 @@ static inline void ps_detect_path_virtual_flags(NSString *p1, NSString *p2, BOOL
     }
     if (attrs == nil) {
         ps_assign_virtualized_nserror(error, localErr, usePrivatePrefix, wasVirtual, caller);
+        return nil;
+    }
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(caller)) {
+        NSMutableDictionary<NSFileAttributeKey, id> *san = nil;
+        id grpId = attrs[NSFileGroupOwnerAccountID];
+        if ([grpId isKindOfClass:[NSNumber class]] && [(NSNumber *)grpId unsignedIntValue] == 20U) {
+            san = [attrs mutableCopy];
+            san[NSFileGroupOwnerAccountID] = @(501);
+        }
+        id grpName = attrs[NSFileGroupOwnerAccountName];
+        if ([grpName isKindOfClass:[NSString class]] && [(NSString *)grpName isEqualToString:@"staff"]) {
+            if (san == nil) {
+                san = [attrs mutableCopy];
+            }
+            san[NSFileGroupOwnerAccountName] = @"mobile";
+        }
+        id ownerName = attrs[NSFileOwnerAccountName];
+        if ([ownerName isKindOfClass:[NSString class]]) {
+            const char *hr = pt_get_host_user_root_cstr();
+            const char *hostUser = (hr != NULL && strncmp(hr, "/Users/", 7) == 0) ? (hr + 7) : NULL;
+            if (hostUser != NULL && hostUser[0] != '\0' &&
+                strcmp([(NSString *)ownerName UTF8String] ?: "", hostUser) == 0) {
+                if (san == nil) {
+                    san = [attrs mutableCopy];
+                }
+                san[NSFileOwnerAccountName] = @"mobile";
+            }
+        }
+        if (attrs[NSFileProtectionKey] == nil) {
+            if (san == nil) {
+                san = [attrs mutableCopy];
+            }
+            san[NSFileProtectionKey] = NSFileProtectionCompleteUntilFirstUserAuthentication;
+        }
+        if (san != nil) {
+            return [san copy];
+        }
     }
     return attrs;
 }
@@ -2615,26 +2663,45 @@ static void ps_prepare_file_url_for_io(NSURL *url,
     const void *caller = __builtin_return_address(0);
     NSArray<NSURL *> *orig = [self pm_URLsForDirectory:directory inDomains:domainMask];
     if (orig.count > 0) {
-        NSMutableArray<NSURL *> *mapped = nil;
+        BOOL bypass = pt_is_bypass_enabled();
+        NSMutableArray<NSURL *> *filtered = nil;
         int isSysCaller = -1;
         for (NSUInteger i = 0; i < orig.count; i++) {
             NSURL *u = orig[i];
             NSURL *vu = ps_virtualize_nsurl_for_app(u, NO);
-            if (vu != u) {
+            BOOL changed = (vu != u);
+            BOOL hide = NO;
+            if (bypass && [vu isFileURL]) {
                 if (isSysCaller < 0) {
                     isSysCaller = ps_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
                 }
                 if (isSysCaller != 0) {
                     return orig;
                 }
-                if (mapped == nil) {
-                    mapped = [orig mutableCopy];
+                NSString *vpath = vu.path;
+                if (vpath.length > 0 && ps_is_hidden_path(vpath, caller)) {
+                    hide = YES;
                 }
-                mapped[i] = vu;
+            } else if (changed) {
+                if (isSysCaller < 0) {
+                    isSysCaller = ps_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
+                }
+                if (isSysCaller != 0) {
+                    return orig;
+                }
+            }
+            if ((changed || hide) && filtered == nil) {
+                filtered = [NSMutableArray arrayWithCapacity:orig.count];
+                for (NSUInteger j = 0; j < i; j++) {
+                    [filtered addObject:orig[j]];
+                }
+            }
+            if (filtered != nil && !hide) {
+                [filtered addObject:vu];
             }
         }
-        if (mapped != nil) {
-            return [mapped copy];
+        if (filtered != nil) {
+            return [filtered copy];
         }
     }
     return orig;
@@ -2715,6 +2782,13 @@ static void ps_prepare_file_url_for_io(NSURL *url,
         }
         NSURL *orig = [self pm_ps_homeDirectoryForUser:userName];
         if (orig != nil) {
+            NSString *origPath = [orig isFileURL] ? orig.path : nil;
+            if (pt_is_bypass_enabled() && origPath.length > 0 &&
+                ([origPath hasPrefix:@"/Users/"] ||
+                 [origPath hasPrefix:@"/System/Volumes/Data/Users/"] ||
+                 ps_is_hidden_path(origPath, caller))) {
+                return nil;
+            }
             return ps_virtualize_nsurl_for_app(orig, NO);
         }
         return nil;

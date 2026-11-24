@@ -44,6 +44,10 @@ static CFMutableDictionaryRef s_mtl_orig_supports_render_dyn_lib_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_supports_pull_interp_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_supports_barycentric_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_supports_query_lod_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_supports_counter_sampling_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_counter_sets_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_sparse_tile_size_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_raster_order_groups_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_max_threads_tg_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_max_tg_mem_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_architecture_imps = NULL;
@@ -272,7 +276,14 @@ static uint64_t ps_mtl_memory_cap(void) {
         if (gpuFamily >= 1001 && gpuFamily < 1100 && gpuFamily > (NSInteger)maxAppleFam) {
             return NO;
         }
-        if (gpuFamily == 5001 && maxAppleFam < 1007) { // MTLGPUFamilyMetal3 requires Apple7+
+        if (gpuFamily == 3002 && maxAppleFam < 1004) { // MTLGPUFamilyCommon2 requires Apple4+
+            return NO;
+        }
+        if (gpuFamily == 3003 && maxAppleFam < 1005) { // MTLGPUFamilyCommon3 requires Apple5+
+            return NO;
+        }
+        if (gpuFamily == 5001 && (pt_is_compat13_7_active() || maxAppleFam < 1007)) {
+            // MTLGPUFamilyMetal3 introduced in iOS 16 and requires Apple7+
             return NO;
         }
         if (gpuFamily == 5002 &&
@@ -704,6 +715,82 @@ static uint64_t ps_mtl_memory_cap(void) {
     return NO;
 }
 
+- (BOOL) pm_ps_mtl_supportsCounterSampling:(NSUInteger)samplingPoint {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        (pt_is_compat13_7_active() || pt_get_spoofed_max_apple_gpu_family() < 1005)) {
+        return NO;
+    }
+    SEL sel = sel_registerName("supportsCounterSampling:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_supports_counter_sampling_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            return ((BOOL (*)(id, SEL, NSUInteger))origIMP)(self, sel, samplingPoint);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    return NO;
+}
+
+- (NSArray *) pm_ps_mtl_counterSets {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_is_compat13_7_active()) {
+        return nil;
+    }
+    SEL sel = sel_registerName("counterSets");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_counter_sets_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            return ((NSArray *(*)(id, SEL))origIMP)(self, sel);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    return nil;
+}
+
+- (NSUInteger) pm_ps_mtl_sparseTileSizeInBytes {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_get_spoofed_max_apple_gpu_family() <= 1005) {
+        return 0U;
+    }
+    SEL sel = sel_registerName("sparseTileSizeInBytes");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_sparse_tile_size_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            return ((NSUInteger (*)(id, SEL))origIMP)(self, sel);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    return 0U;
+}
+
+- (BOOL) pm_ps_mtl_rasterOrderGroupsSupported {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_get_spoofed_max_apple_gpu_family() <= 1003) {
+        return NO;
+    }
+    SEL sel = sel_registerName("areRasterOrderGroupsSupported");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_raster_order_groups_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            return ((BOOL (*)(id, SEL))origIMP)(self, sel);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    return NO;
+}
+
 - (NSUInteger) pm_ps_mtl_argumentBuffersSupport {
     if (pt_is_bypass_enabled() &&
         !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
@@ -1028,6 +1115,18 @@ static void ps_swizzle_mtl_device_class(Class cls) {
     ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_supports_query_lod_imps, cls,
                                      sel_registerName("supportsQueryTextureLOD"),
                                      @selector(pm_ps_mtl_supportsQueryTextureLOD));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_supports_counter_sampling_imps, cls,
+                                     sel_registerName("supportsCounterSampling:"),
+                                     @selector(pm_ps_mtl_supportsCounterSampling:));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_counter_sets_imps, cls,
+                                     sel_registerName("counterSets"),
+                                     @selector(pm_ps_mtl_counterSets));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_sparse_tile_size_imps, cls,
+                                     sel_registerName("sparseTileSizeInBytes"),
+                                     @selector(pm_ps_mtl_sparseTileSizeInBytes));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_raster_order_groups_imps, cls,
+                                     sel_registerName("areRasterOrderGroupsSupported"),
+                                     @selector(pm_ps_mtl_rasterOrderGroupsSupported));
     ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_max_threads_tg_imps, cls,
                                      sel_registerName("maxThreadsPerThreadgroup"),
                                      @selector(pm_ps_mtl_maxThreadsPerThreadgroup));

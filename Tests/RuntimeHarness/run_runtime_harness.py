@@ -94,6 +94,7 @@ MOCK_TARGET_M = r"""
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/attr.h>
 #include <sys/ioctl.h>
 #include <sys/mount.h>
 #include <sys/socket.h>
@@ -1666,6 +1667,9 @@ int main(int argc, const char *argv[]) {
         BOOL s11Round2CGAndHIDBlockedOK = NO;
         BOOL s11Round2FontsAndDlopenOK = NO;
         BOOL s11Round2MigThreadNetIopsOK = NO;
+        BOOL s11Round3SignKernelCsrOK = NO;
+        BOOL s11Round3DyldHandleUnwindOK = NO;
+        BOOL s11Round3FsCasePathsAndIORegOK = NO;
         const char *testS11Env = getenv("HARNESS_TEST_SCENARIO11");
         if (testS11Env != NULL && strcmp(testS11Env, "1") == 0) {
             // 1. PROC_PIDPATHINFO (libproc + SYS_proc_info) returns 0 and virtualized iOS bundle path
@@ -2667,6 +2671,121 @@ int main(int argc, const char *argv[]) {
                 s11Round2MigThreadNetIopsOK = (threadsClean && mig219SwapZeroOK && mig3414NoBrkOK &&
                                                siocgifconfClean && iopsNonEmptyOK && amfiOK && hdrImgParityOK);
             }
+
+            // 20. Round 3 parity: csops(5)==SHA256(csops(10) CD)[:20], host_kernel_version==uname().version,
+            //     SYS_csrctl(483)==ENOSYS, dlsym(Metal,"uname")==NULL, CFBundleGetFunctionPointerForName,
+            //     dlopen_from(AppKit), _dyld_find_unwind_sections, pathconf(_PC_CASE_SENSITIVE)==1,
+            //     F_GETPROTECTIONCLASS>0, resolv.conf/firmlinks/Dock.app hidden, IORegistryEntryFromPath
+            {
+                BOOL cdhashMatchOK = YES;
+                uint8_t cdh5[20] = {0};
+                NSMutableData *sb3 = [NSMutableData dataWithLength:(1U << 19)];
+                if (pt_harness_csops(0, 5U, cdh5, sizeof(cdh5)) == 0 &&
+                    pt_harness_csops(0, 10U, sb3.mutableBytes, sb3.length) == 0) {
+                    const uint8_t *b = (const uint8_t *)sb3.bytes;
+                    uint32_t sm = 0, sl = 0, sc = 0;
+                    memcpy(&sm, b, 4); memcpy(&sl, b + 4, 4); memcpy(&sc, b + 8, 4);
+                    sm = ntohl(sm); sl = ntohl(sl); sc = ntohl(sc);
+                    if (sm == 0xfade0cc0U && sl <= sb3.length && sc <= 128U) {
+                        for (uint32_t si = 0; si < sc; si++) {
+                            uint32_t st = 0, so = 0;
+                            memcpy(&st, b + 12U + si * 8U, 4);
+                            memcpy(&so, b + 16U + si * 8U, 4);
+                            st = ntohl(st); so = ntohl(so);
+                            if (st != 0U || so + 44U > sl) continue;
+                            uint32_t cm = 0, cl = 0;
+                            memcpy(&cm, b + so, 4); memcpy(&cl, b + so + 4, 4);
+                            cm = ntohl(cm); cl = ntohl(cl);
+                            if (cm == 0xfade0c02U && cl >= 44U && so + cl <= sl && b[so + 37U] == 2U && b[so + 36U] == 32U) {
+                                uint8_t d[32] = {0};
+                                CC_SHA256(b + so, (CC_LONG)cl, d);
+                                if (memcmp(cdh5, d, 20U) != 0) cdhashMatchOK = NO;
+                                break;
+                            }
+                        }
+                    }
+                }
+                struct utsname u3 = {0};
+                kernel_version_t hkv3 = {0};
+                host_t h3 = mach_host_self();
+                kern_return_t hkvRC3 = host_kernel_version(h3, hkv3);
+                if (MACH_PORT_VALID(h3)) mach_port_deallocate(mach_task_self(), h3);
+                hkv3[sizeof(hkv3) - 1] = '\0';
+                BOOL hostKvOK = (uname(&u3) == 0 && hkvRC3 == KERN_SUCCESS &&
+                                 strncmp(hkv3, u3.version, sizeof(u3.version) - 1) == 0);
+                uint32_t csrVal = 0;
+                errno = 0;
+                intptr_t csrRC = pt_harness_syscall(483, (uint32_t)1, &csrVal, (size_t)sizeof(csrVal));
+                BOOL csrBlockedOK = (csrRC == -1 && errno == ENOSYS &&
+                                     dlsym(RTLD_DEFAULT, "csr_get_active_config") == NULL &&
+                                     dlsym(RTLD_DEFAULT, "csr_check") == NULL);
+                s11Round3SignKernelCsrOK = (cdhashMatchOK && hostKvOK && csrBlockedOK);
+
+                void *mtlH = dlopen("/System/Library/Frameworks/Metal.framework/Metal", RTLD_LAZY | RTLD_NOLOAD);
+                BOOL explicitHandleOK = (mtlH == NULL || dlsym(mtlH, "uname") == NULL);
+                CFBundleRef cgB = CFBundleGetBundleWithIdentifier(CFSTR("com.apple.CoreGraphics"));
+                BOOL cfBundleOK = (cgB == NULL || CFBundleGetFunctionPointerForName(cgB, CFSTR("CGMainDisplayID")) == NULL);
+                typedef void *(*DlopenFromFn3)(const char *, int, void *);
+                DlopenFromFn3 fnDF = (DlopenFromFn3)dlsym(RTLD_DEFAULT, "dlopen_from");
+                BOOL dlopenFromOK = (fnDF == NULL ||
+                                     fnDF("/System/Library/Frameworks/AppKit.framework/AppKit", RTLD_LAZY | RTLD_NOLOAD, (void *)&main) == NULL);
+                typedef struct { const void *mh; const void *d; uintptr_t dl; const void *c; uintptr_t cl; } HarnessUnwindT;
+                typedef bool (*UnwindFn3)(void *, HarnessUnwindT *);
+                typedef const void *(*HdrAddrFn3)(const void *);
+                UnwindFn3 fnUnw = (UnwindFn3)dlsym(RTLD_DEFAULT, "_dyld_find_unwind_sections");
+                HdrAddrFn3 fnHdrA = (HdrAddrFn3)dlsym(RTLD_DEFAULT, "dyld_image_header_containing_address");
+                BOOL unwindOK = YES;
+                if (fnUnw != NULL && fnHdrA != NULL) {
+                    HarnessUnwindT uw = {0};
+                    if (fnUnw((void *)&uname, &uw)) {
+                        const void *ha = fnHdrA((void *)&uname);
+                        if (ha != NULL && uw.mh != ha) unwindOK = NO;
+                    }
+                }
+                s11Round3DyldHandleUnwindOK = (explicitHandleOK && cfBundleOK && dlopenFromOK && unwindOK);
+
+                NSString *home3 = NSHomeDirectory();
+                BOOL caseSensOK = (pathconf(home3.fileSystemRepresentation, _PC_CASE_SENSITIVE) == 1);
+                int hfd3 = open(home3.fileSystemRepresentation, O_RDONLY | O_CLOEXEC);
+                int prot3 = -1;
+                if (hfd3 >= 0) {
+#ifdef F_GETPROTECTIONCLASS
+                    prot3 = fcntl(hfd3, F_GETPROTECTIONCLASS);
+#endif
+                    close(hfd3);
+                }
+                BOOL protOK = (prot3 > 0);
+                struct stat st3 = {0};
+                BOOL pathsHiddenOK = (stat("/etc/resolv.conf", &st3) != 0 &&
+                                      stat("/usr/share/firmlinks", &st3) != 0 &&
+                                      stat("/System/Library/CoreServices/Dock.app", &st3) != 0);
+                BOOL ioFromPathOK = YES;
+                {
+                    typedef mach_port_t (*FromPathFn3)(mach_port_t, const char *);
+                    typedef CFTypeRef (*CreatePropFn3)(mach_port_t, CFStringRef, CFAllocatorRef, uint32_t);
+                    typedef kern_return_t (*RelFn3)(mach_port_t);
+                    FromPathFn3 fnFP = (FromPathFn3)dlsym(RTLD_DEFAULT, "IORegistryEntryFromPath");
+                    CreatePropFn3 fnCP = (CreatePropFn3)dlsym(RTLD_DEFAULT, "IORegistryEntryCreateCFProperty");
+                    RelFn3 fnRel3 = (RelFn3)dlsym(RTLD_DEFAULT, "IOObjectRelease");
+                    if (fnFP != NULL && fnCP != NULL && fnRel3 != NULL) {
+                        mach_port_t dt = fnFP(0, "IODeviceTree:/");
+                        if (dt != 0) {
+                            id nm = CFBridgingRelease(fnCP(dt, CFSTR("name"), kCFAllocatorDefault, 0));
+                            NSString *ns = [nm isKindOfClass:[NSString class]] ? nm :
+                                ([nm isKindOfClass:[NSData class]] ? [[NSString alloc] initWithData:nm encoding:NSUTF8StringEncoding] : @"");
+                            if ([ns containsString:@"Mac"]) ioFromPathOK = NO;
+                            fnRel3(dt);
+                        }
+                        mach_port_t opt = fnFP(0, "IODeviceTree:/options");
+                        if (opt != 0) {
+                            id fmm = CFBridgingRelease(fnCP(opt, CFSTR("fmm-computer-name"), kCFAllocatorDefault, 0));
+                            if (fmm != nil) ioFromPathOK = NO;
+                            fnRel3(opt);
+                        }
+                    }
+                }
+                s11Round3FsCasePathsAndIORegOK = (caseSensOK && protOK && pathsHiddenOK && ioFromPathOK);
+            }
         }
 
         // Scenario 12: compat13_7 parity checks
@@ -2678,6 +2797,7 @@ int main(int argc, const char *argv[]) {
         BOOL s12Round1JscCAPICleanOK = NO;
         BOOL s12Round1ReflectionParityOK = NO;
         BOOL s12Round2Compat13EpochOK = NO;
+        BOOL s12Round3IcuSwiftAvailOK = NO;
         const char *testS12Env = getenv("HARNESS_TEST_SCENARIO12");
         if (testS12Env != NULL && strcmp(testS12Env, "1") == 0) {
             s12FreadlinkHiddenOK = (dlsym(RTLD_DEFAULT, "freadlink") == NULL);
@@ -2958,6 +3078,42 @@ int main(int argc, const char *argv[]) {
                     }
                 }
                 s12Round2Compat13EpochOK = (r2JscObjcOK && r2JscCOK && r2MetalRtBlockedOK);
+
+                // Round 3 compat13_7: u_charAge(0x1F972)==0, AttributedString/Duration hidden, ___isPlatformVersionAtLeast(2,14,0,0)==0
+                BOOL r3IcuAgeOK = YES;
+                {
+                    typedef void (*UCharAgeFn3)(int32_t, uint8_t[4]);
+                    UCharAgeFn3 fnAge = (UCharAgeFn3)dlsym(RTLD_DEFAULT, "u_charAge");
+                    if (fnAge != NULL) {
+                        uint8_t age[4] = {0};
+                        fnAge(0x1F972, age);
+                        r3IcuAgeOK = (age[0] == 0);
+                    }
+                }
+                BOOL r3SwiftHiddenOK = (dlsym(RTLD_DEFAULT, "$s10Foundation16AttributedStringVMn") == NULL &&
+                                        dlsym(RTLD_DEFAULT, "$ss8DurationVMn") == NULL);
+#if __has_attribute(swiftcall)
+                {
+                    pt_harness_swift_lookup_fn fnSw3 = (pt_harness_swift_lookup_fn)dlsym(RTLD_DEFAULT, "swift_getTypeByMangledNameInContext");
+                    if (fnSw3 != NULL) {
+                        const char *m1 = "10Foundation16AttributedStringV";
+                        const char *m2 = "s8DurationV";
+                        if (fnSw3(m1, strlen(m1), NULL, NULL) != NULL ||
+                            fnSw3(m2, strlen(m2), NULL, NULL) != NULL) {
+                            r3SwiftHiddenOK = NO;
+                        }
+                    }
+                }
+#endif
+                BOOL r3AvailOK = YES;
+                {
+                    typedef int32_t (*AvailFn3)(uint32_t, uint32_t, uint32_t, uint32_t);
+                    AvailFn3 fnAv = (AvailFn3)dlsym(RTLD_DEFAULT, "__isPlatformVersionAtLeast");
+                    if (fnAv != NULL) {
+                        r3AvailOK = (fnAv(2U, 14U, 0U, 0U) == 0);
+                    }
+                }
+                s12Round3IcuSwiftAvailOK = (r3IcuAgeOK && r3SwiftHiddenOK && r3AvailOK);
             }
         }
 
@@ -3101,6 +3257,9 @@ int main(int argc, const char *argv[]) {
             @"s11Round2CGAndHIDBlockedOK": s11Round2CGAndHIDBlockedOK ? @YES : @NO,
             @"s11Round2FontsAndDlopenOK": s11Round2FontsAndDlopenOK ? @YES : @NO,
             @"s11Round2MigThreadNetIopsOK": s11Round2MigThreadNetIopsOK ? @YES : @NO,
+            @"s11Round3SignKernelCsrOK": s11Round3SignKernelCsrOK ? @YES : @NO,
+            @"s11Round3DyldHandleUnwindOK": s11Round3DyldHandleUnwindOK ? @YES : @NO,
+            @"s11Round3FsCasePathsAndIORegOK": s11Round3FsCasePathsAndIORegOK ? @YES : @NO,
             @"s12FreadlinkHiddenOK": s12FreadlinkHiddenOK ? @YES : @NO,
             @"s12ExtensionKitHiddenOK": s12ExtensionKitHiddenOK ? @YES : @NO,
             @"s12MetalCompat13GateOK": s12MetalCompat13GateOK ? @YES : @NO,
@@ -3109,6 +3268,7 @@ int main(int argc, const char *argv[]) {
             @"s12Round1JscCAPICleanOK": s12Round1JscCAPICleanOK ? @YES : @NO,
             @"s12Round1ReflectionParityOK": s12Round1ReflectionParityOK ? @YES : @NO,
             @"s12Round2Compat13EpochOK": s12Round2Compat13EpochOK ? @YES : @NO,
+            @"s12Round3IcuSwiftAvailOK": s12Round3IcuSwiftAvailOK ? @YES : @NO,
             @"provPath": provPath,
             @"hidPCInstallGen": (hidPCInstallGenNS && hidPCInstallGenCF) ? @YES : @NO,
             @"provURLPath": provURLPath,
@@ -4329,6 +4489,9 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info11["s11Round2CGAndHIDBlockedOK"] is True,
         info11["s11Round2FontsAndDlopenOK"] is True,
         info11["s11Round2MigThreadNetIopsOK"] is True,
+        info11["s11Round3SignKernelCsrOK"] is True,
+        info11["s11Round3DyldHandleUnwindOK"] is True,
+        info11["s11Round3FsCasePathsAndIORegOK"] is True,
     ]
     results.append(ScenarioResult(
         name="11. 1.0.4 audit & detect-v2 parity checks",
@@ -4392,6 +4555,7 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info12["s12Round1JscCAPICleanOK"] is True,
         info12["s12Round1ReflectionParityOK"] is True,
         info12["s12Round2Compat13EpochOK"] is True,
+        info12["s12Round3IcuSwiftAvailOK"] is True,
     ]
     results.append(ScenarioResult(
         name="12. compat13_7 parity (freadlink, ExtensionKit, Metal 2.3 gate, AGX IORegistry)",

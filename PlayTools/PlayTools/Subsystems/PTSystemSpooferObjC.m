@@ -358,8 +358,12 @@ static void ps_sanitize_jsc_global_context_ref(JSGlobalContextRef ctx, const voi
         "delete globalThis.BigInt;"
         "delete globalThis.AggregateError;"
         "delete globalThis.structuredClone;"
+        "delete globalThis.Float16Array;"
         "if(typeof Promise==='function'){delete Promise.any;}"
-        "if(typeof Object==='function'){delete Object.hasOwn;}"
+        "if(typeof Object==='function'){delete Object.hasOwn;delete Object.groupBy;}"
+        "if(typeof Map==='function'){delete Map.groupBy;}"
+        "if(typeof RegExp==='function'){delete RegExp.escape;}"
+        "if(typeof Error==='function'){delete Error.isError;}"
         "if(typeof Array==='function'&&Array.prototype){"
         "delete Array.prototype.at;"
         "delete Array.prototype.findLast;"
@@ -367,11 +371,27 @@ static void ps_sanitize_jsc_global_context_ref(JSGlobalContextRef ctx, const voi
         "delete Array.prototype.toSorted;"
         "delete Array.prototype.toReversed;"
         "delete Array.prototype.toSpliced;"
+        "delete Array.prototype.with;"
+        "}"
+        "if(typeof String==='function'&&String.prototype){"
+        "delete String.prototype.at;"
+        "delete String.prototype.isWellFormed;"
+        "delete String.prototype.toWellFormed;"
+        "}"
+        "if(typeof Set==='function'&&Set.prototype){"
+        "delete Set.prototype.union;"
+        "delete Set.prototype.intersection;"
+        "delete Set.prototype.difference;"
+        "delete Set.prototype.symmetricDifference;"
+        "delete Set.prototype.isSubsetOf;"
+        "delete Set.prototype.isSupersetOf;"
+        "delete Set.prototype.isDisjointFrom;"
         "}"
         "if(typeof Intl==='object'&&Intl){"
         "delete Intl.Segmenter;"
         "delete Intl.DisplayNames;"
         "delete Intl.ListFormat;"
+        "delete Intl.DurationFormat;"
         "}"
         "}catch(e){}";
     s_tls_in_jsc_c_sanitize = YES;
@@ -614,8 +634,41 @@ __attribute__((visibility("hidden"))) NSUUID *ps_hook_device_identifierForVendor
     return desc;
 }
 
+static const char kPSProximityMonitoringEnabledKey = 0;
+
+- (void) pm_ps_setProximityMonitoringEnabled:(BOOL)enabled {
+    if (pt_is_bypass_enabled() &&
+        ps_is_iphone_device_model() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        objc_setAssociatedObject(self, &kPSProximityMonitoringEnabledKey, @(enabled), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return;
+    }
+    [self pm_ps_setProximityMonitoringEnabled:enabled];
+}
+
+- (BOOL) pm_ps_isProximityMonitoringEnabled {
+    if (pt_is_bypass_enabled() &&
+        ps_is_iphone_device_model() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        NSNumber *val = objc_getAssociatedObject(self, &kPSProximityMonitoringEnabledKey);
+        return [val boolValue];
+    }
+    return [self pm_ps_isProximityMonitoringEnabled];
+}
+
+- (BOOL) pm_ps_proximityState {
+    if (pt_is_bypass_enabled() &&
+        ps_is_iphone_device_model() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return NO;
+    }
+    return [self pm_ps_proximityState];
+}
+
 - (BOOL) pm_canOpenURL:(NSURL *)url {
-    if (url != nil && url.scheme != nil) {
+    if (url != nil && url.scheme != nil &&
+        pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         static NSSet<NSString *> *s_blockedSchemes = nil;
         static dispatch_once_t onceToken;
         dispatch_once(&onceToken, ^{
@@ -634,7 +687,16 @@ __attribute__((visibility("hidden"))) NSUUID *ps_hook_device_identifierForVendor
                 @"ssh",
                 @"apt",
                 @"playcover",
-                @"macover"
+                @"macover",
+                @"x-apple.systempreferences",
+                @"macappstore",
+                @"macappstores",
+                @"finder",
+                @"applescript",
+                @"x-man-page",
+                @"vnc",
+                @"afp",
+                @"dict"
             ]];
         });
         NSString *scheme = [url.scheme lowercaseString];
@@ -699,84 +761,15 @@ static BOOL ps_is_hidden_bundle_identifier(NSString *bId) {
         return NO;
     }
     const char *cId = [bId UTF8String];
-    if (cId != NULL && pt_is_registered_hidden_module(cId)) {
-        return YES;
+    if (cId != NULL) {
+        if (pt_is_hidden_bundle_id_cstr(cId) || pt_is_registered_hidden_module(cId)) {
+            return YES;
+        }
     }
     if ([bId hasPrefix:@"com.apple.AGXMetal"]) {
         return YES;
     }
-    if (pt_is_compat13_7_active()) {
-        if ([bId isEqualToString:@"com.apple.AppTrackingTransparency"] ||
-            [bId isEqualToString:@"com.apple.WidgetKit"] ||
-            [bId isEqualToString:@"com.apple.ExtensionKit"] ||
-            [bId isEqualToString:@"com.apple.ExtensionFoundation"] ||
-            [bId isEqualToString:@"com.apple.UniformTypeIdentifiers"] ||
-            [bId isEqualToString:@"com.apple.TipKit"] ||
-            [bId isEqualToString:@"com.apple.AppIntents"] ||
-            [bId isEqualToString:@"com.apple.OSLog"] ||
-            [bId isEqualToString:@"com.apple.SwiftData"] ||
-            [bId isEqualToString:@"com.apple.Observation"] ||
-            [bId isEqualToString:@"com.apple.ActivityKit"] ||
-            [bId isEqualToString:@"com.apple.GroupActivities"] ||
-            [bId isEqualToString:@"com.apple.NearbyInteraction"] ||
-            [bId isEqualToString:@"com.apple.Charts"] ||
-            [bId isEqualToString:@"com.apple.WeatherKit"] ||
-            [bId isEqualToString:@"com.apple.MusicKit"] ||
-            [bId isEqualToString:@"com.apple.RoomPlan"] ||
-            [bId isEqualToString:@"com.apple.WorkoutKit"] ||
-            [bId isEqualToString:@"com.apple.Translation"] ||
-            [bId isEqualToString:@"com.apple.FamilyControls"] ||
-            [bId isEqualToString:@"com.apple.ManagedSettings"] ||
-            [bId isEqualToString:@"com.apple.DeviceActivity"] ||
-            [bId isEqualToString:@"com.apple.Cinematic"] ||
-            [bId isEqualToString:@"com.apple.CoreTransferable"] ||
-            [bId isEqualToString:@"com.apple.Spatial"] ||
-            [bId isEqualToString:@"com.apple.DockKit"] ||
-            [bId isEqualToString:@"com.apple.FinanceKit"] ||
-            [bId isEqualToString:@"com.apple.JournalingSuggestions"] ||
-            [bId isEqualToString:@"com.apple.SensitiveContentAnalysis"] ||
-            [bId isEqualToString:@"com.apple.LockedCameraCapture"] ||
-            [bId isEqualToString:@"com.apple.MarketplaceKit"]) {
-            return YES;
-        }
-    }
-    return ([bId containsString:@"PlayTools"] ||
-            [bId containsString:@"AKInterface"] ||
-            [bId containsString:@"playcover"] ||
-            [bId containsString:@"macover"] ||
-            [bId containsString:@"MacOver"] ||
-            [bId containsString:@"app.makedie"] ||
-            [bId isEqualToString:@"com.apple.AppKit"] ||
-            [bId isEqualToString:@"com.apple.UIKitMacHelper"] ||
-            [bId isEqualToString:@"com.apple.ViewBridge"] ||
-            [bId isEqualToString:@"com.apple.SkyLight"] ||
-            [bId isEqualToString:@"com.apple.HIToolbox"] ||
-            [bId isEqualToString:@"com.apple.Carbon"] ||
-            [bId isEqualToString:@"com.apple.Cocoa"] ||
-            [bId isEqualToString:@"com.apple.ApplicationServices"] ||
-            [bId isEqualToString:@"com.apple.IOBluetooth"] ||
-            [bId isEqualToString:@"com.apple.ServiceManagement"] ||
-            [bId isEqualToString:@"com.apple.ScriptingBridge"] ||
-            [bId isEqualToString:@"com.apple.DiskArbitration"] ||
-            [bId isEqualToString:@"com.apple.EndpointSecurity"] ||
-            [bId isEqualToString:@"com.apple.Hypervisor"] ||
-            [bId isEqualToString:@"com.apple.Virtualization"] ||
-            [bId isEqualToString:@"com.apple.CoreWLAN"] ||
-            [bId isEqualToString:@"com.apple.CoreDisplay"] ||
-            [bId isEqualToString:@"com.apple.OpenDirectory"] ||
-            [bId isEqualToString:@"com.apple.DirectoryService"] ||
-            [bId isEqualToString:@"com.apple.FinderSync"] ||
-            [bId isEqualToString:@"com.apple.SystemAdministration"] ||
-            [bId isEqualToString:@"com.apple.Automator"] ||
-            [bId isEqualToString:@"com.apple.AppleScriptObjC"] ||
-            [bId isEqualToString:@"com.apple.InputMethodKit"] ||
-            [bId isEqualToString:@"com.apple.PreferencePanes"] ||
-            [bId isEqualToString:@"com.apple.ScreenSaver"] ||
-            [bId isEqualToString:@"com.apple.SecurityInterface"] ||
-            [bId isEqualToString:@"com.apple.OSAKit"] ||
-            [bId isEqualToString:@"com.apple.NetFS"] ||
-            [bId isEqualToString:@"com.apple.ParavirtualizedGraphics"] ||
-            [bId isEqualToString:@"com.apple.DriverKit"]);
+    return NO;
 }
 
 static BOOL ps_is_hidden_bundle(NSBundle *bundle, const void *caller) {
@@ -856,13 +849,31 @@ __attribute__((visibility("hidden"))) NSBundle *ps_hook_bundle_for_class(id self
     return [self pm_bundleWithIdentifier:identifier];
 }
 
+static BOOL ps_is_hidden_bundle_path_for_caller(NSString *path, const void *caller) {
+    if (path.length == 0) {
+        return NO;
+    }
+    if (ps_is_hidden_path(path, caller)) {
+        return YES;
+    }
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(caller)) {
+        const char *cpath = [path UTF8String];
+        if (cpath != NULL &&
+            (pt_is_hidden_dyld_image_name(cpath) ||
+             pt_is_post13_7_hidden_framework_path(cpath))) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
 + (NSBundle *) pm_bundleWithPath:(NSString *)path {
     const void *caller = __builtin_return_address(0);
-    if (ps_is_hidden_path(path, caller)) {
+    if (ps_is_hidden_bundle_path_for_caller(path, caller)) {
         return nil;
     }
     NSString *resolved = ps_resolve_virtual_nsstring_path(path);
-    if (resolved != path && ps_is_hidden_path(ps_strip_iossupport_nsstring(resolved), caller)) {
+    if (resolved != path && ps_is_hidden_bundle_path_for_caller(ps_strip_iossupport_nsstring(resolved), caller)) {
         return nil;
     }
     return [self pm_bundleWithPath:resolved];
@@ -870,12 +881,12 @@ __attribute__((visibility("hidden"))) NSBundle *ps_hook_bundle_for_class(id self
 
 + (NSBundle *) pm_bundleWithURL:(NSURL *)url {
     const void *caller = __builtin_return_address(0);
-    if (url != nil && [url isFileURL] && ps_is_hidden_path(url.path, caller)) {
+    if (url != nil && [url isFileURL] && ps_is_hidden_bundle_path_for_caller(url.path, caller)) {
         return nil;
     }
     NSURL *resolved = ps_resolve_virtual_nsurl(url);
     if (resolved != url && resolved != nil && [resolved isFileURL] &&
-        ps_is_hidden_path(ps_strip_iossupport_nsstring(resolved.path), caller)) {
+        ps_is_hidden_bundle_path_for_caller(ps_strip_iossupport_nsstring(resolved.path), caller)) {
         return nil;
     }
     return [self pm_bundleWithURL:resolved];
@@ -920,11 +931,11 @@ __attribute__((visibility("hidden"))) NSString *ps_app_settings_plist_path(void)
 
 - (instancetype) pm_ps_initWithPath:(NSString *)path {
     const void *caller = __builtin_return_address(0);
-    if (ps_is_hidden_path(path, caller)) {
+    if (ps_is_hidden_bundle_path_for_caller(path, caller)) {
         return nil;
     }
     NSString *resolved = ps_resolve_virtual_nsstring_path(path);
-    if (resolved != path && ps_is_hidden_path(ps_strip_iossupport_nsstring(resolved), caller)) {
+    if (resolved != path && ps_is_hidden_bundle_path_for_caller(ps_strip_iossupport_nsstring(resolved), caller)) {
         return nil;
     }
     return [self pm_ps_initWithPath:resolved];
@@ -932,15 +943,87 @@ __attribute__((visibility("hidden"))) NSString *ps_app_settings_plist_path(void)
 
 - (instancetype) pm_ps_initWithURL:(NSURL *)url {
     const void *caller = __builtin_return_address(0);
-    if (url != nil && [url isFileURL] && ps_is_hidden_path(url.path, caller)) {
+    if (url != nil && [url isFileURL] && ps_is_hidden_bundle_path_for_caller(url.path, caller)) {
         return nil;
     }
     NSURL *resolved = ps_resolve_virtual_nsurl(url);
     if (resolved != url && resolved != nil && [resolved isFileURL] &&
-        ps_is_hidden_path(ps_strip_iossupport_nsstring(resolved.path), caller)) {
+        ps_is_hidden_bundle_path_for_caller(ps_strip_iossupport_nsstring(resolved.path), caller)) {
         return nil;
     }
     return [self pm_ps_initWithURL:resolved];
+}
+
+static BOOL ps_is_hidden_bundle_resolved_class(Class cls) {
+    if (cls == Nil) {
+        return NO;
+    }
+    const char *cname = class_getName(cls);
+    const char *img = class_getImageName(cls);
+    if (img != NULL &&
+        (pt_is_hidden_dyld_image_name(img) || pt_is_post13_7_hidden_framework_path(img))) {
+        pt_ensure_bundle_path_map();
+        if (s_real_app_bundle_len == 0 ||
+            pt_match_prefix_modulo_private(img, s_real_app_bundle_dir, s_real_app_bundle_len) == NULL) {
+            return YES;
+        }
+    }
+    if (cname != NULL && pt_is_hidden_objc_class(cname)) {
+        if (cname[0] == 'N' && cname[1] == 'S' && img != NULL) {
+            pt_ensure_bundle_path_map();
+            if (s_real_app_bundle_len > 0 &&
+                pt_match_prefix_modulo_private(img, s_real_app_bundle_dir, s_real_app_bundle_len) != NULL) {
+                return NO;
+            }
+        }
+        return YES;
+    }
+    return NO;
+}
+
+- (NSArray<NSNumber *> *) pm_ps_bundle_executableArchitectures {
+    NSArray<NSNumber *> *orig = [self pm_ps_bundle_executableArchitectures];
+    if (orig.count == 0 ||
+        !pt_is_bypass_enabled() ||
+        ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return orig;
+    }
+    NSMutableArray<NSNumber *> *filtered = [NSMutableArray arrayWithCapacity:orig.count];
+    for (NSNumber *arch in orig) {
+        NSInteger v = arch.integerValue;
+        // Strip x86_64 (0x01000007) and i386 (0x00000007) universal slices on spoofed iOS
+        if (v == 0x01000007 || v == 0x00000007) {
+            continue;
+        }
+        [filtered addObject:arch];
+    }
+    return (filtered.count > 0) ? [filtered copy] : @[@(0x0100000c)];
+}
+
+- (Class) pm_ps_bundle_classNamed:(NSString *)className {
+    const void *caller = __builtin_return_address(0);
+    BOOL appCaller = (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(caller));
+    if (appCaller && className.length > 0) {
+        const char *cstr = [className UTF8String];
+        if (cstr != NULL && pt_is_hidden_objc_class(cstr) && !(cstr[0] == 'N' && cstr[1] == 'S')) {
+            return Nil;
+        }
+    }
+    Class cls = [self pm_ps_bundle_classNamed:className];
+    if (appCaller && ps_is_hidden_bundle_resolved_class(cls)) {
+        return Nil;
+    }
+    return cls;
+}
+
+- (Class) pm_ps_bundle_principalClass {
+    const void *caller = __builtin_return_address(0);
+    BOOL appCaller = (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(caller));
+    Class cls = [self pm_ps_bundle_principalClass];
+    if (appCaller && ps_is_hidden_bundle_resolved_class(cls)) {
+        return Nil;
+    }
+    return cls;
 }
 
 - (NSString *) pm_ps_bundlePath {
@@ -1819,7 +1902,7 @@ static NSString *ps_sanitize_process_name(NSString *orig) {
 
 - (NSString *) pm_ps_operatingSystemVersionString {
     if (pt_is_bypass_enabled() &&
-        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        pt_is_availability_app_caller(__builtin_return_address(0))) {
         return ps_spoofed_os_version_string((NSProcessInfo *)self);
     }
     return [self pm_ps_operatingSystemVersionString];
@@ -1827,7 +1910,7 @@ static NSString *ps_sanitize_process_name(NSString *orig) {
 
 - (NSString *) pm_ps_swift_operatingSystemVersionString {
     if (pt_is_bypass_enabled() &&
-        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        pt_is_availability_app_caller(__builtin_return_address(0))) {
         return ps_spoofed_os_version_string((NSProcessInfo *)self);
     }
     return [self pm_ps_swift_operatingSystemVersionString];
@@ -1835,7 +1918,7 @@ static NSString *ps_sanitize_process_name(NSString *orig) {
 
 - (NSOperatingSystemVersion) pm_ps_operatingSystemVersion {
     if (pt_is_bypass_enabled() &&
-        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        pt_is_availability_app_caller(__builtin_return_address(0))) {
         NSOperatingSystemVersion ver = {0, 0, 0};
         if (ps_get_cached_ios_sysver(&ver, NULL)) {
             return ver;
@@ -1846,7 +1929,7 @@ static NSString *ps_sanitize_process_name(NSString *orig) {
 
 - (NSOperatingSystemVersion) pm_ps_swift_operatingSystemVersion {
     if (pt_is_bypass_enabled() &&
-        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        pt_is_availability_app_caller(__builtin_return_address(0))) {
         NSOperatingSystemVersion ver = {0, 0, 0};
         if (ps_get_cached_ios_sysver(&ver, NULL)) {
             return ver;
@@ -1857,7 +1940,7 @@ static NSString *ps_sanitize_process_name(NSString *orig) {
 
 - (BOOL) pm_ps_isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion)version {
     if (pt_is_bypass_enabled() &&
-        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        pt_is_availability_app_caller(__builtin_return_address(0))) {
         NSOperatingSystemVersion ver = {0, 0, 0};
         if (ps_get_cached_ios_sysver(&ver, NULL)) {
             return ps_os_version_at_least(ver, version);
@@ -1868,7 +1951,7 @@ static NSString *ps_sanitize_process_name(NSString *orig) {
 
 - (BOOL) pm_ps_swift_isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion)version {
     if (pt_is_bypass_enabled() &&
-        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        pt_is_availability_app_caller(__builtin_return_address(0))) {
         NSOperatingSystemVersion ver = {0, 0, 0};
         if (ps_get_cached_ios_sysver(&ver, NULL)) {
             return ps_os_version_at_least(ver, version);
@@ -2102,9 +2185,13 @@ static NSString *ps_audio_port_type(id portDesc) {
 static os_unfair_lock s_av_swizzle_lock = OS_UNFAIR_LOCK_INIT;
 static CFMutableDictionaryRef s_av_orig_name_imps = NULL;
 static CFMutableDictionaryRef s_av_orig_modelid_imps = NULL;
+static CFMutableDictionaryRef s_av_orig_uniqueid_imps = NULL;
+static CFMutableDictionaryRef s_av_orig_desc_imps = NULL;
 static CFMutableDictionaryRef s_av_orig_fov_imps = NULL;
 static CFMutableDictionaryRef s_av_orig_flash_imps = NULL;
 static CFMutableDictionaryRef s_av_orig_torch_imps = NULL;
+static os_unfair_lock s_av_uid_map_lock = OS_UNFAIR_LOCK_INIT;
+static NSMutableDictionary<NSString *, NSString *> *s_av_synth_uid_to_real = nil;
 
 - (BOOL) pm_ps_av_hasFlash {
     SEL sel = sel_registerName("hasFlash");
@@ -2199,6 +2286,14 @@ static void ps_swizzle_capture_device_class(Class cls) {
                                      sel_registerName("localizedName"), @selector(pm_ps_av_localizedName));
     ps_swizzle_class_sel_storing_imp(&s_av_swizzle_lock, &s_av_orig_modelid_imps, cls,
                                      sel_registerName("modelID"), @selector(pm_ps_av_modelID));
+    if (class_getInstanceMethod(cls, sel_registerName("uniqueID")) != NULL) {
+        ps_swizzle_class_sel_storing_imp(&s_av_swizzle_lock, &s_av_orig_uniqueid_imps, cls,
+                                         sel_registerName("uniqueID"), @selector(pm_ps_av_uniqueID));
+    }
+    if (class_getInstanceMethod(cls, @selector(description)) != NULL) {
+        ps_swizzle_class_sel_storing_imp(&s_av_swizzle_lock, &s_av_orig_desc_imps, cls,
+                                         @selector(description), @selector(pm_ps_av_description));
+    }
     if (class_getInstanceMethod(cls, sel_registerName("hasFlash")) != NULL) {
         ps_swizzle_class_sel_storing_imp(&s_av_swizzle_lock, &s_av_orig_flash_imps, cls,
                                          sel_registerName("hasFlash"), @selector(pm_ps_av_hasFlash));
@@ -2207,6 +2302,52 @@ static void ps_swizzle_capture_device_class(Class cls) {
         ps_swizzle_class_sel_storing_imp(&s_av_swizzle_lock, &s_av_orig_torch_imps, cls,
                                          sel_registerName("hasTorch"), @selector(pm_ps_av_hasTorch));
     }
+}
+
+static BOOL ps_av_string_is_virtual_desktop_audio(NSString *s) {
+    if (s.length == 0) {
+        return NO;
+    }
+    static NSArray<NSString *> *s_virtualAudioKeywords = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        s_virtualAudioKeywords = @[
+            @"BlackHole",
+            @"Loopback",
+            @"ZoomAudioDevice",
+            @"TeamsAudioDevice",
+            @"Aggregate",
+            @"Soundflower",
+            @"VB-Cable",
+            @"OBS Virtual",
+            @"Krisp"
+        ];
+    });
+    for (NSString *kw in s_virtualAudioKeywords) {
+        if ([s rangeOfString:kw options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static NSString *ps_av_raw_string_prop(id dev, CFMutableDictionaryRef dict, SEL sel) {
+    if (dev == nil || sel == NULL) {
+        return nil;
+    }
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_av_swizzle_lock, dict, dev, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            return ((NSString *(*)(id, SEL))origIMP)(dev, sel);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    if ([dev respondsToSelector:sel]) {
+        return ((NSString *(*)(id, SEL))objc_msgSend)(dev, sel);
+    }
+    return nil;
 }
 
 static BOOL ps_is_hidden_capture_device(id dev) {
@@ -2224,23 +2365,21 @@ static BOOL ps_is_hidden_capture_device(id dev) {
             }
         }
     }
-    BOOL pushed = NO;
-    IMP nameIMP = ps_lookup_orig_imp_and_push(&s_av_swizzle_lock, s_av_orig_name_imps, dev, &pushed);
-    NSString *name = nil;
-    if (nameIMP != NULL) {
-        @try {
-            name = ((NSString *(*)(id, SEL))nameIMP)(dev, sel_registerName("localizedName"));
-        } @finally {
-            ps_pop_orig_imp_frame(pushed);
-        }
-    } else if ([dev respondsToSelector:sel_registerName("localizedName")]) {
-        name = ((NSString *(*)(id, SEL))objc_msgSend)(dev, sel_registerName("localizedName"));
-    }
+    NSString *name = ps_av_raw_string_prop(dev, s_av_orig_name_imps, sel_registerName("localizedName"));
     if ([name isKindOfClass:[NSString class]]) {
         if ([name containsString:@"Continuity"] ||
-            [name containsString:@"Desk View"]) {
+            [name containsString:@"Desk View"] ||
+            ps_av_string_is_virtual_desktop_audio(name)) {
             return YES;
         }
+    }
+    NSString *modelID = ps_av_raw_string_prop(dev, s_av_orig_modelid_imps, sel_registerName("modelID"));
+    if ([modelID isKindOfClass:[NSString class]] && ps_av_string_is_virtual_desktop_audio(modelID)) {
+        return YES;
+    }
+    NSString *uid = ps_av_raw_string_prop(dev, s_av_orig_uniqueid_imps, sel_registerName("uniqueID"));
+    if ([uid isKindOfClass:[NSString class]] && ps_av_string_is_virtual_desktop_audio(uid)) {
+        return YES;
     }
     return NO;
 }
@@ -2252,7 +2391,20 @@ static NSString *ps_sanitize_capture_device_string(id dev, NSString *orig, BOOL 
     static NSArray<NSString *> *s_cameraMacKeywords = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        s_cameraMacKeywords = @[@"FaceTime", @"MacBook Air", @"MacBook Pro", @"MacBook", @"Mac mini", @"Mac Studio", @"Mac Pro", @"iMac"];
+        s_cameraMacKeywords = @[
+            @"FaceTime",
+            @"MacBook Air",
+            @"MacBook Pro",
+            @"MacBook",
+            @"Mac mini",
+            @"Mac Studio",
+            @"Mac Pro",
+            @"iMac",
+            @"Studio Display",
+            @"Pro Display",
+            @"Apple Display",
+            @"LG UltraFine"
+        ];
     });
     BOOL isCamera = NO;
     SEL hasMediaSel = sel_registerName("hasMediaType:");
@@ -2281,6 +2433,45 @@ static NSString *ps_sanitize_capture_device_string(id dev, NSString *orig, BOOL 
         }
     }
     return ps_sanitize_audio_port_string(orig, nil, isModelID);
+}
+
+static NSString *ps_sanitize_capture_device_unique_id(id dev, NSString *orig) {
+    if (orig.length == 0) {
+        return orig;
+    }
+    NSString *sanitized = orig;
+    BOOL isVideo = NO;
+    BOOL isAudio = NO;
+    SEL hasMediaSel = sel_registerName("hasMediaType:");
+    if ([dev respondsToSelector:hasMediaSel]) {
+        isVideo = ((BOOL (*)(id, SEL, NSString *))objc_msgSend)(dev, hasMediaSel, @"vide");
+        isAudio = ((BOOL (*)(id, SEL, NSString *))objc_msgSend)(dev, hasMediaSel, @"soun");
+    }
+    if (isVideo) {
+        NSInteger pos = 0;
+        SEL posSel = sel_registerName("position");
+        if ([dev respondsToSelector:posSel]) {
+            pos = ((NSInteger (*)(id, SEL))objc_msgSend)(dev, posSel);
+        }
+        sanitized = (pos == 1)
+            ? @"com.apple.avfoundation.avcapturedevice.built-in_video:0"
+            : @"com.apple.avfoundation.avcapturedevice.built-in_video:1";
+    } else if (isAudio || [orig rangeOfString:@"BuiltInMicrophoneDevice"].location != NSNotFound) {
+        sanitized = @"com.apple.avfoundation.avcapturedevice.built-in_audio:0";
+    } else {
+        sanitized = ps_sanitize_capture_device_string(dev, orig, YES);
+    }
+    if (sanitized.length > 0 && ![sanitized isEqualToString:orig]) {
+        os_unfair_lock_lock(&s_av_uid_map_lock);
+        if (s_av_synth_uid_to_real == nil) {
+            s_av_synth_uid_to_real = [NSMutableDictionary dictionary];
+        }
+        if (s_av_synth_uid_to_real[sanitized] == nil) {
+            s_av_synth_uid_to_real[sanitized] = [orig copy];
+        }
+        os_unfair_lock_unlock(&s_av_uid_map_lock);
+    }
+    return sanitized;
 }
 
 static NSArray *ps_filter_capture_devices(NSArray *devices, BOOL isAppCaller) {
@@ -2391,6 +2582,87 @@ static NSArray *ps_filter_capture_devices(NSArray *devices, BOOL isAppCaller) {
     return orig;
 }
 
+- (NSString *) pm_ps_av_uniqueID {
+    SEL sel = sel_registerName("uniqueID");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_av_swizzle_lock, s_av_orig_uniqueid_imps, self, &pushed);
+    NSString *orig = nil;
+    if (origIMP != NULL) {
+        @try {
+            orig = ((NSString *(*)(id, SEL))origIMP)(self, sel);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    if (orig.length > 0 && pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return ps_sanitize_capture_device_unique_id(self, orig);
+    }
+    return orig;
+}
+
+- (NSString *) pm_ps_av_description {
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_av_swizzle_lock, s_av_orig_desc_imps, self, &pushed);
+    NSString *orig = nil;
+    if (origIMP != NULL) {
+        @try {
+            orig = ((NSString *(*)(id, SEL))origIMP)(self, @selector(description));
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    if (orig.length > 0 && pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        NSString *res = orig;
+        NSString *rawName = ps_av_raw_string_prop(self, s_av_orig_name_imps, sel_registerName("localizedName"));
+        if (rawName.length > 0) {
+            NSString *cleanName = ps_sanitize_capture_device_string(self, rawName, NO);
+            if (cleanName.length > 0 && ![cleanName isEqualToString:rawName]) {
+                res = [res stringByReplacingOccurrencesOfString:rawName withString:cleanName];
+            }
+        }
+        NSString *rawModel = ps_av_raw_string_prop(self, s_av_orig_modelid_imps, sel_registerName("modelID"));
+        if (rawModel.length > 0) {
+            NSString *cleanModel = ps_sanitize_capture_device_string(self, rawModel, YES);
+            if (cleanModel.length > 0 && ![cleanModel isEqualToString:rawModel]) {
+                res = [res stringByReplacingOccurrencesOfString:rawModel withString:cleanModel];
+            }
+        }
+        NSString *rawUID = ps_av_raw_string_prop(self, s_av_orig_uniqueid_imps, sel_registerName("uniqueID"));
+        if (rawUID.length > 0) {
+            NSString *cleanUID = ps_sanitize_capture_device_unique_id(self, rawUID);
+            if (cleanUID.length > 0 && ![cleanUID isEqualToString:rawUID]) {
+                res = [res stringByReplacingOccurrencesOfString:rawUID withString:cleanUID];
+            }
+        }
+        return ps_sanitize_audio_port_string(res, nil, NO);
+    }
+    return orig;
+}
+
++ (id) pm_ps_av_deviceWithUniqueID:(NSString *)deviceUniqueID {
+    NSString *lookupID = deviceUniqueID;
+    BOOL isAppCaller = pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0));
+    if (isAppCaller && lookupID.length > 0) {
+        os_unfair_lock_lock(&s_av_uid_map_lock);
+        NSString *mapped = s_av_synth_uid_to_real[lookupID];
+        os_unfair_lock_unlock(&s_av_uid_map_lock);
+        if (mapped.length > 0) {
+            lookupID = mapped;
+        }
+    }
+    id dev = [self pm_ps_av_deviceWithUniqueID:lookupID];
+    if (dev != nil) {
+        ps_swizzle_capture_device_class(object_getClass(dev));
+        if (isAppCaller && ps_is_hidden_capture_device(dev)) {
+            return nil;
+        }
+    }
+    return dev;
+}
+
 + (NSArray *) pm_ps_av_devices {
     NSArray *devices = [self pm_ps_av_devices];
     BOOL isAppCaller = pt_is_bypass_enabled() &&
@@ -2468,7 +2740,10 @@ static BOOL ps_is_hidden_user_default_key(NSString *key) {
     return (ckey != NULL && pt_is_hidden_macos_pref_key(ckey));
 }
 
-static BOOL ps_user_default_val_leaks_host_user(id val) {
+static BOOL ps_user_default_val_leaks_host_user_depth(id val, int depth) {
+    if (val == nil || depth > 3) {
+        return NO;
+    }
     if ([val isKindOfClass:[NSString class]]) {
         return [(NSString *)val containsString:@"/Users/"];
     }
@@ -2476,7 +2751,29 @@ static BOOL ps_user_default_val_leaks_host_user(id val) {
         NSString *p = [(NSURL *)val path];
         return (p != nil && [p containsString:@"/Users/"]);
     }
+    if ([val isKindOfClass:[NSArray class]]) {
+        for (id elem in (NSArray *)val) {
+            if (ps_user_default_val_leaks_host_user_depth(elem, depth + 1)) {
+                return YES;
+            }
+        }
+        return NO;
+    }
+    if ([val isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *d = (NSDictionary *)val;
+        for (id k in d) {
+            if (ps_user_default_val_leaks_host_user_depth(k, depth + 1) ||
+                ps_user_default_val_leaks_host_user_depth(d[k], depth + 1)) {
+                return YES;
+            }
+        }
+        return NO;
+    }
     return NO;
+}
+
+static BOOL ps_user_default_val_leaks_host_user(id val) {
+    return ps_user_default_val_leaks_host_user_depth(val, 0);
 }
 
 static NSDictionary<NSString *, id> *ps_sanitize_user_defaults_dict(NSDictionary<NSString *, id> *dict) {
@@ -2676,6 +2973,42 @@ static NSArray<UIWindow *> *ps_filter_windows_array(NSArray<UIWindow *> *orig, c
 
 - (NSArray<UIWindow *> *) pm_ps_scene_windows {
     return ps_filter_windows_array([self pm_ps_scene_windows], __builtin_return_address(0));
+}
+
+- (id) pm_ps_scene_titlebar {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return nil;
+    }
+    return [self pm_ps_scene_titlebar];
+}
+
+- (id) pm_ps_scene_sizeRestrictions {
+    if (pt_is_bypass_enabled() &&
+        (ps_is_iphone_device_model() || pt_is_compat13_7_active()) &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return nil;
+    }
+    return [self pm_ps_scene_sizeRestrictions];
+}
+
+- (BOOL) pm_ps_app_supportsMultipleScenes {
+    if (pt_is_bypass_enabled() &&
+        ps_is_iphone_device_model() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return NO;
+    }
+    return [self pm_ps_app_supportsMultipleScenes];
+}
+
+- (id) pm_ps_menuBuilder_menuForIdentifier:(NSString *)identifier {
+    if (identifier.length > 0 &&
+        pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        [identifier hasPrefix:@"com.apple.menu.application.ext"]) {
+        return nil;
+    }
+    return [self pm_ps_menuBuilder_menuForIdentifier:identifier];
 }
 
 static NSDictionary *ps_sanitize_process_environment(NSDictionary *orig) {
@@ -2964,7 +3297,8 @@ static NSString *ps_build_wk_env_user_script_source_uncached(NSString *plat,
                                                              int ptWidth,
                                                              int ptHeight,
                                                              double dpr,
-                                                             BOOL compat13) {
+                                                             BOOL compat13,
+                                                             int32_t maxAppleFam) {
     NSString *preamble = [NSString stringWithFormat:
         @"%@\n"
         "(function(){\n"
@@ -2974,8 +3308,9 @@ static NSString *ps_build_wk_env_user_script_source_uncached(NSString *plat,
         "  const ptWidth = %d;\n"
         "  const ptHeight = %d;\n"
         "  const dpr = %.6g;\n"
-        "  const compat13 = %s;\n",
-        kPSWKEnvScriptMarker, plat, uaToken, cores, ptWidth, ptHeight, dpr, compat13 ? "true" : "false"];
+        "  const compat13 = %s;\n"
+        "  const maxAppleFam = %d;\n",
+        kPSWKEnvScriptMarker, plat, uaToken, cores, ptWidth, ptHeight, dpr, compat13 ? "true" : "false", (int)maxAppleFam];
 
     static NSString * const kEnvScriptBody =
         @"  const wrappedFns = new WeakSet();\n"
@@ -2989,7 +3324,11 @@ static NSString *ps_build_wk_env_user_script_source_uncached(NSString *plat,
         "  const macCamLabelRe = /facetime|desk\\s*view|continuity/i;\n"
         "  const blockedWebGLExts = new Set([\n"
         "    'ext_disjoint_timer_query',\n"
-        "    'ext_disjoint_timer_query_webgl2'\n"
+        "    'ext_disjoint_timer_query_webgl2',\n"
+        "    'webgl_compressed_texture_s3tc',\n"
+        "    'webgl_compressed_texture_s3tc_srgb',\n"
+        "    'ext_texture_compression_bptc',\n"
+        "    'ext_texture_compression_rgtc'\n"
         "  ]);\n"
         "  const ptBlobMap = (typeof Map === 'function') ? new Map() : null;\n"
         "  const ptPendingWorkerURLs = (typeof Set === 'function') ? new Set() : null;\n"
@@ -3020,7 +3359,7 @@ static NSString *ps_build_wk_env_user_script_source_uncached(NSString *plat,
         "      });\n"
         "    } catch (_) {}\n"
         "  }\n"
-        "  function workerBootstrap(p, u, c, baseHref, isShared, bootFnSrc, sharedName, wCompat13) {\n"
+        "  function workerBootstrap(p, u, c, baseHref, isShared, bootFnSrc, sharedName, wCompat13, wMaxAppleFam) {\n"
         "    if (wCompat13 === true) {\n"
         "      try {\n"
         "        delete globalThis.WeakRef;\n"
@@ -3028,8 +3367,13 @@ static NSString *ps_build_wk_env_user_script_source_uncached(NSString *plat,
         "        delete globalThis.BigInt;\n"
         "        delete globalThis.AggregateError;\n"
         "        delete globalThis.structuredClone;\n"
+        "        delete globalThis.Float16Array;\n"
+        "        delete globalThis.WebGL2RenderingContext;\n"
         "        if (typeof Promise === 'function') { delete Promise.any; }\n"
-        "        if (typeof Object === 'function') { delete Object.hasOwn; }\n"
+        "        if (typeof Object === 'function') { delete Object.hasOwn; delete Object.groupBy; }\n"
+        "        if (typeof Map === 'function') { delete Map.groupBy; }\n"
+        "        if (typeof RegExp === 'function') { delete RegExp.escape; }\n"
+        "        if (typeof Error === 'function') { delete Error.isError; }\n"
         "        if (typeof Array === 'function' && Array.prototype) {\n"
         "          delete Array.prototype.at;\n"
         "          delete Array.prototype.findLast;\n"
@@ -3037,11 +3381,27 @@ static NSString *ps_build_wk_env_user_script_source_uncached(NSString *plat,
         "          delete Array.prototype.toSorted;\n"
         "          delete Array.prototype.toReversed;\n"
         "          delete Array.prototype.toSpliced;\n"
+        "          delete Array.prototype.with;\n"
+        "        }\n"
+        "        if (typeof String === 'function' && String.prototype) {\n"
+        "          delete String.prototype.at;\n"
+        "          delete String.prototype.isWellFormed;\n"
+        "          delete String.prototype.toWellFormed;\n"
+        "        }\n"
+        "        if (typeof Set === 'function' && Set.prototype) {\n"
+        "          delete Set.prototype.union;\n"
+        "          delete Set.prototype.intersection;\n"
+        "          delete Set.prototype.difference;\n"
+        "          delete Set.prototype.symmetricDifference;\n"
+        "          delete Set.prototype.isSubsetOf;\n"
+        "          delete Set.prototype.isSupersetOf;\n"
+        "          delete Set.prototype.isDisjointFrom;\n"
         "        }\n"
         "        if (typeof Intl === 'object' && Intl) {\n"
         "          delete Intl.Segmenter;\n"
         "          delete Intl.DisplayNames;\n"
         "          delete Intl.ListFormat;\n"
+        "          delete Intl.DurationFormat;\n"
         "        }\n"
         "      } catch (_) {}\n"
         "    }\n"
@@ -3050,7 +3410,11 @@ static NSString *ps_build_wk_env_user_script_source_uncached(NSString *plat,
         "    const wDebugExtContexts = new WeakSet();\n"
         "    const wBlockedWebGLExts = new Set([\n"
         "      'ext_disjoint_timer_query',\n"
-        "      'ext_disjoint_timer_query_webgl2'\n"
+        "      'ext_disjoint_timer_query_webgl2',\n"
+        "      'webgl_compressed_texture_s3tc',\n"
+        "      'webgl_compressed_texture_s3tc_srgb',\n"
+        "      'ext_texture_compression_bptc',\n"
+        "      'ext_texture_compression_rgtc'\n"
         "    ]);\n"
         "    function wMark(fn, str, fnName) {\n"
         "      wWrappedFns.add(fn);\n"
@@ -3171,17 +3535,24 @@ static NSString *ps_build_wk_env_user_script_source_uncached(NSString *plat,
         "            if (pname === 37445) return 'Apple Inc.';\n"
         "            if (pname === 37446) return 'Apple GPU';\n"
         "          }\n"
-        "          return origGetParam.apply(this, arguments);\n"
+        "          const val = origGetParam.apply(this, arguments);\n"
+        "          if (wMaxAppleFam > 0 && wMaxAppleFam <= 1003 && (pname === 3379 || pname === 34024) && typeof val === 'number' && val > 8192) {\n"
+        "            return 8192;\n"
+        "          }\n"
+        "          return val;\n"
         "        } }).getParameter;\n"
         "        wMark(wrappedGetParam, 'function getParameter() { [native code] }', 'getParameter');\n"
         "        try { proto.getParameter = wrappedGetParam; } catch (_) {}\n"
         "      }\n"
         "    }\n"
         "    if (typeof WebGLRenderingContext !== 'undefined') wPatchWebGL(WebGLRenderingContext);\n"
-        "    if (typeof WebGL2RenderingContext !== 'undefined') wPatchWebGL(WebGL2RenderingContext);\n"
+        "    if (wCompat13 !== true && typeof WebGL2RenderingContext !== 'undefined') wPatchWebGL(WebGL2RenderingContext);\n"
         "    if (typeof OffscreenCanvas !== 'undefined' && OffscreenCanvas.prototype && typeof OffscreenCanvas.prototype.getContext === 'function' && !wWrappedFns.has(OffscreenCanvas.prototype.getContext)) {\n"
         "      const origOffscreenGetContext = OffscreenCanvas.prototype.getContext;\n"
         "      const wrappedOffscreenGetContext = function getContext(contextType) {\n"
+        "        if (wCompat13 === true && typeof contextType === 'string' && /^(?:experimental-)?webgl2$/i.test(contextType)) {\n"
+        "          return null;\n"
+        "        }\n"
         "        const ctx = origOffscreenGetContext.apply(this, arguments);\n"
         "        try {\n"
         "          if (ctx && (contextType === 'webgl' || contextType === 'experimental-webgl' || contextType === 'webgl2')) {\n"
@@ -3397,7 +3768,7 @@ static NSString *ps_build_wk_env_user_script_source_uncached(NSString *plat,
         "          JSON.stringify(u) + ',' +\n"
         "          c + ',' +\n"
         "          JSON.stringify(cBaseHref || '') + ',false,' +\n"
-        "          JSON.stringify(childBootSrc) + ',undefined,' + (wCompat13 === true ? 'true' : 'false') + ');';\n"
+        "          JSON.stringify(childBootSrc) + ',undefined,' + (wCompat13 === true ? 'true' : 'false') + ',' + (typeof wMaxAppleFam === 'number' ? wMaxAppleFam : 0) + ');';\n"
         "      }\n"
         "      const WrappedChildWorker = function Worker(scriptURL) {\n"
         "        if (arguments.length === 0) {\n"
@@ -3645,7 +4016,7 @@ static NSString *ps_build_wk_env_user_script_source_uncached(NSString *plat,
         "    const bHref = (typeof baseHref === 'string') ? baseHref : '';\n"
         "    const sharedFlag = Boolean(isShared);\n"
         "    const sNameArg = (typeof sharedName === 'string') ? JSON.stringify(sharedName) : 'undefined';\n"
-        "    const argsStr = JSON.stringify(plat) + ',' + JSON.stringify(uaToken) + ',' + cores + ',' + JSON.stringify(bHref) + ',' + (sharedFlag ? 'true' : 'false') + ',' + JSON.stringify(workerBootSrc) + ',' + sNameArg + ',' + (compat13 ? 'true' : 'false');\n"
+        "    const argsStr = JSON.stringify(plat) + ',' + JSON.stringify(uaToken) + ',' + cores + ',' + JSON.stringify(bHref) + ',' + (sharedFlag ? 'true' : 'false') + ',' + JSON.stringify(workerBootSrc) + ',' + sNameArg + ',' + (compat13 ? 'true' : 'false') + ',' + maxAppleFam;\n"
         "    return '(' + workerBootSrc + ')(' + argsStr + ');';\n"
         "  }\n"
         "  function patchWebGL(ctor, ObjCtor) {\n"
@@ -3687,7 +4058,11 @@ static NSString *ps_build_wk_env_user_script_source_uncached(NSString *plat,
         "          if (pname === 37445) return 'Apple Inc.';\n"
         "          if (pname === 37446) return 'Apple GPU';\n"
         "        }\n"
-        "        return origGetParam.apply(this, arguments);\n"
+        "        const val = origGetParam.apply(this, arguments);\n"
+        "        if (maxAppleFam > 0 && maxAppleFam <= 1003 && (pname === 3379 || pname === 34024) && typeof val === 'number' && val > 8192) {\n"
+        "          return 8192;\n"
+        "        }\n"
+        "        return val;\n"
         "      } }).getParameter;\n"
         "      markNativeFn(wrappedGetParam, 'function getParameter() { [native code] }', 'getParameter', ObjCtor);\n"
         "      try { proto.getParameter = wrappedGetParam; } catch (_) {}\n"
@@ -3793,8 +4168,13 @@ static NSString *ps_build_wk_env_user_script_source_uncached(NSString *plat,
         "            delete win.BigInt;\n"
         "            delete win.AggregateError;\n"
         "            delete win.structuredClone;\n"
+        "            delete win.Float16Array;\n"
+        "            delete win.WebGL2RenderingContext;\n"
         "            if (win.Promise) delete win.Promise.any;\n"
-        "            if (win.Object) delete win.Object.hasOwn;\n"
+        "            if (win.Object) { delete win.Object.hasOwn; delete win.Object.groupBy; }\n"
+        "            if (win.Map) delete win.Map.groupBy;\n"
+        "            if (win.RegExp) delete win.RegExp.escape;\n"
+        "            if (win.Error) delete win.Error.isError;\n"
         "            if (win.Array && win.Array.prototype) {\n"
         "              delete win.Array.prototype.at;\n"
         "              delete win.Array.prototype.findLast;\n"
@@ -3802,11 +4182,27 @@ static NSString *ps_build_wk_env_user_script_source_uncached(NSString *plat,
         "              delete win.Array.prototype.toSorted;\n"
         "              delete win.Array.prototype.toReversed;\n"
         "              delete win.Array.prototype.toSpliced;\n"
+        "              delete win.Array.prototype.with;\n"
+        "            }\n"
+        "            if (win.String && win.String.prototype) {\n"
+        "              delete win.String.prototype.at;\n"
+        "              delete win.String.prototype.isWellFormed;\n"
+        "              delete win.String.prototype.toWellFormed;\n"
+        "            }\n"
+        "            if (win.Set && win.Set.prototype) {\n"
+        "              delete win.Set.prototype.union;\n"
+        "              delete win.Set.prototype.intersection;\n"
+        "              delete win.Set.prototype.difference;\n"
+        "              delete win.Set.prototype.symmetricDifference;\n"
+        "              delete win.Set.prototype.isSubsetOf;\n"
+        "              delete win.Set.prototype.isSupersetOf;\n"
+        "              delete win.Set.prototype.isDisjointFrom;\n"
         "            }\n"
         "            if (win.Intl) {\n"
         "              delete win.Intl.Segmenter;\n"
         "              delete win.Intl.DisplayNames;\n"
         "              delete win.Intl.ListFormat;\n"
+        "              delete win.Intl.DurationFormat;\n"
         "            }\n"
         "          } catch (_) {}\n"
         "        }\n"
@@ -4084,8 +4480,14 @@ static NSString *ps_build_wk_env_user_script_source_uncached(NSString *plat,
         "      if (win.CSS && typeof win.CSS.supports === 'function' && !wrappedFns.has(win.CSS.supports)) {\n"
         "        const origCSSSupports = win.CSS.supports;\n"
         "        const wrappedCSSSupports = ({ supports(prop, value) {\n"
-        "          if (typeof prop === 'string' && /^-webkit-(?:touch-callout|overflow-scrolling)\\b/i.test(prop.trim())) {\n"
-        "            return true;\n"
+        "          if (typeof prop === 'string') {\n"
+        "            const trimmed = prop.trim();\n"
+        "            if (/^-webkit-(?:touch-callout|overflow-scrolling)\\b/i.test(trimmed)) {\n"
+        "              return true;\n"
+        "            }\n"
+        "            if (compat13 && (/^(?:aspect-ratio|container-type|container-name|container)\\b/i.test(trimmed) || /(?:aspect-ratio\\s*:|container-type\\s*:|:has\\s*\\()/i.test(trimmed))) {\n"
+        "              return false;\n"
+        "            }\n"
         "          }\n"
         "          return origCSSSupports.apply(this, arguments);\n"
         "        } }).supports;\n"
@@ -4093,10 +4495,24 @@ static NSString *ps_build_wk_env_user_script_source_uncached(NSString *plat,
         "        try { win.CSS.supports = wrappedCSSSupports; } catch (_) {}\n"
         "      }\n"
         "      if (typeof win.WebGLRenderingContext !== 'undefined') patchWebGL(win.WebGLRenderingContext, winObj);\n"
-        "      if (typeof win.WebGL2RenderingContext !== 'undefined') patchWebGL(win.WebGL2RenderingContext, winObj);\n"
+        "      if (!compat13 && typeof win.WebGL2RenderingContext !== 'undefined') patchWebGL(win.WebGL2RenderingContext, winObj);\n"
+        "      if (compat13 && win.HTMLCanvasElement && win.HTMLCanvasElement.prototype && typeof win.HTMLCanvasElement.prototype.getContext === 'function' && !wrappedFns.has(win.HTMLCanvasElement.prototype.getContext)) {\n"
+        "        const origCanvasGetContext = win.HTMLCanvasElement.prototype.getContext;\n"
+        "        const wrappedCanvasGetContext = function getContext(contextType) {\n"
+        "          if (typeof contextType === 'string' && /^(?:experimental-)?webgl2$/i.test(contextType)) {\n"
+        "            return null;\n"
+        "          }\n"
+        "          return origCanvasGetContext.apply(this, arguments);\n"
+        "        };\n"
+        "        markNativeFn(wrappedCanvasGetContext, 'function getContext() { [native code] }', 'getContext', winObj);\n"
+        "        try { win.HTMLCanvasElement.prototype.getContext = wrappedCanvasGetContext; } catch (_) {}\n"
+        "      }\n"
         "      if (typeof win.OffscreenCanvas !== 'undefined' && win.OffscreenCanvas.prototype && typeof win.OffscreenCanvas.prototype.getContext === 'function' && !wrappedFns.has(win.OffscreenCanvas.prototype.getContext)) {\n"
         "        const origOffscreenGetContext = win.OffscreenCanvas.prototype.getContext;\n"
         "        const wrappedOffscreenGetContext = function getContext(contextType) {\n"
+        "          if (compat13 && typeof contextType === 'string' && /^(?:experimental-)?webgl2$/i.test(contextType)) {\n"
+        "            return null;\n"
+        "          }\n"
         "          const ctx = origOffscreenGetContext.apply(this, arguments);\n"
         "          try {\n"
         "            if (ctx && (contextType === 'webgl' || contextType === 'experimental-webgl' || contextType === 'webgl2')) {\n"
@@ -4595,6 +5011,7 @@ static int s_cachedWKEnvPtW = 0;
 static int s_cachedWKEnvPtH = 0;
 static double s_cachedWKEnvDpr = 0.0;
 static BOOL s_cachedWKEnvCompat13 = NO;
+static int32_t s_cachedWKEnvMaxAppleFam = 0;
 static NSString *s_cachedWKEnvSource = nil;
 static id s_cachedWKEnvScript = nil;
 
@@ -4608,6 +5025,7 @@ static void ps_get_cached_wk_env(NSString **outSource, id *outScript) {
     int ptHeight = 0;
     double dpr = 0.0;
     BOOL compat13 = pt_is_compat13_7_active();
+    int32_t maxAppleFam = pt_get_spoofed_max_apple_gpu_family();
     ps_get_wk_env_profile_params(&plat, &uaToken, &cores, &ptWidth, &ptHeight, &dpr);
 
     os_unfair_lock_lock(&s_wkEnvCacheLock);
@@ -4616,6 +5034,7 @@ static void ps_get_cached_wk_env(NSString **outSource, id *outScript) {
                      s_cachedWKEnvPtW == ptWidth &&
                      s_cachedWKEnvPtH == ptHeight &&
                      s_cachedWKEnvCompat13 == compat13 &&
+                     s_cachedWKEnvMaxAppleFam == maxAppleFam &&
                      fabs(s_cachedWKEnvDpr - dpr) < 1e-6 &&
                      [s_cachedWKEnvPlat isEqualToString:plat] &&
                      [s_cachedWKEnvUaToken isEqualToString:uaToken]);
@@ -4641,7 +5060,7 @@ static void ps_get_cached_wk_env(NSString **outSource, id *outScript) {
     }
     os_unfair_lock_unlock(&s_wkEnvCacheLock);
 
-    NSString *built = ps_build_wk_env_user_script_source_uncached(plat, uaToken, cores, ptWidth, ptHeight, dpr, compat13);
+    NSString *built = ps_build_wk_env_user_script_source_uncached(plat, uaToken, cores, ptWidth, ptHeight, dpr, compat13, maxAppleFam);
     id builtScript = (outScript != NULL || objc_getClass("WKUserScript") != Nil) ? ps_create_wk_user_script(built) : nil;
 
     os_unfair_lock_lock(&s_wkEnvCacheLock);
@@ -4652,6 +5071,7 @@ static void ps_get_cached_wk_env(NSString **outSource, id *outScript) {
     s_cachedWKEnvPtH = ptHeight;
     s_cachedWKEnvDpr = dpr;
     s_cachedWKEnvCompat13 = compat13;
+    s_cachedWKEnvMaxAppleFam = maxAppleFam;
     s_cachedWKEnvSource = built;
     if (builtScript != nil) {
         s_cachedWKEnvScript = builtScript;
@@ -5466,8 +5886,12 @@ static void ps_sanitize_jscontext_for_compat13(id ctx, const void *caller) {
              "delete globalThis.BigInt;"
              "delete globalThis.AggregateError;"
              "delete globalThis.structuredClone;"
+             "delete globalThis.Float16Array;"
              "if(typeof Promise==='function'){delete Promise.any;}"
-             "if(typeof Object==='function'){delete Object.hasOwn;}"
+             "if(typeof Object==='function'){delete Object.hasOwn;delete Object.groupBy;}"
+             "if(typeof Map==='function'){delete Map.groupBy;}"
+             "if(typeof RegExp==='function'){delete RegExp.escape;}"
+             "if(typeof Error==='function'){delete Error.isError;}"
              "if(typeof Array==='function'&&Array.prototype){"
              "delete Array.prototype.at;"
              "delete Array.prototype.findLast;"
@@ -5475,11 +5899,27 @@ static void ps_sanitize_jscontext_for_compat13(id ctx, const void *caller) {
              "delete Array.prototype.toSorted;"
              "delete Array.prototype.toReversed;"
              "delete Array.prototype.toSpliced;"
+             "delete Array.prototype.with;"
+             "}"
+             "if(typeof String==='function'&&String.prototype){"
+             "delete String.prototype.at;"
+             "delete String.prototype.isWellFormed;"
+             "delete String.prototype.toWellFormed;"
+             "}"
+             "if(typeof Set==='function'&&Set.prototype){"
+             "delete Set.prototype.union;"
+             "delete Set.prototype.intersection;"
+             "delete Set.prototype.difference;"
+             "delete Set.prototype.symmetricDifference;"
+             "delete Set.prototype.isSubsetOf;"
+             "delete Set.prototype.isSupersetOf;"
+             "delete Set.prototype.isDisjointFrom;"
              "}"
              "if(typeof Intl==='object'&&Intl){"
              "delete Intl.Segmenter;"
              "delete Intl.DisplayNames;"
              "delete Intl.ListFormat;"
+             "delete Intl.DurationFormat;"
              "}"
              "}catch(e){}";
         (void)((id (*)(id, SEL, NSString *))objc_msgSend)(ctx, evalSel, cleanupJS);
@@ -6124,6 +6564,10 @@ static void ps_install_avcapture_hooks_if_loaded(void) {
             if (class_getClassMethod(avCls, defTypeSel) != NULL) {
                 ps_swizzle_class_method(avCls, defTypeSel, @selector(pm_ps_av_defaultDeviceWithDeviceType:mediaType:position:));
             }
+            SEL devWithUidSel = sel_registerName("deviceWithUniqueID:");
+            if (class_getClassMethod(avCls, devWithUidSel) != NULL) {
+                ps_swizzle_class_method(avCls, devWithUidSel, @selector(pm_ps_av_deviceWithUniqueID:));
+            }
             ps_swizzle_capture_device_class(avCls);
             Class avFmtCls = objc_getClass("AVCaptureDeviceFormat");
             if (avFmtCls != Nil) {
@@ -6191,6 +6635,7 @@ void ps_load_environment_bypass_hooks(void) {
     ps_init_safe_false_foundation_imp(piClass);
     ps_register_safe_false_cf_imp([PSSwizzleHooks class], @selector(pm_isMacCatalystApp));
     ps_register_safe_false_cf_imp([PSSwizzleHooks class], @selector(pm_isiOSAppOnMac));
+    ps_register_safe_false_cf_imp([PSSwizzleHooks class], @selector(pm_macCatalystVersionIsAtLeastVersion:));
     ps_swizzle_instance_method(piClass, @selector(isMacCatalystApp), @selector(pm_isMacCatalystApp));
     ps_swizzle_instance_method(piClass, @selector(isiOSAppOnMac), @selector(pm_isiOSAppOnMac));
     ps_replace_instance_method(piClass, NSSelectorFromString(@"isiOSAppOnVision"), @selector(pm_isiOSAppOnVision_no));
@@ -6238,6 +6683,7 @@ void ps_load_environment_bypass_hooks(void) {
         }
         SEL catAtLeastSel = NSSelectorFromString(@"macCatalystVersionIsAtLeastVersion:");
         if (ps_class_defines_instance_method(concretePIClass, catAtLeastSel)) {
+            ps_register_safe_false_cf_imp([PSSwizzleHooks class], @selector(pm_swift_macCatalystVersionIsAtLeastVersion:));
             ps_swizzle_instance_method(concretePIClass, catAtLeastSel, @selector(pm_swift_macCatalystVersionIsAtLeastVersion:));
         }
         if (ps_class_defines_instance_method(concretePIClass, @selector(isLowPowerModeEnabled))) {
@@ -6303,12 +6749,35 @@ void ps_load_environment_bypass_hooks(void) {
         ps_swizzle_instance_method(viewCls, @selector(subviews), @selector(pm_ps_subviews));
     }
     Class appCls = objc_getClass("UIApplication");
-    if (appCls != Nil && class_getInstanceMethod(appCls, @selector(windows)) != NULL) {
-        ps_swizzle_instance_method(appCls, @selector(windows), @selector(pm_ps_app_windows));
+    if (appCls != Nil) {
+        if (class_getInstanceMethod(appCls, @selector(windows)) != NULL) {
+            ps_swizzle_instance_method(appCls, @selector(windows), @selector(pm_ps_app_windows));
+        }
+        SEL multiScenesSel = sel_registerName("supportsMultipleScenes");
+        if (class_getInstanceMethod(appCls, multiScenesSel) != NULL) {
+            ps_swizzle_instance_method(appCls, multiScenesSel, @selector(pm_ps_app_supportsMultipleScenes));
+        }
     }
     Class sceneCls = objc_getClass("UIWindowScene");
-    if (sceneCls != Nil && class_getInstanceMethod(sceneCls, @selector(windows)) != NULL) {
-        ps_swizzle_instance_method(sceneCls, @selector(windows), @selector(pm_ps_scene_windows));
+    if (sceneCls != Nil) {
+        if (class_getInstanceMethod(sceneCls, @selector(windows)) != NULL) {
+            ps_swizzle_instance_method(sceneCls, @selector(windows), @selector(pm_ps_scene_windows));
+        }
+        SEL titlebarSel = sel_registerName("titlebar");
+        if (class_getInstanceMethod(sceneCls, titlebarSel) != NULL) {
+            ps_swizzle_instance_method(sceneCls, titlebarSel, @selector(pm_ps_scene_titlebar));
+        }
+        SEL sizeRestrSel = sel_registerName("sizeRestrictions");
+        if (class_getInstanceMethod(sceneCls, sizeRestrSel) != NULL) {
+            ps_swizzle_instance_method(sceneCls, sizeRestrSel, @selector(pm_ps_scene_sizeRestrictions));
+        }
+    }
+    Class menuBuilderCls = objc_getClass("_UIMenuBuilder");
+    if (menuBuilderCls != Nil) {
+        SEL menuForIdSel = sel_registerName("menuForIdentifier:");
+        if (class_getInstanceMethod(menuBuilderCls, menuForIdSel) != NULL) {
+            ps_swizzle_instance_method(menuBuilderCls, menuForIdSel, @selector(pm_ps_menuBuilder_menuForIdentifier:));
+        }
     }
 
     ps_install_dynamic_system_bundle_hooks();
@@ -6749,7 +7218,7 @@ static PSVirtualMotionSamplePayload *ps_make_initialized_motion_payload(BOOL inc
         .field = payload->_magneticField,
         .accuracy = CMMagneticFieldCalibrationAccuracyHigh
     };
-    payload->_heading = 18.6;
+    payload->_heading = 18.6 + ps_motion_micro_jitter(t ^ 0xABULL, 0.08);
     if (includeAttitude) {
         CMQuaternion q = {
             .x = 0.00425 + ps_motion_micro_jitter(t ^ 0xAAULL, 0.00005),
@@ -7077,7 +7546,7 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
             [coder encodeBool:NO forKey:@"kCMDeviceMotionCodingKeyFusedWithVision"];
             [coder encodeBool:NO forKey:@"kCMDeviceMotionCodingKeyUsingVisionCorrections"];
             [coder encodeInteger:0 forKey:@"kCMDeviceMotionCodingKeySensorLocation"];
-            [coder encodeDouble:-1.0 forKey:@"kCMDeviceMotionCodingKeyHeadingAccuracy"];
+            [coder encodeDouble:15.0 forKey:@"kCMDeviceMotionCodingKeyHeadingAccuracy"];
         }
         return;
     }
@@ -7617,7 +8086,7 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
 
 - (double) pm_ps_cm_dm_headingAccuracy {
     if (ps_motion_sample_payload(self, NO) != nil) {
-        return -1.0;
+        return 15.0;
     }
     BOOL pushed = NO;
     IMP origIMP = ps_lookup_orig_imp_and_push(&s_cm_swizzle_lock, s_cm_orig_dm_headingAcc_imps, self, &pushed);
@@ -7629,6 +8098,62 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
         }
     }
     return -1.0;
+}
+
++ (BOOL) pm_ps_cm_ped_isStepCountingAvailable {
+    if (pt_is_bypass_enabled() && ps_is_iphone_device_model() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return YES;
+    }
+    return [self pm_ps_cm_ped_isStepCountingAvailable];
+}
+
++ (BOOL) pm_ps_cm_ped_isDistanceAvailable {
+    if (pt_is_bypass_enabled() && ps_is_iphone_device_model() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return YES;
+    }
+    return [self pm_ps_cm_ped_isDistanceAvailable];
+}
+
++ (BOOL) pm_ps_cm_ped_isFloorCountingAvailable {
+    if (pt_is_bypass_enabled() && ps_is_iphone_device_model() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return YES;
+    }
+    return [self pm_ps_cm_ped_isFloorCountingAvailable];
+}
+
++ (BOOL) pm_ps_cm_ped_isPaceAvailable {
+    if (pt_is_bypass_enabled() && ps_is_iphone_device_model() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return YES;
+    }
+    return [self pm_ps_cm_ped_isPaceAvailable];
+}
+
++ (BOOL) pm_ps_cm_ped_isCadenceAvailable {
+    if (pt_is_bypass_enabled() && ps_is_iphone_device_model() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return YES;
+    }
+    return [self pm_ps_cm_ped_isCadenceAvailable];
+}
+
++ (BOOL) pm_ps_cm_ped_isPedometerEventTrackingAvailable {
+    if (pt_is_bypass_enabled() && ps_is_iphone_device_model() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return YES;
+    }
+    return [self pm_ps_cm_ped_isPedometerEventTrackingAvailable];
+}
+
++ (BOOL) pm_ps_cm_activity_isActivityAvailable {
+    if (pt_is_bypass_enabled() && ps_is_iphone_device_model() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return YES;
+    }
+    return [self pm_ps_cm_activity_isActivityAvailable];
 }
 
 - (CMDeviceMotionSensorLocation) pm_ps_cm_dm_sensorLocation {
@@ -8708,6 +9233,39 @@ static void ps_install_coremotion_hooks_if_loaded(void) {
             }
         });
     }
+    Class pedCls = objc_getClass("CMPedometer");
+    if (pedCls != Nil) {
+        static dispatch_once_t pedOnce;
+        dispatch_once(&pedOnce, ^{
+            const struct {
+                const char *origName;
+                SEL hookSel;
+            } kPedSwizzles[] = {
+                { "isStepCountingAvailable", @selector(pm_ps_cm_ped_isStepCountingAvailable) },
+                { "isDistanceAvailable", @selector(pm_ps_cm_ped_isDistanceAvailable) },
+                { "isFloorCountingAvailable", @selector(pm_ps_cm_ped_isFloorCountingAvailable) },
+                { "isPaceAvailable", @selector(pm_ps_cm_ped_isPaceAvailable) },
+                { "isCadenceAvailable", @selector(pm_ps_cm_ped_isCadenceAvailable) },
+                { "isPedometerEventTrackingAvailable", @selector(pm_ps_cm_ped_isPedometerEventTrackingAvailable) }
+            };
+            for (size_t i = 0; i < sizeof(kPedSwizzles) / sizeof(kPedSwizzles[0]); i++) {
+                SEL s = sel_registerName(kPedSwizzles[i].origName);
+                if (class_getClassMethod(pedCls, s) != NULL) {
+                    ps_swizzle_class_method(pedCls, s, kPedSwizzles[i].hookSel);
+                }
+            }
+        });
+    }
+    Class actCls = objc_getClass("CMMotionActivityManager");
+    if (actCls != Nil) {
+        static dispatch_once_t actOnce;
+        dispatch_once(&actOnce, ^{
+            SEL isActSel = sel_registerName("isActivityAvailable");
+            if (class_getClassMethod(actCls, isActSel) != NULL) {
+                ps_swizzle_class_method(actCls, isActSel, @selector(pm_ps_cm_activity_isActivityAvailable));
+            }
+        });
+    }
 }
 
 __attribute__((visibility("hidden")))
@@ -8749,6 +9307,20 @@ void ps_install_system_jailbreak_bypass_hooks(void) {
     ps_replace_instance_method(objc_getClass("UIDevice"), @selector(systemName), @selector(pm_hook_systemName));
     ps_swizzle_instance_method(objc_getClass("UIDevice"), @selector(systemVersion), @selector(pm_hook_systemVersion));
     ps_swizzle_instance_method(objc_getClass("UIDevice"), @selector(userInterfaceIdiom), @selector(pm_hook_userInterfaceIdiom));
+    {
+        Class devCls = objc_getClass("UIDevice");
+        if (devCls != Nil) {
+            if (class_getInstanceMethod(devCls, @selector(setProximityMonitoringEnabled:)) != NULL) {
+                ps_swizzle_instance_method(devCls, @selector(setProximityMonitoringEnabled:), @selector(pm_ps_setProximityMonitoringEnabled:));
+            }
+            if (class_getInstanceMethod(devCls, @selector(isProximityMonitoringEnabled)) != NULL) {
+                ps_swizzle_instance_method(devCls, @selector(isProximityMonitoringEnabled), @selector(pm_ps_isProximityMonitoringEnabled));
+            }
+            if (class_getInstanceMethod(devCls, @selector(proximityState)) != NULL) {
+                ps_swizzle_instance_method(devCls, @selector(proximityState), @selector(pm_ps_proximityState));
+            }
+        }
+    }
     {
         Class devCls = objc_getClass("UIDevice");
         if (devCls != Nil) {
@@ -8933,6 +9505,9 @@ void ps_install_system_jailbreak_bypass_hooks(void) {
         { @selector(localizedInfoDictionary), @selector(pm_ps_localizedInfoDictionary) },
         { @selector(infoDictionary), @selector(pm_ps_infoDictionary) },
         { @selector(objectForInfoDictionaryKey:), @selector(pm_ps_objectForInfoDictionaryKey:) },
+        { @selector(executableArchitectures), @selector(pm_ps_bundle_executableArchitectures) },
+        { @selector(classNamed:), @selector(pm_ps_bundle_classNamed:) },
+        { @selector(principalClass), @selector(pm_ps_bundle_principalClass) },
         { @selector(description), @selector(pm_ps_bundle_description) }
     };
     for (size_t i = 0; i < sizeof(kPSBundleInstanceSwizzles) / sizeof(kPSBundleInstanceSwizzles[0]); i++) {

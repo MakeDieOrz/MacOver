@@ -2705,6 +2705,27 @@ static int pt_ioctl(int fd, unsigned long request, ...) {
 #ifdef SIOCGIFMEDIA
             || request == SIOCGIFMEDIA
 #endif
+#ifdef SIOCGIFDEVMTU
+            || request == SIOCGIFDEVMTU
+#endif
+#ifdef SIOCGIFCAP
+            || request == SIOCGIFCAP
+#endif
+#ifdef SIOCGIFEFLAGS
+            || request == SIOCGIFEFLAGS
+#endif
+#ifdef SIOCGIFXFLAGS
+            || request == SIOCGIFXFLAGS
+#endif
+#ifdef SIOCGIFXMEDIA
+            || request == SIOCGIFXMEDIA
+#endif
+#ifdef SIOCGIFAFLAG_IN6
+            || request == SIOCGIFAFLAG_IN6
+#endif
+#ifdef SIOCGIFSTAT_IN6
+            || request == SIOCGIFSTAT_IN6
+#endif
         ) {
             const struct ifreq *ifr = (const struct ifreq *)arg;
             char namebuf[IFNAMSIZ + 1];
@@ -2721,6 +2742,166 @@ static int pt_ioctl(int fd, unsigned long request, ...) {
         pt_filter_ifconf_buffer((struct ifconf *)arg);
     }
     return ret;
+}
+
+static const char *pt_net_get_real_host_short_name(void) {
+    static char s_host_short[256];
+    static dispatch_once_t s_once;
+    dispatch_once(&s_once, ^{
+        char raw[256] = {0};
+        if (gethostname(raw, sizeof(raw) - 1U) == 0 && raw[0] != '\0') {
+            raw[sizeof(raw) - 1U] = '\0';
+            char *dot = strchr(raw, '.');
+            if (dot != NULL) {
+                *dot = '\0';
+            }
+            strlcpy(s_host_short, raw, sizeof(s_host_short));
+        }
+    });
+    return s_host_short;
+}
+
+static BOOL pt_net_is_desktop_or_host_rdns_name(const char *host) {
+    if (host == NULL || host[0] == '\0') {
+        return NO;
+    }
+    if (strcasecmp(host, "localhost") == 0) {
+        return NO;
+    }
+    const char *real_short = pt_net_get_real_host_short_name();
+    if (real_short != NULL && real_short[0] != '\0') {
+        size_t rlen = strlen(real_short);
+        if (strncasecmp(host, real_short, rlen) == 0 &&
+            (host[rlen] == '\0' || host[rlen] == '.')) {
+            return YES;
+        }
+    }
+    if (strcasestr(host, "macbook") != NULL ||
+        strcasestr(host, "mac-mini") != NULL ||
+        strcasestr(host, "macmini") != NULL ||
+        strcasestr(host, "mac-studio") != NULL ||
+        strcasestr(host, "macstudio") != NULL ||
+        strcasestr(host, "mac-pro") != NULL ||
+        strcasestr(host, "macpro") != NULL ||
+        strcasestr(host, "imac") != NULL ||
+        strcasestr(host, "macos") != NULL ||
+        strcasestr(host, "playcover") != NULL ||
+        strcasestr(host, "macover") != NULL) {
+        return YES;
+    }
+    return NO;
+}
+
+static BOOL pt_net_sockaddr_is_loopback(const struct sockaddr *sa) {
+    if (sa == NULL) {
+        return NO;
+    }
+    if (sa->sa_family == AF_INET) {
+        const struct sockaddr_in *sin = (const struct sockaddr_in *)sa;
+        return ((ntohl(sin->sin_addr.s_addr) >> 24) == 127U);
+    }
+    if (sa->sa_family == AF_INET6) {
+        const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)sa;
+        return IN6_IS_ADDR_LOOPBACK(&sin6->sin6_addr) ? YES : NO;
+    }
+    return NO;
+}
+
+static const char *pt_net_spoofed_rdns_replacement(const char *orig_host, BOOL is_loopback) {
+    if (is_loopback) {
+        return "localhost";
+    }
+    BOOL is_local = NO;
+    if (orig_host != NULL) {
+        size_t len = strlen(orig_host);
+        if (len >= 6U && strcasecmp(orig_host + len - 6U, ".local") == 0) {
+            is_local = YES;
+        } else if (len >= 7U && strcasecmp(orig_host + len - 7U, ".local.") == 0) {
+            is_local = YES;
+        }
+    }
+    BOOL is_ipad = pt_get_spoofed_device_is_ipad();
+    if (is_local) {
+        return is_ipad ? "iPad.local" : "iPhone.local";
+    }
+    return is_ipad ? "iPad" : "iPhone";
+}
+
+static int pt_getnameinfo(const struct sockaddr *sa,
+                          socklen_t salen,
+                          char *host,
+                          socklen_t hostlen,
+                          char *serv,
+                          socklen_t servlen,
+                          int flags) {
+    int ret = getnameinfo(sa, salen, host, hostlen, serv, servlen, flags);
+    if (ret == 0 && host != NULL && hostlen > 0 &&
+        (flags & NI_NUMERICHOST) == 0 &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        host[hostlen - 1U] = '\0';
+        if (pt_net_is_desktop_or_host_rdns_name(host)) {
+            const char *repl = pt_net_spoofed_rdns_replacement(host, pt_net_sockaddr_is_loopback(sa));
+            strlcpy(host, repl, (size_t)hostlen);
+        }
+    }
+    return ret;
+}
+
+static struct hostent *pt_gethostbyaddr(const void *addr, socklen_t len, int type) {
+    struct hostent *he = gethostbyaddr(addr, len, type);
+    if (he == NULL ||
+        !pt_is_bypass_enabled() ||
+        pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return he;
+    }
+    BOOL needs_sanitize = pt_net_is_desktop_or_host_rdns_name(he->h_name);
+    if (!needs_sanitize && he->h_aliases != NULL) {
+        for (char **a = he->h_aliases; *a != NULL; a++) {
+            if (pt_net_is_desktop_or_host_rdns_name(*a)) {
+                needs_sanitize = YES;
+                break;
+            }
+        }
+    }
+    if (!needs_sanitize) {
+        return he;
+    }
+    BOOL is_loopback = NO;
+    if (addr != NULL) {
+        if (type == AF_INET && len >= (socklen_t)sizeof(struct in_addr)) {
+            struct in_addr in4;
+            memcpy(&in4, addr, sizeof(in4));
+            is_loopback = ((ntohl(in4.s_addr) >> 24) == 127U);
+        } else if (type == AF_INET6 && len >= (socklen_t)sizeof(struct in6_addr)) {
+            struct in6_addr in6;
+            memcpy(&in6, addr, sizeof(in6));
+            is_loopback = IN6_IS_ADDR_LOOPBACK(&in6) ? YES : NO;
+        }
+    }
+    static _Thread_local struct hostent s_tls_he;
+    static _Thread_local char s_tls_name[64];
+    static _Thread_local char *s_tls_aliases[1];
+    static _Thread_local char *s_tls_addr_list[2];
+    static _Thread_local uint8_t s_tls_addr_buf[16];
+    const char *repl = pt_net_spoofed_rdns_replacement(he->h_name, is_loopback);
+    strlcpy(s_tls_name, repl, sizeof(s_tls_name));
+    s_tls_aliases[0] = NULL;
+    s_tls_he.h_name = s_tls_name;
+    s_tls_he.h_aliases = s_tls_aliases;
+    s_tls_he.h_addrtype = he->h_addrtype;
+    s_tls_he.h_length = he->h_length;
+    if (he->h_addr_list != NULL && he->h_addr_list[0] != NULL &&
+        he->h_length > 0 && (size_t)he->h_length <= sizeof(s_tls_addr_buf)) {
+        memcpy(s_tls_addr_buf, he->h_addr_list[0], (size_t)he->h_length);
+        s_tls_addr_list[0] = (char *)s_tls_addr_buf;
+        s_tls_addr_list[1] = NULL;
+        s_tls_he.h_addr_list = s_tls_addr_list;
+    } else {
+        s_tls_addr_list[0] = NULL;
+        s_tls_he.h_addr_list = s_tls_addr_list;
+    }
+    return &s_tls_he;
 }
 
 __attribute__((visibility("hidden")))
@@ -2758,6 +2939,12 @@ void *pt_network_dlsym_route(const char *symbol) {
     if (strcmp(symbol, "getaddrinfo") == 0) {
         return (void *)&pt_getaddrinfo;
     }
+    if (strcmp(symbol, "getnameinfo") == 0) {
+        return (void *)&pt_getnameinfo;
+    }
+    if (strcmp(symbol, "gethostbyaddr") == 0) {
+        return (void *)&pt_gethostbyaddr;
+    }
     if (strcmp(symbol, "gethostbyname") == 0) {
         return (void *)&pt_gethostbyname;
     }
@@ -2789,6 +2976,8 @@ void *pt_network_dlsym_route(const char *symbol) {
 }
 
 DYLD_INTERPOSE(pt_getaddrinfo, getaddrinfo)
+DYLD_INTERPOSE(pt_getnameinfo, getnameinfo)
+DYLD_INTERPOSE(pt_gethostbyaddr, gethostbyaddr)
 DYLD_INTERPOSE(pt_ioctl, ioctl)
 DYLD_INTERPOSE(pt_gethostbyname, gethostbyname)
 DYLD_INTERPOSE(pt_gethostbyname2, gethostbyname2)

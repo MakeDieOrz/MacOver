@@ -257,6 +257,7 @@ static CGRect (*s_orig_screen_bounds)(id, SEL) = NULL;
 static CGRect (*s_orig_screen_nativeBounds)(id, SEL) = NULL;
 static CGRect (*s_orig_fixed_coord_bounds)(id, SEL) = NULL;
 static NSInteger (*s_orig_screen_maxFPS)(id, SEL) = NULL;
+static NSInteger (*s_orig_screen_displayGamut)(id, SEL) = NULL;
 static id (*s_orig_screen_currentMode)(id, SEL) = NULL;
 static id (*s_orig_screen_preferredMode)(id, SEL) = NULL;
 static NSArray *(*s_orig_screen_availableModes)(id, SEL) = NULL;
@@ -489,6 +490,17 @@ static NSInteger pt_hook_screen_maxFPS(id self, SEL _cmd) {
         return pt_spoofed_max_fps();
     }
     return orig;
+}
+
+static NSInteger pt_hook_screen_displayGamut(id self, SEL _cmd) {
+    if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        const char *m = pt_get_device_model_cstr();
+        if (m != NULL && strcmp(m, "iPad6,7") == 0) {
+            return UIDisplayGamutSRGB;
+        }
+        return UIDisplayGamutP3;
+    }
+    return s_orig_screen_displayGamut ? s_orig_screen_displayGamut(self, _cmd) : UIDisplayGamutP3;
 }
 
 static CGSize pt_hook_screenmode_size(id self, SEL _cmd) {
@@ -844,6 +856,7 @@ static void pt_install_bypass_screen_hooks(BOOL hookBounds) {
         pt_replace_instance_imp(screenCls, @selector(scale), (IMP)pt_hook_screen_scale, NULL);
         if (pt_is_bypass_enabled()) {
             pt_replace_instance_imp(screenCls, @selector(maximumFramesPerSecond), (IMP)pt_hook_screen_maxFPS, (IMP *)&s_orig_screen_maxFPS);
+            pt_replace_instance_imp(screenCls, sel_registerName("displayGamut"), (IMP)pt_hook_screen_displayGamut, (IMP *)&s_orig_screen_displayGamut);
             pt_replace_instance_imp(screenCls, @selector(currentMode), (IMP)pt_hook_screen_currentMode, (IMP *)&s_orig_screen_currentMode);
             pt_replace_instance_imp(screenCls, @selector(preferredMode), (IMP)pt_hook_screen_preferredMode, (IMP *)&s_orig_screen_preferredMode);
             pt_replace_instance_imp(screenCls, @selector(availableModes), (IMP)pt_hook_screen_availableModes, (IMP *)&s_orig_screen_availableModes);

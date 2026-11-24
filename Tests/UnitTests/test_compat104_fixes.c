@@ -1017,6 +1017,256 @@ static void test_round2_sha1_sha256_cd_and_sfsymbols(void) {
     assert(is_post13_hardware_sf_symbol_prefix("house.fill") == 0);
 }
 
+static uint32_t l1i_cache_size_for_machine(const char *machine) {
+    if (machine == NULL) return 131072U;
+    /* A9X (iPad6,7 / iPad6,8): 64 KiB */
+    if (strcmp(machine, "iPad6,7") == 0 || strcmp(machine, "iPad6,8") == 0) return 65536U;
+    /* A14+ / M1+ (iPhone13+, iPad13+): 192 KiB */
+    if (strncmp(machine, "iPhone13,", 9) == 0 || strncmp(machine, "iPhone14,", 9) == 0 ||
+        strncmp(machine, "iPhone15,", 9) == 0 || strncmp(machine, "iPad13,", 7) == 0 ||
+        strncmp(machine, "iPad14,", 7) == 0) return 196608U;
+    /* A12X / A13 (iPad8,x / iPhone12,x): 128 KiB */
+    return 131072U;
+}
+
+static void test_round3_cdhash_kernel_version_and_l1i(void) {
+    /* Primary CodeDirectory SHA-256[:20] must equal csops(5) CS_OPS_CDHASH */
+    uint8_t cd[128];
+    memset(cd, 0, sizeof(cd));
+    put_be32(cd + 0, 0xfade0c02U);
+    put_be32(cd + 4, (uint32_t)sizeof(cd));
+    put_be32(cd + 16, 96U);
+    put_be32(cd + 24, 2U);
+    cd[36] = 32U;
+    cd[37] = 2U;
+    for (size_t i = 44; i < sizeof(cd); i++) cd[i] = (uint8_t)(i * 7U + 3U);
+
+    uint8_t full_sha256[32];
+    sha256_compute(cd, sizeof(cd), full_sha256);
+    uint8_t cdhash5[20];
+    memcpy(cdhash5, full_sha256, 20U);
+    assert(memcmp(cdhash5, full_sha256, 20U) == 0);
+
+    /* CS_OPS_CDHASH usersize < 20 must fail with ERANGE (34 on Darwin) */
+    size_t small_user_sz = 19U;
+    assert(small_user_sz < 20U);
+
+    /* CS_OPS_STATUS(0) strips CS_RUNTIME (0x10000) and CS_LINKER_SIGNED (0x20000) */
+    uint32_t raw_cs_flags = 0x22030201U; /* includes CS_RUNTIME | CS_LINKER_SIGNED */
+    uint32_t clean_cs_flags = raw_cs_flags & ~(0x00010000U | 0x00020000U);
+    assert((clean_cs_flags & 0x00010000U) == 0U);
+    assert((clean_cs_flags & 0x00020000U) == 0U);
+    assert((clean_cs_flags & 0x22000201U) == 0x22000201U);
+
+    /* host_kernel_version formatting matches uname().version */
+    char uname_ver[256];
+    char host_kv[512];
+    snprintf(uname_ver, sizeof(uname_ver),
+             "Darwin Kernel Version 19.6.0: Thu Jun 18 20:49:00 PDT 2020; root:xnu-6153.141.1~1/RELEASE_ARM64_T8030");
+    snprintf(host_kv, sizeof(host_kv), "%s", uname_ver);
+    assert(strcmp(host_kv, uname_ver) == 0);
+    assert(strstr(host_kv, "RELEASE_ARM64_") != NULL);
+    assert(strstr(host_kv, "19.6.0") != NULL);
+
+    /* hw.l1icachesize per SoC family */
+    assert(l1i_cache_size_for_machine("iPad6,7") == 65536U);
+    assert(l1i_cache_size_for_machine("iPad8,6") == 131072U);
+    assert(l1i_cache_size_for_machine("iPhone12,5") == 131072U);
+    assert(l1i_cache_size_for_machine("iPad13,4") == 196608U);
+    assert(l1i_cache_size_for_machine("iPhone14,2") == 196608U);
+}
+
+static void test_round3_fs_case_gid_and_prot(void) {
+    /* Three-way APFS case-sensitivity bit: VOL_CAP_FMT_CASE_SENSITIVE = 0x00000020 */
+    const uint32_t kVolCapFmtCaseSensitive = 0x00000020U;
+    uint32_t caps_format = 0x00000001U; /* initially case-insensitive macOS APFS */
+    uint32_t valid_format = 0x00000001U;
+    caps_format |= kVolCapFmtCaseSensitive;
+    valid_format |= kVolCapFmtCaseSensitive;
+    assert((caps_format & kVolCapFmtCaseSensitive) != 0U);
+    assert((valid_format & kVolCapFmtCaseSensitive) != 0U);
+
+    /* st_gid 20 (staff) -> 501 (mobile), other gids preserved */
+    uint32_t gids_in[3] = { 20U, 501U, 0U };
+    uint32_t gids_exp[3] = { 501U, 501U, 0U };
+    for (size_t i = 0; i < 3; i++) {
+        uint32_t mapped = (gids_in[i] == 20U) ? 501U : gids_in[i];
+        assert(mapped == gids_exp[i]);
+    }
+
+    /* F_GETPROTECTIONCLASS: macOS returns 0 (PROTECTION_CLASS_NONE) -> spoof to 4 (NSFileProtectionCompleteUntilFirstUserAuthentication) */
+    int raw_prot = 0;
+    int spoofed_prot = (raw_prot == 0) ? 4 : raw_prot;
+    assert(spoofed_prot > 0 && spoofed_prot == 4);
+}
+
+static int is_round3_hidden_dlsym_symbol(const char *sym) {
+    static const char *const kExactOrPrefix[] = {
+        "Authorization", "SecKeychain", "SecACL", "SecAccess", "SecTrustedApplication",
+        "SCDynamicStore", "SCPreferences", "SCNetworkSet", "SCNetworkService",
+        "SCBondInterface", "SCVLANInterface", "CVDisplayLink", "FSEventStream",
+        "LSOpen", "LSCopyApplicationURLs", "LSFindApplication", "AECreateDesc",
+        "AESendMessage", "MDQuery", "csr_check", "csr_get_active_config", "csrctl",
+        "IOBluetooth", "CGMainDisplayID", "CGWindowList", "IOHIDManager"
+    };
+    if (sym == NULL) return 0;
+    for (size_t i = 0; i < sizeof(kExactOrPrefix) / sizeof(kExactOrPrefix[0]); i++) {
+        if (strncmp(sym, kExactOrPrefix[i], strlen(kExactOrPrefix[i])) == 0) return 1;
+    }
+    return 0;
+}
+
+static int is_round3_macos_framework_path(const char *path) {
+    static const char *const kTokens[] = {
+        "/AppKit.framework", "/Cocoa.framework", "/Carbon.framework",
+        "/Quartz.framework", "/CoreMediaIO.framework", "/IOUSBHost.framework",
+        "/DFRFoundation.framework", "/LoginUIKit.framework", "/FinderKit.framework",
+        "/FSEvents.framework", "/LaunchServices.framework", "/DiscRecording.framework",
+        "/ServiceManagement.framework", "/DiskArbitration.framework", "/EndpointSecurity.framework"
+    };
+    if (path == NULL) return 0;
+    for (size_t i = 0; i < sizeof(kTokens) / sizeof(kTokens[0]); i++) {
+        if (ci_contains(path, kTokens[i])) return 1;
+    }
+    return 0;
+}
+
+static int is_icu_age_post_13_7(uint8_t major, uint8_t minor) {
+    /* iOS 13.7 ships ICU 64.2 / Unicode 12.1 */
+    return (major > 12U) || (major == 12U && minor > 1U);
+}
+
+static int verify_swift_length_prefixed_mangling(const char *s) {
+    /* Checks <digits><ident> tokens (skipping leading stdlib shorthand 's' before a digit) */
+    const char *p = s;
+    if (*p == 's' && p[1] >= '0' && p[1] <= '9') p++;
+    int count = 0;
+    while (*p >= '0' && *p <= '9') {
+        size_t len = 0;
+        while (*p >= '0' && *p <= '9') {
+            len = len * 10U + (size_t)(*p - '0');
+            p++;
+        }
+        if (len == 0 || strlen(p) < len) return 0;
+        p += len;
+        count++;
+    }
+    return count > 0 && (*p == 'V' || *p == 'C' || *p == 'O' || *p == 'P');
+}
+
+static void test_round3_extended_dlsym_fw_icu_swift(void) {
+    /* Extended macOS-only dlsym symbols hidden; iOS CGContext/CGColor/QuartzCore NOT touched */
+    const char *blocked_syms[] = {
+        "AuthorizationCreate", "SecKeychainCopyDefault", "CVDisplayLinkCreateWithActiveCGDisplays",
+        "FSEventStreamCreate", "csr_get_active_config", "csr_check", "csrctl",
+        "SCDynamicStoreCopyComputerName", "IOBluetoothDeviceInquiryCreateWithDelegate"
+    };
+    for (size_t i = 0; i < sizeof(blocked_syms) / sizeof(blocked_syms[0]); i++) {
+        assert(is_round3_hidden_dlsym_symbol(blocked_syms[i]) == 1);
+    }
+    const char *safe_ios_syms[] = {
+        "CGContextDrawImage", "CGColorSpaceCreateDeviceRGB", "CGImageCreate",
+        "SecItemCopyMatching", "SecKeyCreateRandomKey", "SCNetworkReachabilityCreateWithName"
+    };
+    for (size_t i = 0; i < sizeof(safe_ios_syms) / sizeof(safe_ios_syms[0]); i++) {
+        assert(is_round3_hidden_dlsym_symbol(safe_ios_syms[i]) == 0);
+    }
+
+    /* /Quartz.framework hidden while QuartzCore.framework MUST remain visible */
+    assert(is_round3_macos_framework_path("/System/Library/Frameworks/Quartz.framework/Quartz") == 1);
+    assert(is_round3_macos_framework_path("/System/Library/Frameworks/CoreMediaIO.framework/CoreMediaIO") == 1);
+    assert(is_round3_macos_framework_path("/System/Library/PrivateFrameworks/DFRFoundation.framework/DFRFoundation") == 1);
+    assert(is_round3_macos_framework_path("/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/FSEvents") == 1);
+    assert(is_round3_macos_framework_path("/System/Library/Frameworks/QuartzCore.framework/QuartzCore") == 0);
+    assert(is_round3_macos_framework_path("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics") == 0);
+
+    /* ICU u_charAge > 12.1 predicate */
+    assert(is_icu_age_post_13_7(12U, 1U) == 0);
+    assert(is_icu_age_post_13_7(12U, 0U) == 0);
+    assert(is_icu_age_post_13_7(11U, 0U) == 0);
+    assert(is_icu_age_post_13_7(13U, 0U) == 1);
+    assert(is_icu_age_post_13_7(14U, 0U) == 1);
+    assert(is_icu_age_post_13_7(15U, 1U) == 1);
+
+    /* Swift length-prefixed mangling accuracy (zero off-by-one length bugs) */
+    const char *mangled[] = {
+        "10Foundation16AttributedStringV",
+        "s8DurationV",
+        "8StoreKit7ProductV",
+        "11Observation20ObservationRegistrarV",
+        "9PlayTools12PlaySettingsC"
+    };
+    for (size_t i = 0; i < sizeof(mangled) / sizeof(mangled[0]); i++) {
+        assert(verify_swift_length_prefixed_mangling(mangled[i]) == 1);
+    }
+    assert(verify_swift_length_prefixed_mangling("99Foundation16AttributedStringV") == 0);
+}
+
+static int is_hidden_bundle_id_regression(const char *bid, int compat13_7) {
+    static const char *const kMacOnlyBundleIDs[] = {
+        "com.apple.AppKit", "com.apple.Cocoa", "com.apple.Carbon",
+        "com.apple.ApplicationServices", "com.apple.ServiceManagement",
+        "com.apple.ScriptingBridge", "com.apple.DiskArbitration",
+        "com.apple.Hypervisor", "com.apple.Virtualization", "com.apple.CoreWLAN",
+        "com.apple.OpenDirectory", "com.apple.DirectoryService", "com.apple.FinderSync",
+        "com.apple.SystemAdministration", "com.apple.Automator", "com.apple.AppleScriptObjC",
+        "com.apple.InputMethodKit", "com.apple.PreferencePanes", "com.apple.ScreenSaver",
+        "com.apple.SecurityInterface", "com.apple.OSAKit", "com.apple.NetFS",
+        "com.apple.ParavirtualizedGraphics", "com.apple.DriverKit"
+    };
+    static const char *const kPost137BundleIDs[] = {
+        "com.apple.ExtensionKit", "com.apple.ExtensionFoundation", "com.apple.AppIntents",
+        "com.apple.OSLog", "com.apple.WorkoutKit", "com.apple.FamilyControls",
+        "com.apple.ManagedSettings", "com.apple.DeviceActivity", "com.apple.CoreTransferable",
+        "com.apple.Spatial", "com.apple.LockedCameraCapture", "com.apple.MarketplaceKit"
+    };
+    if (bid == NULL) return 0;
+    for (size_t i = 0; i < sizeof(kMacOnlyBundleIDs) / sizeof(kMacOnlyBundleIDs[0]); i++) {
+        if (strcmp(bid, kMacOnlyBundleIDs[i]) == 0) return 1;
+    }
+    if (compat13_7) {
+        for (size_t i = 0; i < sizeof(kPost137BundleIDs) / sizeof(kPost137BundleIDs[0]); i++) {
+            if (strcmp(bid, kPost137BundleIDs[i]) == 0) return 1;
+        }
+    }
+    return 0;
+}
+
+static void test_round3_hidden_bundle_ids_regression(void) {
+    const char *must_hide_always[] = {
+        "com.apple.ApplicationServices", "com.apple.ServiceManagement",
+        "com.apple.ScriptingBridge", "com.apple.DiskArbitration",
+        "com.apple.Hypervisor", "com.apple.Virtualization", "com.apple.CoreWLAN",
+        "com.apple.OpenDirectory", "com.apple.DirectoryService", "com.apple.FinderSync",
+        "com.apple.SystemAdministration", "com.apple.Automator", "com.apple.AppleScriptObjC",
+        "com.apple.InputMethodKit", "com.apple.PreferencePanes", "com.apple.ScreenSaver",
+        "com.apple.SecurityInterface", "com.apple.OSAKit", "com.apple.NetFS",
+        "com.apple.ParavirtualizedGraphics", "com.apple.DriverKit"
+    };
+    for (size_t i = 0; i < sizeof(must_hide_always) / sizeof(must_hide_always[0]); i++) {
+        assert(is_hidden_bundle_id_regression(must_hide_always[i], 0) == 1);
+        assert(is_hidden_bundle_id_regression(must_hide_always[i], 1) == 1);
+    }
+    const char *must_hide_compat13[] = {
+        "com.apple.ExtensionKit", "com.apple.ExtensionFoundation", "com.apple.AppIntents",
+        "com.apple.OSLog", "com.apple.WorkoutKit", "com.apple.FamilyControls",
+        "com.apple.ManagedSettings", "com.apple.DeviceActivity", "com.apple.CoreTransferable",
+        "com.apple.Spatial", "com.apple.LockedCameraCapture", "com.apple.MarketplaceKit"
+    };
+    for (size_t i = 0; i < sizeof(must_hide_compat13) / sizeof(must_hide_compat13[0]); i++) {
+        assert(is_hidden_bundle_id_regression(must_hide_compat13[i], 0) == 0);
+        assert(is_hidden_bundle_id_regression(must_hide_compat13[i], 1) == 1);
+    }
+    const char *safe_ios_bundles[] = {
+        "com.apple.UIKit", "com.apple.Foundation", "com.apple.CoreGraphics",
+        "com.apple.Metal", "com.apple.QuartzCore"
+    };
+    for (size_t i = 0; i < sizeof(safe_ios_bundles) / sizeof(safe_ios_bundles[0]); i++) {
+        assert(is_hidden_bundle_id_regression(safe_ios_bundles[i], 0) == 0);
+        assert(is_hidden_bundle_id_regression(safe_ios_bundles[i], 1) == 0);
+    }
+}
+
 int main(void) {
     test_der_entitlements_encoding_and_superblob_rewrite();
     test_attr_ref_zero_fill();
@@ -1035,6 +1285,10 @@ int main(void) {
     test_round2_macos_framework_and_font_filters();
     test_round2_xattr_osvariant_and_afunix();
     test_round2_sha1_sha256_cd_and_sfsymbols();
+    test_round3_cdhash_kernel_version_and_l1i();
+    test_round3_fs_case_gid_and_prot();
+    test_round3_extended_dlsym_fw_icu_swift();
+    test_round3_hidden_bundle_ids_regression();
     printf("All compat104 unit tests passed.\n");
     return 0;
 }

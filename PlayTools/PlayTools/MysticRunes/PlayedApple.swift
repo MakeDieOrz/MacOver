@@ -257,6 +257,20 @@ public class PlayKeychain: NSObject {
         return sub
     }
 
+    private static func isSupportedSecureEnclaveKey(_ parameters: NSDictionary) -> Bool {
+        guard let keyType = parameters[kSecAttrKeyType as String] as? String,
+              keyType == (kSecAttrKeyTypeECSECPrimeRandom as String) else {
+            return false
+        }
+        if let num = parameters[kSecAttrKeySizeInBits as String] as? NSNumber {
+            return num.intValue == 256
+        }
+        if let str = parameters[kSecAttrKeySizeInBits as String] as? String {
+            return Int(str) == 256
+        }
+        return false
+    }
+
     @objc static public func keyCreateRandomKey(_ parameters: NSDictionary,
                                                 error: UnsafeMutablePointer<Unmanaged<CFError>?>?)
     -> Unmanaged<SecKey>? {
@@ -265,6 +279,10 @@ public class PlayKeychain: NSObject {
         // and then add the key to the keychain db with the original attributes (with kSecAttrIsPermanent set to 1)
         let rawPrivateKeyAttrs = parameters[kSecPrivateKeyAttrs as String] as? [String: Any] ?? [:]
         let isSecureEnclave = PTPlayChainSecureEnclaveRegistry.parametersRequestSecureEnclave(parameters)
+        if isSecureEnclave && !isSupportedSecureEnclaveKey(parameters) {
+            error?.pointee = makeCFError(status: errSecParam)
+            return nil
+        }
         let isPermanent = flag(rawPrivateKeyAttrs as NSDictionary, kSecAttrIsPermanent) ||
             flag(parameters, kSecAttrIsPermanent)
         let privateKeyAttrs = sanitizedKeySubAttrs(rawPrivateKeyAttrs, forceNonPermanent: isPermanent)
@@ -348,6 +366,9 @@ public class PlayKeychain: NSObject {
                                              privateKey: UnsafeMutablePointer<Unmanaged<SecKey>?>?) -> OSStatus {
         // Same as above but we need to disable kSecAttrIsPermanent for both the public and private key.
         let isSecureEnclave = PTPlayChainSecureEnclaveRegistry.parametersRequestSecureEnclave(parameters)
+        if isSecureEnclave && !isSupportedSecureEnclaveKey(parameters) {
+            return errSecParam
+        }
         var isPermanent = flag(parameters, kSecAttrIsPermanent)
         let rawPrivateKeyAttrs = parameters[kSecPrivateKeyAttrs as String] as? [String: Any] ?? [:]
         if flag(rawPrivateKeyAttrs as NSDictionary, kSecAttrIsPermanent) {

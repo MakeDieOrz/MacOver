@@ -287,6 +287,9 @@ struct proc_regionwithpathinfo {
 #ifndef PROC_PIDTHREADID64INFO
 #define PROC_PIDTHREADID64INFO 15
 #endif
+#ifndef PROC_PIDUNIQIDENTIFIERINFO
+#define PROC_PIDUNIQIDENTIFIERINFO 17
+#endif
 #ifndef PROC_PIDREGIONPATHINFO2
 #define PROC_PIDREGIONPATHINFO2 22
 #endif
@@ -314,6 +317,16 @@ struct proc_threadinfo {
 struct proc_threadwithpathinfo {
     struct proc_threadinfo pt;
     struct vnode_info_path pvip;
+};
+
+struct proc_uniqidentifierinfo {
+    uint8_t  p_uuid[16];
+    uint64_t p_uniqueid;
+    uint64_t p_puniqueid;
+    int32_t  p_idversion;
+    uint32_t p_reserve2;
+    uint64_t p_reserve3;
+    uint64_t p_reserve4;
 };
 
 typedef struct {
@@ -402,6 +415,9 @@ extern int proc_regionfilename(int pid, uint64_t address, void *buffer, uint32_t
 #ifndef PROC_PIDTHREADID64INFO
 #define PROC_PIDTHREADID64INFO 15
 #endif
+#ifndef PROC_PIDUNIQIDENTIFIERINFO
+#define PROC_PIDUNIQIDENTIFIERINFO 17
+#endif
 #ifndef PROC_PIDREGIONPATHINFO2
 #define PROC_PIDREGIONPATHINFO2 22
 #endif
@@ -433,6 +449,8 @@ _Static_assert(sizeof(struct proc_threadinfo) == 112, "proc_threadinfo ABI size 
 _Static_assert(offsetof(struct proc_threadinfo, pth_name) == 48, "proc_threadinfo pth_name offset mismatch");
 _Static_assert(sizeof(struct proc_threadwithpathinfo) == 1288, "proc_threadwithpathinfo ABI size mismatch");
 _Static_assert(offsetof(struct proc_threadwithpathinfo, pvip.vip_path) == 264, "proc_threadwithpathinfo vip_path offset mismatch");
+_Static_assert(sizeof(struct proc_uniqidentifierinfo) == 56, "proc_uniqidentifierinfo ABI size mismatch");
+_Static_assert(offsetof(struct proc_uniqidentifierinfo, p_puniqueid) == 24, "proc_uniqidentifierinfo p_puniqueid offset mismatch");
 #import <objc/runtime.h>
 #import <Security/Security.h>
 #import <UIKit/UIKit.h>
@@ -599,8 +617,14 @@ typedef struct {
 
 __attribute__((visibility("hidden"))) const char *pt_get_reported_ios_version_override(const char **out_build);
 __attribute__((visibility("hidden"))) BOOL pt_is_compat13_7_active(void);
+__attribute__((visibility("hidden"))) BOOL pt_is_availability_app_caller(const void *caller);
 __attribute__((visibility("hidden"))) bool pt_availability_version_check(uint32_t count, const pt_dyld_build_version_t versions[]);
+__attribute__((visibility("hidden"))) int32_t pt_isPlatformVersionAtLeast(uint32_t platform, uint32_t major, uint32_t minor, uint32_t subminor);
 __attribute__((visibility("hidden"))) void pt_disable_reported_ios_override_for_safe_mode(void);
+__attribute__((visibility("hidden"))) BOOL pt_is_hidden_bundle_id_cstr(const char *bid);
+__attribute__((visibility("hidden"))) void pt_dyld_set_force_task_dyld_sanitize(BOOL active);
+__attribute__((visibility("hidden"))) BOOL pt_dyld_is_force_task_dyld_sanitize(void);
+__attribute__((visibility("hidden"))) float pt_get_shared_spoofed_battery_level(void);
 __attribute__((visibility("hidden"))) uint32_t pt_get_spoofed_cpu_cores(void);
 __attribute__((visibility("hidden"))) uint64_t pt_get_spoofed_physical_memory(void);
 __attribute__((visibility("hidden"))) const char *pt_get_spoofed_gpu_name_cstr(void);
@@ -636,6 +660,8 @@ __attribute__((visibility("hidden"))) void *pt_objc_spoofer_dlsym_route(const ch
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_macos_pref_key(const char *key);
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_unregistered_macho_region(uintptr_t addr, uintptr_t size, vm_prot_t prot);
 __attribute__((visibility("hidden"))) int pt_gethostuuid_with_caller(uuid_t id, const struct timespec *wait, const void *caller);
+__attribute__((visibility("hidden"))) int pt_getauid_with_caller(void *auid, const void *caller);
+__attribute__((visibility("hidden"))) int pt_getaudit_addr_with_caller(void *auinfo, int length, const void *caller);
 __attribute__((visibility("hidden"))) int pt_sysctl_with_caller(int *name, u_int types, void *buf, size_t *size, void *arg0, size_t arg1, const void *caller);
 __attribute__((visibility("hidden"))) int pt_sysctlbyname_with_caller(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen, const void *caller);
 __attribute__((visibility("hidden"))) intptr_t pt_syscall_dispatch_with_caller(int number, const uintptr_t args[8], const void *caller, BOOL *out_handled);
@@ -680,8 +706,15 @@ __attribute__((visibility("hidden"))) const char *pt_lookup_app_backup_redirect_
 __attribute__((visibility("hidden"))) const uint8_t *pt_get_cached_backup_main_mach_header(size_t *out_len);
 __attribute__((visibility("hidden"))) int pt_fs_open_with_caller(const char *filename, int oflag, mode_t mode, const void *caller);
 __attribute__((visibility("hidden"))) int pt_fs_openat_with_caller(int fd, const char *path, int oflag, mode_t mode, const void *caller);
+__attribute__((visibility("hidden"))) int pt_fs_open_dprotected_np_with_caller(const char *path, int flags, int dpclass, int dpflags, mode_t mode, const void *caller);
+__attribute__((visibility("hidden"))) int pt_fs_openat_dprotected_np_with_caller(int fd, const char *path, int flags, int dpclass, int dpflags, mode_t mode, const void *caller);
+__attribute__((visibility("hidden"))) int pt_fs_clonefileat_with_caller(int src_dirfd, const char *src, int dst_dirfd, const char *dst, uint32_t flags, const void *caller);
 __attribute__((visibility("hidden"))) int pt_fs_stat_with_caller(const char *path, struct stat *buf, BOOL follow_symlinks, const void *caller);
+__attribute__((visibility("hidden"))) int pt_fs_fstat_with_caller(int fd, struct stat *buf, const void *caller);
 __attribute__((visibility("hidden"))) int pt_fs_fstatat_with_caller(int fd, const char *path, struct stat *buf, int flag, const void *caller);
+__attribute__((visibility("hidden"))) long pt_fs_pathconf_with_caller(const char *path, int name, const void *caller);
+__attribute__((visibility("hidden"))) long pt_fs_fpathconf_with_caller(int fd, int name, const void *caller);
+__attribute__((visibility("hidden"))) BOOL pt_fs_probe_hidden_region_path(uintptr_t addr, const void *caller);
 __attribute__((visibility("hidden"))) int pt_fs_access_with_caller(const char *path, int mode, const void *caller);
 __attribute__((visibility("hidden"))) int pt_fs_faccessat_with_caller(int fd, const char *path, int mode, int flag, const void *caller);
 __attribute__((visibility("hidden"))) ssize_t pt_fs_readlink_with_caller(const char *path, char *buf, size_t bufsize, const void *caller);
@@ -704,11 +737,15 @@ __attribute__((visibility("hidden"))) ssize_t pt_fs_fgetxattr_with_caller(int fd
 __attribute__((visibility("hidden"))) ssize_t pt_fs_listxattr_with_caller(const char *path, char *namebuff, size_t size, int options, const void *caller);
 __attribute__((visibility("hidden"))) ssize_t pt_fs_flistxattr_with_caller(int fd, char *namebuff, size_t size, int options, const void *caller);
 __attribute__((visibility("hidden"))) ssize_t pt_fs_fsgetpath_with_caller(char *buf, size_t bufsize, fsid_t *fsid, uint64_t objid, const void *caller);
+__attribute__((visibility("hidden"))) ssize_t pt_fs_fsgetpath_ext_with_caller(char *buf, size_t bufsize, fsid_t *fsid, uint64_t objid, uint64_t flags, const void *caller);
+__attribute__((visibility("hidden"))) int pt_fs_searchfs_with_caller(const char *path, void *searchblock, unsigned long *nummatches, unsigned int scriptcode, unsigned int options, void *state, const void *caller);
 __attribute__((visibility("hidden"))) Boolean pt_CFURLCopyResourcePropertyForKey(CFURLRef url, CFStringRef key, void *propertyValueTypeRefPtr, CFErrorRef *error);
 __attribute__((visibility("hidden"))) CFDictionaryRef pt_CFURLCopyResourcePropertiesForKeys(CFURLRef url, CFArrayRef keys, CFErrorRef *error);
 __attribute__((visibility("hidden"))) void *pt_fs_dlsym_route(const char *symbol);
 
 // DyldVirtualizer exports
+__attribute__((visibility("hidden"))) BOOL pt_is_hidden_macos_only_dlsym_symbol(const char *symbol);
+__attribute__((visibility("hidden"))) void *pt_route_dlsym_symbol_for_app(const char *symbol);
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_class(const char *name);
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_protocol_name(const char *name);
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_selector_name(const char *selName);
