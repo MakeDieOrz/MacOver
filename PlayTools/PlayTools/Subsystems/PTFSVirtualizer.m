@@ -4079,31 +4079,57 @@ static int pt_proc_pidpath(int pid, void *buffer, uint32_t buffersize) {
     return ret;
 }
 
-static int pt_proc_pidfdinfo(int pid, int fd, int flavor, void *buffer, int buffersize) {
-    const void *caller = __builtin_return_address(0);
+static int pt_fs_proc_pidfdinfo_ex(int pid,
+                                     int fd,
+                                     int flavor,
+                                     void *buffer,
+                                     int buffersize,
+                                     const void *caller,
+                                     BOOL raw_syscall_abi) {
     BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
     if (!is_sys && pid != 0 && pid != getpid()) {
         errno = ESRCH;
-        return 0;
+        return raw_syscall_abi ? -1 : 0;
     }
+    int saved_errno = errno;
+    errno = 0;
     int ret = proc_pidfdinfo(pid, fd, flavor, buffer, buffersize);
-    if (ret > 0 && buffer != NULL &&
-        flavor == PROC_PIDFDVNODEPATHINFO &&
-        (size_t)ret >= sizeof(struct vnode_fdinfowithpath) &&
-        !is_sys) {
-        struct vnode_fdinfowithpath *info = (struct vnode_fdinfowithpath *)buffer;
-        if (pt_is_sensitive_host_fd_path(info->pvip.vip_path, caller)) {
-            memset(info, 0, sizeof(struct vnode_fdinfowithpath));
-            errno = EBADF;
-            return 0;
+    int call_errno = errno;
+    if (ret <= 0 || call_errno != 0) {
+        if (raw_syscall_abi) {
+            errno = (call_errno != 0) ? call_errno : ESRCH;
+            return -1;
         }
-        char vout[PATH_MAX];
-        const char *virt = pt_virtualize_path_for_app(info->pvip.vip_path, vout, sizeof(vout), YES);
-        if (virt != info->pvip.vip_path) {
-            strlcpy(info->pvip.vip_path, virt, sizeof(info->pvip.vip_path));
+        errno = call_errno;
+        return ret;
+    }
+    if (!is_sys && buffer != NULL) {
+        if (flavor == PROC_PIDFDVNODEPATHINFO &&
+            (size_t)ret >= sizeof(struct vnode_fdinfowithpath)) {
+            struct vnode_fdinfowithpath *info = (struct vnode_fdinfowithpath *)buffer;
+            if (pt_is_sensitive_host_fd_path(info->pvip.vip_path, caller)) {
+                memset(info, 0, sizeof(struct vnode_fdinfowithpath));
+                errno = EBADF;
+                return raw_syscall_abi ? -1 : 0;
+            }
+            char vout[PATH_MAX];
+            const char *virt = pt_virtualize_path_for_app(info->pvip.vip_path, vout, sizeof(vout), YES);
+            if (virt != info->pvip.vip_path) {
+                strlcpy(info->pvip.vip_path, virt, sizeof(info->pvip.vip_path));
+            }
         }
     }
+    errno = saved_errno;
     return ret;
+}
+
+__attribute__((visibility("hidden")))
+int pt_fs_proc_pidfdinfo_syscall_with_caller(int pid, int fd, int flavor, void *buffer, int buffersize, const void *caller) {
+    return pt_fs_proc_pidfdinfo_ex(pid, fd, flavor, buffer, buffersize, caller, YES);
+}
+
+static int pt_proc_pidfdinfo(int pid, int fd, int flavor, void *buffer, int buffersize) {
+    return pt_fs_proc_pidfdinfo_ex(pid, fd, flavor, buffer, buffersize, __builtin_return_address(0), NO);
 }
 
 static void pt_sanitize_vnode_vip_path(char *vip_path, size_t cap, const void *caller, const char *fallback) {
@@ -4170,8 +4196,50 @@ static int pt_fs_proc_pidinfo_ex(int pid,
     }
     int saved_errno = errno;
     errno = 0;
-    int ret = proc_pidinfo(pid, flavor, arg, buffer, buffersize);
-    int call_errno = errno;
+    int ret = -1;
+    int call_errno = 0;
+    BOOL bypass_active = pt_is_bypass_enabled();
+    if (!is_sys && bypass_active &&
+        (flavor == PROC_PIDREGIONINFO ||
+         flavor == PROC_PIDREGIONPATHINFO ||
+         flavor == PROC_PIDREGIONPATHINFO2 ||
+         flavor == PROC_PIDREGIONPATHINFO3)) {
+        uint64_t query_arg = arg;
+        for (int skip = 0; skip < 256; skip++) {
+            errno = 0;
+            ret = proc_pidinfo(pid, flavor, query_arg, buffer, buffersize);
+            call_errno = errno;
+            if (ret <= 0 || call_errno != 0 || buffer == NULL) {
+                break;
+            }
+            uint64_t raddr = 0;
+            uint64_t rsize = 0;
+            if (flavor == PROC_PIDREGIONINFO && (size_t)ret >= sizeof(struct proc_regioninfo)) {
+                struct proc_regioninfo rinfo;
+                memcpy(&rinfo, buffer, sizeof(rinfo));
+                raddr = rinfo.pri_address;
+                rsize = rinfo.pri_size;
+            } else if (flavor != PROC_PIDREGIONINFO && (size_t)ret >= sizeof(struct proc_regionwithpathinfo)) {
+                struct proc_regionwithpathinfo rpinfo;
+                memcpy(&rpinfo, buffer, sizeof(rpinfo));
+                raddr = rpinfo.prp_prinfo.pri_address;
+                rsize = rpinfo.prp_prinfo.pri_size;
+            } else {
+                break;
+            }
+            if (rsize == 0 || !pt_is_hidden_vm_region_range((uintptr_t)raddr, (uintptr_t)rsize)) {
+                break;
+            }
+            if (raddr > UINT64_MAX - rsize || raddr + rsize <= query_arg) {
+                errno = ESRCH;
+                return raw_syscall_abi ? -1 : 0;
+            }
+            query_arg = raddr + rsize;
+        }
+    } else {
+        ret = proc_pidinfo(pid, flavor, arg, buffer, buffersize);
+        call_errno = errno;
+    }
     BOOL failed = (ret < 0 || call_errno != 0);
     if (failed) {
         errno = call_errno;
@@ -4185,7 +4253,6 @@ static int pt_fs_proc_pidinfo_ex(int pid,
         errno = saved_errno;
         return ret;
     }
-    BOOL bypass_active = pt_is_bypass_enabled();
     switch (flavor) {
         case PROC_PIDVNODEPATHINFO:
             if ((size_t)ret >= sizeof(struct proc_vnodepathinfo)) {
@@ -4998,6 +5065,18 @@ static size_t pt_attr_cmn_offset_in_record(const struct attrlist *req,
                                     PT_ATTR_GROUP_COMMON, target_bit, out_present);
 }
 
+static const char *pt_host_root_mntfromname(void) {
+    static char s_root_dev[MFSTYPENAMELEN + MAXPATHLEN];
+    static dispatch_once_t s_once;
+    dispatch_once(&s_once, ^{
+        struct statfs st;
+        if (statfs("/", &st) == 0) {
+            strlcpy(s_root_dev, st.f_mntfromname, sizeof(s_root_dev));
+        }
+    });
+    return s_root_dev;
+}
+
 static void pt_write_attr_ref_replacement(char *rec_ptr,
                                           size_t max_rec_cap,
                                           attrreference_t *ref,
@@ -5010,15 +5089,25 @@ static void pt_write_attr_ref_replacement(char *rec_ptr,
         return;
     }
     uint32_t rec_len = *(uint32_t *)rec_ptr;
+    size_t old_len = (size_t)ref->attr_length;
+    if (old_len > avail_str) {
+        old_len = avail_str;
+    }
     size_t vlen = strlen(replacement) + 1U;
     if (vlen <= (size_t)ref->attr_length && vlen <= avail_str) {
         memcpy((void *)str_start, replacement, vlen);
+        if (old_len > vlen) {
+            memset((uint8_t *)str_start + vlen, 0, old_len - vlen);
+        }
         ref->attr_length = (uint32_t)vlen;
         return;
     }
     if (can_grow_record) {
         size_t padded = (vlen + 3U) & ~3U;
         if ((size_t)rec_len + padded <= max_rec_cap) {
+            if (old_len > 0) {
+                memset((void *)str_start, 0, old_len);
+            }
             char *dst = rec_ptr + rec_len;
             memset(dst, 0, padded);
             memcpy(dst, replacement, vlen);
@@ -5033,17 +5122,27 @@ static void pt_write_attr_ref_replacement(char *rec_ptr,
         size_t slen = strlen(short_virt) + 1U;
         if (slen <= (size_t)ref->attr_length && slen <= avail_str) {
             memcpy((void *)str_start, short_virt, slen);
+            if (old_len > slen) {
+                memset((uint8_t *)str_start + slen, 0, old_len - slen);
+            }
             ref->attr_length = (uint32_t)slen;
             return;
         }
     }
     if (is_mountpoint && avail_str >= 2 && ref->attr_length >= 2) {
         memcpy((void *)str_start, "/", 2);
+        if (old_len > 2) {
+            memset((uint8_t *)str_start + 2, 0, old_len - 2);
+        }
         ref->attr_length = 2;
         return;
     }
     if (avail_str > 0) {
-        *(char *)str_start = '\0';
+        if (old_len > 0) {
+            memset((void *)str_start, 0, old_len);
+        } else {
+            *(char *)str_start = '\0';
+        }
         ref->attr_length = 1;
     }
 }
@@ -5090,6 +5189,30 @@ static void pt_sanitize_attr_path_ref(const struct attrlist *alist,
     memcpy(orig_copy, (const void *)str_start, copy_n);
     orig_copy[copy_n] = '\0';
 
+    if (group == PT_ATTR_GROUP_VOL && bit == ATTR_VOL_NAME) {
+        const char *vol_name = (strcmp(orig_copy, "Macintosh HD") == 0 ||
+                                strcmp(orig_copy, "System") == 0)
+            ? "System"
+            : "Data";
+        if (strcmp(orig_copy, vol_name) != 0) {
+            pt_write_attr_ref_replacement(rec_ptr, max_rec_cap, ref, str_start, avail_str,
+                                          can_grow_record, vol_name, NO);
+        }
+        return;
+    }
+
+    if (group == PT_ATTR_GROUP_VOL && bit == ATTR_VOL_MOUNTEDDEVICE) {
+        const char *root_dev = pt_host_root_mntfromname();
+        const char *dev_name = (root_dev[0] != '\0' && strcmp(orig_copy, root_dev) == 0)
+            ? "/dev/disk0s1s1"
+            : "/dev/disk0s1s2";
+        if (strcmp(orig_copy, dev_name) != 0) {
+            pt_write_attr_ref_replacement(rec_ptr, max_rec_cap, ref, str_start, avail_str,
+                                          can_grow_record, dev_name, NO);
+        }
+        return;
+    }
+
     if (is_mountpoint) {
         if (strcmp(orig_copy, "/System/Volumes/Data") == 0 ||
             strncmp(orig_copy, "/Volumes/", 9) == 0 ||
@@ -5116,7 +5239,15 @@ static void pt_sanitize_attr_path_ref(const struct attrlist *alist,
 
     if (pt_is_sensitive_host_fd_path(orig_copy, caller)) {
         if (avail_str > 0) {
-            *(char *)str_start = '\0';
+            size_t old_len = (size_t)ref->attr_length;
+            if (old_len > avail_str) {
+                old_len = avail_str;
+            }
+            if (old_len > 0) {
+                memset((void *)str_start, 0, old_len);
+            } else {
+                *(char *)str_start = '\0';
+            }
             ref->attr_length = 1;
         }
         return;
@@ -5150,6 +5281,14 @@ static void pt_sanitize_attr_fullpath_in_record(const struct attrlist *alist,
         pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
                                   PT_ATTR_GROUP_VOL, ATTR_VOL_MOUNTPOINT, YES, NULL, caller);
     }
+    if ((alist->volattr & ATTR_VOL_NAME) != 0) {
+        pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
+                                  PT_ATTR_GROUP_VOL, ATTR_VOL_NAME, NO, NULL, caller);
+    }
+    if ((alist->volattr & ATTR_VOL_MOUNTEDDEVICE) != 0) {
+        pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
+                                  PT_ATTR_GROUP_VOL, ATTR_VOL_MOUNTEDDEVICE, NO, NULL, caller);
+    }
     if ((alist->forkattr & ATTR_CMNEXT_NOFIRMLINKPATH) != 0) {
         pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
                                   PT_ATTR_GROUP_FORK, ATTR_CMNEXT_NOFIRMLINKPATH, NO, NULL, caller);
@@ -5180,14 +5319,27 @@ static void pt_sanitize_attr_virtual_ancestor_record(const struct attrlist *alis
         pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
                                   PT_ATTR_GROUP_VOL, ATTR_VOL_MOUNTPOINT, YES, "/private/var", caller);
     }
+    if ((alist->volattr & ATTR_VOL_NAME) != 0) {
+        pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
+                                  PT_ATTR_GROUP_VOL, ATTR_VOL_NAME, NO, "Data", caller);
+    }
+    if ((alist->volattr & ATTR_VOL_MOUNTEDDEVICE) != 0) {
+        pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
+                                  PT_ATTR_GROUP_VOL, ATTR_VOL_MOUNTEDDEVICE, NO, "/dev/disk0s1s2", caller);
+    }
     if ((alist->forkattr & ATTR_CMNEXT_NOFIRMLINKPATH) != 0) {
         pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
                                   PT_ATTR_GROUP_FORK, ATTR_CMNEXT_NOFIRMLINKPATH, NO, ancestor_path, caller);
     }
 }
 
-static int pt_getattrlist(const char *path, void *attrList, void *attrBuf, size_t attrBufSize, unsigned int options) {
-    const void *caller = __builtin_return_address(0);
+__attribute__((visibility("hidden")))
+int pt_fs_getattrlist_with_caller(const char *path,
+                                  void *attrList,
+                                  void *attrBuf,
+                                  size_t attrBufSize,
+                                  unsigned int options,
+                                  const void *caller) {
     char vbuf[PATH_MAX];
     const char *resolved = NULL;
     pt_fs_path_disposition_t disp = pt_prepare_fs_path(path, caller, vbuf, sizeof(vbuf), &resolved);
@@ -5225,8 +5377,17 @@ static int pt_getattrlist(const char *path, void *attrList, void *attrBuf, size_
     return ret;
 }
 
-static int pt_fgetattrlist(int fd, void *attrList, void *attrBuf, size_t attrBufSize, unsigned int options) {
-    const void *caller = __builtin_return_address(0);
+static int pt_getattrlist(const char *path, void *attrList, void *attrBuf, size_t attrBufSize, unsigned int options) {
+    return pt_fs_getattrlist_with_caller(path, attrList, attrBuf, attrBufSize, options, __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
+int pt_fs_fgetattrlist_with_caller(int fd,
+                                   void *attrList,
+                                   void *attrBuf,
+                                   size_t attrBufSize,
+                                   unsigned int options,
+                                   const void *caller) {
     BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
     if (!is_sys && pt_fd_is_sensitive(fd, caller)) {
         errno = EBADF;
@@ -5244,8 +5405,18 @@ static int pt_fgetattrlist(int fd, void *attrList, void *attrBuf, size_t attrBuf
     return ret;
 }
 
-static int pt_getattrlistat(int fd, const char *path, void *attrList, void *attrBuf, size_t attrBufSize, unsigned long options) {
-    const void *caller = __builtin_return_address(0);
+static int pt_fgetattrlist(int fd, void *attrList, void *attrBuf, size_t attrBufSize, unsigned int options) {
+    return pt_fs_fgetattrlist_with_caller(fd, attrList, attrBuf, attrBufSize, options, __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
+int pt_fs_getattrlistat_with_caller(int fd,
+                                    const char *path,
+                                    void *attrList,
+                                    void *attrBuf,
+                                    size_t attrBufSize,
+                                    unsigned long options,
+                                    const void *caller) {
     if (pt_fd_is_sensitive(fd, caller)) {
         errno = EBADF;
         return -1;
@@ -5287,6 +5458,10 @@ static int pt_getattrlistat(int fd, const char *path, void *attrList, void *attr
         }
     }
     return ret;
+}
+
+static int pt_getattrlistat(int fd, const char *path, void *attrList, void *attrBuf, size_t attrBufSize, unsigned long options) {
+    return pt_fs_getattrlistat_with_caller(fd, path, attrList, attrBuf, attrBufSize, options, __builtin_return_address(0));
 }
 
 static int pt_getattrlistbulk(int dirfd, void *attrList, void *attrBuf, size_t attrBufSize, uint64_t options) {
@@ -7139,6 +7314,21 @@ void *pt_fs_dlsym_route(const char *symbol) {
     }
     if (strcmp(symbol, "proc_pidinfo") == 0) {
         return (void *)&pt_proc_pidinfo;
+    }
+    if (strcmp(symbol, "proc_pidfdinfo") == 0) {
+        return (void *)&pt_proc_pidfdinfo;
+    }
+    if (strcmp(symbol, "proc_regionfilename") == 0) {
+        return (void *)&pt_proc_regionfilename;
+    }
+    if (strcmp(symbol, "getattrlist") == 0) {
+        return (void *)&pt_getattrlist;
+    }
+    if (strcmp(symbol, "fgetattrlist") == 0) {
+        return (void *)&pt_fgetattrlist;
+    }
+    if (strcmp(symbol, "getattrlistat") == 0) {
+        return (void *)&pt_getattrlistat;
     }
     return NULL;
 }

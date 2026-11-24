@@ -196,6 +196,8 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_dyld_image_name(const ch
     return (strstr(name, "PlayTools") != NULL ||
             strstr(name, "AKInterface") != NULL ||
             strstr(name, "UserPlugins") != NULL ||
+            strstr(name, "AGXMetal") != NULL ||
+            strstr(name, "/System/Library/Extensions/") != NULL ||
             strstr(name, "AppKit.framework") != NULL ||
             strstr(name, "UIKitMacHelper.framework") != NULL ||
             strstr(name, "ViewBridge.framework") != NULL ||
@@ -1383,7 +1385,7 @@ static BOOL pt_mach_header_64_needs_shadow(const struct mach_header_64 *mh) {
             return YES;
         } else if ((lc->cmd == LC_LOAD_DYLIB || lc->cmd == LC_LOAD_WEAK_DYLIB ||
                     lc->cmd == LC_REEXPORT_DYLIB || lc->cmd == LC_LOAD_UPWARD_DYLIB ||
-                    lc->cmd == LC_LAZY_LOAD_DYLIB) &&
+                    lc->cmd == LC_LAZY_LOAD_DYLIB || lc->cmd == LC_ID_DYLIB) &&
                    lc->cmdsize >= sizeof(struct dylib_command)) {
             const struct dylib_command *dc = (const struct dylib_command *)lc;
             uint32_t noff = dc->dylib.name.offset;
@@ -1512,7 +1514,7 @@ BOOL pt_build_sanitized_mach_header_copy(const struct mach_header_64 *src_mh,
         }
         if (cmd == LC_LOAD_DYLIB || cmd == LC_LOAD_WEAK_DYLIB ||
             cmd == LC_REEXPORT_DYLIB || cmd == LC_LOAD_UPWARD_DYLIB ||
-            cmd == LC_LAZY_LOAD_DYLIB) {
+            cmd == LC_LAZY_LOAD_DYLIB || cmd == LC_ID_DYLIB) {
             if (cmdsize < sizeof(struct dylib_command)) {
                 continue;
             }
@@ -1529,15 +1531,21 @@ BOOL pt_build_sanitized_mach_header_copy(const struct mach_header_64 *src_mh,
             }
             memcpy(nbuf, (const char *)lc + noff, slen);
             nbuf[slen] = '\0';
-            if (pt_lc_dylib_name_should_drop(nbuf)) {
-                continue;
-            }
             char rewritten[PATH_MAX];
             const char *replacement = NULL;
-            if (strncmp(nbuf, "/System/iOSSupport/usr/lib/swift/libswift", 41) == 0) {
+            if (pt_lc_dylib_name_should_drop(nbuf)) {
+                if (cmd != LC_ID_DYLIB) {
+                    continue;
+                }
+                static const char kFallbackIdDylib[] = "/usr/lib/libobjc.A.dylib";
+                static const char kTinyIdDylib[] = "/usr/lib/dyld";
+                size_t fb_aligned = (sizeof(struct dylib_command) + sizeof(kFallbackIdDylib) + 7U) & ~7ULL;
+                replacement = (fb_aligned <= (size_t)cmdsize) ? kFallbackIdDylib : kTinyIdDylib;
+            }
+            if (replacement == NULL && strncmp(nbuf, "/System/iOSSupport/usr/lib/swift/libswift", 41) == 0) {
                 snprintf(rewritten, sizeof(rewritten), "@rpath/%s", nbuf + 33);
                 replacement = rewritten;
-            } else if (strncmp(nbuf, "/System/iOSSupport/", 19) == 0) {
+            } else if (replacement == NULL && strncmp(nbuf, "/System/iOSSupport/", 19) == 0) {
                 replacement = nbuf + 18;
             }
             if (replacement != NULL) {
@@ -2909,6 +2917,9 @@ static void *pt_dlsym(void *handle, const char *symbol) {
                    strcmp(symbol, "AudioObjectGetPropertyDataSize") == 0 ||
                    strcmp(symbol, "AudioObjectGetPropertyData") == 0 ||
                    strcmp(symbol, "_LSCopyApplicationInformation") == 0 ||
+                   strcmp(symbol, "_LSGetCurrentApplicationASN") == 0 ||
+                   strncmp(symbol, "_LSASN", 6) == 0 ||
+                   strncmp(symbol, "_LSCopyApplicationInformation", 29) == 0 ||
                    (pt_is_compat13_7_active() && strcmp(symbol, "freadlink") == 0)) {
             PT_DEBUG_TRACE("dyld", "hid macOS-only symbol=%s", symbol);
             pt_set_synthetic_dlerror("symbol not found");

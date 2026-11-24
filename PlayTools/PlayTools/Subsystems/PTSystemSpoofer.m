@@ -1833,15 +1833,19 @@ static pt_sysctl_mib_entry_t s_sysctl_mibs[] = {
     { "hw.packages", {0}, 0 },
     { "hw.use_kernelmanagerd", {0}, 0 },
     { "vm.swapusage", {0}, 0 },
+    { "vm.swapfileprefix", {0}, 0 },
     { "kern.iossupportversion", {0}, 0 },
     { "kern.osproductversion", {0}, 0 },
     { "kern.bootargs", {0}, 0 },
     { "kern.wakereason", {0}, 0 },
     { "kern.hibernatefile", {0}, 0 },
+    { "kern.hibernatewakenotification", {0}, 0 },
+    { "kern.hibernatemode", {0}, 0 },
     { "kern.hv_support", {0}, 0 },
     { "kern.secure_kernel", {0}, 0 },
     { "security.mac.amfi.developer_mode_status", {0}, 0 },
     { "sysctl.proc_translated", {0}, 0 },
+    { "sysctl.proc_native", {0}, 0 },
 };
 static pthread_once_t s_pt_sysctl_mibs_once = PTHREAD_ONCE_INIT;
 static uint32_t s_sysctl_root_mask = 0;
@@ -1934,6 +1938,28 @@ static void pt_get_spoofed_l2_cache_sizes(const pt_device_profile_t *profile,
     }
 }
 
+static BOOL pt_is_hidden_sysctl_name(const char *name) {
+    if (name == NULL || name[0] == '\0') {
+        return NO;
+    }
+    if (strcmp(name, "sysctl.proc_translated") == 0 ||
+        strcmp(name, "sysctl.proc_native") == 0 ||
+        strcmp(name, "kern.iossupportversion") == 0 ||
+        strncmp(name, "kern.hibernate", 14) == 0 ||
+        strcmp(name, "hw.use_kernelmanagerd") == 0 ||
+        strcmp(name, "vm.swapusage") == 0) {
+        return YES;
+    }
+    if (strncmp(name, "hw.perflevel1.", 14) == 0 &&
+        pt_get_active_device_profile()->e_cores == 0) {
+        return YES;
+    }
+    if (strncmp(name, "hw.optional.arm.FEAT_", 21) == 0 && pt_is_compat13_7_active()) {
+        return YES;
+    }
+    return NO;
+}
+
 static BOOL pt_handle_sysctl_name(const char *name,
                                   void *oldp,
                                   size_t *oldlenp,
@@ -1945,16 +1971,23 @@ static BOOL pt_handle_sysctl_name(const char *name,
     if (name == NULL || out_ret == NULL) {
         return NO;
     }
-    char c0 = name[0];
-    if (c0 != 'h' && c0 != 'k' && c0 != 'm' && c0 != 's' && c0 != 'v') {
-        return NO;
-    }
-    if (c0 == 'v' && strcmp(name, "vm.swapusage") == 0) {
+    if (pt_is_hidden_sysctl_name(name)) {
         if (!pt_is_bypass_enabled() || pt_sysctl_resolve_is_sys(caller, inout_is_sys_caller)) {
             return NO;
         }
         errno = ENOENT;
         *out_ret = -1;
+        return YES;
+    }
+    char c0 = name[0];
+    if (c0 != 'h' && c0 != 'k' && c0 != 'm' && c0 != 's' && c0 != 'v') {
+        return NO;
+    }
+    if (c0 == 'v' && strcmp(name, "vm.swapfileprefix") == 0) {
+        if (!pt_is_bypass_enabled() || pt_sysctl_resolve_is_sys(caller, inout_is_sys_caller)) {
+            return NO;
+        }
+        *out_ret = pt_write_sysctl_string("/private/var/vm/swapfile", oldp, oldlenp);
         return YES;
     }
     if (c0 == 'h' && strncmp(name, "hw.", 3) == 0) {
@@ -2195,8 +2228,7 @@ static BOOL pt_handle_sysctl_name(const char *name,
         *out_ret = -1;
         return YES;
     }
-    if ((c0 == 's' && strcmp(name, "security.mac.amfi.developer_mode_status") == 0) ||
-        (c0 == 's' && strcmp(name, "sysctl.proc_translated") == 0)) {
+    if (c0 == 's' && strcmp(name, "security.mac.amfi.developer_mode_status") == 0) {
         if (!pt_is_bypass_enabled() || pt_sysctl_resolve_is_sys(caller, inout_is_sys_caller)) {
             return NO;
         }
@@ -2209,23 +2241,10 @@ static BOOL pt_handle_sysctl_name(const char *name,
 static int pt_sysctlnametomib(const char *sname, int *mibp, size_t *sizep) {
     if (sname != NULL &&
         pt_is_bypass_enabled() &&
-        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        if (strcmp(sname, "kern.iossupportversion") == 0 ||
-            strcmp(sname, "kern.hibernatefile") == 0 ||
-            strcmp(sname, "hw.use_kernelmanagerd") == 0 ||
-            strcmp(sname, "vm.swapusage") == 0) {
-            errno = ENOENT;
-            return -1;
-        }
-        if (strncmp(sname, "hw.perflevel1.", 14) == 0 &&
-            pt_get_active_device_profile()->e_cores == 0) {
-            errno = ENOENT;
-            return -1;
-        }
-        if (strncmp(sname, "hw.optional.arm.FEAT_", 21) == 0 && pt_is_compat13_7_active()) {
-            errno = ENOENT;
-            return -1;
-        }
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_is_hidden_sysctl_name(sname)) {
+        errno = ENOENT;
+        return -1;
     }
     return sysctlnametomib(sname, mibp, sizep);
 }
@@ -2814,6 +2833,80 @@ int pt_sysctl_with_caller(int *name,
                           const void *ret_addr) {
     int is_sys_caller = -1;
     if (name != NULL && types >= 2) {
+        if (name[0] == 0 &&
+            pt_is_bypass_enabled() &&
+            !pt_sysctl_resolve_is_sys(ret_addr, &is_sys_caller)) {
+            if (name[1] == 3 && arg0 != NULL && arg1 > 0 && arg1 <= 512U) {
+                char qname[513];
+                size_t slen = strnlen((const char *)arg0, arg1);
+                memcpy(qname, arg0, slen);
+                qname[slen] = '\0';
+                if (pt_is_hidden_sysctl_name(qname)) {
+                    errno = ENOENT;
+                    return -1;
+                }
+            } else if (name[1] == 1 && types >= 3) {
+                char qname[512];
+                size_t qlen = sizeof(qname) - 1U;
+                if (pt_orig_kernel_sysctl(name, types, qname, &qlen, NULL, 0) == 0) {
+                    qname[qlen < sizeof(qname) ? qlen : sizeof(qname) - 1U] = '\0';
+                    if (pt_is_hidden_sysctl_name(qname)) {
+                        errno = ENOENT;
+                        return -1;
+                    }
+                }
+            } else if ((name[1] == 2 || name[1] == 5) && types <= CTL_MAXNAME + 2) {
+                int cur_q[CTL_MAXNAME + 2];
+                memcpy(cur_q, name, (size_t)types * sizeof(int));
+                u_int cur_qlen = types;
+                for (int skip = 0; skip < 128; skip++) {
+                    int next_oid[CTL_MAXNAME];
+                    size_t next_sz = sizeof(next_oid);
+                    int r = pt_orig_kernel_sysctl(cur_q, cur_qlen, next_oid, &next_sz, NULL, 0);
+                    if (r != 0) {
+                        return r;
+                    }
+                    if (next_sz == 0 || next_sz > sizeof(next_oid) || (next_sz % sizeof(int)) != 0) {
+                        break;
+                    }
+                    u_int next_cnt = (u_int)(next_sz / sizeof(int));
+                    int name_q[CTL_MAXNAME + 2];
+                    name_q[0] = 0;
+                    name_q[1] = 1;
+                    memcpy(name_q + 2, next_oid, next_sz);
+                    char oid_name[512];
+                    size_t oid_name_sz = sizeof(oid_name) - 1U;
+                    if (pt_orig_kernel_sysctl(name_q, 2U + next_cnt, oid_name, &oid_name_sz, NULL, 0) == 0) {
+                        oid_name[oid_name_sz < sizeof(oid_name) ? oid_name_sz : sizeof(oid_name) - 1U] = '\0';
+                        if (pt_is_hidden_sysctl_name(oid_name)) {
+                            cur_q[0] = 0;
+                            cur_q[1] = name[1];
+                            memcpy(cur_q + 2, next_oid, next_sz);
+                            cur_qlen = 2U + next_cnt;
+                            continue;
+                        }
+                    }
+                    if (size == NULL) {
+                        errno = EINVAL;
+                        return -1;
+                    }
+                    if (buf == NULL) {
+                        *size = next_sz;
+                        return 0;
+                    }
+                    if (*size < next_sz) {
+                        *size = next_sz;
+                        errno = ENOMEM;
+                        return -1;
+                    }
+                    memcpy(buf, next_oid, next_sz);
+                    *size = next_sz;
+                    return 0;
+                }
+                errno = ENOENT;
+                return -1;
+            }
+        }
         if (name[0] == CTL_KERN) {
             if (types >= 4 && name[1] == KERN_PROC && name[2] == KERN_PROC_PID &&
                 name[3] != getpid()) {
@@ -5780,17 +5873,25 @@ static gid_t pt_getegid(void) {
 static BOOL pt_is_desktop_supplemental_gid(gid_t g) {
     switch (g) {
         case 12:  // everyone
+        case 29:  // certusers
+        case 33:  // _appstore
         case 61:  // localaccounts
         case 79:  // _appserverusr
         case 80:  // admin
+        case 81:  // _appserveradm
         case 98:  // _lpadmin
         case 100: // _lpoperator
+        case 101: // _developer
+        case 204: // _developer
+        case 250: // _analyticsusers
+        case 395: // com.apple.access_ftp
         case 398: // com.apple.access_screensharing
         case 399: // com.apple.access_ssh
+        case 400: // com.apple.access_remote_ae
         case 701: // com.apple.sharepoint.group
             return YES;
         default:
-            return NO;
+            return (g >= 390U && g <= 410U);
     }
 }
 
@@ -6835,20 +6936,104 @@ static void pt_sanitize_vm_read_buffer(uintptr_t read_start, uint8_t *dst, size_
     }
     pt_svc_restore_patched_bytes_in_buffer(read_start, dst, copied);
     const struct mach_header *mh = dyld_image_header_containing_address((const void *)read_start);
-    if (mh == NULL || !pt_is_valid_user_pointer((const void *)mh)) {
+    const struct mach_header_64 *mh64 = NULL;
+    uintptr_t mh_base = 0;
+    size_t real_hdr_total = 0;
+
+    if (mh != NULL && pt_is_valid_user_pointer((const void *)mh)) {
+        mh64 = (const struct mach_header_64 *)mh;
+        if (mh64->magic != MH_MAGIC_64 ||
+            mh64->sizeofcmds == 0 ||
+            mh64->sizeofcmds > (1U << 20)) {
+            return;
+        }
+        mh_base = (uintptr_t)mh64;
+        real_hdr_total = sizeof(struct mach_header_64) + (size_t)mh64->sizeofcmds;
+        if (mh_base > UINTPTR_MAX - real_hdr_total) {
+            return;
+        }
+    } else {
+        struct mach_header_64 hdr_copy;
+        memset(&hdr_copy, 0, sizeof(hdr_copy));
+        uintptr_t cand_base = 0;
+        if (copied >= sizeof(struct mach_header_64)) {
+            memcpy(&hdr_copy, dst, sizeof(hdr_copy));
+            if (hdr_copy.magic == MH_MAGIC_64 &&
+                hdr_copy.cputype == CPU_TYPE_ARM64 &&
+                hdr_copy.ncmds > 0 &&
+                hdr_copy.ncmds <= 4096U &&
+                hdr_copy.sizeofcmds > 0 &&
+                hdr_copy.sizeofcmds <= (1U << 20)) {
+                cand_base = read_start;
+            }
+        }
+        if (cand_base == 0) {
+            uintptr_t page_base = read_start & ~(uintptr_t)0x3FFFU;
+            if (read_start > page_base && (read_start - page_base) <= 65536U) {
+                mach_vm_size_t hdr_out = 0;
+                kern_return_t hkr = pt_orig_mach_vm_read_overwrite(
+                    mach_task_self(),
+                    (mach_vm_address_t)page_base,
+                    sizeof(hdr_copy),
+                    (mach_vm_address_t)(uintptr_t)&hdr_copy,
+                    &hdr_out);
+                if (hkr == KERN_SUCCESS &&
+                    hdr_out == sizeof(hdr_copy) &&
+                    hdr_copy.magic == MH_MAGIC_64 &&
+                    hdr_copy.cputype == CPU_TYPE_ARM64 &&
+                    hdr_copy.ncmds > 0 &&
+                    hdr_copy.ncmds <= 4096U &&
+                    hdr_copy.sizeofcmds > 0 &&
+                    hdr_copy.sizeofcmds <= (1U << 20)) {
+                    cand_base = page_base;
+                }
+            }
+        }
+        if (cand_base == 0) {
+            return;
+        }
+        real_hdr_total = sizeof(struct mach_header_64) + (size_t)hdr_copy.sizeofcmds;
+        if (cand_base > UINTPTR_MAX - real_hdr_total ||
+            read_start < cand_base ||
+            read_start >= cand_base + real_hdr_total) {
+            return;
+        }
+        uint8_t *raw_hdr = (uint8_t *)malloc(real_hdr_total);
+        uint8_t *san_hdr = (uint8_t *)malloc(real_hdr_total);
+        if (raw_hdr != NULL && san_hdr != NULL) {
+            const uint8_t *src_ptr = NULL;
+            if (cand_base == read_start && copied >= real_hdr_total) {
+                src_ptr = dst;
+            } else {
+                mach_vm_size_t full_out = 0;
+                kern_return_t fkr = pt_orig_mach_vm_read_overwrite(
+                    mach_task_self(),
+                    (mach_vm_address_t)cand_base,
+                    (mach_vm_size_t)real_hdr_total,
+                    (mach_vm_address_t)(uintptr_t)raw_hdr,
+                    &full_out);
+                if (fkr == KERN_SUCCESS && full_out == real_hdr_total) {
+                    src_ptr = raw_hdr;
+                }
+            }
+            if (src_ptr != NULL &&
+                pt_build_sanitized_mach_header_copy((const struct mach_header_64 *)src_ptr,
+                                                    san_hdr,
+                                                    real_hdr_total,
+                                                    NULL)) {
+                size_t rel_off = (size_t)(read_start - cand_base);
+                uintptr_t cand_end = cand_base + real_hdr_total;
+                uintptr_t read_end = read_start + copied;
+                uintptr_t ov_end = (read_end < cand_end) ? read_end : cand_end;
+                size_t ov_len = (size_t)(ov_end - read_start);
+                memcpy(dst, san_hdr + rel_off, ov_len);
+            }
+        }
+        free(raw_hdr);
+        free(san_hdr);
         return;
     }
-    const struct mach_header_64 *mh64 = (const struct mach_header_64 *)mh;
-    if (mh64->magic != MH_MAGIC_64 ||
-        mh64->sizeofcmds == 0 ||
-        mh64->sizeofcmds > (1U << 20)) {
-        return;
-    }
-    uintptr_t mh_base = (uintptr_t)mh64;
-    size_t real_hdr_total = sizeof(struct mach_header_64) + (size_t)mh64->sizeofcmds;
-    if (mh_base > UINTPTR_MAX - real_hdr_total) {
-        return;
-    }
+
     uintptr_t mh_end = mh_base + real_hdr_total;
     if (read_start >= mh_base && read_start < mh_end) {
         uintptr_t read_end = read_start + copied;
@@ -7363,6 +7548,34 @@ intptr_t pt_syscall_dispatch_with_caller(int number,
             }
             break;
         }
+        case 220: { // SYS_getattrlist
+            return (intptr_t)pt_fs_getattrlist_with_caller(
+                (const char *)(uintptr_t)args[0],
+                (void *)(uintptr_t)args[1],
+                (void *)(uintptr_t)args[2],
+                (size_t)args[3],
+                (unsigned int)args[4],
+                caller);
+        }
+        case 228: { // SYS_fgetattrlist
+            return (intptr_t)pt_fs_fgetattrlist_with_caller(
+                (int)args[0],
+                (void *)(uintptr_t)args[1],
+                (void *)(uintptr_t)args[2],
+                (size_t)args[3],
+                (unsigned int)args[4],
+                caller);
+        }
+        case 476: { // SYS_getattrlistat
+            return (intptr_t)pt_fs_getattrlistat_with_caller(
+                (int)args[0],
+                (const char *)(uintptr_t)args[1],
+                (void *)(uintptr_t)args[2],
+                (void *)(uintptr_t)args[3],
+                (size_t)args[4],
+                (unsigned long)args[5],
+                caller);
+        }
         case 336: { // SYS_proc_info
             int32_t callnum = (int32_t)args[0];
             int32_t pid = (int32_t)args[1];
@@ -7372,6 +7585,8 @@ intptr_t pt_syscall_dispatch_with_caller(int number,
             int32_t buffersize = (int32_t)args[5];
             if (callnum == 2) { // PROC_INFO_CALL_PIDINFO
                 return (intptr_t)pt_fs_proc_pidinfo_syscall_with_caller(pid, (int)flavor, arg, buffer, buffersize, caller);
+            } else if (callnum == 3) { // PROC_INFO_CALL_PIDFDINFO
+                return (intptr_t)pt_fs_proc_pidfdinfo_syscall_with_caller(pid, (int)arg, (int)flavor, buffer, buffersize, caller);
             }
             break;
         }
@@ -7834,6 +8049,77 @@ static kern_return_t pt_mach_msg2_internal(void *data,
     return kr;
 }
 
+#ifndef PT_BOOTSTRAP_UNKNOWN_SERVICE
+#define PT_BOOTSTRAP_UNKNOWN_SERVICE 1102
+#endif
+
+extern kern_return_t bootstrap_look_up(mach_port_t bp, const char *service_name, mach_port_t *sp);
+
+static kern_return_t pt_bootstrap_look_up(mach_port_t bp, const char *service_name, mach_port_t *sp) {
+    if (service_name != NULL &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_is_hidden_macos_mach_service(service_name)) {
+        if (sp != NULL) {
+            *sp = MACH_PORT_NULL;
+        }
+        return PT_BOOTSTRAP_UNKNOWN_SERVICE;
+    }
+    return bootstrap_look_up(bp, service_name, sp);
+}
+
+static kern_return_t pt_bootstrap_look_up2(mach_port_t bp,
+                                           const char *service_name,
+                                           mach_port_t *sp,
+                                           pid_t target_pid,
+                                           uint64_t flags) {
+    if (service_name != NULL &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_is_hidden_macos_mach_service(service_name)) {
+        if (sp != NULL) {
+            *sp = MACH_PORT_NULL;
+        }
+        return PT_BOOTSTRAP_UNKNOWN_SERVICE;
+    }
+    typedef kern_return_t (*BootstrapLookUp2Fn)(mach_port_t, const char *, mach_port_t *, pid_t, uint64_t);
+    static BootstrapLookUp2Fn s_orig = NULL;
+    static dispatch_once_t s_once;
+    dispatch_once(&s_once, ^{
+        s_orig = (BootstrapLookUp2Fn)dlsym(RTLD_NEXT, "bootstrap_look_up2");
+    });
+    if (s_orig != NULL) {
+        return s_orig(bp, service_name, sp, target_pid, flags);
+    }
+    if (sp != NULL) {
+        *sp = MACH_PORT_NULL;
+    }
+    return PT_BOOTSTRAP_UNKNOWN_SERVICE;
+}
+
+static pid_t pt_responsibility_get_pid_responsible_for_pid(pid_t pid) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        pid_t self_pid = getpid();
+        if (pid == 0 || pid == self_pid) {
+            return self_pid;
+        }
+        errno = ESRCH;
+        return -1;
+    }
+    typedef pid_t (*RespFn)(pid_t);
+    static RespFn s_orig = NULL;
+    static dispatch_once_t s_once;
+    dispatch_once(&s_once, ^{
+        s_orig = (RespFn)dlsym(RTLD_NEXT, "responsibility_get_pid_responsible_for_pid");
+    });
+    if (s_orig != NULL) {
+        return s_orig(pid);
+    }
+    errno = ENOSYS;
+    return -1;
+}
+
 __attribute__((visibility("hidden")))
 void *pt_spoofer_dlsym_route(const char *symbol) {
     if (symbol == NULL) {
@@ -7868,6 +8154,42 @@ void *pt_spoofer_dlsym_route(const char *symbol) {
     }
     if (strcmp(symbol, "IORegistryEntryGetName") == 0) {
         return (void *)&pt_IORegistryEntryGetName;
+    }
+    if (strcmp(symbol, "IORegistryEntryCreateCFProperty") == 0) {
+        return (void *)&pt_IORegistryEntryCreateCFProperty;
+    }
+    if (strcmp(symbol, "IORegistryEntrySearchCFProperty") == 0) {
+        return (void *)&pt_IORegistryEntrySearchCFProperty;
+    }
+    if (strcmp(symbol, "IORegistryEntryCreateCFProperties") == 0) {
+        return (void *)&pt_IORegistryEntryCreateCFProperties;
+    }
+    if (strcmp(symbol, "IORegistryEntryGetPath") == 0) {
+        return (void *)&pt_IORegistryEntryGetPath;
+    }
+    if (strcmp(symbol, "IOServiceGetMatchingService") == 0) {
+        return (void *)&pt_IOServiceGetMatchingService;
+    }
+    if (strcmp(symbol, "IOServiceGetMatchingServices") == 0) {
+        return (void *)&pt_IOServiceGetMatchingServices;
+    }
+    if (strcmp(symbol, "sysctl") == 0) {
+        return (void *)&pt_sysctl;
+    }
+    if (strcmp(symbol, "sysctlbyname") == 0) {
+        return (void *)&pt_sysctlbyname;
+    }
+    if (strcmp(symbol, "sysctlnametomib") == 0) {
+        return (void *)&pt_sysctlnametomib;
+    }
+    if (strcmp(symbol, "bootstrap_look_up") == 0) {
+        return (void *)&pt_bootstrap_look_up;
+    }
+    if (strcmp(symbol, "bootstrap_look_up2") == 0) {
+        return (void *)&pt_bootstrap_look_up2;
+    }
+    if (strcmp(symbol, "responsibility_get_pid_responsible_for_pid") == 0) {
+        return (void *)&pt_responsibility_get_pid_responsible_for_pid;
     }
     if (strcmp(symbol, "host_info") == 0) {
         return (void *)&pt_host_info;
@@ -8026,3 +8348,4 @@ DYLD_INTERPOSE(pt_pthread_getname_np, pthread_getname_np)
 DYLD_INTERPOSE(pt_IORegistryEntryGetName, IORegistryEntryGetName)
 DYLD_INTERPOSE(pt_mach_msg, mach_msg)
 DYLD_INTERPOSE(pt_mach_msg_overwrite, mach_msg_overwrite)
+DYLD_INTERPOSE(pt_bootstrap_look_up, bootstrap_look_up)

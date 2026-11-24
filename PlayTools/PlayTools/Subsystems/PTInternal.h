@@ -560,6 +560,7 @@ __attribute__((visibility("hidden"))) char ***pt_get_app_shadow_environ_ptr(void
 // Entitlements exports
 __attribute__((visibility("hidden"))) int pt_csops_with_caller(pid_t pid, unsigned int ops, void *useraddr, size_t usersize, const void *caller);
 __attribute__((visibility("hidden"))) int pt_ptrace_with_caller(int request, pid_t pid, caddr_t addr, int data, const void *caller);
+__attribute__((visibility("hidden"))) BOOL pt_is_hidden_macos_mach_service(const char *name);
 
 // FSVirtualizer exports
 __attribute__((visibility("hidden"))) BOOL pt_is_system_or_playtools_caller(const void *ret_addr);
@@ -600,6 +601,10 @@ __attribute__((visibility("hidden"))) ssize_t pt_fs_readlinkat_with_caller(int f
 __attribute__((visibility("hidden"))) int pt_fs_fcntl_with_caller(int fd, int cmd, uintptr_t arg, const void *caller);
 __attribute__((visibility("hidden"))) int pt_fs_proc_pidinfo_with_caller(int pid, int flavor, uint64_t arg, void *buffer, int buffersize, const void *caller);
 __attribute__((visibility("hidden"))) int pt_fs_proc_pidinfo_syscall_with_caller(int pid, int flavor, uint64_t arg, void *buffer, int buffersize, const void *caller);
+__attribute__((visibility("hidden"))) int pt_fs_proc_pidfdinfo_syscall_with_caller(int pid, int fd, int flavor, void *buffer, int buffersize, const void *caller);
+__attribute__((visibility("hidden"))) int pt_fs_getattrlist_with_caller(const char *path, void *attrList, void *attrBuf, size_t attrBufSize, unsigned int options, const void *caller);
+__attribute__((visibility("hidden"))) int pt_fs_fgetattrlist_with_caller(int fd, void *attrList, void *attrBuf, size_t attrBufSize, unsigned int options, const void *caller);
+__attribute__((visibility("hidden"))) int pt_fs_getattrlistat_with_caller(int fd, const char *path, void *attrList, void *attrBuf, size_t attrBufSize, unsigned long options, const void *caller);
 __attribute__((visibility("hidden"))) ssize_t pt_fs_fsgetpath_with_caller(char *buf, size_t bufsize, fsid_t *fsid, uint64_t objid, const void *caller);
 __attribute__((visibility("hidden"))) void *pt_fs_dlsym_route(const char *symbol);
 

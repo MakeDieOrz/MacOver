@@ -70,10 +70,16 @@ static BOOL pt_is_hidden_entitlement_key(NSString *key) {
 
 #define PT_CS_OPS_STATUS 0
 #define PT_CS_OPS_ENTITLEMENTS_BLOB 7
+#define PT_CS_OPS_BLOB 10U
 #define PT_CS_OPS_IDENTITY 11
 #define PT_CS_OPS_TEAMID 14
-#define PT_CS_OPS_DER_ENTITLEMENTS_BLOB 15
+#define PT_CS_OPS_CLEAR_LV 15U
+#define PT_CS_OPS_DER_ENTITLEMENTS_BLOB 16U
 #define PT_CSMAGIC_EMBEDDED_ENTITLEMENTS 0xfade7171U
+#define PT_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS 0xfade7172U
+#define PT_CSMAGIC_EMBEDDED_SIGNATURE 0xfade0cc0U
+#define PT_CSSLOT_ENTITLEMENTS 5U
+#define PT_CSSLOT_DER_ENTITLEMENTS 7U
 #define PT_CS_VALID 0x00000001U
 #define PT_CS_ADHOC 0x00000002U
 #define PT_CS_GET_TASK_ALLOW 0x00000004U
@@ -263,6 +269,234 @@ static NSData *pt_get_synthesized_entitlements_xml_data(void) {
         }
     });
     return s_xml_data;
+}
+
+typedef struct {
+    uint8_t *data;
+    size_t len;
+    size_t cap;
+    BOOL failed;
+} pt_der_buf_t;
+
+static void pt_der_buf_append(pt_der_buf_t *b, const void *src, size_t n) {
+    if (b == NULL || b->failed || n == 0 || src == NULL) {
+        return;
+    }
+    if (n > (16U << 20) - b->len) {
+        b->failed = YES;
+        return;
+    }
+    if (b->len + n > b->cap) {
+        size_t new_cap = (b->cap == 0) ? 256U : b->cap;
+        while (new_cap < b->len + n) {
+            if (new_cap > (8U << 20)) {
+                b->failed = YES;
+                return;
+            }
+            new_cap *= 2U;
+        }
+        uint8_t *grown = (uint8_t *)realloc(b->data, new_cap);
+        if (grown == NULL) {
+            b->failed = YES;
+            return;
+        }
+        b->data = grown;
+        b->cap = new_cap;
+    }
+    memcpy(b->data + b->len, src, n);
+    b->len += n;
+}
+
+static void pt_der_buf_append_byte(pt_der_buf_t *b, uint8_t v) {
+    pt_der_buf_append(b, &v, 1U);
+}
+
+static void pt_der_buf_append_tag_len(pt_der_buf_t *b, uint8_t tag, size_t content_len) {
+    pt_der_buf_append_byte(b, tag);
+    if (content_len < 0x80U) {
+        pt_der_buf_append_byte(b, (uint8_t)content_len);
+    } else if (content_len <= 0xffU) {
+        uint8_t hdr[2] = { 0x81U, (uint8_t)content_len };
+        pt_der_buf_append(b, hdr, sizeof(hdr));
+    } else if (content_len <= 0xffffU) {
+        uint8_t hdr[3] = { 0x82U, (uint8_t)(content_len >> 8), (uint8_t)(content_len & 0xffU) };
+        pt_der_buf_append(b, hdr, sizeof(hdr));
+    } else {
+        uint8_t hdr[5] = {
+            0x84U,
+            (uint8_t)((content_len >> 24) & 0xffU),
+            (uint8_t)((content_len >> 16) & 0xffU),
+            (uint8_t)((content_len >> 8) & 0xffU),
+            (uint8_t)(content_len & 0xffU)
+        };
+        pt_der_buf_append(b, hdr, sizeof(hdr));
+    }
+}
+
+static void pt_der_buf_wrap_tlv(pt_der_buf_t *out, uint8_t tag, const uint8_t *body, size_t body_len) {
+    pt_der_buf_append_tag_len(out, tag, body_len);
+    pt_der_buf_append(out, body, body_len);
+}
+
+typedef struct {
+    uint8_t *bytes;
+    size_t len;
+} pt_der_item_t;
+
+static int pt_der_item_cmp(const void *a, const void *b) {
+    const pt_der_item_t *ia = (const pt_der_item_t *)a;
+    const pt_der_item_t *ib = (const pt_der_item_t *)b;
+    size_t min_len = (ia->len < ib->len) ? ia->len : ib->len;
+    int c = (min_len > 0) ? memcmp(ia->bytes, ib->bytes, min_len) : 0;
+    if (c != 0) {
+        return c;
+    }
+    if (ia->len < ib->len) {
+        return -1;
+    }
+    return (ia->len > ib->len) ? 1 : 0;
+}
+
+static void pt_der_encode_objc_value(id val, pt_der_buf_t *out);
+
+static void pt_der_encode_dict_pairs(NSDictionary *dict, uint8_t container_tag, pt_der_buf_t *out) {
+    if (out == NULL || out->failed) {
+        return;
+    }
+    NSArray *keys = [dict allKeys];
+    size_t count = keys.count;
+    pt_der_item_t *items = (count > 0) ? (pt_der_item_t *)calloc(count, sizeof(pt_der_item_t)) : NULL;
+    if (count > 0 && items == NULL) {
+        out->failed = YES;
+        return;
+    }
+    size_t item_count = 0;
+    for (id rawKey in keys) {
+        if (![rawKey isKindOfClass:[NSString class]]) {
+            continue;
+        }
+        id v = dict[rawKey];
+        if (v == nil) {
+            continue;
+        }
+        pt_der_buf_t pair_body = {0};
+        const char *kutf = [(NSString *)rawKey UTF8String];
+        if (kutf == NULL) {
+            continue;
+        }
+        pt_der_buf_wrap_tlv(&pair_body, 0x0cU, (const uint8_t *)kutf, strlen(kutf));
+        pt_der_encode_objc_value(v, &pair_body);
+        if (!pair_body.failed && pair_body.data != NULL) {
+            pt_der_buf_t pair_seq = {0};
+            pt_der_buf_wrap_tlv(&pair_seq, 0x30U, pair_body.data, pair_body.len);
+            if (!pair_seq.failed && pair_seq.data != NULL) {
+                items[item_count].bytes = pair_seq.data;
+                items[item_count].len = pair_seq.len;
+                item_count++;
+            } else {
+                free(pair_seq.data);
+            }
+        }
+        free(pair_body.data);
+    }
+    if (item_count > 1U) {
+        qsort(items, item_count, sizeof(pt_der_item_t), pt_der_item_cmp);
+    }
+    pt_der_buf_t inner = {0};
+    for (size_t i = 0; i < item_count; i++) {
+        pt_der_buf_append(&inner, items[i].bytes, items[i].len);
+        free(items[i].bytes);
+    }
+    free(items);
+    if (!inner.failed) {
+        pt_der_buf_wrap_tlv(out, container_tag, inner.data, inner.len);
+    } else {
+        out->failed = YES;
+    }
+    free(inner.data);
+}
+
+static void pt_der_encode_objc_value(id val, pt_der_buf_t *out) {
+    if (val == nil || out == NULL || out->failed) {
+        return;
+    }
+    if (CFGetTypeID((__bridge CFTypeRef)val) == CFBooleanGetTypeID()) {
+        uint8_t b = [(NSNumber *)val boolValue] ? 0xffU : 0x00U;
+        pt_der_buf_wrap_tlv(out, 0x01U, &b, 1U);
+        return;
+    }
+    if ([val isKindOfClass:[NSNumber class]]) {
+        int64_t iv = [(NSNumber *)val longLongValue];
+        uint8_t raw[8];
+        for (int i = 7; i >= 0; i--) {
+            raw[7 - i] = (uint8_t)(((uint64_t)iv >> (i * 8)) & 0xffULL);
+        }
+        size_t start = 0;
+        while (start < 7U) {
+            if ((iv >= 0 && raw[start] == 0x00U && (raw[start + 1U] & 0x80U) == 0) ||
+                (iv < 0 && raw[start] == 0xffU && (raw[start + 1U] & 0x80U) != 0)) {
+                start++;
+            } else {
+                break;
+            }
+        }
+        pt_der_buf_wrap_tlv(out, 0x02U, raw + start, 8U - start);
+        return;
+    }
+    if ([val isKindOfClass:[NSString class]]) {
+        const char *s = [(NSString *)val UTF8String];
+        if (s != NULL) {
+            pt_der_buf_wrap_tlv(out, 0x0cU, (const uint8_t *)s, strlen(s));
+        }
+        return;
+    }
+    if ([val isKindOfClass:[NSData class]]) {
+        NSData *d = (NSData *)val;
+        pt_der_buf_wrap_tlv(out, 0x04U, (const uint8_t *)d.bytes, d.length);
+        return;
+    }
+    if ([val isKindOfClass:[NSArray class]]) {
+        pt_der_buf_t body = {0};
+        for (id elem in (NSArray *)val) {
+            pt_der_encode_objc_value(elem, &body);
+        }
+        if (!body.failed) {
+            pt_der_buf_wrap_tlv(out, 0x30U, body.data, body.len);
+        } else {
+            out->failed = YES;
+        }
+        free(body.data);
+        return;
+    }
+    if ([val isKindOfClass:[NSDictionary class]]) {
+        pt_der_encode_dict_pairs((NSDictionary *)val, 0x30U, out);
+        return;
+    }
+}
+
+static NSData *pt_get_synthesized_entitlements_der_data(void) {
+    static NSData *s_der_data = nil;
+    static dispatch_once_t s_der_once;
+    dispatch_once(&s_der_once, ^{
+        NSDictionary *ent = pt_get_synthesized_app_entitlements_dict();
+        if (ent == nil) {
+            return;
+        }
+        pt_der_buf_t root_body = {0};
+        uint8_t ver_tlv[3] = { 0x02U, 0x01U, 0x01U };
+        pt_der_buf_append(&root_body, ver_tlv, sizeof(ver_tlv));
+        pt_der_encode_dict_pairs(ent, 0x31U, &root_body);
+        pt_der_buf_t root = {0};
+        if (!root_body.failed && root_body.data != NULL) {
+            pt_der_buf_wrap_tlv(&root, 0x70U, root_body.data, root_body.len);
+        }
+        free(root_body.data);
+        if (!root.failed && root.data != NULL && root.len > 0) {
+            s_der_data = [NSData dataWithBytes:root.data length:root.len];
+        }
+        free(root.data);
+    });
+    return s_der_data;
 }
 
 static int pt_csops_write_blob_or_erange(uint32_t host_magic,
@@ -751,7 +985,151 @@ static OSStatus pt_SecStaticCodeCheckValidity(SecStaticCodeRef staticCode,
 extern int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
 extern int csops_audittoken(pid_t pid, unsigned int ops, void *useraddr, size_t usersize, audit_token_t *token);
 
-static int pt_handle_spoofed_csops_query(unsigned int ops, void *useraddr, size_t usersize) {
+static int pt_handle_spoofed_csops_blob(pid_t pid, void *useraddr, size_t usersize) {
+    if (usersize > 0 && useraddr == NULL) {
+        errno = EFAULT;
+        return -1;
+    }
+    uint32_t probe[2] = {0, 0};
+    errno = 0;
+    int pr = csops(pid, PT_CS_OPS_BLOB, probe, sizeof(probe));
+    int probe_errno = errno;
+    if (pr < 0 && probe_errno != ERANGE) {
+        errno = probe_errno;
+        return -1;
+    }
+    uint32_t raw_magic = ntohl(probe[0]);
+    uint32_t raw_len = ntohl(probe[1]);
+    if (raw_magic != PT_CSMAGIC_EMBEDDED_SIGNATURE || raw_len < 12U || raw_len > (16U << 20)) {
+        return csops(pid, PT_CS_OPS_BLOB, useraddr, usersize);
+    }
+    uint8_t *raw_buf = (uint8_t *)malloc(raw_len);
+    if (raw_buf == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+    if (csops(pid, PT_CS_OPS_BLOB, raw_buf, raw_len) != 0) {
+        int saved = errno;
+        free(raw_buf);
+        errno = saved;
+        return -1;
+    }
+    uint32_t slot_count = 0;
+    memcpy(&slot_count, raw_buf + 8U, sizeof(slot_count));
+    slot_count = ntohl(slot_count);
+    if (slot_count == 0 || slot_count > 256U || (size_t)slot_count * 8U > (size_t)(raw_len - 12U)) {
+        free(raw_buf);
+        return csops(pid, PT_CS_OPS_BLOB, useraddr, usersize);
+    }
+
+    NSData *xmlData = pt_get_synthesized_entitlements_xml_data();
+    NSData *derData = pt_is_compat13_7_active() ? nil : pt_get_synthesized_entitlements_der_data();
+    typedef struct {
+        uint32_t type;
+        uint32_t magic_override;
+        const uint8_t *bytes;
+        size_t len;
+    } pt_sb_slot_t;
+
+    pt_sb_slot_t *slots = (pt_sb_slot_t *)calloc(slot_count, sizeof(pt_sb_slot_t));
+    if (slots == NULL) {
+        free(raw_buf);
+        errno = ENOMEM;
+        return -1;
+    }
+    uint32_t out_count = 0;
+    size_t payload_total = 0;
+    for (uint32_t i = 0; i < slot_count; i++) {
+        uint32_t stype = 0, soff = 0;
+        memcpy(&stype, raw_buf + 12U + i * 8U, sizeof(stype));
+        memcpy(&soff, raw_buf + 16U + i * 8U, sizeof(soff));
+        stype = ntohl(stype);
+        soff = ntohl(soff);
+        if (soff < 12U + slot_count * 8U || soff + 8U > raw_len) {
+            continue;
+        }
+        uint32_t clen = 0;
+        memcpy(&clen, raw_buf + soff + 4U, sizeof(clen));
+        clen = ntohl(clen);
+        if (clen < 8U || clen > raw_len - soff) {
+            continue;
+        }
+        if (stype == PT_CSSLOT_ENTITLEMENTS) {
+            if (xmlData == nil || xmlData.length == 0) {
+                continue;
+            }
+            slots[out_count] = (pt_sb_slot_t){
+                .type = stype,
+                .magic_override = PT_CSMAGIC_EMBEDDED_ENTITLEMENTS,
+                .bytes = (const uint8_t *)xmlData.bytes,
+                .len = xmlData.length,
+            };
+            payload_total += 8U + xmlData.length;
+            out_count++;
+        } else if (stype == PT_CSSLOT_DER_ENTITLEMENTS) {
+            if (pt_is_compat13_7_active() || derData == nil || derData.length == 0) {
+                continue;
+            }
+            slots[out_count] = (pt_sb_slot_t){
+                .type = stype,
+                .magic_override = PT_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS,
+                .bytes = (const uint8_t *)derData.bytes,
+                .len = derData.length,
+            };
+            payload_total += 8U + derData.length;
+            out_count++;
+        } else {
+            slots[out_count] = (pt_sb_slot_t){
+                .type = stype,
+                .magic_override = 0U,
+                .bytes = raw_buf + soff,
+                .len = (size_t)clen,
+            };
+            payload_total += (size_t)clen;
+            out_count++;
+        }
+    }
+
+    size_t header_len = 12U + (size_t)out_count * 8U;
+    size_t out_total = header_len + payload_total;
+    if (usersize < 8U) {
+        free(slots);
+        free(raw_buf);
+        errno = ERANGE;
+        return -1;
+    }
+    uint32_t out_hdr[2] = { htonl(PT_CSMAGIC_EMBEDDED_SIGNATURE), htonl((uint32_t)out_total) };
+    memcpy(useraddr, out_hdr, sizeof(out_hdr));
+    if (usersize < out_total) {
+        free(slots);
+        free(raw_buf);
+        errno = ERANGE;
+        return -1;
+    }
+    uint8_t *dst = (uint8_t *)useraddr;
+    uint32_t be_count = htonl(out_count);
+    memcpy(dst + 8U, &be_count, sizeof(be_count));
+    size_t cur_off = header_len;
+    for (uint32_t i = 0; i < out_count; i++) {
+        uint32_t idx_pair[2] = { htonl(slots[i].type), htonl((uint32_t)cur_off) };
+        memcpy(dst + 12U + i * 8U, idx_pair, sizeof(idx_pair));
+        if (slots[i].magic_override != 0U) {
+            size_t full_sz = 8U + slots[i].len;
+            uint32_t chdr[2] = { htonl(slots[i].magic_override), htonl((uint32_t)full_sz) };
+            memcpy(dst + cur_off, chdr, sizeof(chdr));
+            memcpy(dst + cur_off + 8U, slots[i].bytes, slots[i].len);
+            cur_off += full_sz;
+        } else {
+            memcpy(dst + cur_off, slots[i].bytes, slots[i].len);
+            cur_off += slots[i].len;
+        }
+    }
+    free(slots);
+    free(raw_buf);
+    return 0;
+}
+
+static int pt_handle_spoofed_csops_query(pid_t pid, unsigned int ops, void *useraddr, size_t usersize) {
     if (ops == PT_CS_OPS_ENTITLEMENTS_BLOB) {
         NSData *xmlData = pt_get_synthesized_entitlements_xml_data();
         if (xmlData != nil && xmlData.length > 0) {
@@ -765,8 +1143,23 @@ static int pt_handle_spoofed_csops_query(unsigned int ops, void *useraddr, size_
         return -1;
     }
     if (ops == PT_CS_OPS_DER_ENTITLEMENTS_BLOB) {
+        if (pt_is_compat13_7_active()) {
+            errno = ENOENT;
+            return -1;
+        }
+        NSData *derData = pt_get_synthesized_entitlements_der_data();
+        if (derData != nil && derData.length > 0) {
+            return pt_csops_write_blob_or_erange(PT_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS,
+                                                 derData.bytes,
+                                                 derData.length,
+                                                 useraddr,
+                                                 usersize);
+        }
         errno = ENOENT;
         return -1;
+    }
+    if (ops == PT_CS_OPS_BLOB) {
+        return pt_handle_spoofed_csops_blob(pid, useraddr, usersize);
     }
     if (ops == PT_CS_OPS_TEAMID) {
         const char *team = pt_get_effective_team_id_cstr();
@@ -798,7 +1191,7 @@ int pt_csops_with_caller(pid_t pid, unsigned int ops, void *useraddr, size_t use
     if (pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(caller) &&
         (pid == 0 || pid == getpid())) {
-        int handled = pt_handle_spoofed_csops_query(ops, useraddr, usersize);
+        int handled = pt_handle_spoofed_csops_query(pid, ops, useraddr, usersize);
         if (handled != -2) {
             return handled;
         }
@@ -824,7 +1217,7 @@ static int pt_csops_audittoken(pid_t pid, unsigned int ops, void *useraddr, size
         pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(caller) &&
         (pid == 0 || pid == getpid())) {
-        int handled = pt_handle_spoofed_csops_query(ops, useraddr, usersize);
+        int handled = pt_handle_spoofed_csops_query(pid, ops, useraddr, usersize);
         if (handled != -2) {
             return handled;
         }
@@ -1411,18 +1804,39 @@ static int pt_sandbox_check_impl(BOOL use_audit_token,
             strcasestr(sarg, "akinterface") != NULL) {
             return 1;
         }
-        if (filter == 2 &&
-            (strcmp(sarg, "com.apple.dock.server") == 0 ||
-             strncmp(sarg, "com.apple.dock.", 15) == 0 ||
-             strncmp(sarg, "com.apple.windowserver.", 23) == 0 ||
-             strncmp(sarg, "com.apple.finder.", 17) == 0 ||
-             strncmp(sarg, "com.apple.coreservices.launchservicesd", 38) == 0 ||
-             strncmp(sarg, "com.apple.loginwindow", 21) == 0)) {
+        if (filter == 2 && pt_is_hidden_macos_mach_service(sarg)) {
             return 1;
         }
     }
     return use_audit_token ? sandbox_check_by_audit_token(au, operation, type, arg1)
                            : sandbox_check(pid, operation, type, arg1);
+}
+
+__attribute__((visibility("hidden")))
+BOOL pt_is_hidden_macos_mach_service(const char *name) {
+    if (name == NULL || name[0] == '\0') {
+        return NO;
+    }
+    if (strcmp(name, "com.apple.dock.server") == 0 ||
+        strncmp(name, "com.apple.dock.", 15) == 0 ||
+        strncmp(name, "com.apple.windowserver.", 23) == 0 ||
+        strncmp(name, "com.apple.finder.", 17) == 0 ||
+        strcmp(name, "com.apple.Finder") == 0 ||
+        strncmp(name, "com.apple.coreservices.launchservicesd", 38) == 0 ||
+        strncmp(name, "com.apple.coreservices.appleevents", 34) == 0 ||
+        strncmp(name, "com.apple.loginwindow", 21) == 0 ||
+        strncmp(name, "com.apple.systemuiserver", 24) == 0 ||
+        strcmp(name, "com.apple.pasteboard.1") == 0) {
+        return YES;
+    }
+    if (strcasestr(name, "playcover") != NULL ||
+        strcasestr(name, "macover") != NULL ||
+        strcasestr(name, "app.makedie") != NULL ||
+        strcasestr(name, "playtools") != NULL ||
+        strcasestr(name, "akinterface") != NULL) {
+        return YES;
+    }
+    return NO;
 }
 
 static int pt_sandbox_check(pid_t pid, const char *operation, int type, ...) {
@@ -1452,6 +1866,12 @@ void *pt_entitlements_dlsym_route(const char *symbol) {
     }
     if (strcmp(symbol, "sandbox_check_by_audit_token") == 0) {
         return (void *)&pt_sandbox_check_by_audit_token;
+    }
+    if (strcmp(symbol, "csops") == 0) {
+        return (void *)&pt_csops;
+    }
+    if (strcmp(symbol, "csops_audittoken") == 0) {
+        return (void *)&pt_csops_audittoken;
     }
     return NULL;
 }

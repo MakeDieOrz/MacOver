@@ -1652,6 +1652,10 @@ int main(int argc, const char *argv[]) {
         BOOL s11SandboxDlsymOK = NO;
         BOOL s11CoreMotionPullCacheOK = NO;
         BOOL s11MigHostAndTaskOK = NO;
+        BOOL s11BootstrapBlockedOK = NO;
+        BOOL s11SysctlSwapAndTreeOK = NO;
+        BOOL s11ResponsibilitySelfOK = NO;
+        BOOL s11LsAsnHiddenOK = NO;
         const char *testS11Env = getenv("HARNESS_TEST_SCENARIO11");
         if (testS11Env != NULL && strcmp(testS11Env, "1") == 0) {
             // 1. PROC_PIDPATHINFO (libproc + SYS_proc_info) returns 0 and virtualized iOS bundle path
@@ -2233,6 +2237,35 @@ int main(int argc, const char *argv[]) {
                 }
                 s11MigHostAndTaskOK = (hostMigOK && taskMigOK);
             }
+
+            // 17. bootstrap_look_up/2 return 1102, vm.swapfileprefix, CTL_SYSCTL tree hides proc_translated, responsibility/LS hidden
+            {
+                typedef kern_return_t (*BootFn)(mach_port_t, const char *, mach_port_t *);
+                BootFn fnBoot = (BootFn)dlsym(RTLD_DEFAULT, "bootstrap_look_up");
+                mach_port_t sp1 = 123, sp2 = 123;
+                kern_return_t br1 = (fnBoot != NULL) ? fnBoot(bootstrap_port, "com.apple.dock.server", &sp1) : -1;
+                kern_return_t br2 = (fnBoot != NULL) ? fnBoot(bootstrap_port, "com.apple.windowserver.active", &sp2) : -1;
+                s11BootstrapBlockedOK = (br1 == 1102 && br2 == 1102 && sp1 == MACH_PORT_NULL && sp2 == MACH_PORT_NULL);
+
+                char swapPfx[128] = {0};
+                size_t swapPfxLen = sizeof(swapPfx);
+                int swapRC = sysctlbyname("vm.swapfileprefix", swapPfx, &swapPfxLen, NULL, 0);
+                int ptVal = -1;
+                size_t ptLen = sizeof(ptVal);
+                errno = 0;
+                int ptRC = sysctlbyname("sysctl.proc_translated", &ptVal, &ptLen, NULL, 0);
+                s11SysctlSwapAndTreeOK = (swapRC == 0 &&
+                                          strcmp(swapPfx, "/private/var/vm/swapfile") == 0 &&
+                                          ptRC != 0 && errno == ENOENT);
+
+                typedef pid_t (*RespFn)(pid_t);
+                RespFn fnResp = (RespFn)dlsym(RTLD_DEFAULT, "responsibility_get_pid_responsible_for_pid");
+                s11ResponsibilitySelfOK = (fnResp != NULL && fnResp(getpid()) == getpid());
+
+                s11LsAsnHiddenOK = (dlsym(RTLD_DEFAULT, "_LSGetCurrentApplicationASN") == NULL &&
+                                    dlsym(RTLD_DEFAULT, "_LSASNCreateWithPid") == NULL &&
+                                    dlsym(RTLD_DEFAULT, "_LSCopyApplicationInformation") == NULL);
+            }
         }
 
         // Scenario 12: compat13_7 parity checks
@@ -2496,6 +2529,10 @@ int main(int argc, const char *argv[]) {
             @"s11SandboxDlsymOK": s11SandboxDlsymOK ? @YES : @NO,
             @"s11CoreMotionPullCacheOK": s11CoreMotionPullCacheOK ? @YES : @NO,
             @"s11MigHostAndTaskOK": s11MigHostAndTaskOK ? @YES : @NO,
+            @"s11BootstrapBlockedOK": s11BootstrapBlockedOK ? @YES : @NO,
+            @"s11SysctlSwapAndTreeOK": s11SysctlSwapAndTreeOK ? @YES : @NO,
+            @"s11ResponsibilitySelfOK": s11ResponsibilitySelfOK ? @YES : @NO,
+            @"s11LsAsnHiddenOK": s11LsAsnHiddenOK ? @YES : @NO,
             @"s12FreadlinkHiddenOK": s12FreadlinkHiddenOK ? @YES : @NO,
             @"s12ExtensionKitHiddenOK": s12ExtensionKitHiddenOK ? @YES : @NO,
             @"s12MetalCompat13GateOK": s12MetalCompat13GateOK ? @YES : @NO,
@@ -3709,6 +3746,10 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info11["s11SandboxDlsymOK"] is True,
         info11["s11CoreMotionPullCacheOK"] is True,
         info11["s11MigHostAndTaskOK"] is True,
+        info11["s11BootstrapBlockedOK"] is True,
+        info11["s11SysctlSwapAndTreeOK"] is True,
+        info11["s11ResponsibilitySelfOK"] is True,
+        info11["s11LsAsnHiddenOK"] is True,
     ]
     results.append(ScenarioResult(
         name="11. 1.0.4 audit & detect-v2 parity checks",
