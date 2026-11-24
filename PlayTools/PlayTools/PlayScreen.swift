@@ -120,6 +120,7 @@ public class PlayScreen: NSObject {
     private static var lastKnownWindowBounds: CGRect = .zero
     private static var lastMainKnownBounds: CGRect = .zero
     private static var cachedMainScreenRect: CGRect = .zero
+    private static var lastAppliedStrictFitViewportKey: PTStrictViewportFocusKey?
 
     func initialize() {
         if Thread.isMainThread {
@@ -134,45 +135,7 @@ public class PlayScreen: NSObject {
             object: nil,
             queue: .main
         ) { [weak self] notification in
-            guard let self else { return }
-            UIScreen.invalidateCachedAspectRatio()
-            if let window = notification.object as? UIWindow,
-               !window.isHidden,
-               !Self.isAuxiliaryKeyboardWindow(window),
-               Self.isValidWindowBounds(window) {
-                Self.cachedWindow = window
-                let isStrict = PlaySettings.shared.strictEmulationMode
-                if self.resizable || isStrict, let windowScene = window.windowScene {
-                    windowScene.sizeRestrictions?.minimumSize = CGSize(width: 0, height: 0)
-                    windowScene.sizeRestrictions?.maximumSize = CGSize(width: .max, height: .max)
-                }
-                if !PTSafeMode.isActive,
-                   let ak = AKInterface.shared,
-                   isStrict || ak.isSequoiaOrNewer == true,
-                   !self.fullscreen,
-                   PlaySettings.shared.adaptiveDisplay {
-                    let targetSize = CGSize(width: mainScreenWidth, height: mainScreenHeight)
-                    if targetSize.width > 0, targetSize.height > 0 {
-                        if isStrict {
-                            ak.setWindowAspectRatio?(targetSize)
-                        }
-                        ak.setWindowContentSize?(targetSize)
-                        let settingsData = PlaySettings.shared.settingsData
-                        if !isStrict,
-                           self.resizable,
-                           settingsData.resizableAspectRatioWidth > 0,
-                           settingsData.resizableAspectRatioHeight > 0 {
-                            ak.setWindowAspectRatio?(
-                                CGSize(
-                                    width: CGFloat(settingsData.resizableAspectRatioWidth),
-                                    height: CGFloat(settingsData.resizableAspectRatioHeight)
-                                )
-                            )
-                        }
-                    }
-                }
-            }
-            Self.updateCachedScreenRect(UIScreen.main.bounds)
+            self?.handleWindowDidBecomeKey(notification)
         }
         NotificationCenter.default.addObserver(
             forName: Notification.Name("NSWindowDidEndLiveResizeNotification"),
@@ -181,6 +144,64 @@ public class PlayScreen: NSObject {
         ) { _ in
             UIScreen.invalidateCachedAspectRatio()
             Self.updateCachedScreenRect(UIScreen.main.bounds)
+        }
+    }
+
+    private func handleWindowDidBecomeKey(_ notification: Notification) {
+        UIScreen.invalidateCachedAspectRatio()
+        defer { Self.updateCachedScreenRect(UIScreen.main.bounds) }
+        guard let window = notification.object as? UIWindow,
+              !window.isHidden,
+              !Self.isAuxiliaryKeyboardWindow(window),
+              Self.isValidWindowBounds(window) else {
+            return
+        }
+        Self.cachedWindow = window
+        let isStrict = PlaySettings.shared.strictEmulationMode
+        if self.resizable || isStrict, let windowScene = window.windowScene {
+            windowScene.sizeRestrictions?.minimumSize = CGSize(width: 0, height: 0)
+            windowScene.sizeRestrictions?.maximumSize = CGSize(width: .max, height: .max)
+        }
+        guard !PTSafeMode.isActive,
+              let akInterface = AKInterface.shared,
+              isStrict || akInterface.isSequoiaOrNewer == true,
+              !self.fullscreen,
+              PlaySettings.shared.adaptiveDisplay else {
+            return
+        }
+        let targetSize = CGSize(width: mainScreenWidth, height: mainScreenHeight)
+        guard targetSize.width > 0, targetSize.height > 0 else { return }
+        if isStrict {
+            akInterface.setWindowAspectRatio?(targetSize)
+        }
+        let currentKey = PTStrictViewportFocusKey(
+            sceneID: window.windowScene.map { ObjectIdentifier($0) },
+            deviceModel: PlaySettings.shared.deviceModel as String,
+            scaleMode: PlaySettings.shared.strictViewportScaleMode as String,
+            targetSize: targetSize,
+            screenFrame: akInterface.mainScreenFrame
+        )
+        let shouldApplySize = Self.boundsLock.withLock {
+            let decision = PTStrictViewportFocusPolicy.shouldApplyContentSizeOnFocus(
+                isStrictEmulationMode: isStrict,
+                lastAppliedFitScreenKey: Self.lastAppliedStrictFitViewportKey,
+                currentKey: currentKey
+            )
+            Self.lastAppliedStrictFitViewportKey = decision.nextAppliedFitScreenKey
+            return decision.shouldApply
+        }
+        if shouldApplySize {
+            akInterface.setWindowContentSize?(targetSize)
+        }
+        let settingsData = PlaySettings.shared.settingsData
+        if !isStrict,
+           self.resizable,
+           settingsData.resizableAspectRatioWidth > 0,
+           settingsData.resizableAspectRatioHeight > 0 {
+            akInterface.setWindowAspectRatio?(CGSize(
+                width: CGFloat(settingsData.resizableAspectRatioWidth),
+                height: CGFloat(settingsData.resizableAspectRatioHeight)
+            ))
         }
     }
 

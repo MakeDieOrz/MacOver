@@ -887,6 +887,60 @@ static inline BOOL pt_is_playchain_debug_enabled(void) {
     return v;
 }
 
+static void pt_merge_entitlement_values(NSMutableDictionary *merged, NSString *key, id value) {
+    if (merged == nil || key.length == 0 || value == nil) {
+        return;
+    }
+    NSMutableArray<NSString *> *combined = [NSMutableArray array];
+    id existing = merged[key];
+    if ([existing isKindOfClass:[NSString class]]) {
+        NSString *str = (NSString *)existing;
+        if (str.length > 0) {
+            [combined addObject:str];
+        }
+    } else if ([existing isKindOfClass:[NSArray class]]) {
+        for (id item in (NSArray *)existing) {
+            if ([item isKindOfClass:[NSString class]] &&
+                [(NSString *)item length] > 0 &&
+                ![combined containsObject:item]) {
+                [combined addObject:item];
+            }
+        }
+    }
+    if ([value isKindOfClass:[NSString class]]) {
+        NSString *str = (NSString *)value;
+        if (str.length > 0 && ![combined containsObject:str]) {
+            [combined addObject:str];
+        }
+    } else if ([value isKindOfClass:[NSArray class]]) {
+        for (id item in (NSArray *)value) {
+            if ([item isKindOfClass:[NSString class]] &&
+                [(NSString *)item length] > 0 &&
+                ![combined containsObject:item]) {
+                [combined addObject:item];
+            }
+        }
+    }
+    if (combined.count > 0) {
+        merged[key] = [combined copy];
+    }
+}
+
+static void pt_merge_application_identifier(NSMutableDictionary *merged, id appIdValue) {
+    if (merged == nil || ![appIdValue isKindOfClass:[NSString class]]) {
+        return;
+    }
+    NSCharacterSet *ws = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+    NSString *appId = [(NSString *)appIdValue stringByTrimmingCharactersInSet:ws];
+    if (appId.length == 0 || [appId isEqualToString:@"FAKETEAMID."]) {
+        return;
+    }
+    if (merged[@"application-identifier"] == nil) {
+        merged[@"application-identifier"] = appId;
+    }
+    pt_merge_entitlement_values(merged, @"keychain-access-groups", appId);
+}
+
 static NSArray<NSString *> *pt_get_allowed_keychain_access_groups(void) {
     static NSArray<NSString *> *s_allowed_groups = nil;
     static dispatch_once_t s_once;
@@ -896,6 +950,11 @@ static NSArray<NSString *> *pt_get_allowed_keychain_access_groups(void) {
         if (synth != nil) {
             [merged addEntriesFromDictionary:synth];
         }
+        NSDictionary *fb = pt_get_fallback_entitlements_dict();
+        if (fb != nil) {
+            pt_merge_application_identifier(merged, fb[@"application-identifier"]);
+            pt_merge_entitlement_values(merged, @"com.apple.security.application-groups", fb[@"com.apple.security.application-groups"]);
+        }
         SecCodeRef selfCode = NULL;
         if (SecCodeCopySelf(0, &selfCode) == 0 && selfCode != NULL) {
             CFDictionaryRef info = NULL;
@@ -904,30 +963,43 @@ static NSArray<NSString *> *pt_get_allowed_keychain_access_groups(void) {
                 NSDictionary *infoDict = (__bridge NSDictionary *)info;
                 NSDictionary *liveEnt = infoDict[@"entitlements-dict"];
                 if ([liveEnt isKindOfClass:[NSDictionary class]]) {
-                    id liveGroups = liveEnt[@"keychain-access-groups"];
-                    if (liveGroups != nil && merged[@"keychain-access-groups"] == nil) {
-                        merged[@"keychain-access-groups"] = liveGroups;
-                    } else if ([liveGroups isKindOfClass:[NSArray class]] &&
-                               [merged[@"keychain-access-groups"] isKindOfClass:[NSArray class]]) {
-                        NSMutableArray *combined = [(NSArray *)merged[@"keychain-access-groups"] mutableCopy];
-                        for (id g in (NSArray *)liveGroups) {
-                            if ([g isKindOfClass:[NSString class]] && ![combined containsObject:g]) {
-                                [combined addObject:g];
-                            }
-                        }
-                        merged[@"keychain-access-groups"] = [combined copy];
-                    }
-                    id liveAppId = liveEnt[@"application-identifier"];
-                    if ([liveAppId isKindOfClass:[NSString class]] &&
-                        ![(NSString *)liveAppId hasPrefix:@"FAKETEAMID."] &&
-                        [(NSString *)liveAppId length] > 0 &&
-                        merged[@"application-identifier"] == nil) {
-                        merged[@"application-identifier"] = liveAppId;
-                    }
+                    pt_merge_entitlement_values(merged, @"keychain-access-groups", liveEnt[@"keychain-access-groups"]);
+                    pt_merge_entitlement_values(merged,
+                                                @"com.apple.security.application-groups",
+                                                liveEnt[@"com.apple.security.application-groups"]);
+                    pt_merge_application_identifier(merged, liveEnt[@"application-identifier"]);
                 }
+            }
+            if (info != NULL) {
                 CFRelease(info);
             }
+        }
+        if (selfCode != NULL) {
             CFRelease(selfCode);
+        }
+        SecTaskRef selfTask = SecTaskCreateFromSelf(kCFAllocatorDefault);
+        if (selfTask != NULL) {
+            CFTypeRef taskGroups = SecTaskCopyValueForEntitlement(selfTask, CFSTR("keychain-access-groups"), NULL);
+            if (taskGroups != NULL) {
+                pt_merge_entitlement_values(merged, @"keychain-access-groups", (__bridge id)taskGroups);
+                CFRelease(taskGroups);
+            }
+            CFTypeRef taskAppGroups = SecTaskCopyValueForEntitlement(
+                selfTask, CFSTR("com.apple.security.application-groups"), NULL);
+            if (taskAppGroups != NULL) {
+                pt_merge_entitlement_values(merged,
+                                            @"com.apple.security.application-groups",
+                                            (__bridge id)taskAppGroups);
+                CFRelease(taskAppGroups);
+            }
+            CFTypeRef taskAppId = SecTaskCopyValueForEntitlement(selfTask, CFSTR("application-identifier"), NULL);
+            if (taskAppId != NULL) {
+                if (CFGetTypeID(taskAppId) == CFStringGetTypeID()) {
+                    pt_merge_application_identifier(merged, (__bridge id)taskAppId);
+                }
+                CFRelease(taskAppId);
+            }
+            CFRelease(selfTask);
         }
         const char *team = pt_get_effective_team_id_cstr();
         char bid[256];
@@ -1163,6 +1235,30 @@ static CFDataRef pt_SecKeyCopyExternalRepresentation(SecKeyRef key, CFErrorRef *
     return SecKeyCopyExternalRepresentation(key, error);
 }
 
+static CFDictionaryRef pt_SecKeyCopyAttributes(SecKeyRef key) {
+    if (key == NULL) {
+        return NULL;
+    }
+    CFDictionaryRef attrs = SecKeyCopyAttributes(key);
+    if (attrs == NULL) {
+        return NULL;
+    }
+    const void *caller = __builtin_return_address(0);
+    if (pt_is_playchain_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(caller) &&
+        [PTPlayChainSecureEnclaveRegistry isSecureEnclaveKey:key]) {
+        NSDictionary *dict = (__bridge NSDictionary *)attrs;
+        if ([dict isKindOfClass:[NSDictionary class]]) {
+            NSMutableDictionary *sanitized = [dict mutableCopy];
+            [sanitized removeObjectForKey:(__bridge id)kSecValueData];
+            sanitized[(__bridge id)kSecAttrTokenID] = (__bridge id)kSecAttrTokenIDSecureEnclave;
+            CFRelease(attrs);
+            return (__bridge_retained CFDictionaryRef)[sanitized copy];
+        }
+    }
+    return attrs;
+}
+
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 // Deprecated, but some apps might still use it.
@@ -1197,6 +1293,7 @@ DYLD_INTERPOSE(pt_SecItemUpdate, SecItemUpdate)
 DYLD_INTERPOSE(pt_SecItemDelete, SecItemDelete)
 DYLD_INTERPOSE(pt_SecKeyCreateRandomKey, SecKeyCreateRandomKey)
 DYLD_INTERPOSE(pt_SecKeyCopyExternalRepresentation, SecKeyCopyExternalRepresentation)
+DYLD_INTERPOSE(pt_SecKeyCopyAttributes, SecKeyCopyAttributes)
 DYLD_INTERPOSE(pt_SecKeyGeneratePair, SecKeyGeneratePair)
 #pragma clang diagnostic pop
 

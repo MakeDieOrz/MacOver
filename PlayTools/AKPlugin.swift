@@ -9,6 +9,7 @@ import AppKit
 import CoreGraphics
 import Darwin
 import Foundation
+import ObjectiveC
 
 // Add a lightweight struct so we can decode only the flag we care about
 private struct AKAppSettingsData: Codable {
@@ -56,25 +57,41 @@ class AKPlugin: NSObject, Plugin {
         return NSApplication.shared.windows.first(where: { Self.isPrimaryHostWindow($0) })
     }
 
+    private static func titleBarHeight(for window: NSWindow) -> CGFloat {
+        max(0, window.frame.height - window.contentRect(forFrameRect: window.frame).height)
+    }
+
+    private func applyHideTitleBarAppearance(to window: NSWindow) {
+        if !window.styleMask.contains(.fullScreen) {
+            window.styleMask.insert([.fullSizeContentView])
+        }
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.toolbar = nil
+        window.title = ""
+    }
+
     private func configureWindow(_ window: NSWindow) {
-        if let plan = strictWindowPlan(for: window) {
-            if plan.allowsUserResize {
-                window.styleMask.insert([.resizable])
+        if !window.styleMask.contains(.fullScreen) {
+            if let plan = strictWindowPlan(for: window) {
+                if plan.allowsUserResize {
+                    window.styleMask.insert([.resizable])
+                } else {
+                    window.styleMask.remove(.resizable)
+                }
+                window.contentMinSize = NSSize(
+                    width: min(100, max(1, plan.windowContentSize.width)),
+                    height: min(100, max(1, plan.windowContentSize.height))
+                )
+                window.contentAspectRatio = NSSize(
+                    width: plan.lockedAspectRatio.width,
+                    height: plan.lockedAspectRatio.height
+                )
             } else {
-                window.styleMask.remove(.resizable)
-            }
-            window.contentMinSize = NSSize(
-                width: min(100, max(1, plan.windowContentSize.width)),
-                height: min(100, max(1, plan.windowContentSize.height))
-            )
-            window.contentAspectRatio = NSSize(
-                width: plan.lockedAspectRatio.width,
-                height: plan.lockedAspectRatio.height
-            )
-        } else {
-            window.styleMask.insert([.resizable])
-            if let aspectRatio = self.aspectRatioSetting {
-                window.contentAspectRatio = aspectRatio
+                window.styleMask.insert([.resizable])
+                if let aspectRatio = self.aspectRatioSetting {
+                    window.contentAspectRatio = aspectRatio
+                }
             }
         }
         window.collectionBehavior = [.fullScreenPrimary, .managed, .participatesInCycle]
@@ -82,11 +99,7 @@ class AKPlugin: NSObject, Plugin {
         window.isMovableByWindowBackground = true
 
         if self.hideTitleBarSetting {
-            window.styleMask.insert([.fullSizeContentView])
-            window.titlebarAppearsTransparent = true
-            window.titleVisibility = .hidden
-            window.toolbar = nil
-            window.title = ""
+            applyHideTitleBarAppearance(to: window)
         }
 
         if self.floatingWindowSetting {
@@ -145,8 +158,11 @@ class AKPlugin: NSObject, Plugin {
         let apply = { [weak self] in
             guard let self, let window = self.activeWindow else { return }
             guard !window.styleMask.contains(.fullScreen) else { return }
+            if self.hideTitleBarSetting && !window.styleMask.contains(.fullSizeContentView) {
+                self.applyHideTitleBarAppearance(to: window)
+            }
             let visibleFrame = (window.screen ?? NSScreen.main ?? NSScreen.screens.first)?.visibleFrame ?? .zero
-            let titleHeight = max(0, window.frame.height - window.contentLayoutRect.height)
+            let titleHeight = Self.titleBarHeight(for: window)
             let clamped: CGSize
             if let plan = self.strictWindowPlan(for: window, visibleFrame: visibleFrame, titleHeight: titleHeight) {
                 clamped = plan.windowContentSize
@@ -190,7 +206,9 @@ class AKPlugin: NSObject, Plugin {
 
     func setWindowAspectRatio(_ ratio: CGSize) {
         let apply = { [weak self] in
-            guard let self, let window = self.activeWindow else { return }
+            guard let self,
+                  let window = self.activeWindow,
+                  !window.styleMask.contains(.fullScreen) else { return }
             let effectiveRatio = self.strictDeviceLogicalSize ?? ratio
             guard effectiveRatio.width.isFinite,
                   effectiveRatio.height.isFinite,
@@ -483,13 +501,47 @@ class AKPlugin: NSObject, Plugin {
         NSMenu.setMenuBarVisible(visible)
     }
 
-    private static var isSafeModeEnvActive: Bool {
-        guard let ptr = getenv("PLAYTOOLS_SAFE_MODE") else { return false }
-        return String(cString: ptr) == "1"
+    private static func parseSafeModeEnvFlag(_ raw: String?) -> Bool? {
+        guard let raw else { return nil }
+        let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized == "1" || normalized == "true" || normalized == "yes" {
+            return true
+        }
+        if normalized == "0" || normalized == "false" || normalized == "no" {
+            return false
+        }
+        return nil
+    }
+
+    private static func resolvePTSafeModeIsActive() -> Bool? {
+        let candidateNames = [
+            "PTSafeMode",
+            "_TtC9PlayTools10PTSafeMode",
+            "_TtC14PlayToolsTests10PTSafeMode"
+        ]
+        let selector = NSSelectorFromString("isActive")
+        for name in candidateNames {
+            guard let cls = NSClassFromString(name),
+                  let method = class_getClassMethod(cls, selector) else {
+                continue
+            }
+            typealias IsActiveFn = @convention(c) (AnyClass, Selector) -> Bool
+            let isActiveImp = unsafeBitCast(method_getImplementation(method), to: IsActiveFn.self)
+            return isActiveImp(cls, selector)
+        }
+        return nil
+    }
+
+    private static var isSafeModeActive: Bool {
+        let envRaw = getenv("PLAYTOOLS_SAFE_MODE").map { String(cString: $0) }
+        if let explicitFlag = parseSafeModeEnvFlag(envRaw) {
+            return explicitFlag
+        }
+        return resolvePTSafeModeIsActive() ?? false
     }
 
     private var isStrictEmulationActive: Bool {
-        !Self.isSafeModeEnvActive && (Self.akAppSettingsData?.strictEmulationMode == true)
+        !Self.isSafeModeActive && (Self.akAppSettingsData?.strictEmulationMode == true)
     }
 
     private var strictDeviceLogicalSize: CGSize? {
@@ -519,7 +571,7 @@ class AKPlugin: NSObject, Plugin {
         let targetFrame = visibleFrame
             ?? (window.screen ?? NSScreen.main ?? NSScreen.screens.first)?.visibleFrame
             ?? .zero
-        let resolvedTitleHeight = titleHeight ?? max(0, window.frame.height - window.contentLayoutRect.height)
+        let resolvedTitleHeight = titleHeight ?? Self.titleBarHeight(for: window)
         return PTWindowGeometryMath.strictViewportWindowPlan(
             logicalSceneSize: logicalSize,
             scaleMode: Self.akAppSettingsData?.strictViewportScaleMode,

@@ -780,6 +780,22 @@ public enum PTPlayChainPersistentRef {
 }
 
 public enum PTPlayChainAccessGroupPolicy {
+    private static func extractStringValues(from raw: Any?) -> [String] {
+        if let arr = raw as? [String] { return arr }
+        if let arr = raw as? [Any] { return arr.compactMap { $0 as? String } }
+        if let single = raw as? String { return [single] }
+        return []
+    }
+
+    private static func isValidApplicationGroup(_ group: String) -> Bool {
+        guard group.hasPrefix("group."), group.count > "group.".count,
+              !group.contains("/"), !group.contains(".."), !group.contains("*"),
+              !group.contains("\0"), !group.contains("\n"), !group.contains("\r") else {
+            return false
+        }
+        return !group.contains(where: { $0.isWhitespace })
+    }
+
     public static func expandAccessGroupPatterns(
         fromEntitlements entitlements: [String: Any]?,
         teamID: String,
@@ -790,37 +806,48 @@ public enum PTPlayChainAccessGroupPolicy {
         var ordered = [String]()
         var seen = Set<String>()
 
+        func appendUnique(_ candidate: String) {
+            if seen.insert(candidate).inserted {
+                ordered.append(candidate)
+            }
+        }
+
         func appendExpanded(_ raw: String) {
-            var expanded = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !expanded.isEmpty else { return }
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            var expanded = trimmed
+            var preserveFakeTeamOriginal = false
             if !cleanTeam.isEmpty {
                 expanded = expanded
                     .replacingOccurrences(of: "$(AppIdentifierPrefix)", with: "\(cleanTeam).")
                     .replacingOccurrences(of: "$(TeamIdentifierPrefix)", with: "\(cleanTeam).")
                 if expanded.hasPrefix("FAKETEAMID.") {
                     let suffix = expanded.dropFirst("FAKETEAMID.".count)
+                    guard !suffix.isEmpty else { return }
                     expanded = "\(cleanTeam).\(suffix)"
+                    preserveFakeTeamOriginal = true
                 }
             }
-            if seen.insert(expanded).inserted {
-                ordered.append(expanded)
+            appendUnique(expanded)
+            if preserveFakeTeamOriginal {
+                appendUnique(trimmed)
             }
         }
 
-        if let rawGroups = entitlements?["keychain-access-groups"] {
-            if let arr = rawGroups as? [String] {
-                for item in arr { appendExpanded(item) }
-            } else if let arr = rawGroups as? [Any] {
-                for case let item as String in arr { appendExpanded(item) }
-            } else if let single = rawGroups as? String {
-                appendExpanded(single)
-            }
+        for item in extractStringValues(from: entitlements?["keychain-access-groups"]) {
+            appendExpanded(item)
         }
-        if let appID = entitlements?["application-identifier"] as? String {
+        for appID in extractStringValues(from: entitlements?["application-identifier"]) {
             appendExpanded(appID)
         }
         if !cleanTeam.isEmpty, !cleanBundle.isEmpty {
             appendExpanded("\(cleanTeam).\(cleanBundle)")
+        }
+        for rawGroup in extractStringValues(from: entitlements?["com.apple.security.application-groups"]) {
+            let trimmed = rawGroup.trimmingCharacters(in: .whitespacesAndNewlines)
+            if isValidApplicationGroup(trimmed) {
+                appendUnique(trimmed)
+            }
         }
         return ordered
     }
@@ -830,32 +857,65 @@ public enum PTPlayChainAccessGroupPolicy {
         allowedPatterns: [String],
         isReadOnlyQuery: Bool
     ) -> OSStatus {
-        if requestedGroup == nil || requestedGroup is NSNull {
-            return errSecSuccess
-        }
-        guard let group = requestedGroup as? String else {
-            return errSecParam
-        }
-        if group.isEmpty {
-            return errSecSuccess
-        }
-        if isReadOnlyQuery && group == (kSecAttrAccessGroupToken as String) {
-            return errSecSuccess
-        }
+        guard let requestedGroup else { return errSecSuccess }
+        guard let group = requestedGroup as? String else { return errSecParam }
+        if group.isEmpty { return errSecSuccess }
+        if isReadOnlyQuery && group == (kSecAttrAccessGroupToken as String) { return errSecSuccess }
         for rawPattern in allowedPatterns {
             let pattern = rawPattern.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !pattern.isEmpty else { continue }
-            if pattern == group {
-                return errSecSuccess
-            }
+            if pattern == group { return errSecSuccess }
             if pattern.hasSuffix(".*") {
                 let prefix = String(pattern.dropLast(1))
-                if group.hasPrefix(prefix), group.count > prefix.count {
-                    return errSecSuccess
-                }
+                if group.hasPrefix(prefix), group.count > prefix.count { return errSecSuccess }
             }
         }
         return errSecMissingEntitlement
+    }
+}
+
+public enum PTPlayChainKeyUpdatePolicy {
+    public static func isUpdatableColumn(_ column: String, internalTokenIDColumn: String) -> Bool {
+        column != internalTokenIDColumn
+    }
+}
+
+public struct PTStrictViewportFocusKey: Equatable {
+    public let sceneID: ObjectIdentifier?
+    public let deviceModel: String
+    public let scaleMode: String
+    public let targetSize: CGSize
+    public let screenFrame: CGRect
+
+    public init(
+        sceneID: ObjectIdentifier?,
+        deviceModel: String,
+        scaleMode: String,
+        targetSize: CGSize,
+        screenFrame: CGRect
+    ) {
+        self.sceneID = sceneID
+        self.deviceModel = deviceModel
+        self.scaleMode = scaleMode
+        self.targetSize = targetSize
+        self.screenFrame = screenFrame
+    }
+}
+
+public enum PTStrictViewportFocusPolicy {
+    public static func shouldApplyContentSizeOnFocus(
+        isStrictEmulationMode: Bool,
+        lastAppliedFitScreenKey: PTStrictViewportFocusKey?,
+        currentKey: PTStrictViewportFocusKey
+    ) -> (shouldApply: Bool, nextAppliedFitScreenKey: PTStrictViewportFocusKey?) {
+        guard isStrictEmulationMode,
+              PTWindowGeometryMath.normalizedStrictScaleMode(currentKey.scaleMode) == "fitScreen" else {
+            return (true, nil)
+        }
+        if lastAppliedFitScreenKey == currentKey {
+            return (false, lastAppliedFitScreenKey)
+        }
+        return (true, currentKey)
     }
 }
 

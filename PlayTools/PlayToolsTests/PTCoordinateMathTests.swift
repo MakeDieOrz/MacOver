@@ -777,4 +777,102 @@ final class PTCoordinateMathTests: XCTestCase {
         XCTAssertEqual(nativeSmall.windowContentSize, CGSize(width: 430, height: 932))
         XCTAssertFalse(nativeSmall.allowsUserResize)
     }
+
+    func testStrictViewportFocusPolicyPreservesFitScreenResizeAcrossFocus() {
+        let screenA = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let screenB = CGRect(x: 0, y: 0, width: 2560, height: 1440)
+        let landscapeKey = PTStrictViewportFocusKey(
+            sceneID: nil, deviceModel: "iPad13,8", scaleMode: "fitScreen",
+            targetSize: CGSize(width: 1366, height: 1024), screenFrame: screenA
+        )
+
+        let first = PTStrictViewportFocusPolicy.shouldApplyContentSizeOnFocus(
+            isStrictEmulationMode: true, lastAppliedFitScreenKey: nil, currentKey: landscapeKey
+        )
+        XCTAssertTrue(first.shouldApply)
+        XCTAssertEqual(first.nextAppliedFitScreenKey, landscapeKey)
+
+        let repeatFocus = PTStrictViewportFocusPolicy.shouldApplyContentSizeOnFocus(
+            isStrictEmulationMode: true,
+            lastAppliedFitScreenKey: first.nextAppliedFitScreenKey,
+            currentKey: landscapeKey
+        )
+        XCTAssertFalse(repeatFocus.shouldApply)
+        XCTAssertEqual(repeatFocus.nextAppliedFitScreenKey, landscapeKey)
+
+        let portraitKey = PTStrictViewportFocusKey(
+            sceneID: nil, deviceModel: "iPad13,8", scaleMode: "fitScreen",
+            targetSize: CGSize(width: 1024, height: 1366), screenFrame: screenA
+        )
+        let rotated = PTStrictViewportFocusPolicy.shouldApplyContentSizeOnFocus(
+            isStrictEmulationMode: true,
+            lastAppliedFitScreenKey: repeatFocus.nextAppliedFitScreenKey,
+            currentKey: portraitKey
+        )
+        XCTAssertTrue(rotated.shouldApply)
+        XCTAssertEqual(rotated.nextAppliedFitScreenKey, portraitKey)
+
+        let movedScreenKey = PTStrictViewportFocusKey(
+            sceneID: nil, deviceModel: "iPad13,8", scaleMode: "fitScreen",
+            targetSize: CGSize(width: 1024, height: 1366), screenFrame: screenB
+        )
+        let moved = PTStrictViewportFocusPolicy.shouldApplyContentSizeOnFocus(
+            isStrictEmulationMode: true,
+            lastAppliedFitScreenKey: rotated.nextAppliedFitScreenKey,
+            currentKey: movedScreenKey
+        )
+        XCTAssertTrue(moved.shouldApply)
+        XCTAssertEqual(moved.nextAppliedFitScreenKey, movedScreenKey)
+    }
+
+    func testStrictViewportFocusPolicyNative1xAndNonStrictAlwaysApply() {
+        let screenA = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let landscapeKey = PTStrictViewportFocusKey(
+            sceneID: nil,
+            deviceModel: "iPad13,8",
+            scaleMode: "fitScreen",
+            targetSize: CGSize(width: 1366, height: 1024),
+            screenFrame: screenA
+        )
+        let native1xKey = PTStrictViewportFocusKey(
+            sceneID: nil,
+            deviceModel: "iPad13,8",
+            scaleMode: "native1x",
+            targetSize: CGSize(width: 1366, height: 1024),
+            screenFrame: screenA
+        )
+        let nativeApply = PTStrictViewportFocusPolicy.shouldApplyContentSizeOnFocus(
+            isStrictEmulationMode: true,
+            lastAppliedFitScreenKey: landscapeKey,
+            currentKey: native1xKey
+        )
+        XCTAssertTrue(nativeApply.shouldApply)
+        XCTAssertNil(nativeApply.nextAppliedFitScreenKey)
+
+        let nonStrict = PTStrictViewportFocusPolicy.shouldApplyContentSizeOnFocus(
+            isStrictEmulationMode: false,
+            lastAppliedFitScreenKey: landscapeKey,
+            currentKey: landscapeKey
+        )
+        XCTAssertTrue(nonStrict.shouldApply)
+        XCTAssertNil(nonStrict.nextAppliedFitScreenKey)
+    }
+
+    func testHideTitleBarZeroTitleHeightAvoids32ptInflation() {
+        let visible = CGRect(x: 0, y: 25, width: 1440, height: 875)
+        let zeroTitlePlan = PTWindowGeometryMath.strictViewportWindowPlan(
+            logicalSceneSize: CGSize(width: 1024, height: 1366),
+            scaleMode: "fitScreen",
+            visibleScreenFrame: visible,
+            titleBarHeight: 0
+        )
+        XCTAssertEqual(zeroTitlePlan.windowContentSize.height, 875)
+        let centeredNoTitle = PTWindowGeometryMath.centeredFrame(
+            forContentSize: zeroTitlePlan.windowContentSize,
+            currentFrame: .zero,
+            visibleScreenFrame: visible,
+            titleBarHeight: 0
+        )
+        XCTAssertEqual(centeredNoTitle.height, 875)
+    }
 }

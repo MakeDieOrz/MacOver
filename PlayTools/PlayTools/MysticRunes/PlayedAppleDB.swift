@@ -798,7 +798,11 @@ class PlayKeychainDB: NSObject {
                 for (rawKey, val) in normalizedUpdates {
                     guard let col = rawKey as? String,
                           allowedCols.contains(col),
-                          !Self.nonFilterableKeys.contains(col) else {
+                          !Self.nonFilterableKeys.contains(col),
+                          PTPlayChainKeyUpdatePolicy.isUpdatableColumn(
+                              col,
+                              internalTokenIDColumn: Self.internalTokenIDColumn
+                          ) else {
                         continue
                     }
                     if col == (kSecAttrSynchronizable as String) {

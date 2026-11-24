@@ -267,4 +267,124 @@ final class PlayedAppleDBBackupTests: XCTestCase {
         XCTAssertFalse(PTPlayChainSecureEnclaveRegistry.isSecureEnclaveKey(sePubKey))
         XCTAssertFalse(PTPlayChainSecureEnclaveRegistry.isSecureEnclaveKey(normalKey))
     }
+
+    func testAccessGroupPolicyIncludesValidAppGroupsAndPreservesFakeTeamID() {
+        let entitlements: [String: Any] = [
+            "keychain-access-groups": [
+                "$(AppIdentifierPrefix)com.example.shared",
+                "FAKETEAMID.com.example.legacy",
+                "FAKETEAMID."
+            ],
+            "application-identifier": "FAKETEAMID.com.example.app",
+            "com.apple.security.application-groups": [
+                "group.com.example.shared",
+                "  group.com.example.trimmed  ",
+                "group.",
+                "group.*",
+                "not-a-group",
+                "group.com/evil",
+                "group.com..evil",
+                "group.has space"
+            ]
+        ]
+
+        let patterns = PTPlayChainAccessGroupPolicy.expandAccessGroupPatterns(
+            fromEntitlements: entitlements,
+            teamID: "ABCD123456",
+            bundleID: "com.example.app"
+        )
+
+        XCTAssertTrue(patterns.contains("ABCD123456.com.example.shared"))
+        XCTAssertTrue(patterns.contains("ABCD123456.com.example.legacy"))
+        XCTAssertTrue(patterns.contains("FAKETEAMID.com.example.legacy"))
+        XCTAssertTrue(patterns.contains("ABCD123456.com.example.app"))
+        XCTAssertTrue(patterns.contains("FAKETEAMID.com.example.app"))
+        XCTAssertTrue(patterns.contains("group.com.example.shared"))
+        XCTAssertTrue(patterns.contains("group.com.example.trimmed"))
+
+        XCTAssertFalse(patterns.contains("ABCD123456."))
+        XCTAssertFalse(patterns.contains("group."))
+        XCTAssertFalse(patterns.contains("group.*"))
+        XCTAssertFalse(patterns.contains("not-a-group"))
+        XCTAssertFalse(patterns.contains("group.com/evil"))
+        XCTAssertFalse(patterns.contains("group.com..evil"))
+        XCTAssertFalse(patterns.contains("group.has space"))
+    }
+
+    func testAccessGroupValidationAllowsAppGroupsFakeTeamAndRejectsNSNull() {
+        let patterns = [
+            "ABCD123456.com.example.app",
+            "FAKETEAMID.com.example.legacy",
+            "group.com.example.shared"
+        ]
+        XCTAssertEqual(
+            PTPlayChainAccessGroupPolicy.validate(
+                requestedGroup: "group.com.example.shared",
+                allowedPatterns: patterns,
+                isReadOnlyQuery: false
+            ),
+            errSecSuccess
+        )
+        XCTAssertEqual(
+            PTPlayChainAccessGroupPolicy.validate(
+                requestedGroup: "FAKETEAMID.com.example.legacy",
+                allowedPatterns: patterns,
+                isReadOnlyQuery: true
+            ),
+            errSecSuccess
+        )
+        XCTAssertEqual(
+            PTPlayChainAccessGroupPolicy.validate(
+                requestedGroup: "group.com.other.evil",
+                allowedPatterns: patterns,
+                isReadOnlyQuery: false
+            ),
+            errSecMissingEntitlement
+        )
+        XCTAssertEqual(
+            PTPlayChainAccessGroupPolicy.validate(
+                requestedGroup: NSNull(),
+                allowedPatterns: patterns,
+                isReadOnlyQuery: false
+            ),
+            errSecParam
+        )
+        XCTAssertEqual(
+            PTPlayChainAccessGroupPolicy.validate(
+                requestedGroup: NSNull(),
+                allowedPatterns: patterns,
+                isReadOnlyQuery: true
+            ),
+            errSecParam
+        )
+        XCTAssertEqual(
+            PTPlayChainAccessGroupPolicy.validate(
+                requestedGroup: ["group.com.example.shared"],
+                allowedPatterns: patterns,
+                isReadOnlyQuery: false
+            ),
+            errSecParam
+        )
+    }
+
+    func testSecureEnclaveUpdatePolicyProtectsTokenIDColumn() {
+        XCTAssertFalse(
+            PTPlayChainKeyUpdatePolicy.isUpdatableColumn(
+                "pc_tokid",
+                internalTokenIDColumn: "pc_tokid"
+            )
+        )
+        XCTAssertTrue(
+            PTPlayChainKeyUpdatePolicy.isUpdatableColumn(
+                kSecAttrLabel as String,
+                internalTokenIDColumn: "pc_tokid"
+            )
+        )
+        XCTAssertTrue(
+            PTPlayChainKeyUpdatePolicy.isUpdatableColumn(
+                kSecAttrApplicationTag as String,
+                internalTokenIDColumn: "pc_tokid"
+            )
+        )
+    }
 }

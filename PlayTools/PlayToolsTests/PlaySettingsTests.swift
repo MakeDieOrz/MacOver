@@ -589,4 +589,47 @@ final class PlaySettingsTests: XCTestCase {
         XCTAssertEqual(padSettings.customScaler, 1.0)
         XCTAssertFalse(padSettings.interceptInlineSyscalls)
     }
+
+    func testSafeModeTruthyEnvFlagsAndPostMortemBreadcrumbPrecedence() throws {
+        let dir = try XCTUnwrap(tempDir)
+        let stateDir = dir.appendingPathComponent("SafeModeState", isDirectory: true)
+        let safeMode = PTSafeMode(stateDirectory: stateDir, bundleIdentifier: "com.example.safemode")
+
+        for truthy in ["1", "true", "YES", " True\n", "\tyes "] {
+            XCTAssertTrue(
+                safeMode.evaluateAndBeginLaunch(
+                    environment: ["PLAYTOOLS_SAFE_MODE": truthy],
+                    stabilityWindow: 5.0
+                )
+            )
+            XCTAssertTrue(safeMode.isSafeModeActive)
+        }
+
+        for falsy in ["0", "false", "NO", " no "] {
+            // Seed stale breadcrumb first; explicit falsy flag must still override it
+            XCTAssertFalse(safeMode.evaluateAndBeginLaunch(environment: [:], stabilityWindow: 5.0))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: safeMode.breadcrumbURL.path))
+
+            XCTAssertFalse(
+                safeMode.evaluateAndBeginLaunch(
+                    environment: ["PLAYTOOLS_SAFE_MODE": falsy],
+                    stabilityWindow: 5.0
+                )
+            )
+            XCTAssertFalse(safeMode.isSafeModeActive)
+            safeMode.markGracefulTermination()
+        }
+
+        // Unrecognized env flag falls through to post-mortem breadcrumb check
+        XCTAssertFalse(safeMode.evaluateAndBeginLaunch(environment: [:], stabilityWindow: 5.0))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: safeMode.breadcrumbURL.path))
+        XCTAssertTrue(
+            safeMode.evaluateAndBeginLaunch(
+                environment: ["PLAYTOOLS_SAFE_MODE": "maybe"],
+                stabilityWindow: 5.0
+            )
+        )
+        XCTAssertTrue(safeMode.isSafeModeActive)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: safeMode.lastTriggeredURL.path))
+    }
 }
