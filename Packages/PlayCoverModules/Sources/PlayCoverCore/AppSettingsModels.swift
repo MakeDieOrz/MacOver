@@ -341,9 +341,20 @@ public struct PixelBudget: Equatable, Sendable {
 
     public var fittedScaler: Double {
         guard width > 0, height > 0 else { return 1.0 }
-        let raw = sqrt(adaptiveLimit / (Double(width) * Double(height)))
-        let floored = (raw * 10.0).rounded(.down) / 10.0
-        return min(3.0, max(0.5, floored))
+        let pixelArea = Double(width) * Double(height)
+        let budgetLimit = adaptiveLimit
+        guard budgetLimit > 0 else { return 0.5 }
+        let raw = sqrt(budgetLimit / pixelArea)
+        let clampedTenths = Int(min(30.0, max(5.0, (raw * 10.0).rounded(.down))))
+        var tenths = min(30, max(5, clampedTenths))
+        while tenths > 5 {
+            let candidate = Double(tenths) / 10.0
+            if (pixelArea * candidate * candidate) / budgetLimit < 1.0 {
+                break
+            }
+            tenths -= 1
+        }
+        return Double(tenths) / 10.0
     }
 }
 

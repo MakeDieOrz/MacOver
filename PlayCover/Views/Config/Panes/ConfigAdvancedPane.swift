@@ -32,7 +32,8 @@ struct ConfigAdvancedPane: View {
         self.hasPlayTools = hasPlayTools
         self._blockingTask = blockingTask
         let lsEnv = app.info.lsEnvironment["DYLD_LIBRARY_PATH"] ?? ""
-        _hasIntrospection = State(initialValue: lsEnv.contains(PlayApp.introspection))
+        let plistHasIntrospection = lsEnv.contains(PlayApp.introspection)
+        _hasIntrospection = State(initialValue: plistHasIntrospection || settings.settings.storedHasIntrospection)
         _hasIosFrameworks = State(initialValue: lsEnv.contains(PlayApp.iosFrameworks))
     }
 
@@ -121,14 +122,21 @@ struct ConfigAdvancedPane: View {
         }
         .formStyle(.grouped)
         .scrollEdgeEffectStyle(.soft, for: .top)
+        .onAppear {
+            syncDyldStates()
+        }
         .onChange(of: app.url) {
+            syncDyldStates()
+        }
+        .onChange(of: settings.settings.strictEmulationMode) {
             syncDyldStates()
         }
     }
 
     private func syncDyldStates() {
         let lsEnv = app.info.lsEnvironment["DYLD_LIBRARY_PATH"] ?? ""
-        hasIntrospection = lsEnv.contains(PlayApp.introspection)
+        let plistHasIntrospection = lsEnv.contains(PlayApp.introspection)
+        hasIntrospection = plistHasIntrospection || settings.settings.storedHasIntrospection
         hasIosFrameworks = lsEnv.contains(PlayApp.iosFrameworks)
     }
 
@@ -199,7 +207,8 @@ struct ConfigAdvancedPane: View {
         let spec = data.strictDeviceDisplaySpec
         let logical = data.effectiveLogicalWindowSize
         let pixels = spec.pixelSize(orientation: data.strictViewportOrientation)
-        let visibleSize = NSScreen.main?.visibleFrame.size ?? CGSize(width: 1440, height: 900)
+        let visibleSize = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame.size
+            ?? CGSize(width: 1440, height: 900)
         let titleBarReserve: CGFloat = data.hideTitleBar ? 0 : 28
         let usableWidth = max(1, Int(visibleSize.width.rounded(.down)))
         let usableHeight = max(1, Int((visibleSize.height - titleBarReserve).rounded(.down)))
@@ -294,12 +303,26 @@ struct ConfigAdvancedPane: View {
                         settings.settings.effectiveHasIntrospection(hasIntrospection)
                     },
                     set: { enabled in
-                        guard !isStrictMode else { return }
-                        dyldBinding(
-                            for: PlayApp.introspection,
-                            role: .introspection,
-                            value: $hasIntrospection
-                        ).wrappedValue = enabled
+                        guard !isStrictMode, blockingTask == .none else {
+                            syncDyldStates()
+                            return
+                        }
+                        settings.update { $0.storedHasIntrospection = enabled }
+                        let currentInPlist = (app.info.lsEnvironment["DYLD_LIBRARY_PATH"] ?? "")
+                            .contains(PlayApp.introspection)
+                        guard enabled != currentInPlist else {
+                            syncDyldStates()
+                            return
+                        }
+                        hasIntrospection = enabled
+                        blockingTask = .introspection
+                        Task {
+                            _ = await app.changeDyldLibraryPath(set: enabled, path: PlayApp.introspection)
+                            await MainActor.run {
+                                syncDyldStates()
+                                blockingTask = .none
+                            }
+                        }
                     }
                 )
             )

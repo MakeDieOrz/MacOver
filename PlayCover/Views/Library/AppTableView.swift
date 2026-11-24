@@ -93,7 +93,7 @@ private struct TableAppDeviceCell: View {
     @ObservedObject var settings: AppSettings
 
     var body: some View {
-        Text(DeviceProfileOption.displayName(for: settings.settings.iosDeviceModel))
+        Text(DeviceProfileOption.displayName(for: settings.settings.effectiveIOSDeviceModel))
             .font(.callout)
             .foregroundStyle(.secondary)
             .lineLimit(1)

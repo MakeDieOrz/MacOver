@@ -157,6 +157,9 @@ struct ConfigPluginsPane: View {
     private func togglePlayTools() {
         blockingTask = .playTools
         let executable = app.executable
+        let bundleURL = app.url
+        let bundleID = app.info.bundleIdentifier
+        let svcManifestURL = bundleID.isEmpty ? nil : app.svcPatchManifestURL
         let currentlyInstalled = hasPlayTools
         Task(priority: .userInitiated) {
             defer {
@@ -165,7 +168,12 @@ struct ConfigPluginsPane: View {
                 }
             }
             if currentlyInstalled {
-                await PlayTools.removeFromApp(executable)
+                await PlayTools.removeFromApp(
+                    executable,
+                    appBundleURL: bundleURL,
+                    bundleIdentifier: bundleID,
+                    svcManifestURL: svcManifestURL
+                )
             } else {
                 do {
                     try await PlayTools.installInIPA(executable)

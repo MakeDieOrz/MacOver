@@ -217,10 +217,16 @@ class PlayApp: BaseApp, ObservableObject, Identifiable, Hashable {
                 }
             }
 
-            let introspectionModifiedForStrict = usesPlayTools
-                && !safeModeOneShot
-                && settings.settings.strictEmulationMode
-                && stripIntrospectionForStrictLaunch(launchInfo: launchInfo)
+            let introspectionModified: Bool
+            if usesPlayTools && !safeModeOneShot {
+                if settings.settings.strictEmulationMode {
+                    introspectionModified = stripIntrospectionForStrictLaunch(launchInfo: launchInfo)
+                } else {
+                    introspectionModified = restoreIntrospectionForNonStrictLaunch(launchInfo: launchInfo)
+                }
+            } else {
+                introspectionModified = false
+            }
 
             let entitlementsInvalid = try !Entitlements.areEntitlementsValid(app: self)
 
@@ -235,7 +241,7 @@ class PlayApp: BaseApp, ObservableObject, Identifiable, Hashable {
             } else if binaryModified
                         || pluginsModified
                         || svcResult.modified
-                        || introspectionModifiedForStrict
+                        || introspectionModified
                         || !isBundleSignatureStrictlyValid() {
                 Self.invalidateVerifiedBundleStamp(for: url)
                 do {
@@ -288,8 +294,11 @@ class PlayApp: BaseApp, ObservableObject, Identifiable, Hashable {
             }
 
             do {
-                if !safeModeOneShot && settings.settings.strictEmulationMode && !svcBundleID.isEmpty {
-                    try? Shell.setMetalHUD(svcBundleID, enabled: false)
+                if !safeModeOneShot && !svcBundleID.isEmpty {
+                    await AppSettings.syncMetalHUD(
+                        bundleID: svcBundleID,
+                        enabled: settings.settings.effectiveMetalHUD
+                    )
                 }
                 settings.flush()
                 if !safeModeOneShot && settings.effectiveOpenWithLLDB {
@@ -596,7 +605,7 @@ extension PlayApp {
 
     var sortName: String { name.lowercased() }
     var sortVersion: String { info.bundleVersion }
-    var sortDevice: String { settings.settings.iosDeviceModel }
+    var sortDevice: String { settings.settings.effectiveIOSDeviceModel }
     var sortPixelRatio: Double { settings.settings.pixelBudget.ratio }
     var sortRunningRank: Int { isRunning ? 0 : 1 }
 }
@@ -693,58 +702,104 @@ extension PlayApp {
         }
     }
 
-    private func stripIntrospectionForStrictLaunch(launchInfo: AppInfo) -> Bool {
-        var env = launchInfo.lsEnvironment
-        var entries = (env["DYLD_LIBRARY_PATH"] ?? "")
+    private static func updatedLSEnvironment(
+        _ env: [String: String],
+        including entry: String,
+        enabled: Bool
+    ) -> (env: [String: String], changed: Bool) {
+        var nextEnv = env
+        var entries = (nextEnv["DYLD_LIBRARY_PATH"] ?? "")
             .split(separator: ":")
             .map(String.init)
             .filter { !$0.isEmpty }
-        guard entries.contains(Self.introspection) else {
+        let contains = entries.contains(entry)
+        if enabled {
+            guard !contains else { return (env, false) }
+            entries.append(entry)
+        } else {
+            guard contains else { return (env, false) }
+            entries.removeAll { $0 == entry }
+        }
+        if entries.isEmpty {
+            nextEnv.removeValue(forKey: "DYLD_LIBRARY_PATH")
+        } else {
+            nextEnv["DYLD_LIBRARY_PATH"] = entries.joined(separator: ":")
+        }
+        return (nextEnv, true)
+    }
+
+    private func syncInMemoryLSEnvironment(_ env: [String: String]) {
+        var filtered = env
+        if let dyldPath = filtered["DYLD_LIBRARY_PATH"], dyldPath.isEmpty {
+            filtered.removeValue(forKey: "DYLD_LIBRARY_PATH")
+        }
+        if filtered.isEmpty {
+            info[dictionary: "LSEnvironment"] = nil
+        } else {
+            info[dictionary: "LSEnvironment"] = NSMutableDictionary(dictionary: filtered)
+        }
+    }
+
+    func stripIntrospectionForStrictLaunch(launchInfo: AppInfo) -> Bool {
+        let result = Self.updatedLSEnvironment(
+            launchInfo.lsEnvironment,
+            including: Self.introspection,
+            enabled: false
+        )
+        guard result.changed else {
             return false
         }
-        entries.removeAll { $0 == Self.introspection }
-        if entries.isEmpty {
-            env.removeValue(forKey: "DYLD_LIBRARY_PATH")
-        } else {
-            env["DYLD_LIBRARY_PATH"] = entries.joined(separator: ":")
+        if !settings.settings.storedHasIntrospection {
+            settings.update { $0.storedHasIntrospection = true }
+            _ = settings.flush()
         }
-        launchInfo.lsEnvironment = env
-        info.lsEnvironment = env
+        launchInfo.lsEnvironment = result.env
+        syncInMemoryLSEnvironment(result.env)
+        Self.invalidateVerifiedBundleStamp(for: url)
+        return true
+    }
+
+    func restoreIntrospectionForNonStrictLaunch(launchInfo: AppInfo) -> Bool {
+        guard settings.settings.storedHasIntrospection else {
+            return false
+        }
+        let result = Self.updatedLSEnvironment(
+            launchInfo.lsEnvironment,
+            including: Self.introspection,
+            enabled: true
+        )
+        guard result.changed else {
+            return false
+        }
+        launchInfo.lsEnvironment = result.env
+        syncInMemoryLSEnvironment(result.env)
         Self.invalidateVerifiedBundleStamp(for: url)
         return true
     }
 
     func changeDyldLibraryPath(set: Bool? = nil, path: String) async -> Bool {
-        var env = info.lsEnvironment
-        var entries = (env["DYLD_LIBRARY_PATH"] ?? "")
+        if let set {
+            if path == Self.introspection {
+                settings.update { $0.storedHasIntrospection = set }
+            }
+            let result = Self.updatedLSEnvironment(info.lsEnvironment, including: path, enabled: set)
+            if result.changed {
+                info.lsEnvironment = result.env
+                Self.invalidateVerifiedBundleStamp(for: url)
+
+                do {
+                    try Shell.signApp(executable)
+                } catch {
+                    PlayCoverDiagnostics.reportError(error)
+                }
+            }
+            return set
+        }
+
+        let entries = (info.lsEnvironment["DYLD_LIBRARY_PATH"] ?? "")
             .split(separator: ":")
             .map(String.init)
             .filter { !$0.isEmpty }
-
-        if let set = set {
-            if set {
-                if !entries.contains(path) {
-                    entries.append(path)
-                }
-            } else {
-                entries.removeAll { $0 == path }
-            }
-
-            if entries.isEmpty {
-                env.removeValue(forKey: "DYLD_LIBRARY_PATH")
-            } else {
-                env["DYLD_LIBRARY_PATH"] = entries.joined(separator: ":")
-            }
-            info.lsEnvironment = env
-            Self.invalidateVerifiedBundleStamp(for: url)
-
-            do {
-                try Shell.signApp(executable)
-            } catch {
-                PlayCoverDiagnostics.reportError(error)
-            }
-        }
-
         return entries.contains(path)
     }
 }

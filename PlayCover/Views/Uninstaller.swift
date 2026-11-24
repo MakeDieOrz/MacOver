@@ -488,7 +488,7 @@ class Uninstaller {
         return firstError
     }
 
-    private static func resolvePruneBundleIdentifier(for file: URL, in dirName: String) -> String {
+    static func resolvePruneBundleIdentifier(for file: URL, in dirName: String) -> String {
         switch dirName {
         case "Containers":
             return AppContainer.containerIdentity(at: file) ?? file.lastPathComponent
@@ -498,6 +498,10 @@ class Uninstaller {
                 return String(name.dropLast(".invalid".count))
             }
             return name
+        case "SVCPatches":
+            return file.pathExtension == "json"
+                ? file.deletingPathExtension().lastPathComponent
+                : file.lastPathComponent
         case "PlayChain":
             var name = file.lastPathComponent
             for suffix in ["-wal", "-shm", "-journal"] where name.hasSuffix(suffix) {

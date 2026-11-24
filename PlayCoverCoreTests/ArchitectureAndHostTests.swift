@@ -1521,4 +1521,28 @@ final class ArchitectureAndHostTests: XCTestCase {
             .write(to: plistURL, options: .atomic)
         XCTAssertFalse(AppsVM.shouldReuseExistingApp(existing, at: appURL))
     }
+
+    func testUninstallerResolvesSVCPatchesBundleIdentifier() {
+        XCTAssertEqual(
+            Uninstaller.resolvePruneBundleIdentifier(
+                for: URL(fileURLWithPath: "/tmp/SVCPatches/com.example.game.json"),
+                in: "SVCPatches"
+            ),
+            "com.example.game"
+        )
+        XCTAssertEqual(
+            Uninstaller.resolvePruneBundleIdentifier(
+                for: URL(fileURLWithPath: "/tmp/SVCPatches/com.example.json.json"),
+                in: "SVCPatches"
+            ),
+            "com.example.json"
+        )
+        XCTAssertEqual(
+            Uninstaller.resolvePruneBundleIdentifier(
+                for: URL(fileURLWithPath: "/tmp/SVCPatches/com.example.game"),
+                in: "SVCPatches"
+            ),
+            "com.example.game"
+        )
+    }
 }

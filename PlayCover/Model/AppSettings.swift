@@ -63,6 +63,7 @@ struct AppSettingsData: Codable, Equatable {
     var strictEmulationMode = false
     var strictViewportOrientation: StrictViewportOrientation = .landscape
     var strictViewportScaleMode: StrictViewportScaleMode = .fitScreen
+    var storedHasIntrospection = false
 
     init() {}
 
@@ -138,6 +139,7 @@ struct AppSettingsData: Codable, Equatable {
         strictViewportScaleMode = StrictViewportScaleMode(
             rawSetting: try? container.decodeIfPresent(String.self, forKey: .strictViewportScaleMode)
         )
+        storedHasIntrospection = (try? container.decodeIfPresent(Bool.self, forKey: .storedHasIntrospection)) ?? false
     }
 
     private static func decodeFloat<K: CodingKey>(
@@ -324,7 +326,10 @@ struct AppSettingsData: Codable, Equatable {
             changed.append(.playChainDebugging)
         }
         if effectiveMetalHUD != snapshot.effectiveMetalHUD { changed.append(.metalHUD) }
-        // `injectIntrospection` is a deprecated/unused legacy plist field with no runtime consumer.
+        if effectiveHasIntrospection(storedHasIntrospection)
+            != snapshot.effectiveHasIntrospection(snapshot.storedHasIntrospection) {
+            changed.append(.injectIntrospection)
+        }
         if effectiveRootWorkDir != snapshot.effectiveRootWorkDir { changed.append(.rootWorkDir) }
         if hideTitleBar != snapshot.hideTitleBar { changed.append(.hideTitleBar) }
         if floatingWindow != snapshot.floatingWindow { changed.append(.floatingWindow) }
@@ -372,14 +377,72 @@ class AppSettings: ObservableObject {
     var effectiveOpenWithLLDB: Bool {
         settings.effectiveOpenWithLLDB(openWithLLDB)
     }
+    private static let metalHUDQueue = DispatchQueue(
+        label: "app.makedie.MacOver.AppSettings.metalHUD",
+        qos: .utility
+    )
+    private static let metalHUDGenerationLock = NSLock()
+    private static var metalHUDGenerations: [String: UInt64] = [:]
+
+    private struct PendingMetalHUDUpdate {
+        let bundleID: String
+        let enabled: Bool
+        let generation: UInt64
+    }
+
     private let lock = NSLock()
     private let ioQueue = DispatchQueue(label: "app.makedie.MacOver.AppSettings.io", qos: .utility)
     private var pendingSaveWorkItem: DispatchWorkItem?
     private var hasPendingWrite = false
     let debounceInterval: TimeInterval
+    private let metalHUDExecutor: (String, Bool) throws -> Void
     private var suppressPersistence = false
     private var isResetting = false
     private var _settings: AppSettingsData
+
+    private static func reserveMetalHUDGeneration(for bundleID: String) -> UInt64 {
+        metalHUDGenerationLock.lock()
+        defer { metalHUDGenerationLock.unlock() }
+        let next = (metalHUDGenerations[bundleID] ?? 0) &+ 1
+        metalHUDGenerations[bundleID] = next
+        return next
+    }
+
+    private static func isLatestMetalHUDGeneration(_ generation: UInt64, for bundleID: String) -> Bool {
+        metalHUDGenerationLock.lock()
+        defer { metalHUDGenerationLock.unlock() }
+        return metalHUDGenerations[bundleID] == generation
+    }
+
+    private static func enqueueMetalHUDUpdate(
+        _ pending: PendingMetalHUDUpdate,
+        executor: @escaping (String, Bool) throws -> Void
+    ) {
+        metalHUDQueue.async {
+            guard isLatestMetalHUDGeneration(pending.generation, for: pending.bundleID) else { return }
+            do {
+                try executor(pending.bundleID, pending.enabled)
+            } catch {
+                PlayCoverDiagnostics.reportError(error)
+            }
+        }
+    }
+
+    static func syncMetalHUD(
+        bundleID: String,
+        enabled: Bool,
+        executor: @escaping (String, Bool) throws -> Void = { try Shell.setMetalHUD($0, enabled: $1) }
+    ) async {
+        guard !bundleID.isEmpty else { return }
+        let generation = reserveMetalHUDGeneration(for: bundleID)
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            metalHUDQueue.async {
+                defer { continuation.resume() }
+                guard isLatestMetalHUDGeneration(generation, for: bundleID) else { return }
+                try? executor(bundleID, enabled)
+            }
+        }
+    }
 
     private func notifyChangedOnMain() {
         if Thread.isMainThread {
@@ -398,34 +461,7 @@ class AppSettings: ObservableObject {
             return _settings
         }
         set {
-            var didChange = false
-            var metalHUDToApply: (bundleID: String, enabled: Bool)?
-            lock.lock()
-            let previous = _settings
-            _settings = newValue
-            if newValue != previous {
-                didChange = true
-                if !suppressPersistence {
-                    if previous.effectiveMetalHUD != newValue.effectiveMetalHUD && !newValue.bundleIdentifier.isEmpty {
-                        metalHUDToApply = (newValue.bundleIdentifier, newValue.effectiveMetalHUD)
-                    }
-                    scheduleDebouncedWriteLocked()
-                }
-            }
-            lock.unlock()
-
-            if didChange {
-                notifyChangedOnMain()
-            }
-            if let hud = metalHUDToApply {
-                Task.detached(priority: .utility) {
-                    do {
-                        try Shell.setMetalHUD(hud.bundleID, enabled: hud.enabled)
-                    } catch {
-                        PlayCoverDiagnostics.reportError(error)
-                    }
-                }
-            }
+            update { $0 = newValue }
         }
     }
 
@@ -440,10 +476,16 @@ class AppSettings: ObservableObject {
         self.init(settingsUrl: url, info: info, debounceInterval: 0.5)
     }
 
-    init(settingsUrl: URL, info: AppInfo, debounceInterval: TimeInterval = 0.5) {
+    init(
+        settingsUrl: URL,
+        info: AppInfo,
+        debounceInterval: TimeInterval = 0.5,
+        metalHUDExecutor: @escaping (String, Bool) throws -> Void = { try Shell.setMetalHUD($0, enabled: $1) }
+    ) {
         self.info = info
         self.settingsUrl = settingsUrl
         self.debounceInterval = debounceInterval
+        self.metalHUDExecutor = metalHUDExecutor
         var defaults = AppSettingsData()
         defaults.bundleIdentifier = info.bundleIdentifier
         _settings = defaults
@@ -461,8 +503,24 @@ class AppSettings: ObservableObject {
         _ = flush()
     }
 
+    private func reserveMetalHUDIfNeededLocked(
+        from previous: AppSettingsData,
+        to current: AppSettingsData
+    ) -> PendingMetalHUDUpdate? {
+        guard previous.effectiveMetalHUD != current.effectiveMetalHUD,
+              !current.bundleIdentifier.isEmpty else {
+            return nil
+        }
+        let generation = Self.reserveMetalHUDGeneration(for: current.bundleIdentifier)
+        return PendingMetalHUDUpdate(
+            bundleID: current.bundleIdentifier,
+            enabled: current.effectiveMetalHUD,
+            generation: generation
+        )
+    }
+
     func update(_ mutate: (inout AppSettingsData) -> Void) {
-        var metalHUDToApply: (bundleID: String, enabled: Bool)?
+        var pendingHUD: PendingMetalHUDUpdate?
         lock.lock()
         let previous = _settings
         var updated = _settings
@@ -473,23 +531,15 @@ class AppSettings: ObservableObject {
         }
         _settings = updated
         if !suppressPersistence {
-            if previous.effectiveMetalHUD != updated.effectiveMetalHUD && !updated.bundleIdentifier.isEmpty {
-                metalHUDToApply = (updated.bundleIdentifier, updated.effectiveMetalHUD)
-            }
+            pendingHUD = reserveMetalHUDIfNeededLocked(from: previous, to: updated)
             scheduleDebouncedWriteLocked()
         }
         lock.unlock()
 
         notifyChangedOnMain()
 
-        if let hud = metalHUDToApply {
-            Task.detached(priority: .utility) {
-                do {
-                    try Shell.setMetalHUD(hud.bundleID, enabled: hud.enabled)
-                } catch {
-                    PlayCoverDiagnostics.reportError(error)
-                }
-            }
+        if let pendingHUD {
+            Self.enqueueMetalHUDUpdate(pendingHUD, executor: metalHUDExecutor)
         }
     }
 
@@ -552,7 +602,7 @@ class AppSettings: ObservableObject {
     public func reset() {
         var defaults = AppSettingsData()
         defaults.bundleIdentifier = info.bundleIdentifier
-        var metalHUDToApply: (bundleID: String, enabled: Bool)?
+        var pendingHUD: PendingMetalHUDUpdate?
         lock.lock()
         pendingSaveWorkItem?.cancel()
         pendingSaveWorkItem = nil
@@ -561,22 +611,14 @@ class AppSettings: ObservableObject {
         isResetting = true
         defer { isResetting = false }
         _settings = defaults
-        if previous.effectiveMetalHUD != defaults.effectiveMetalHUD && !defaults.bundleIdentifier.isEmpty {
-            metalHUDToApply = (defaults.bundleIdentifier, defaults.effectiveMetalHUD)
-        }
+        pendingHUD = reserveMetalHUDIfNeededLocked(from: previous, to: defaults)
         _ = encodeLocked()
         lock.unlock()
 
         notifyChangedOnMain()
 
-        if let hud = metalHUDToApply {
-            Task.detached(priority: .utility) {
-                do {
-                    try Shell.setMetalHUD(hud.bundleID, enabled: hud.enabled)
-                } catch {
-                    PlayCoverDiagnostics.reportError(error)
-                }
-            }
+        if let pendingHUD {
+            Self.enqueueMetalHUDUpdate(pendingHUD, executor: metalHUDExecutor)
         }
     }
 

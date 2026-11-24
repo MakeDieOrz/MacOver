@@ -373,3 +373,38 @@
 "settings.toggle.interceptInlineSyscalls.help" = "在啟動時可逆地修補應用二進位檔案中的內聯 ARM64 svc #0x80 指令，並在記憶體讀取檢查時還原原始位元組。變更需重新啟動應用。";
 "settings.toggle.interceptInlineSyscalls.warning" = "實驗性功能：會在啟動時修改並重新本機簽章應用二進位檔案，嚴格完整性驗證或防作弊可能導致閃退或觸發偵測；關閉開關或安全模式啟動時會自動還原原始位元組。";
 "restart.field.interceptInlineSyscalls" = "內聯系統呼叫攔截";
+
+"budget.renderedDetails" = "%d × %d px · 記憶體檔位 %@";
+"budget.textureEdgeWarning" = "> 4096 px";
+"budget.textureEdgeWarning.help" = "算繪像素單邊超過 4096 px，可能觸發舊版 Metal 紋理尺寸上限而導致異常或閃退。";
+
+"device.mSeriesNotice" = "M 系列 iPad 機型會暴露桌面級 Metal GPU 設定（applegpu_g13g–g18g）；若應用嚴格驗證 A 系列 iPad 或 iPhone GPU，請改選 A12X iPad 或 iPhone 機型。";
+
+"restart.field.strictEmulationMode" = "嚴格模擬模式";
+"restart.field.strictViewportOrientation" = "嚴格模擬方向";
+"restart.field.strictViewportScaleMode" = "嚴格模擬縮放";
+
+"strict.section.title" = "嚴格模擬模式";
+"strict.mode.toggle" = "一鍵嚴格模擬模式";
+"strict.mode.desc" = "一鍵開啟真實 iOS/iPadOS 執行時模擬：強制開啟繞過越獄檢測、內聯系統呼叫攔截與根目錄相容，鎖定裝置原生邏輯解析度與倍率，並停用除錯掛鉤與瀏海適配。";
+"strict.orientation.title" = "視口螢幕方向";
+"strict.orientation.landscape" = "橫向";
+"strict.orientation.portrait" = "直向";
+"strict.scaleMode.title" = "視窗縮放策略";
+"strict.scaleMode.fitScreen" = "等比適配螢幕（Option B）";
+"strict.scaleMode.native1x" = "原生 1:1 點對點";
+"strict.scaleMode.fitScreenShort" = "等比適配";
+"strict.scaleMode.native1xShort" = "1:1 原生";
+"strict.display.targetHardware" = "原生硬體規格";
+"strict.display.logicalPoints" = "UIKit 邏輯視口";
+"strict.display.nativePixels" = "裝置原生像素";
+"strict.fitStatus.fitsNative" = "原生 1:1 尺寸（%d×%d pt）可直接完整顯示在目前 Mac 螢幕內（可用 %d×%d pt）。";
+"strict.fitStatus.fitScreenActive" = "已啟用 Option B 等比縮放：%d×%d pt UIKit 視口將縮放為 %d×%d pt（%d%%），以適配 %d×%d pt 可用螢幕。";
+"strict.fitStatus.nativeExceeds" = "原生 1:1 尺寸（%d×%d pt）超出目前 Mac 可用螢幕（%d×%d pt），視窗將依螢幕邊界等比鉗制。";
+"strict.banner.title" = "嚴格模擬模式已啟用";
+"strict.banner.overviewNote" = "嚴格模擬模式正在強制接管裝置顯示與環境偽裝參數，場景預設已鎖定。";
+"strict.banner.displayNote" = "解析度、倍率、視窗相容模式與螢幕方向已鎖定為所選裝置的原生規格。";
+"strict.openAdvanced" = "前往進階設定…";
+"strict.notchLockedNote" = "嚴格模擬模式下已強制關閉瀏海適配（裝置機型與系統版本仍可自由選擇）。";
+"strict.lockedByMode.bypasses" = "繞過越獄檢測與內聯系統呼叫攔截已被嚴格模擬模式強制鎖定開啟。";
+"strict.lockedByMode.troubleshooting" = "嚴格模擬模式下已強制鎖定開啟根目錄相容，並鎖定關閉 PlayChain 調試、內檢庫、Metal HUD 與 LLDB。";

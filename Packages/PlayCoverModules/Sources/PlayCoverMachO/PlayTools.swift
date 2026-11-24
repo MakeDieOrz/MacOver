@@ -409,8 +409,77 @@ public class PlayTools {
         try installPluginInIPA(payload)
     }
 
-    public static func removeFromApp(_ exec: URL) async {
+    private static func resolveAppBundleAndInfo(
+        for exec: URL,
+        appBundleURL: URL?,
+        bundleIdentifier: String?
+    ) -> (bundleURL: URL, bundleID: String) {
+        let resolvedBundleURL: URL
+        if let appBundleURL {
+            resolvedBundleURL = appBundleURL
+        } else {
+            let parent = exec.deletingLastPathComponent()
+            let grandParent = parent.deletingLastPathComponent()
+            if parent.lastPathComponent == "MacOS" && grandParent.lastPathComponent == "Contents" {
+                resolvedBundleURL = grandParent.deletingLastPathComponent()
+            } else {
+                resolvedBundleURL = parent
+            }
+        }
+        if let bundleIdentifier, !bundleIdentifier.isEmpty {
+            return (resolvedBundleURL, bundleIdentifier)
+        }
+        let directInfo = resolvedBundleURL.appendingPathComponent("Info.plist")
+        let contentsInfo = resolvedBundleURL.appendingPathComponent("Contents/Info.plist")
+        for plistURL in [directInfo, contentsInfo] where FileManager.default.fileExists(atPath: plistURL.path) {
+            let parsedID = AppInfo(contentsOf: plistURL).bundleIdentifier
+            if !parsedID.isEmpty {
+                return (resolvedBundleURL, parsedID)
+            }
+        }
+        return (resolvedBundleURL, "")
+    }
+
+    public static func removeFromApp(
+        _ exec: URL,
+        appBundleURL: URL? = nil,
+        bundleIdentifier: String? = nil,
+        svcManifestURL: URL? = nil,
+        signMacho: (URL) throws -> Void = { try Shell.signMacho($0) },
+        signApp: (URL) throws -> Void = { try Shell.signApp($0) }
+    ) async {
         do {
+            let resolved = resolveAppBundleAndInfo(
+                for: exec,
+                appBundleURL: appBundleURL,
+                bundleIdentifier: bundleIdentifier
+            )
+            let resolvedManifestURL: URL?
+            if let svcManifestURL {
+                resolvedManifestURL = svcManifestURL
+            } else if !resolved.bundleID.isEmpty {
+                resolvedManifestURL = playCoverContainer
+                    .appendingPathComponent("SVCPatches")
+                    .appendingPathComponent("\(resolved.bundleID).json")
+            } else {
+                resolvedManifestURL = nil
+            }
+            if let resolvedManifestURL {
+                let svcResult = try InlineSyscallPatcher.reconcile(
+                    appBundleURL: resolved.bundleURL,
+                    bundleIdentifier: resolved.bundleID,
+                    manifestURL: resolvedManifestURL,
+                    enabled: false
+                )
+                if svcResult.modified {
+                    let execCanonical = exec.standardizedFileURL.resolvingSymlinksInPath()
+                    for modifiedURL in svcResult.modifiedBinaryURLs where
+                        modifiedURL.standardizedFileURL.resolvingSymlinksInPath() != execCanonical {
+                        try signMacho(modifiedURL)
+                    }
+                }
+            }
+
             try Macho.removeLoadCommand(
                 at: exec,
                 dylibPaths: [
@@ -456,7 +525,7 @@ public class PlayTools {
                 try fm.removeItem(at: userPluginsUrl)
             }
 
-            try Shell.signApp(exec)
+            try signApp(exec)
         } catch {
             PlayCoverDiagnostics.reportError(error)
         }

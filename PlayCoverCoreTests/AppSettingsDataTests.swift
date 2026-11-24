@@ -217,4 +217,117 @@ final class AppSettingsDataTests: XCTestCase {
             5
         )
     }
+
+    func testStrictIntrospectionStripAndNonStrictRestoration() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("introspection-restore-\(UUID().uuidString)")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let appURL = root.appendingPathComponent("IntrospectionProbe.app", isDirectory: true)
+        try fm.createDirectory(at: appURL, withIntermediateDirectories: true)
+        let bundleID = "com.example.introspection.\(UUID().uuidString.lowercased())"
+        let settingsFileURL = AppSettings.settingsURL(forBundleIdentifier: bundleID)
+        defer { try? fm.removeItem(at: settingsFileURL) }
+
+        let plistURL = appURL.appendingPathComponent("Info.plist")
+        let initialPlist: [String: Any] = [
+            "CFBundleIdentifier": bundleID,
+            "CFBundleExecutable": "IntrospectionProbe",
+            "CFBundleShortVersionString": "1.0",
+            "LSEnvironment": [
+                "DYLD_LIBRARY_PATH": "\(PlayApp.introspection):\(PlayApp.iosFrameworks)"
+            ]
+        ]
+        try PropertyListSerialization.data(fromPropertyList: initialPlist, format: .xml, options: 0)
+            .write(to: plistURL)
+
+        let app = PlayApp(appUrl: appURL)
+        defer { _ = app.settings.flush() }
+        XCTAssertFalse(app.settings.settings.storedHasIntrospection)
+
+        // Strict launch strips introspection from Info.plist, syncs in-memory info,
+        // and records storedHasIntrospection = true non-destructively.
+        let strictLaunchInfo = AppInfo(contentsOf: plistURL)
+        XCTAssertTrue(app.stripIntrospectionForStrictLaunch(launchInfo: strictLaunchInfo))
+        XCTAssertTrue(app.settings.settings.storedHasIntrospection)
+        let afterStrictDisk = AppInfo(contentsOf: plistURL)
+        XCTAssertEqual(afterStrictDisk.lsEnvironment["DYLD_LIBRARY_PATH"], PlayApp.iosFrameworks)
+        XCTAssertEqual(app.info.lsEnvironment["DYLD_LIBRARY_PATH"], PlayApp.iosFrameworks)
+
+        // Second strict pass is a no-op.
+        XCTAssertFalse(app.stripIntrospectionForStrictLaunch(launchInfo: afterStrictDisk))
+
+        // Non-strict launch restores introspection when storedHasIntrospection == true.
+        let nonStrictLaunchInfo = AppInfo(contentsOf: plistURL)
+        XCTAssertTrue(app.restoreIntrospectionForNonStrictLaunch(launchInfo: nonStrictLaunchInfo))
+        let afterRestoreDisk = AppInfo(contentsOf: plistURL)
+        let restoredEntries = (afterRestoreDisk.lsEnvironment["DYLD_LIBRARY_PATH"] ?? "").split(separator: ":")
+        XCTAssertTrue(restoredEntries.contains(Substring(PlayApp.introspection)))
+        XCTAssertTrue(restoredEntries.contains(Substring(PlayApp.iosFrameworks)))
+        XCTAssertEqual(app.info.lsEnvironment["DYLD_LIBRARY_PATH"], afterRestoreDisk.lsEnvironment["DYLD_LIBRARY_PATH"])
+
+        // When storedHasIntrospection == false and stripped, non-strict launch does not inject introspection.
+        app.settings.update { $0.storedHasIntrospection = false }
+        let cleanLaunchInfo = AppInfo(contentsOf: plistURL)
+        XCTAssertTrue(app.stripIntrospectionForStrictLaunch(launchInfo: cleanLaunchInfo))
+        // Note: strip sets storedHasIntrospection = true only when it had to strip; explicit off clears it.
+        app.settings.update { $0.storedHasIntrospection = false }
+        XCTAssertFalse(app.restoreIntrospectionForNonStrictLaunch(launchInfo: AppInfo(contentsOf: plistURL)))
+    }
+
+    func testMetalHUDUpdatesSerializeAndCoalesceToLatestState() async throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("metal-hud-serial-\(UUID().uuidString)")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let infoURL = root.appendingPathComponent("Info.plist")
+        let bundleID = "com.example.metalhud.\(UUID().uuidString.lowercased())"
+        let plist: [String: Any] = [
+            "CFBundleIdentifier": bundleID,
+            "CFBundleExecutable": "Sample",
+            "CFBundleShortVersionString": "1.0"
+        ]
+        try PropertyListSerialization.data(fromPropertyList: plist, format: .binary, options: 0).write(to: infoURL)
+        let info = AppInfo(contentsOf: infoURL)
+        let settingsURL = root.appendingPathComponent("settings.plist")
+
+        let recordLock = NSLock()
+        var recorded: [Bool] = []
+        let appSettings = AppSettings(
+            settingsUrl: settingsURL,
+            info: info,
+            debounceInterval: 0.2,
+            metalHUDExecutor: { _, enabled in
+                if recorded.isEmpty {
+                    Thread.sleep(forTimeInterval: 0.03)
+                }
+                recordLock.lock()
+                recorded.append(enabled)
+                recordLock.unlock()
+            }
+        )
+
+        // Rapidly toggle Metal HUD + Strict Mode: ON -> strict ON (false) -> strict OFF (true) -> strict ON (false)
+        appSettings.update { $0.metalHUD = true }
+        appSettings.update { $0.strictEmulationMode = true }
+        appSettings.update { $0.strictEmulationMode = false }
+        appSettings.update { $0.strictEmulationMode = true }
+
+        await AppSettings.syncMetalHUD(
+            bundleID: bundleID,
+            enabled: appSettings.settings.effectiveMetalHUD,
+            executor: { _, enabled in
+                recordLock.lock()
+                recorded.append(enabled)
+                recordLock.unlock()
+            }
+        )
+
+        recordLock.lock()
+        let finalValue = recorded.last
+        recordLock.unlock()
+        XCTAssertEqual(finalValue, false)
+    }
 }

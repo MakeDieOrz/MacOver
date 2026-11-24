@@ -14,6 +14,7 @@ struct AppQuickInspector: View {
 
     @State private var keymapURLs: [URL] = []
     @State private var defaultKeymapURL: URL?
+    @State private var hasPlayTools = true
 
     private let presetColumns = [
         GridItem(.flexible(), spacing: 8),
@@ -33,6 +34,7 @@ struct AppQuickInspector: View {
                 Divider()
 
                 presetsSection
+                    .disabled(!hasPlayTools || settings.settings.strictEmulationMode)
 
                 Divider()
 
@@ -47,7 +49,7 @@ struct AppQuickInspector: View {
                 PixelBudgetMeter(
                     budget: settings.settings.pixelBudget,
                     compact: true,
-                    onFitToBudget: { fitted in
+                    onFitToBudget: settings.settings.strictEmulationMode ? nil : { fitted in
                         settings.update { $0.customScaler = fitted }
                     }
                 )
@@ -58,6 +60,11 @@ struct AppQuickInspector: View {
             app.keymapping.reloadKeymapCache()
             keymapURLs = app.keymapping.keymapConfig.keymapOrder
             defaultKeymapURL = app.keymapping.keymapConfig.defaultKm
+            let executable = app.executable
+            let installed = await Task.detached(priority: .background) {
+                (try? PlayTools.installedInExec(atURL: executable)) ?? true
+            }.value
+            hasPlayTools = installed
         }
     }
 
@@ -198,7 +205,17 @@ struct AppQuickInspector: View {
                 .font(.subheadline.weight(.medium))
             Toggle("settings.toggle.km", isOn: $settings.settings.keymapping)
             Toggle("settings.playChain.enable", isOn: $settings.settings.playChain)
-            Toggle("settings.toggle.jbBypass", isOn: $settings.settings.bypass)
+            Toggle(
+                "settings.toggle.jbBypass",
+                isOn: Binding(
+                    get: { settings.settings.effectiveBypass },
+                    set: { newValue in
+                        guard !settings.settings.strictEmulationMode else { return }
+                        settings.settings.bypass = newValue
+                    }
+                )
+            )
+            .disabled(!hasPlayTools || settings.settings.strictEmulationMode)
             Toggle("settings.network.enable", isOn: $settings.settings.enableNetworkRules)
             Toggle("settings.toggle.disableDisplaySleep", isOn: $settings.settings.disableTimeout)
         }

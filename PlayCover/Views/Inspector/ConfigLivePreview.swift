@@ -12,7 +12,7 @@ struct ConfigLivePreview: View {
 
     private var targetAspectRatio: CGFloat {
         let data = settings.settings
-        if data.resolution == 6 {
+        if data.effectiveResolution == 6 {
             switch data.resizableAspectRatioType {
             case 2: return 4.0 / 3.0
             case 3: return 16.0 / 9.0
@@ -23,8 +23,8 @@ struct ConfigLivePreview: View {
                 return 16.0 / 10.0
             }
         }
-        let width = max(CGFloat(data.windowWidth), 1)
-        let height = max(CGFloat(data.windowHeight), 1)
+        let width = max(CGFloat(data.effectiveWindowWidth), 1)
+        let height = max(CGFloat(data.effectiveWindowHeight), 1)
         return width / height
     }
 
@@ -48,7 +48,8 @@ struct ConfigLivePreview: View {
                 VStack(alignment: .leading, spacing: 6) {
                     let data = settings.settings
                     LabeledContent("settings.picker.adaptiveRes") {
-                        Text("\(data.windowWidth)×\(data.windowHeight) @ \(String(format: "%.1f×", data.customScaler))")
+                        let scalerText = String(format: "%.1f×", data.effectiveCustomScaler)
+                        Text("\(data.effectiveWindowWidth)×\(data.effectiveWindowHeight) @ \(scalerText)")
                             .font(.caption.monospacedDigit())
                     }
                     LabeledContent("display.frameRate.title") {
@@ -56,7 +57,7 @@ struct ConfigLivePreview: View {
                             .font(.caption)
                     }
                     LabeledContent("device.layoutTitle") {
-                        let isPhone = DeviceProfileOption.isIPhone(data.iosDeviceModel)
+                        let isPhone = DeviceProfileOption.isIPhone(data.effectiveIOSDeviceModel)
                         Text(isPhone ? "Compact (iPhone)" : "Regular (iPad)")
                             .font(.caption)
                     }
@@ -67,7 +68,7 @@ struct ConfigLivePreview: View {
                 PixelBudgetMeter(
                     budget: settings.settings.pixelBudget,
                     compact: true,
-                    onFitToBudget: { fitted in
+                    onFitToBudget: settings.settings.strictEmulationMode ? nil : { fitted in
                         settings.update { $0.customScaler = fitted }
                     }
                 )

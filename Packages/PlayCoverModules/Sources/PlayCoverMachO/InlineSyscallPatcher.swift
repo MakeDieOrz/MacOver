@@ -150,8 +150,10 @@ public enum InlineSyscallPatcher {
                 // Edge case: binary previously patched at existingEntry.sites and somehow acquired additional sites
                 // without invalidating those sites; revert known sites first so originalSHA256 is clean.
                 try writeWord(svcInstruction, to: &data, sites: existingEntry.sites)
+                var seenFileOffsets: Set<UInt64> = []
                 let combinedSites = (existingEntry.sites + newSites)
                     .sorted { $0.fileOffset < $1.fileOffset }
+                    .filter { seenFileOffsets.insert($0.fileOffset).inserted }
                 let origSHA = sha256Hex(data)
                 try writeWord(brkInstruction, to: &data, sites: combinedSites)
                 let patchedSHA = sha256Hex(data)
@@ -211,7 +213,18 @@ public enum InlineSyscallPatcher {
         appBundleURL: URL,
         manifestURL: URL
     ) throws -> ReconcileResult {
-        guard let manifest = try loadValidManifestIfPresent(at: manifestURL) else {
+        let manifest: SVCPatchManifest?
+        do {
+            manifest = try loadValidManifestIfPresent(at: manifestURL)
+        } catch is DecodingError {
+            PlayCoverDiagnostics.log(
+                "Corrupt SVC patch manifest at \(manifestURL.path); removing manifest during disable.",
+                isError: true
+            )
+            try? removeManifestIfExists(at: manifestURL)
+            return ReconcileResult(modified: false, modifiedBinaryURLs: [], patchedSiteCount: 0)
+        }
+        guard let manifest else {
             return ReconcileResult(modified: false, modifiedBinaryURLs: [], patchedSiteCount: 0)
         }
 
@@ -500,10 +513,12 @@ public enum InlineSyscallPatcher {
             return []
         }
 
-        var result: [(offset: UInt64, size: UInt64)] = []
+        var candidates: [(offset: UInt64, size: UInt64, subtype: Int32)] = []
+        var seenOffsets: Set<UInt64> = []
         for idx in 0..<nfat {
             let entryOffset = tableStart + idx * archStride
             let cpu: Int32
+            let subcpu: Int32
             let sliceOff: UInt64
             let sliceSz: UInt64
             if isFat64 {
@@ -511,6 +526,7 @@ public enum InlineSyscallPatcher {
                     return []
                 }
                 cpu = Int32(bitPattern: UInt32(bigEndian: UInt32(bitPattern: arch.cputype)))
+                subcpu = Int32(bitPattern: UInt32(bigEndian: UInt32(bitPattern: arch.cpusubtype)))
                 sliceOff = UInt64(bigEndian: arch.offset)
                 sliceSz = UInt64(bigEndian: arch.size)
             } else {
@@ -518,6 +534,7 @@ public enum InlineSyscallPatcher {
                     return []
                 }
                 cpu = Int32(bitPattern: UInt32(bigEndian: UInt32(bitPattern: arch.cputype)))
+                subcpu = Int32(bitPattern: UInt32(bigEndian: UInt32(bitPattern: arch.cpusubtype)))
                 sliceOff = UInt64(UInt32(bigEndian: arch.offset))
                 sliceSz = UInt64(UInt32(bigEndian: arch.size))
             }
@@ -525,14 +542,30 @@ public enum InlineSyscallPatcher {
             guard cpu == CPU_TYPE_ARM64,
                   sliceSz >= UInt64(MemoryLayout<mach_header_64>.size),
                   sliceOff <= UInt64(data.count),
-                  sliceSz <= UInt64(data.count) - sliceOff else {
+                  sliceSz <= UInt64(data.count) - sliceOff,
+                  seenOffsets.insert(sliceOff).inserted else {
                 continue
             }
-            if loadUInt32LE(from: data, at: Int(sliceOff)) == MH_MAGIC_64 {
-                result.append((sliceOff, sliceSz))
+            if let mh = loadStruct(mach_header_64.self, from: data, at: Int(sliceOff)),
+               mh.magic == MH_MAGIC_64,
+               mh.cputype == CPU_TYPE_ARM64 {
+                let fatBaseSubtype = subcpu & 0x00FF_FFFF
+                let headerBaseSubtype = mh.cpusubtype & 0x00FF_FFFF
+                let baseSubtype = fatBaseSubtype != 0 ? fatBaseSubtype : headerBaseSubtype
+                candidates.append((sliceOff, sliceSz, baseSubtype))
             }
         }
-        return result
+        guard !candidates.isEmpty else {
+            return []
+        }
+        if let arm64All = candidates.first(where: { $0.subtype == CPU_SUBTYPE_ARM64_ALL }) {
+            return [(arm64All.offset, arm64All.size)]
+        }
+        if let nonArm64e = candidates.first(where: { $0.subtype != CPU_SUBTYPE_ARM64E }) {
+            return [(nonArm64e.offset, nonArm64e.size)]
+        }
+        let first = candidates[0]
+        return [(first.offset, first.size)]
     }
 
     private static func scanSlice(

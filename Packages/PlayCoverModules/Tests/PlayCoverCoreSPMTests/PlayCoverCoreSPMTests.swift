@@ -166,6 +166,35 @@ final class PlayCoverCoreSPMTests: XCTestCase {
         XCTAssertEqual(PixelBudget(width: 0, height: 1080, scaler: 2.0).fittedScaler, 1.0)
         XCTAssertEqual(PixelBudget(width: 1920, height: 1080, scaler: -1.0).weightedPixels, 0)
         XCTAssertFalse(PixelBudget(width: 1920, height: 1080, scaler: -1.0).exceedsMaxTextureEdge)
+
+        // Exact-tenth boundary (3000x1500 on 8 GB -> sqrt(4_500_000 / 4_500_000) == 1.0)
+        // must step down to 0.9 so fitted ratio < 1.0 and level is not .over.
+        let exactBoundary8GB = PixelBudget(width: 3000, height: 1500, scaler: 1.5, physicalMemoryBytes: 8 * gib)
+        XCTAssertEqual(exactBoundary8GB.level, .over)
+        XCTAssertEqual(exactBoundary8GB.fittedScaler, 0.9, accuracy: 0.001)
+        let fittedBoundary8GB = PixelBudget(
+            width: 3000,
+            height: 1500,
+            scaler: exactBoundary8GB.fittedScaler,
+            physicalMemoryBytes: 8 * gib
+        )
+        XCTAssertLessThan(fittedBoundary8GB.ratio, 1.0)
+        XCTAssertNotEqual(fittedBoundary8GB.level, .over)
+
+        let exactBoundary16GB = PixelBudget(width: 3000, height: 2000, scaler: 1.4, physicalMemoryBytes: 16 * gib)
+        XCTAssertEqual(exactBoundary16GB.fittedScaler, 0.9, accuracy: 0.001)
+        XCTAssertLessThan(
+            PixelBudget(
+                width: 3000,
+                height: 2000,
+                scaler: exactBoundary16GB.fittedScaler,
+                physicalMemoryBytes: 16 * gib
+            ).ratio,
+            1.0
+        )
+
+        let extremeBudget = PixelBudget(width: 7680, height: 4320, scaler: 2.0, physicalMemoryBytes: 8 * gib)
+        XCTAssertEqual(extremeBudget.fittedScaler, 0.5, accuracy: 0.001)
     }
 
     func testStrictEmulationEnumsAndDeviceDisplaySpecs() {

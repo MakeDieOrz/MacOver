@@ -516,4 +516,196 @@ final class PlayCoverMachOSPMTests: XCTestCase {
             XCTAssertEqual(try readUInt32LE(from: mainExecURL, at: off), InlineSyscallPatcher.svcInstruction)
         }
     }
+
+    private func buildFatBinaryWithArm64EAndArm64(
+        arm64eSlice: Data,
+        arm64Slice: Data
+    ) -> (data: Data, arm64eOffset: Int, arm64Offset: Int) {
+        let arm64eOffset = 0x4000
+        let arm64Offset = 0x8000
+        var fat = Data(count: arm64Offset + arm64Slice.count)
+        var header = fat_header(magic: FAT_MAGIC.bigEndian, nfat_arch: UInt32(2).bigEndian)
+        let arm64eSubtype = UInt32(bitPattern: CPU_SUBTYPE_ARM64E) | 0x8000_0000
+        var arm64eArch = fat_arch(
+            cputype: Int32(bitPattern: UInt32(bitPattern: CPU_TYPE_ARM64).bigEndian),
+            cpusubtype: Int32(bitPattern: arm64eSubtype.bigEndian),
+            offset: UInt32(arm64eOffset).bigEndian,
+            size: UInt32(arm64eSlice.count).bigEndian,
+            align: UInt32(14).bigEndian
+        )
+        var arm64Arch = fat_arch(
+            cputype: Int32(bitPattern: UInt32(bitPattern: CPU_TYPE_ARM64).bigEndian),
+            cpusubtype: Int32(bitPattern: UInt32(bitPattern: CPU_SUBTYPE_ARM64_ALL).bigEndian),
+            offset: UInt32(arm64Offset).bigEndian,
+            size: UInt32(arm64Slice.count).bigEndian,
+            align: UInt32(14).bigEndian
+        )
+
+        var cursor = 0
+        withUnsafeBytes(of: &header) {
+            fat.replaceSubrange(cursor..<(cursor + $0.count), with: $0)
+            cursor += $0.count
+        }
+        withUnsafeBytes(of: &arm64eArch) {
+            fat.replaceSubrange(cursor..<(cursor + $0.count), with: $0)
+            cursor += $0.count
+        }
+        withUnsafeBytes(of: &arm64Arch) {
+            fat.replaceSubrange(cursor..<(cursor + $0.count), with: $0)
+            cursor += $0.count
+        }
+        fat.replaceSubrange(arm64eOffset..<(arm64eOffset + arm64eSlice.count), with: arm64eSlice)
+        fat.replaceSubrange(arm64Offset..<(arm64Offset + arm64Slice.count), with: arm64Slice)
+        return (fat, arm64eOffset, arm64Offset)
+    }
+
+    func testInlineSyscallPatcherCorruptManifestRecoveryAndArm64SliceDeduplication() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("svc-recovery-test-\(UUID().uuidString)")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let appURL = root.appendingPathComponent("FatApp.app", isDirectory: true)
+        try fm.createDirectory(at: appURL, withIntermediateDirectories: true)
+        let infoData = try PropertyListSerialization.data(
+            fromPropertyList: [
+                "CFBundleIdentifier": "com.example.fat",
+                "CFBundleExecutable": "FatApp"
+            ],
+            format: .xml,
+            options: 0
+        )
+        try infoData.write(to: appURL.appendingPathComponent("Info.plist"))
+
+        let arm64eSynth = buildSyntheticArm64BinaryWithSVC(
+            filetype: UInt32(MH_EXECUTE),
+            textSegmentVMAddr: 0x1_0000_0000,
+            codeSvcCount: 1
+        )
+        let arm64Synth = buildSyntheticArm64BinaryWithSVC(
+            filetype: UInt32(MH_EXECUTE),
+            textSegmentVMAddr: 0x1_0000_0000,
+            codeSvcCount: 2
+        )
+        let fat = buildFatBinaryWithArm64EAndArm64(arm64eSlice: arm64eSynth.data, arm64Slice: arm64Synth.data)
+        let execURL = appURL.appendingPathComponent("FatApp")
+        try fat.data.write(to: execURL)
+
+        let manifestURL = root.appendingPathComponent("SVCPatches/com.example.fat.json")
+        try fm.createDirectory(at: manifestURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("{corrupt-json".utf8).write(to: manifestURL)
+
+        // Disabled / Safe Mode must recover cleanly from corrupt JSON manifest without throwing.
+        let recoveryResult = try InlineSyscallPatcher.reconcile(
+            appBundleURL: appURL,
+            bundleIdentifier: "com.example.fat",
+            manifestURL: manifestURL,
+            enabled: false
+        )
+        XCTAssertFalse(recoveryResult.modified)
+        XCTAssertEqual(recoveryResult.patchedSiteCount, 0)
+        XCTAssertFalse(fm.fileExists(atPath: manifestURL.path))
+
+        // Applying patches to a fat binary with both arm64e and arm64 (subtype 0)
+        // must only target the arm64 (subtype 0) slice and never mix sliceOffset entries.
+        let patchResult = try InlineSyscallPatcher.reconcile(
+            appBundleURL: appURL,
+            bundleIdentifier: "com.example.fat",
+            manifestURL: manifestURL,
+            enabled: true
+        )
+        XCTAssertTrue(patchResult.modified)
+        XCTAssertEqual(patchResult.patchedSiteCount, 2)
+
+        let manifest = try JSONDecoder().decode(SVCPatchManifest.self, from: Data(contentsOf: manifestURL))
+        let entry = try XCTUnwrap(manifest.files.first)
+        XCTAssertEqual(entry.sites.count, 2)
+        XCTAssertTrue(entry.sites.allSatisfy { $0.sliceOffset == UInt64(fat.arm64Offset) })
+
+        for off in arm64Synth.codeSvcFileOffsets {
+            XCTAssertEqual(
+                try readUInt32LE(from: execURL, at: fat.arm64Offset + off),
+                InlineSyscallPatcher.brkInstruction
+            )
+        }
+        // arm64e slice remains untouched
+        XCTAssertEqual(
+            try readUInt32LE(from: execURL, at: fat.arm64eOffset + arm64eSynth.codeSvcFileOffsets[0]),
+            InlineSyscallPatcher.svcInstruction
+        )
+
+        // Second apply must remain idempotent.
+        let secondApply = try InlineSyscallPatcher.reconcile(
+            appBundleURL: appURL,
+            bundleIdentifier: "com.example.fat",
+            manifestURL: manifestURL,
+            enabled: true
+        )
+        XCTAssertFalse(secondApply.modified)
+
+        let revertResult = try InlineSyscallPatcher.reconcile(
+            appBundleURL: appURL,
+            bundleIdentifier: "com.example.fat",
+            manifestURL: manifestURL,
+            enabled: false
+        )
+        XCTAssertTrue(revertResult.modified)
+        XCTAssertEqual(try Data(contentsOf: execURL), fat.data)
+    }
+
+    func testPlayToolsRemoveFromAppRevertsSVCPatches() async throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("playtools-remove-svc-\(UUID().uuidString)")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let appURL = root.appendingPathComponent("Sample.app", isDirectory: true)
+        try fm.createDirectory(at: appURL, withIntermediateDirectories: true)
+        let infoData = try PropertyListSerialization.data(
+            fromPropertyList: [
+                "CFBundleIdentifier": "com.example.removept",
+                "CFBundleExecutable": "Sample"
+            ],
+            format: .xml,
+            options: 0
+        )
+        try infoData.write(to: appURL.appendingPathComponent("Info.plist"))
+
+        let synth = buildSyntheticArm64BinaryWithSVC(
+            filetype: UInt32(MH_EXECUTE),
+            textSegmentVMAddr: 0x1_0000_0000,
+            codeSvcCount: 2
+        )
+        let execURL = appURL.appendingPathComponent("Sample")
+        try synth.data.write(to: execURL)
+
+        let manifestURL = root.appendingPathComponent("SVCPatches/com.example.removept.json")
+        let applyResult = try InlineSyscallPatcher.reconcile(
+            appBundleURL: appURL,
+            bundleIdentifier: "com.example.removept",
+            manifestURL: manifestURL,
+            enabled: true
+        )
+        XCTAssertTrue(applyResult.modified)
+        XCTAssertTrue(fm.fileExists(atPath: manifestURL.path))
+        for off in synth.codeSvcFileOffsets {
+            XCTAssertEqual(try readUInt32LE(from: execURL, at: off), InlineSyscallPatcher.brkInstruction)
+        }
+
+        var signedApp = false
+        await PlayTools.removeFromApp(
+            execURL,
+            appBundleURL: appURL,
+            bundleIdentifier: "com.example.removept",
+            svcManifestURL: manifestURL,
+            signMacho: { _ in },
+            signApp: { _ in signedApp = true }
+        )
+
+        XCTAssertTrue(signedApp)
+        XCTAssertFalse(fm.fileExists(atPath: manifestURL.path))
+        for off in synth.codeSvcFileOffsets {
+            XCTAssertEqual(try readUInt32LE(from: execURL, at: off), InlineSyscallPatcher.svcInstruction)
+        }
+    }
 }

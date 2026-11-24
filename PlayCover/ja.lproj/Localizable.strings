@@ -391,3 +391,38 @@
 "settings.toggle.interceptInlineSyscalls.help" = "起動時にアプリバイナリ内のインライン ARM64 svc #0x80 命令を可逆的にパッチし、メモリ読み取り時に元のバイト列を復元します。変更にはアプリの再起動が必要です。";
 "settings.toggle.interceptInlineSyscalls.warning" = "実験的機能: 起動時にコード署名ページを変更してローカルで再署名するため、厳格な整合性検証やアンチチートでクラッシュや検知が発生する可能性があります。無効化またはセーフモード起動時に自動で元のバイトへ復元されます。";
 "restart.field.interceptInlineSyscalls" = "インライン syscall インターセプト";
+
+"budget.renderedDetails" = "%d × %d px · メモリ枠 %@";
+"budget.textureEdgeWarning" = "> 4096 px";
+"budget.textureEdgeWarning.help" = "レンダリング解像度の1辺が 4096 px を超えており、旧式の Metal テクスチャサイズ上限に達する可能性があります。";
+
+"device.mSeriesNotice" = "Apple M シリーズ iPad プロファイルはデスクトップ級 Metal GPU プロファイル（applegpu_g13g–g18g）を公開します。A シリーズ iPad または iPhone の GPU 互換を要求するアプリには iPad Pro A12X または iPhone プロファイルを選択してください。";
+
+"restart.field.strictEmulationMode" = "厳格エミュレーション";
+"restart.field.strictViewportOrientation" = "厳格エミュレーション向き";
+"restart.field.strictViewportScaleMode" = "厳格エミュレーション倍率";
+
+"strict.section.title" = "厳格エミュレーションモード";
+"strict.mode.toggle" = "ワンクリック厳格エミュレーション";
+"strict.mode.desc" = "iOS/iPadOS 実機に近いランタイム環境を強制します。脱獄検知回避、インラインシステムコールインターセプト、ルート作業ディレクトリ、デバイス固有の表示仕様をロックし、デバッグフックとノッチ模擬を無効化します。";
+"strict.orientation.title" = "ビューポートの向き";
+"strict.orientation.landscape" = "横向き";
+"strict.orientation.portrait" = "縦向き";
+"strict.scaleMode.title" = "ウィンドウ拡大縮小方式";
+"strict.scaleMode.fitScreen" = "画面に合わせる（等比・Option B）";
+"strict.scaleMode.native1x" = "ネイティブ 1:1 ポイント";
+"strict.scaleMode.fitScreenShort" = "画面に合わせる";
+"strict.scaleMode.native1xShort" = "1:1 ネイティブ";
+"strict.display.targetHardware" = "ネイティブハードウェア仕様";
+"strict.display.logicalPoints" = "論理 UIKit ビューポート";
+"strict.display.nativePixels" = "ネイティブデバイスピクセル";
+"strict.fitStatus.fitsNative" = "ネイティブ 1:1 サイズ（%d×%d pt）は現在の Mac ディスプレイ（利用可能 %d×%d pt）内に収まります。";
+"strict.fitStatus.fitScreenActive" = "Option B 等比フィット有効: %d×%d pt の UIKit ビューポートを %d×%d pt（%d%%）へ縮小し、%d×%d pt の利用可能領域に収めます。";
+"strict.fitStatus.nativeExceeds" = "ネイティブ 1:1 サイズ（%d×%d pt）が利用可能な Mac ディスプレイ（%d×%d pt）を超えているため、ウィンドウは画面境界に合わせて等比クランプされます。";
+"strict.banner.title" = "厳格エミュレーションモード有効";
+"strict.banner.overviewNote" = "厳格エミュレーションモードが正規デバイスの表示仕様と検知回避設定を強制しているため、プリセットはロックされています。";
+"strict.banner.displayNote" = "解像度、スケーラー、ウィンドウ互換モード、画面回転は選択中のデバイスプロファイルにロックされています。";
+"strict.openAdvanced" = "厳格モードを設定…";
+"strict.notchLockedNote" = "厳格エミュレーションモード有効中はノッチ模擬が強制的にオフになります。";
+"strict.lockedByMode.bypasses" = "脱獄検知回避とインラインシステムコールインターセプトは厳格エミュレーションモードによりオンにロックされています。";
+"strict.lockedByMode.troubleshooting" = "ルート作業ディレクトリはオンにロックされ、PlayChain デバッグ、イントロスペクション、Metal HUD、LLDB はオフにロックされています。";
