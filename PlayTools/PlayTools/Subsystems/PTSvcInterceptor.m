@@ -2195,6 +2195,32 @@ DYLD_INTERPOSE(pt_thread_set_exception_ports, thread_set_exception_ports)
 DYLD_INTERPOSE(pt_thread_swap_exception_ports, thread_swap_exception_ports)
 DYLD_INTERPOSE(pt_thread_get_exception_ports, thread_get_exception_ports)
 
+__attribute__((visibility("hidden")))
+void *pt_svc_dlsym_route(const char *symbol) {
+    if (symbol == NULL) {
+        return NULL;
+    }
+    if (strcmp(symbol, "task_set_exception_ports") == 0) {
+        return (void *)&pt_task_set_exception_ports;
+    }
+    if (strcmp(symbol, "task_swap_exception_ports") == 0) {
+        return (void *)&pt_task_swap_exception_ports;
+    }
+    if (strcmp(symbol, "task_get_exception_ports") == 0) {
+        return (void *)&pt_task_get_exception_ports;
+    }
+    if (strcmp(symbol, "thread_set_exception_ports") == 0) {
+        return (void *)&pt_thread_set_exception_ports;
+    }
+    if (strcmp(symbol, "thread_swap_exception_ports") == 0) {
+        return (void *)&pt_thread_swap_exception_ports;
+    }
+    if (strcmp(symbol, "thread_get_exception_ports") == 0) {
+        return (void *)&pt_thread_get_exception_ports;
+    }
+    return NULL;
+}
+
 // MARK: - Initialization
 
 __attribute__((visibility("hidden"))) void pt_svc_interceptor_init_early(void) {

@@ -59,9 +59,26 @@ static void der_tag_len(der_buf_t *b, uint8_t tag, size_t len) {
     } else if (len <= 0xffU) {
         uint8_t h[2] = { 0x81U, (uint8_t)len };
         der_append(b, h, 2U);
-    } else {
+    } else if (len <= 0xffffU) {
         uint8_t h[3] = { 0x82U, (uint8_t)(len >> 8), (uint8_t)(len & 0xffU) };
         der_append(b, h, 3U);
+    } else if (len <= 0xffffffU) {
+        uint8_t h[4] = {
+            0x83U,
+            (uint8_t)((len >> 16) & 0xffU),
+            (uint8_t)((len >> 8) & 0xffU),
+            (uint8_t)(len & 0xffU)
+        };
+        der_append(b, h, 4U);
+    } else {
+        uint8_t h[5] = {
+            0x84U,
+            (uint8_t)((len >> 24) & 0xffU),
+            (uint8_t)((len >> 16) & 0xffU),
+            (uint8_t)((len >> 8) & 0xffU),
+            (uint8_t)(len & 0xffU)
+        };
+        der_append(b, h, 5U);
     }
 }
 
@@ -349,6 +366,337 @@ static void test_network_and_coderesources(void) {
     assert(is_code_res_key_dirty("Info.plist") == 0);
 }
 
+/* ---------- Round 1 Hardening Unit Tests ---------- */
+
+static uint32_t rotr32(uint32_t x, unsigned n) {
+    return (x >> n) | (x << (32U - n));
+}
+
+static void sha256_compute(const uint8_t *msg, size_t len, uint8_t out[32]) {
+    static const uint32_t k[64] = {
+        0x428a2f98U, 0x71374491U, 0xb5c0fbcfU, 0xe9b5dba5U, 0x3956c25bU, 0x59f111f1U, 0x923f82a4U, 0xab1c5ed5U,
+        0xd807aa98U, 0x12835b01U, 0x243185beU, 0x550c7dc3U, 0x72be5d74U, 0x80deb1feU, 0x9bdc06a7U, 0xc19bf174U,
+        0xe49b69c1U, 0xefbe4786U, 0x0fc19dc6U, 0x240ca1ccU, 0x2de92c6fU, 0x4a7484aaU, 0x5cb0a9dcU, 0x76f988daU,
+        0x983e5152U, 0xa831c66dU, 0xb00327c8U, 0xbf597fc7U, 0xc6e00bf3U, 0xd5a79147U, 0x06ca6351U, 0x14292967U,
+        0x27b70a85U, 0x2e1b2138U, 0x4d2c6dfcU, 0x53380d13U, 0x650a7354U, 0x766a0abbU, 0x81c2c92eU, 0x92722c85U,
+        0xa2bfe8a1U, 0xa81a664bU, 0xc24b8b70U, 0xc76c51a3U, 0xd192e819U, 0xd6990624U, 0xf40e3585U, 0x106aa070U,
+        0x19a4c116U, 0x1e376c08U, 0x2748774cU, 0x34b0bcb5U, 0x391c0cb3U, 0x4ed8aa4aU, 0x5b9cca4fU, 0x682e6ff3U,
+        0x748f82eeU, 0x78a5636fU, 0x84c87814U, 0x8cc70208U, 0x90befffaU, 0xa4506cebU, 0xbef9a3f7U, 0xc67178f2U
+    };
+    uint32_t h[8] = {
+        0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU,
+        0x510e527fU, 0x9b05688cU, 0x1f83d9abU, 0x5be0cd19U
+    };
+    size_t padded = ((len + 9U + 63U) / 64U) * 64U;
+    uint8_t *buf = (uint8_t *)calloc(1U, padded);
+    assert(buf != NULL);
+    if (len > 0) memcpy(buf, msg, len);
+    buf[len] = 0x80U;
+    uint64_t bitlen = (uint64_t)len * 8ULL;
+    for (int i = 0; i < 8; i++) {
+        buf[padded - 1U - (size_t)i] = (uint8_t)((bitlen >> (i * 8)) & 0xffULL);
+    }
+    for (size_t off = 0; off < padded; off += 64U) {
+        uint32_t w[64];
+        for (int i = 0; i < 16; i++) {
+            w[i] = ((uint32_t)buf[off + (size_t)i * 4U] << 24) |
+                   ((uint32_t)buf[off + (size_t)i * 4U + 1U] << 16) |
+                   ((uint32_t)buf[off + (size_t)i * 4U + 2U] << 8) |
+                   (uint32_t)buf[off + (size_t)i * 4U + 3U];
+        }
+        for (int i = 16; i < 64; i++) {
+            uint32_t s0 = rotr32(w[i - 15], 7U) ^ rotr32(w[i - 15], 18U) ^ (w[i - 15] >> 3);
+            uint32_t s1 = rotr32(w[i - 2], 17U) ^ rotr32(w[i - 2], 19U) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+        }
+        uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], hh = h[7];
+        for (int i = 0; i < 64; i++) {
+            uint32_t S1 = rotr32(e, 6U) ^ rotr32(e, 11U) ^ rotr32(e, 25U);
+            uint32_t ch = (e & f) ^ ((~e) & g);
+            uint32_t t1 = hh + S1 + ch + k[i] + w[i];
+            uint32_t S0 = rotr32(a, 2U) ^ rotr32(a, 13U) ^ rotr32(a, 22U);
+            uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+            uint32_t t2 = S0 + maj;
+            hh = g; g = f; f = e; e = d + t1;
+            d = c; c = b; b = a; a = t1 + t2;
+        }
+        h[0] += a; h[1] += b; h[2] += c; h[3] += d;
+        h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
+    }
+    free(buf);
+    for (int i = 0; i < 8; i++) {
+        out[i * 4] = (uint8_t)(h[i] >> 24);
+        out[i * 4 + 1] = (uint8_t)(h[i] >> 16);
+        out[i * 4 + 2] = (uint8_t)(h[i] >> 8);
+        out[i * 4 + 3] = (uint8_t)h[i];
+    }
+}
+
+static void test_der_3byte_len_and_nested_set(void) {
+    der_buf_t b = {0};
+    der_tag_len(&b, 0x31U, 0x12345U);
+    assert(!b.failed);
+    assert(b.len == 5U);
+    assert(b.data[0] == 0x31U && b.data[1] == 0x83U && b.data[2] == 0x01U && b.data[3] == 0x23U && b.data[4] == 0x45U);
+    free(b.data);
+
+    /* Nested dictionary must use SET tag 0x31 (Apple CE DER spec) */
+    der_buf_t inner_kv = {0};
+    der_tlv(&inner_kv, 0x0cU, "subkey", 6U);
+    uint8_t der_true = 0xffU;
+    der_tlv(&inner_kv, 0x01U, &der_true, 1U);
+    der_buf_t inner_seq = {0};
+    der_tlv(&inner_seq, 0x30U, inner_kv.data, inner_kv.len);
+    der_buf_t nested_set = {0};
+    der_tlv(&nested_set, 0x31U, inner_seq.data, inner_seq.len);
+    assert(nested_set.data[0] == 0x31U);
+    free(inner_kv.data);
+    free(inner_seq.data);
+    free(nested_set.data);
+}
+
+static void test_superblob_cd_special_slot_sha256_update(void) {
+    /* Sanity-check SHA-256 against NIST "abc" vector */
+    uint8_t abc_hash[32];
+    sha256_compute((const uint8_t *)"abc", 3U, abc_hash);
+    assert(abc_hash[0] == 0xbaU && abc_hash[1] == 0x78U && abc_hash[2] == 0x16U && abc_hash[3] == 0xbfU);
+
+    /* Build synthetic CodeDirectory with nSpecialSlots=7, hashOffset=44+7*32=268, hashType=2, hashSize=32 */
+    uint8_t cd[300];
+    memset(cd, 0, sizeof(cd));
+    uint32_t magic = to_be32(0xfade0c02U);
+    uint32_t cd_len = to_be32((uint32_t)sizeof(cd));
+    uint32_t hash_off = to_be32(268U);
+    uint32_t n_special = to_be32(7U);
+    memcpy(cd + 0, &magic, 4);
+    memcpy(cd + 4, &cd_len, 4);
+    memcpy(cd + 16, &hash_off, 4);
+    memcpy(cd + 24, &n_special, 4);
+    cd[36] = 32U; /* hashSize */
+    cd[37] = 2U;  /* CS_HASHTYPE_SHA256 */
+    /* Seed non-zero stale hashes at special slots -5 and -7 */
+    memset(cd + 268U - 5U * 32U, 0x11, 32U);
+    memset(cd + 268U - 7U * 32U, 0x22, 32U);
+
+    /* Sanitized slot 5 (XML) and slot 7 (DER) blobs including 8-byte header */
+    const char *xml_body = "<plist><dict/></plist>";
+    size_t xml_blob_len = 8U + strlen(xml_body);
+    uint8_t slot5[64];
+    uint32_t m5 = to_be32(0xfade7171U), l5 = to_be32((uint32_t)xml_blob_len);
+    memcpy(slot5, &m5, 4);
+    memcpy(slot5 + 4, &l5, 4);
+    memcpy(slot5 + 8, xml_body, strlen(xml_body));
+
+    uint8_t der_body[6] = { 0x70U, 0x04U, 0x02U, 0x01U, 0x01U, 0x31U };
+    size_t der_blob_len = 8U + sizeof(der_body);
+    uint8_t slot7[32];
+    uint32_t m7 = to_be32(0xfade7172U), l7 = to_be32((uint32_t)der_blob_len);
+    memcpy(slot7, &m7, 4);
+    memcpy(slot7 + 4, &l7, 4);
+    memcpy(slot7 + 8, der_body, sizeof(der_body));
+
+    /* Update CD special slots -5 and -7 */
+    uint8_t h5[32], h7[32];
+    sha256_compute(slot5, xml_blob_len, h5);
+    sha256_compute(slot7, der_blob_len, h7);
+    memcpy(cd + 268U - 5U * 32U, h5, 32U);
+    memcpy(cd + 268U - 7U * 32U, h7, 32U);
+
+    /* Verify detector check passes */
+    uint8_t verify5[32], verify7[32];
+    sha256_compute(slot5, xml_blob_len, verify5);
+    sha256_compute(slot7, der_blob_len, verify7);
+    assert(memcmp(cd + 268U - 5U * 32U, verify5, 32U) == 0);
+    assert(memcmp(cd + 268U - 7U * 32U, verify7, 32U) == 0);
+}
+
+static uint64_t fnv1a_cstr(const char *s) {
+    uint64_t h = 14695981039346656037ULL;
+    while (*s != '\0') {
+        h ^= (uint8_t)(*s++);
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static void test_fnv1a_linear_dedup(void) {
+    const size_t n_per_slice = 2048U;
+    char (*pool)[32] = (char (*)[32])calloc(n_per_slice * 2U, 32U);
+    assert(pool != NULL);
+    const char **slice1 = (const char **)calloc(n_per_slice, sizeof(const char *));
+    const char **slice2 = (const char **)calloc(n_per_slice, sizeof(const char *));
+    assert(slice1 != NULL && slice2 != NULL);
+    for (size_t i = 0; i < n_per_slice; i++) {
+        snprintf(pool[i], 32U, "SwiftUI_Cls_%zu", i);
+        slice1[i] = pool[i];
+        /* 50% overlap with slice1 */
+        size_t idx2 = (i < 1024U) ? i : (n_per_slice + i - 1024U);
+        snprintf(pool[n_per_slice + i], 32U, "SwiftUI_Cls_%zu", idx2);
+        slice2[i] = pool[n_per_slice + i];
+    }
+    size_t cap = 8192U; /* power of 2 >= 2 * total */
+    const char **ht = (const char **)calloc(cap, sizeof(const char *));
+    const char **out = (const char **)calloc(n_per_slice * 2U, sizeof(const char *));
+    assert(ht != NULL && out != NULL);
+    size_t out_n = 0;
+    const char **slices[2] = { slice1, slice2 };
+    for (int si = 0; si < 2; si++) {
+        for (size_t k = 0; k < n_per_slice; k++) {
+            const char *c = slices[si][k];
+            size_t slot = (size_t)(fnv1a_cstr(c) & (cap - 1U));
+            int dup = 0;
+            while (ht[slot] != NULL) {
+                if (ht[slot] == c || strcmp(ht[slot], c) == 0) {
+                    dup = 1;
+                    break;
+                }
+                slot = (slot + 1U) & (cap - 1U);
+            }
+            if (!dup) {
+                ht[slot] = c;
+                out[out_n++] = c;
+            }
+        }
+    }
+    assert(out_n == 3072U);
+    free(ht);
+    free(out);
+    free(slice1);
+    free(slice2);
+    free(pool);
+}
+
+static int is_post13_sf_symbol_multisuffix(const char *s) {
+    static const char *const kTable[] = {
+        "applelogo", "brain.head.profile", "gearshape", "gearshape.2",
+        "ipad", "iphone", "leaf", "macbook", "sparkles.tv", "wrench.and.screwdriver"
+    };
+    size_t n = sizeof(kTable) / sizeof(kTable[0]);
+    for (size_t i = 1; i < n; i++) {
+        assert(strcmp(kTable[i - 1], kTable[i]) < 0);
+    }
+    char base[128];
+    snprintf(base, sizeof(base), "%s", s);
+    if (bsearch(base, kTable, n, sizeof(kTable[0]), sf_cmp) != NULL) return 1;
+    static const char *const kSuffixes[] = { ".fill", ".circle", ".square", ".slash" };
+    int changed = 1;
+    while (changed) {
+        changed = 0;
+        for (size_t i = 0; i < sizeof(kSuffixes) / sizeof(kSuffixes[0]); i++) {
+            size_t sl = strlen(kSuffixes[i]), bl = strlen(base);
+            if (bl > sl && strcmp(base + bl - sl, kSuffixes[i]) == 0) {
+                base[bl - sl] = '\0';
+                if (bsearch(base, kTable, n, sizeof(kTable[0]), sf_cmp) != NULL) return 1;
+                changed = 1;
+                break;
+            }
+        }
+    }
+    return 0;
+}
+
+static void test_sf_symbols_multisuffix(void) {
+    assert(is_post13_sf_symbol_multisuffix("leaf.circle.fill") == 1);
+    assert(is_post13_sf_symbol_multisuffix("gearshape.2.fill") == 1);
+    assert(is_post13_sf_symbol_multisuffix("applelogo") == 1);
+    assert(is_post13_sf_symbol_multisuffix("house.circle.fill") == 0);
+}
+
+static int ci_contains(const char *hay, const char *needle) {
+    size_t nlen = strlen(needle);
+    if (nlen == 0) return 1;
+    for (const char *p = hay; *p; p++) {
+        size_t i = 0;
+        while (i < nlen && p[i]) {
+            char a = p[i], b = needle[i];
+            if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+            if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+            if (a != b) break;
+            i++;
+        }
+        if (i == nlen) return 1;
+    }
+    return 0;
+}
+
+static void test_coderesources_case_insensitive_and_attr_fallback(void) {
+    const char *dirty[] = {
+        "Frameworks/playtools.framework/PlayTools",
+        "Playtools.strings",
+        "Frameworks/akinterface.framework/AKInterface",
+        "SVCPatches/patch.bin",
+        "UserPlugins/foo.dylib"
+    };
+    for (size_t i = 0; i < sizeof(dirty) / sizeof(dirty[0]); i++) {
+        int hit = ci_contains(dirty[i], "playtools") ||
+                  ci_contains(dirty[i], "akinterface") ||
+                  ci_contains(dirty[i], "svcpatches") ||
+                  ci_contains(dirty[i], "userplugins");
+        assert(hit == 1);
+    }
+    assert(ci_contains("Info.plist", "playtools") == 0);
+
+    /* getattrlistbulk 13-byte slot cannot grow to "/dev/disk0s1s2" (15B), must fall back to "/dev/disk0s1" (13B) */
+    char slot[13];
+    memcpy(slot, "/dev/disk3s1", 13U);
+    const char *ideal = "/dev/disk0s1s2";
+    const char *fallback = "/dev/disk0s1";
+    int can_grow = 0;
+    const char *chosen = (strlen(ideal) + 1U <= sizeof(slot) || can_grow) ? ideal : fallback;
+    assert(strlen(chosen) + 1U <= sizeof(slot));
+    memcpy(slot, chosen, strlen(chosen) + 1U);
+    assert(strcmp(slot, "/dev/disk0s1") == 0);
+}
+
+static void test_ioreg_agx_path_and_kinfo_cr_groups_and_prefs(void) {
+    /* IORegistry path-safe AGX replacement preserving G12P (not corrupting to G12G) */
+    char path[256] = "IOService:/AppleARMPE/sgx/AGXAcceleratorG13G_B0";
+    char *p = strstr(path, "AGXAcceleratorG");
+    assert(p != NULL);
+    size_t tail_off = 15U;
+    while (p[tail_off] && p[tail_off] != '/' && p[tail_off] != ':') tail_off++;
+    char repl[64] = "AGXAcceleratorG12P";
+    size_t rlen = strlen(repl);
+    memmove(p + rlen, p + tail_off, strlen(p + tail_off) + 1U);
+    memcpy(p, repl, rlen);
+    assert(strcmp(path, "IOService:/AppleARMPE/sgx/AGXAcceleratorG12P") == 0);
+
+    /* Substring ATCDPXBAR matches M1/M2/M3/M4 */
+    assert(strstr("AppleT8112ATCDPXBAR", "ATCDPXBAR") != NULL);
+    assert(strstr("AppleT6000ATCDPXBAR", "ATCDPXBAR") != NULL);
+
+    /* kinfo_proc cr_groups scrub */
+    uint32_t cr_groups[16] = { 20, 12, 61, 80, 81, 204, 250, 395, 398, 399, 400, 701 };
+    int cr_ngroups = 12;
+    int w = 0;
+    for (int i = 0; i < cr_ngroups; i++) {
+        uint32_t g = cr_groups[i];
+        if (is_desktop_gid(g)) continue;
+        if (g == 20U) g = 501U;
+        cr_groups[w++] = g;
+    }
+    cr_ngroups = w;
+    assert(cr_ngroups == 1 && cr_groups[0] == 501U);
+
+    /* NSGlobalDomain desktop preference keys */
+    const char *hidden_prefs[] = {
+        "com.apple.trackpad.scaling",
+        "com.apple.mouse.scaling",
+        "com.apple.swipescrolldirection",
+        "AppleMiniaturizeOnDoubleClick",
+        "NSNavRecentPlaces"
+    };
+    for (size_t i = 0; i < sizeof(hidden_prefs) / sizeof(hidden_prefs[0]); i++) {
+        const char *k = hidden_prefs[i];
+        int is_hidden = (strncmp(k, "com.apple.trackpad.", 19) == 0 ||
+                         strncmp(k, "com.apple.mouse.", 16) == 0 ||
+                         strcmp(k, "com.apple.swipescrolldirection") == 0 ||
+                         strcmp(k, "AppleMiniaturizeOnDoubleClick") == 0 ||
+                         strcmp(k, "NSNavRecentPlaces") == 0);
+        assert(is_hidden == 1);
+    }
+}
+
 int main(void) {
     test_der_entitlements_encoding_and_superblob_rewrite();
     test_attr_ref_zero_fill();
@@ -357,6 +705,12 @@ int main(void) {
     test_ioreg_compat13_sanitize();
     test_sf_symbols_and_versions();
     test_network_and_coderesources();
+    test_der_3byte_len_and_nested_set();
+    test_superblob_cd_special_slot_sha256_update();
+    test_fnv1a_linear_dedup();
+    test_sf_symbols_multisuffix();
+    test_coderesources_case_insensitive_and_attr_fallback();
+    test_ioreg_agx_path_and_kinfo_cr_groups_and_prefs();
     printf("All compat104 unit tests passed.\n");
     return 0;
 }

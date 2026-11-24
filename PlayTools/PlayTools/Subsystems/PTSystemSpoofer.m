@@ -7,6 +7,8 @@
 @import AudioToolbox;
 @import CoreServices;
 @import IOKit;
+#include <grp.h>
+#include <notify.h>
 #include <net/if.h>
 #include <net/if_dl.h>
 #include <net/route.h>
@@ -1841,11 +1843,27 @@ static pt_sysctl_mib_entry_t s_sysctl_mibs[] = {
     { "kern.hibernatefile", {0}, 0 },
     { "kern.hibernatewakenotification", {0}, 0 },
     { "kern.hibernatemode", {0}, 0 },
+    { "kern.hibernatestatistics", {0}, 0 },
+    { "kern.hibernategraphicsready", {0}, 0 },
+    { "kern.hibernatelockscreenready", {0}, 0 },
+    { "kern.hibernatehidready", {0}, 0 },
+    { "kern.hibernatecount", {0}, 0 },
+    { "kern.hibernatepreview", {0}, 0 },
+    { "kern.osproductversioncompat", {0}, 0 },
+    { "kern.osvariant_status", {0}, 0 },
+    { "kern.osbuildconfig", {0}, 0 },
     { "kern.hv_support", {0}, 0 },
+    { "kern.hv_vmm_present", {0}, 0 },
+    { "kern.singleuser", {0}, 0 },
+    { "kern.safeboot", {0}, 0 },
+    { "kern.willshutdown", {0}, 0 },
+    { "kern.waketime", {0}, 0 },
+    { "kern.sleeptime", {0}, 0 },
     { "kern.secure_kernel", {0}, 0 },
     { "security.mac.amfi.developer_mode_status", {0}, 0 },
     { "sysctl.proc_translated", {0}, 0 },
     { "sysctl.proc_native", {0}, 0 },
+    { "sysctl.proc_cputype", {0}, 0 },
 };
 static pthread_once_t s_pt_sysctl_mibs_once = PTHREAD_ONCE_INIT;
 static uint32_t s_sysctl_root_mask = 0;
@@ -1944,8 +1962,14 @@ static BOOL pt_is_hidden_sysctl_name(const char *name) {
     }
     if (strcmp(name, "sysctl.proc_translated") == 0 ||
         strcmp(name, "sysctl.proc_native") == 0 ||
+        strcmp(name, "sysctl.proc_cputype") == 0 ||
         strcmp(name, "kern.iossupportversion") == 0 ||
         strncmp(name, "kern.hibernate", 14) == 0 ||
+        strcmp(name, "kern.singleuser") == 0 ||
+        strcmp(name, "kern.safeboot") == 0 ||
+        strcmp(name, "kern.willshutdown") == 0 ||
+        strcmp(name, "kern.waketime") == 0 ||
+        strcmp(name, "kern.sleeptime") == 0 ||
         strcmp(name, "hw.use_kernelmanagerd") == 0 ||
         strcmp(name, "vm.swapusage") == 0) {
         return YES;
@@ -1954,8 +1978,14 @@ static BOOL pt_is_hidden_sysctl_name(const char *name) {
         pt_get_active_device_profile()->e_cores == 0) {
         return YES;
     }
-    if (strncmp(name, "hw.optional.arm.FEAT_", 21) == 0 && pt_is_compat13_7_active()) {
-        return YES;
+    if (pt_is_compat13_7_active()) {
+        if (strncmp(name, "hw.optional.arm.FEAT_", 21) == 0 ||
+            strcmp(name, "kern.osproductversioncompat") == 0 ||
+            strcmp(name, "hw.nperflevels") == 0 ||
+            strncmp(name, "hw.perflevel0.", 14) == 0 ||
+            strncmp(name, "hw.perflevel1.", 14) == 0) {
+            return YES;
+        }
     }
     return NO;
 }
@@ -2197,8 +2227,18 @@ static BOOL pt_handle_sysctl_name(const char *name,
             *out_ret = pt_write_sysctl_int(1, oldp, oldlenp);
             return YES;
         }
-        if (strcmp(sub, "hv_support") == 0) {
+        if (strcmp(sub, "hv_support") == 0 ||
+            strcmp(sub, "hv_vmm_present") == 0) {
             *out_ret = pt_write_sysctl_int(0, oldp, oldlenp);
+            return YES;
+        }
+        if (strcmp(sub, "osbuildconfig") == 0) {
+            *out_ret = pt_write_sysctl_string("release", oldp, oldlenp);
+            return YES;
+        }
+        if (strcmp(sub, "osvariant_status") == 0) {
+            uint64_t consumer_ios_status = 0x7001000000000000ULL;
+            *out_ret = pt_write_sysctl_uint64(oldp, oldlenp, (newlen > 0) ? newp : NULL, consumer_ios_status);
             return YES;
         }
         return NO;
@@ -2823,6 +2863,61 @@ static void pt_compact_rt_iflist_sysctl(void *buf, size_t *size) {
     *size = write_pos;
 }
 
+static gid_t pt_map_spoofed_gid(gid_t g);
+static BOOL pt_is_desktop_supplemental_gid(gid_t g);
+
+static void pt_sanitize_kinfo_proc(struct kinfo_proc *info, BOOL is_sys) {
+    if (info == NULL) {
+        return;
+    }
+    info->kp_proc.p_flag &= ~P_TRACED;
+    if (is_sys || !pt_is_bypass_enabled()) {
+        return;
+    }
+    info->kp_eproc.e_ppid = 1;
+    strlcpy(info->kp_eproc.e_login, "mobile", sizeof(info->kp_eproc.e_login));
+    info->kp_eproc.e_pcred.p_rgid = pt_map_spoofed_gid(info->kp_eproc.e_pcred.p_rgid);
+    info->kp_eproc.e_pcred.p_svgid = pt_map_spoofed_gid(info->kp_eproc.e_pcred.p_svgid);
+    size_t max_groups = sizeof(info->kp_eproc.e_ucred.cr_groups) / sizeof(info->kp_eproc.e_ucred.cr_groups[0]);
+    short raw_n = info->kp_eproc.e_ucred.cr_ngroups;
+    if (raw_n < 0) {
+        raw_n = 0;
+    }
+    if ((size_t)raw_n > max_groups) {
+        raw_n = (short)max_groups;
+    }
+    gid_t filtered[NGROUPS];
+    size_t filtered_n = 0;
+    for (short i = 0; i < raw_n && filtered_n < max_groups; i++) {
+        gid_t g = info->kp_eproc.e_ucred.cr_groups[i];
+        if (pt_is_desktop_supplemental_gid(g)) {
+            continue;
+        }
+        g = pt_map_spoofed_gid(g);
+        BOOL dup = NO;
+        for (size_t j = 0; j < filtered_n; j++) {
+            if (filtered[j] == g) {
+                dup = YES;
+                break;
+            }
+        }
+        if (!dup) {
+            filtered[filtered_n++] = g;
+        }
+    }
+    if (filtered_n == 0) {
+        filtered[0] = 501;
+        filtered_n = 1;
+    }
+    for (size_t i = 0; i < filtered_n; i++) {
+        info->kp_eproc.e_ucred.cr_groups[i] = filtered[i];
+    }
+    for (size_t i = filtered_n; i < max_groups; i++) {
+        info->kp_eproc.e_ucred.cr_groups[i] = 0;
+    }
+    info->kp_eproc.e_ucred.cr_ngroups = (short)filtered_n;
+}
+
 __attribute__((visibility("hidden")))
 int pt_sysctl_with_caller(int *name,
                           u_int types,
@@ -2867,7 +2962,7 @@ int pt_sysctl_with_caller(int *name,
                         return r;
                     }
                     if (next_sz == 0 || next_sz > sizeof(next_oid) || (next_sz % sizeof(int)) != 0) {
-                        break;
+                        return pt_orig_kernel_sysctl(cur_q, cur_qlen, buf, size, arg0, arg1);
                     }
                     u_int next_cnt = (u_int)(next_sz / sizeof(int));
                     int name_q[CTL_MAXNAME + 2];
@@ -3028,12 +3123,7 @@ int pt_sysctl_with_caller(int *name,
         BOOL is_sys = pt_sysctl_resolve_is_sys(ret_addr, &is_sys_caller);
         if (name[2] == KERN_PROC_PID) {
             if (buf != NULL && *size >= sizeof(struct kinfo_proc)) {
-                struct kinfo_proc *info = (struct kinfo_proc *)buf;
-                info->kp_proc.p_flag &= ~P_TRACED;
-                if (!is_sys) {
-                    info->kp_eproc.e_ppid = 1;
-                    strlcpy(info->kp_eproc.e_login, "mobile", sizeof(info->kp_eproc.e_login));
-                }
+                pt_sanitize_kinfo_proc((struct kinfo_proc *)buf, is_sys);
             }
         } else if (name[2] == KERN_PROC_ALL ||
                    (!is_sys && name[2] != KERN_PROC_PID)) {
@@ -3048,10 +3138,8 @@ int pt_sysctl_with_caller(int *name,
                 BOOL found_self = NO;
                 for (size_t i = 0; i < count; i++) {
                     if (entries[i].kp_proc.p_pid == self_pid) {
-                        entries[i].kp_proc.p_flag &= ~P_TRACED;
+                        pt_sanitize_kinfo_proc(&entries[i], is_sys);
                         if (!is_sys) {
-                            entries[i].kp_eproc.e_ppid = 1;
-                            strlcpy(entries[i].kp_eproc.e_login, "mobile", sizeof(entries[i].kp_eproc.e_login));
                             if (i != 0) {
                                 entries[0] = entries[i];
                             }
@@ -3069,7 +3157,11 @@ int pt_sysctl_with_caller(int *name,
     }
     if (ret == 0 && name != NULL && types >= 5 &&
         name[0] == CTL_NET && name[1] == PF_ROUTE &&
-        (name[4] == NET_RT_IFLIST || name[4] == NET_RT_IFLIST2) &&
+        (name[4] == NET_RT_IFLIST || name[4] == NET_RT_IFLIST2
+#ifdef NET_RT_IFLISTL
+         || name[4] == NET_RT_IFLISTL
+#endif
+        ) &&
         buf != NULL && size != NULL && *size > 0 &&
         pt_is_bypass_enabled() &&
         !pt_sysctl_resolve_is_sys(ret_addr, &is_sys_caller)) {
@@ -3398,7 +3490,9 @@ static NSArray<NSString *> *pt_blocked_ioreg_keys_list(void) {
             @"serial-number", @"IOPlatformSerialNumber", @"SystemSerialNumber",
             @"IOPlatformUUID", @"mlb-serial-number", @"board-id",
             @"CompatibleDeviceFallback", @"has-boot-chime", @"boot-args",
-            @"IONVRAM", @"efi-boot-device"
+            @"IONVRAM", @"efi-boot-device",
+            @"AppleClamshellState", @"HibernateMode", @"HibernateFile",
+            @"AppleRawAdapterDetails", @"AdapterDetails"
         ];
     });
     return s_keys;
@@ -3579,6 +3673,46 @@ static kern_return_t pt_IORegistryEntryCreateCFProperties(mach_port_t entry, CFM
 }
 
 static void pt_sanitize_io_hardware_name(char *buf, size_t cap);
+static BOOL pt_is_hidden_io_class_or_name(const char *cls_name, const char *entry_name);
+
+static BOOL pt_is_hidden_io_path(const char *path) {
+    if (path == NULL || path[0] == '\0') {
+        return NO;
+    }
+    if (strstr(path, "AppleACPIPlatformExpert") != NULL ||
+        strstr(path, "AppleSMC") != NULL ||
+        strstr(path, "Mac") != NULL) {
+        return YES;
+    }
+    const char *p = path;
+    while (*p != '\0') {
+        while (*p == '/' || *p == ':') {
+            p++;
+        }
+        if (*p == '\0') {
+            break;
+        }
+        const char *seg_start = p;
+        while (*p != '\0' && *p != '/' && *p != ':') {
+            p++;
+        }
+        const char *seg_end = p;
+        const char *at = memchr(seg_start, '@', (size_t)(seg_end - seg_start));
+        if (at != NULL) {
+            seg_end = at;
+        }
+        size_t seg_len = (size_t)(seg_end - seg_start);
+        if (seg_len > 0 && seg_len < 128U) {
+            char comp[128];
+            memcpy(comp, seg_start, seg_len);
+            comp[seg_len] = '\0';
+            if (pt_is_hidden_io_class_or_name(comp, comp)) {
+                return YES;
+            }
+        }
+    }
+    return NO;
+}
 
 extern kern_return_t IORegistryEntryGetPath(mach_port_t entry, const char *plane, char *path);
 static kern_return_t pt_IORegistryEntryGetPath(mach_port_t entry, const char *plane, char *path) {
@@ -3586,9 +3720,7 @@ static kern_return_t pt_IORegistryEntryGetPath(mach_port_t entry, const char *pl
     if (kr == KERN_SUCCESS && path != NULL &&
         pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        if (strstr(path, "AppleACPIPlatformExpert") != NULL ||
-            strstr(path, "AppleSMC") != NULL ||
-            strstr(path, "Mac") != NULL) {
+        if (pt_is_hidden_io_path(path)) {
             strlcpy(path, "IOService:/AppleARMPE", 512);
         } else {
             pt_sanitize_io_hardware_name(path, 512U);
@@ -3604,29 +3736,24 @@ static BOOL pt_is_blocked_ioservice_matching(CFDictionaryRef matching) {
     NSDictionary *dict = (__bridge NSDictionary *)matching;
     id prov = dict[@"IOProviderClass"];
     if ([prov isKindOfClass:[NSString class]]) {
-        NSString *p = (NSString *)prov;
-        if ([p isEqualToString:@"AppleACPIPlatformExpert"] ||
-            [p isEqualToString:@"AppleSMC"] ||
-            [p isEqualToString:@"AppleSMBusController"] ||
-            [p isEqualToString:@"IOThunderboltController"] ||
-            [p isEqualToString:@"AppleThunderboltHAL"] ||
-            [p isEqualToString:@"AppleBacklightDisplay"] ||
-            [p isEqualToString:@"IODisplayWrangler"] ||
-            [p isEqualToString:@"AGPM"]) {
+        const char *pc = [(NSString *)prov UTF8String];
+        if (pc != NULL && pt_is_hidden_io_class_or_name(pc, pc)) {
             return YES;
         }
     }
     id nameMatch = dict[@"IONameMatch"];
     if ([nameMatch isKindOfClass:[NSString class]]) {
-        NSString *nm = (NSString *)nameMatch;
-        if ([nm containsString:@"Mac"] || [nm containsString:@"AppleSMC"]) {
+        const char *nc = [(NSString *)nameMatch UTF8String];
+        if (nc != NULL && pt_is_hidden_io_class_or_name(nc, nc)) {
             return YES;
         }
     } else if ([nameMatch isKindOfClass:[NSArray class]]) {
         for (id item in (NSArray *)nameMatch) {
-            if ([item isKindOfClass:[NSString class]] &&
-                ([(NSString *)item containsString:@"Mac"] || [(NSString *)item containsString:@"AppleSMC"])) {
-                return YES;
+            if ([item isKindOfClass:[NSString class]]) {
+                const char *ic = [(NSString *)item UTF8String];
+                if (ic != NULL && pt_is_hidden_io_class_or_name(ic, ic)) {
+                    return YES;
+                }
             }
         }
     }
@@ -3673,7 +3800,15 @@ static BOOL pt_is_hidden_io_class_or_name(const char *cls_name, const char *entr
             strcmp(s, "AppleActuatorHIDEventDriver") == 0 ||
             strcmp(s, "AppleHIDKeyboardEventDriverV2") == 0 ||
             strncmp(s, "AppleHIDTransport", 17) == 0 ||
-            strcmp(s, "AppleT8103ATCDPXBAR") == 0) {
+            strstr(s, "ATCDPXBAR") != NULL ||
+            strstr(s, "AppleParadeDP855TCON") != NULL ||
+            strstr(s, "AppleATCDPAltModePort") != NULL ||
+            strstr(s, "AppleATCDPINAdapterPort") != NULL ||
+            strstr(s, "AppleDisplayCrossbar") != NULL ||
+            strcmp(s, "IOHIDSystem") == 0 ||
+            strncmp(s, "AppleAuthCPDock", 15) == 0 ||
+            strncmp(s, "AppleExternalSecondaryAudio", 27) == 0 ||
+            strncmp(s, "AppleSmartBattery", 17) == 0) {
             return YES;
         }
     }
@@ -3719,6 +3854,65 @@ static void pt_replace_substr_in_buf(char *buf, size_t cap, const char *needle, 
     }
 }
 
+static void pt_replace_agx_gen_tokens(char *buf,
+                                      size_t cap,
+                                      const char *prefix_with_g,
+                                      const char *prefix_no_g,
+                                      const char *gpu_gen,
+                                      unsigned long target_gen) {
+    if (buf == NULL || cap == 0 || prefix_with_g == NULL || prefix_no_g == NULL || gpu_gen == NULL) {
+        return;
+    }
+    size_t plen = strlen(prefix_with_g);
+    size_t target_len = strlen(gpu_gen);
+    char repl[64];
+    int rn = snprintf(repl, sizeof(repl), "%s%s", prefix_no_g, gpu_gen);
+    if (rn <= 0 || (size_t)rn >= sizeof(repl)) {
+        return;
+    }
+    size_t rlen = (size_t)rn;
+    size_t pos = 0;
+    for (int guard = 0; guard < 16; guard++) {
+        char *hit = strstr(buf + pos, prefix_with_g);
+        if (hit == NULL) {
+            break;
+        }
+        if (hit[plen] < '0' || hit[plen] > '9') {
+            pos = (size_t)(hit - buf) + plen;
+            continue;
+        }
+        char *endp = NULL;
+        unsigned long gen = strtoul(hit + plen, &endp, 10);
+        if (endp == NULL || endp == hit + plen) {
+            pos = (size_t)(hit - buf) + plen;
+            continue;
+        }
+        if (*endp != '\0' && strchr("GPSXCDgpsxcd", *endp) != NULL) {
+            endp++;
+        }
+        size_t tok_gen_len = (size_t)(endp - (hit + plen - 1U));
+        BOOL mismatch = (gen != target_gen) ||
+                        (pt_is_compat13_7_active() && gen >= 13UL) ||
+                        (tok_gen_len != target_len) ||
+                        (strncmp(hit + plen - 1U, gpu_gen, target_len) != 0);
+        size_t span_len = (size_t)(endp - hit);
+        size_t off = (size_t)(hit - buf);
+        if (mismatch) {
+            size_t cur_len = strlen(buf);
+            if (cur_len - span_len + rlen >= cap) {
+                break;
+            }
+            if (rlen != span_len) {
+                memmove(hit + rlen, endp, cur_len - off - span_len + 1U);
+            }
+            memcpy(hit, repl, rlen);
+            pos = off + rlen;
+        } else {
+            pos = off + span_len;
+        }
+    }
+}
+
 static void pt_sanitize_io_hardware_name(char *buf, size_t cap) {
     if (buf == NULL || cap == 0 || buf[0] == '\0') {
         return;
@@ -3745,12 +3939,14 @@ static void pt_sanitize_io_hardware_name(char *buf, size_t cap) {
         : (strcmp(upper_soc, "T8030") == 0 ? "H12" : "H13");
 
     static const char *const kHostSocs[] = {
-        "T8103", "T8101", "T8102", "T810x", "T8112", "T8122", "T8132",
-        "T6000", "T6001", "T6002", "T6020", "T6030", "T6040"
+        "T8103", "T8101", "T8102", "T810x", "T8112", "T8122", "T8132", "T8142",
+        "T6000", "T6001", "T6002", "T6020", "T6021", "T6022",
+        "T6030", "T6031", "T6034", "T6040", "T6041"
     };
     static const char *const kHostSocsLower[] = {
-        "t8103", "t8101", "t8102", "t810x", "t8112", "t8122", "t8132",
-        "t6000", "t6001", "t6002", "t6020", "t6030", "t6040"
+        "t8103", "t8101", "t8102", "t810x", "t8112", "t8122", "t8132", "t8142",
+        "t6000", "t6001", "t6002", "t6020", "t6021", "t6022",
+        "t6030", "t6031", "t6034", "t6040", "t6041"
     };
     for (size_t i = 0; i < sizeof(kHostSocs) / sizeof(kHostSocs[0]); i++) {
         if (strcmp(kHostSocs[i], upper_soc) != 0) {
@@ -3759,31 +3955,18 @@ static void pt_sanitize_io_hardware_name(char *buf, size_t cap) {
         }
     }
 
-    if (strncmp(buf, "AGXAcceleratorG", 15) == 0 && buf[15] >= '0' && buf[15] <= '9') {
-        unsigned long gen = strtoul(buf + 15, NULL, 10);
-        unsigned long target_gen = strtoul(gpu_short + 1, NULL, 10);
-        if (gen > target_gen || (pt_is_compat13_7_active() && gen >= 13UL)) {
-            char repl[64];
-            snprintf(repl, sizeof(repl), "AGXAccelerator%s", gpu_gen);
-            strlcpy(buf, repl, cap);
-            return;
-        }
-    }
-    if (strncmp(buf, "AGXMetalG", 9) == 0 && buf[9] >= '0' && buf[9] <= '9') {
-        unsigned long gen = strtoul(buf + 9, NULL, 10);
-        unsigned long target_gen = strtoul(gpu_short + 1, NULL, 10);
-        if (gen > target_gen || (pt_is_compat13_7_active() && gen >= 13UL)) {
-            char repl[64];
-            snprintf(repl, sizeof(repl), "AGXMetal%s", gpu_gen);
-            strlcpy(buf, repl, cap);
-            return;
-        }
-    }
+    unsigned long target_gen = strtoul(gpu_short + 1, NULL, 10);
+    pt_replace_agx_gen_tokens(buf, cap, "AGXAcceleratorG", "AGXAccelerator", gpu_gen, target_gen);
+    pt_replace_agx_gen_tokens(buf, cap, "AGXMetalG", "AGXMetal", gpu_gen, target_gen);
+    pt_replace_agx_gen_tokens(buf, cap, "AGXFirmwareKextG", "AGXFirmwareKext", gpu_gen, target_gen);
 
     static const char *const kGpuShorts[] = { "G13", "G14", "G15", "G16", "G17", "G18" };
     static const char *const kIspGens[] = { "H13", "H14", "H15", "H16" };
-    if (strncmp(buf, "AGXFirmwareKext", 15) == 0 || pt_is_compat13_7_active() || strcmp(upper_soc, "T8103") != 0) {
-        if (strstr(buf, "AGX") != NULL) {
+    if (strstr(buf, "AGXFirmwareKext") != NULL || pt_is_compat13_7_active() || strcmp(upper_soc, "T8103") != 0) {
+        if (strstr(buf, "AGX") != NULL &&
+            strstr(buf, "AGXAccelerator") == NULL &&
+            strstr(buf, "AGXMetal") == NULL &&
+            strstr(buf, "AGXFirmwareKext") == NULL) {
             for (size_t i = 0; i < sizeof(kGpuShorts) / sizeof(kGpuShorts[0]); i++) {
                 if (strcmp(kGpuShorts[i], gpu_short) != 0) {
                     pt_replace_substr_in_buf(buf, cap, kGpuShorts[i], gpu_short);
@@ -3816,8 +3999,34 @@ static kern_return_t pt_IOObjectGetClass(io_object_t object, io_name_t className
     return kr;
 }
 
+static boolean_t pt_IOObjectConformsTo(io_object_t object, const io_name_t className) {
+    if (className != NULL &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_is_hidden_io_class_or_name(className, NULL)) {
+        return FALSE;
+    }
+    return IOObjectConformsTo(object, className);
+}
+
 static kern_return_t pt_IORegistryEntryGetName(io_registry_entry_t entry, io_name_t name) {
     kern_return_t kr = IORegistryEntryGetName(entry, name);
+    if (kr == KERN_SUCCESS && name != NULL &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (pt_is_hidden_io_class_or_name(NULL, name)) {
+            strlcpy(name, "IOService", sizeof(io_name_t));
+        } else {
+            pt_sanitize_io_hardware_name(name, sizeof(io_name_t));
+        }
+    }
+    return kr;
+}
+
+static kern_return_t pt_IORegistryEntryGetNameInPlane(io_registry_entry_t entry,
+                                                     const io_name_t plane,
+                                                     io_name_t name) {
+    kern_return_t kr = IORegistryEntryGetNameInPlane(entry, plane, name);
     if (kr == KERN_SUCCESS && name != NULL &&
         pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
@@ -4426,6 +4635,7 @@ BOOL pt_is_hidden_env_key(const char *name) {
         strncmp(name, "SIMULATOR_", 10) == 0 ||
         strncmp(name, "METAL_", 6) == 0 ||
         strncmp(name, "MTL_", 4) == 0 ||
+        strncmp(name, "HOMEBREW_", 9) == 0 ||
         strcasestr(name, "playcover") != NULL ||
         strcasestr(name, "macover") != NULL ||
         strcasestr(name, "playtools") != NULL) {
@@ -4434,9 +4644,13 @@ BOOL pt_is_hidden_env_key(const char *name) {
     static const char *const kHiddenKeys[] = {
         "MallocStackLogging",
         "MallocStackLoggingNoCompact",
+        "MallocNanoZone",
         "NSZombieEnabled",
         "CLASSIC",
         "OSSignpostLogging",
+        "OS_ACTIVITY_DT_MODE",
+        "OS_ACTIVITY_MODE",
+        "OBJC_DISABLE_INITIALIZE_FORK_SAFETY",
         "MTLCaptureEnabled",
         "__CFBundleIdentifier",
         "__CF_USER_TEXT_ENCODING",
@@ -4444,9 +4658,12 @@ BOOL pt_is_hidden_env_key(const char *name) {
         "DARWIN_USER_CACHE_DIR",
         "DARWIN_USER_DIR",
         "SQLITE_EXEMPT_PATH_FROM_VNODE_GUARDS",
+        "TERM",
         "TERM_PROGRAM",
         "TERM_PROGRAM_VERSION",
         "TERM_SESSION_ID",
+        "Apple_PubSub_Socket_Render",
+        "DISPLAY",
         "SHELL",
         "SSH_AUTH_SOCK",
         "SECURITYSESSIONID",
@@ -5285,6 +5502,49 @@ static NSString *pt_compat13_framework_bundle_version(NSString *bid) {
     if ([bid isEqualToString:@"com.apple.GameController"]) {
         return @"1.0";
     }
+    if ([bid isEqualToString:@"com.apple.Metal"]) {
+        return @"212.8";
+    }
+    if ([bid isEqualToString:@"com.apple.Security"]) {
+        return @"59306.140.5";
+    }
+    if ([bid isEqualToString:@"com.apple.CoreGraphics"]) {
+        return @"1355.22";
+    }
+    if ([bid isEqualToString:@"com.apple.QuartzCore"]) {
+        return @"841.4";
+    }
+    if ([bid isEqualToString:@"com.apple.AVFoundation"]) {
+        return @"1800.12";
+    }
+    if ([bid isEqualToString:@"com.apple.audio.CoreAudio"] ||
+        [bid isEqualToString:@"com.apple.CoreAudio"] ||
+        [bid isEqualToString:@"com.apple.audio.toolbox.AudioToolbox"]) {
+        return @"5.0";
+    }
+    if ([bid isEqualToString:@"com.apple.SwiftUI"]) {
+        return @"42.19.2";
+    }
+    if ([bid isEqualToString:@"com.apple.corelocation"] ||
+        [bid isEqualToString:@"com.apple.CoreLocation"]) {
+        return @"2394.0.22";
+    }
+    if ([bid isEqualToString:@"com.apple.CoreBluetooth"]) {
+        return @"1";
+    }
+    if ([bid isEqualToString:@"com.apple.CoreImage"]) {
+        return @"940.9";
+    }
+    if ([bid isEqualToString:@"com.apple.CoreText"]) {
+        return @"643.1.5.1";
+    }
+    if ([bid isEqualToString:@"com.apple.ImageIO.framework"] ||
+        [bid isEqualToString:@"com.apple.ImageIO"]) {
+        return @"1976.11";
+    }
+    if ([bid isEqualToString:@"com.apple.Network"]) {
+        return @"1880.120.4";
+    }
     return nil;
 }
 
@@ -5298,7 +5558,7 @@ static NSString *pt_sanitized_dtsdk_name(NSString *sdkStr, NSString *bid) {
         ? [NSString stringWithFormat:@"iphoneos%s", verCStr]
         : @"iphoneos";
     BOOL isApple = ([bid isKindOfClass:[NSString class]] && [bid hasPrefix:@"com.apple."]);
-    if (isApple && pt_is_compat13_7_active()) {
+    if (isApple && (pt_is_compat13_7_active() || (ovVer != NULL && ovVer[0] != '\0'))) {
         return iosSdk;
     }
     NSString *cleaned = sdkStr;
@@ -5351,13 +5611,33 @@ __attribute__((visibility("hidden"))) BOOL pt_info_dict_needs_sanitize(NSDiction
     }
     id bid = dict[@"CFBundleIdentifier"];
     NSString *bidStr = [bid isKindOfClass:[NSString class]] ? (NSString *)bid : nil;
+    BOOL isApple = (bidStr != nil && [bidStr hasPrefix:@"com.apple."]);
+    const char *ovVer = pt_get_reported_ios_version_override(NULL);
     id dtSdk = dict[@"DTSDKName"];
     if ([dtSdk isKindOfClass:[NSString class]]) {
         NSString *sdkStr = (NSString *)dtSdk;
         if ([sdkStr rangeOfString:@"macosx" options:NSCaseInsensitiveSearch].location != NSNotFound ||
             [sdkStr rangeOfString:@"maccatalyst" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-            [sdkStr hasSuffix:@".internal"] ||
-            ([bidStr hasPrefix:@"com.apple."] && pt_is_compat13_7_active() && ![sdkStr isEqualToString:@"iphoneos13.7"])) {
+            [sdkStr hasSuffix:@".internal"]) {
+            return YES;
+        }
+        if (isApple && pt_is_compat13_7_active() && ![sdkStr isEqualToString:@"iphoneos13.7"]) {
+            return YES;
+        }
+        if (isApple && ovVer != NULL && ovVer[0] != '\0') {
+            NSString *expectedSdk = [NSString stringWithFormat:@"iphoneos%s", ovVer];
+            if (![sdkStr isEqualToString:expectedSdk]) {
+                return YES;
+            }
+        }
+    }
+    if (isApple && pt_is_compat13_7_active()) {
+        id dtPlatVer = dict[@"DTPlatformVersion"];
+        if ([dtPlatVer isKindOfClass:[NSString class]] && ![(NSString *)dtPlatVer isEqualToString:@"13.7"]) {
+            return YES;
+        }
+        id dtSdkBuild = dict[@"DTSDKBuild"];
+        if ([dtSdkBuild isKindOfClass:[NSString class]] && ![(NSString *)dtSdkBuild isEqualToString:@"17H35"]) {
             return YES;
         }
     }
@@ -5415,11 +5695,20 @@ __attribute__((visibility("hidden"))) NSMutableDictionary *pt_build_sanitized_mu
         }
     }
     NSString *bidStr = [m[@"CFBundleIdentifier"] isKindOfClass:[NSString class]] ? (NSString *)m[@"CFBundleIdentifier"] : nil;
+    BOOL isApple = (bidStr != nil && [bidStr hasPrefix:@"com.apple."]);
     id dtSdk = m[@"DTSDKName"];
     if ([dtSdk isKindOfClass:[NSString class]]) {
         NSString *cleanSdk = pt_sanitized_dtsdk_name((NSString *)dtSdk, bidStr);
         if (cleanSdk != nil && ![cleanSdk isEqualToString:(NSString *)dtSdk]) {
             m[@"DTSDKName"] = cleanSdk;
+        }
+    }
+    if (isApple && pt_is_compat13_7_active()) {
+        if ([m[@"DTPlatformVersion"] isKindOfClass:[NSString class]]) {
+            m[@"DTPlatformVersion"] = @"13.7";
+        }
+        if ([m[@"DTSDKBuild"] isKindOfClass:[NSString class]]) {
+            m[@"DTSDKBuild"] = @"17H35";
         }
     }
     NSString *targetVer = pt_compat13_framework_bundle_version(bidStr);
@@ -5443,6 +5732,167 @@ __attribute__((visibility("hidden"))) NSMutableDictionary *pt_build_sanitized_mu
         }
     }
     return m;
+}
+
+__attribute__((visibility("hidden")))
+BOOL pt_is_hidden_macos_pref_key(const char *key) {
+    if (key == NULL || key[0] == '\0') {
+        return NO;
+    }
+    if (strncmp(key, "NSWindow Frame", 14) == 0 ||
+        strncmp(key, "NSToolbar Configuration", 23) == 0 ||
+        strncmp(key, "NSNav", 5) == 0 ||
+        strncmp(key, "NSStatusItem", 12) == 0 ||
+        strncmp(key, "NSTableView", 11) == 0 ||
+        strncmp(key, "NSSplitView", 11) == 0 ||
+        strncmp(key, "com.apple.trackpad.", 19) == 0 ||
+        strncmp(key, "com.apple.mouse.", 16) == 0 ||
+        strncmp(key, "com.apple.springing.", 20) == 0 ||
+        strncmp(key, "com.apple.sound.beep.", 21) == 0 ||
+        strcasestr(key, "PlayCover") != NULL ||
+        strcasestr(key, "PlayTools") != NULL ||
+        strcasestr(key, "MacOver") != NULL ||
+        strcasestr(key, "AKInterface") != NULL) {
+        return YES;
+    }
+    static const char *const kHiddenPrefKeys[] = {
+        "NSQuitAlwaysKeepsWindows",
+        "AppleActionOnDoubleClick",
+        "AppleMiniaturizeOnDoubleClick",
+        "AppleShowScrollBars",
+        "AppleScrollerPagingBehavior",
+        "AppleMenuBarVisibleInFullscreen",
+        "AppleEnableSwipeNavigateWithScrolls",
+        "AppleEnableMouseSwipeNavigateWithScrolls",
+        "ApplePressAndHoldEnabled",
+        "com.apple.swipescrolldirection",
+        "NSDocumentRevisionsDebugMode",
+        "ApplePersistenceIgnoreState",
+        "NSFullScreenMenuItemEverywhere",
+        "WebKitDeveloperExtras",
+    };
+    for (size_t i = 0; i < sizeof(kHiddenPrefKeys) / sizeof(kHiddenPrefKeys[0]); i++) {
+        if (strcmp(key, kHiddenPrefKeys[i]) == 0) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static BOOL pt_cfstr_to_cstr(CFStringRef s, char *buf, size_t cap, const char **out_ptr) {
+    if (s == NULL || out_ptr == NULL) {
+        return NO;
+    }
+    const char *fast = CFStringGetCStringPtr(s, kCFStringEncodingUTF8);
+    if (fast != NULL) {
+        *out_ptr = fast;
+        return YES;
+    }
+    if (buf != NULL && cap > 0 && CFStringGetCString(s, buf, (CFIndex)cap, kCFStringEncodingUTF8)) {
+        *out_ptr = buf;
+        return YES;
+    }
+    return NO;
+}
+
+static BOOL pt_cstr_contains_macos_pref_leak(const char *s) {
+    if (s == NULL || s[0] == '\0') {
+        return NO;
+    }
+    return (strstr(s, "/Users/") != NULL ||
+            strstr(s, "/System/Volumes/Data") != NULL ||
+            strcasestr(s, "PlayCover") != NULL ||
+            strcasestr(s, "PlayTools") != NULL ||
+            strcasestr(s, "MacOver") != NULL);
+}
+
+static BOOL pt_pref_value_contains_macos_leak(CFPropertyListRef val, int depth) {
+    if (val == NULL || depth > 2) {
+        return NO;
+    }
+    CFTypeID tid = CFGetTypeID(val);
+    if (tid == CFStringGetTypeID()) {
+        char buf[512];
+        const char *cstr = NULL;
+        if (pt_cfstr_to_cstr((CFStringRef)val, buf, sizeof(buf), &cstr)) {
+            return pt_cstr_contains_macos_pref_leak(cstr);
+        }
+        return NO;
+    }
+    if (tid == CFArrayGetTypeID()) {
+        CFArrayRef arr = (CFArrayRef)val;
+        CFIndex n = CFArrayGetCount(arr);
+        if (n > 64) {
+            n = 64;
+        }
+        for (CFIndex i = 0; i < n; i++) {
+            if (pt_pref_value_contains_macos_leak(CFArrayGetValueAtIndex(arr, i), depth + 1)) {
+                return YES;
+            }
+        }
+        return NO;
+    }
+    return NO;
+}
+
+static CFPropertyListRef pt_CFPreferencesCopyAppValue(CFStringRef key, CFStringRef applicationID) CF_RETURNS_RETAINED {
+    BOOL should_filter = (pt_is_bypass_enabled() &&
+                          !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
+    if (should_filter && key != NULL) {
+        char kbuf[256];
+        const char *kstr = NULL;
+        if (pt_cfstr_to_cstr(key, kbuf, sizeof(kbuf), &kstr) && pt_is_hidden_macos_pref_key(kstr)) {
+            return NULL;
+        }
+    }
+    CFPropertyListRef val = CFPreferencesCopyAppValue(key, applicationID);
+    if (val != NULL && should_filter && pt_pref_value_contains_macos_leak(val, 0)) {
+        CFRelease(val);
+        return NULL;
+    }
+    return val;
+}
+
+static CFDictionaryRef pt_CFPreferencesCopyMultiple(CFArrayRef keysToFetch,
+                                                    CFStringRef applicationID,
+                                                    CFStringRef userName,
+                                                    CFStringRef hostName) CF_RETURNS_RETAINED {
+    CFDictionaryRef dict = CFPreferencesCopyMultiple(keysToFetch, applicationID, userName, hostName);
+    if (dict == NULL ||
+        !pt_is_bypass_enabled() ||
+        pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return dict;
+    }
+    NSDictionary *nsDict = (__bridge NSDictionary *)dict;
+    NSMutableArray *keysToRemove = nil;
+    for (id k in nsDict) {
+        BOOL drop = NO;
+        if ([k isKindOfClass:[NSString class]]) {
+            const char *kc = [(NSString *)k UTF8String];
+            if (kc != NULL && pt_is_hidden_macos_pref_key(kc)) {
+                drop = YES;
+            }
+        }
+        if (!drop) {
+            id v = nsDict[k];
+            if (v != nil && pt_pref_value_contains_macos_leak((__bridge CFPropertyListRef)v, 0)) {
+                drop = YES;
+            }
+        }
+        if (drop) {
+            if (keysToRemove == nil) {
+                keysToRemove = [NSMutableArray array];
+            }
+            [keysToRemove addObject:k];
+        }
+    }
+    if (keysToRemove == nil) {
+        return dict;
+    }
+    NSMutableDictionary *san = [nsDict mutableCopy];
+    [san removeObjectsForKeys:keysToRemove];
+    CFRelease(dict);
+    return (__bridge_retained CFDictionaryRef)[san copy];
 }
 
 __attribute__((visibility("hidden"))) NSDictionary *pt_build_sanitized_info_dict(NSDictionary *dict) {
@@ -6148,6 +6598,291 @@ static int pt_getgroups(int gidsetsize, gid_t grouplist[]) {
     return pt_getgroups_with_caller(gidsetsize, grouplist, __builtin_return_address(0));
 }
 
+static BOOL pt_is_hidden_macos_group_name(const char *name) {
+    if (name == NULL || name[0] == '\0') {
+        return NO;
+    }
+    if (strncmp(name, "com.apple.sharepoint.", 21) == 0 ||
+        strncmp(name, "com.apple.access_", 17) == 0) {
+        return YES;
+    }
+    static const char *const kHiddenGroups[] = {
+        "staff", "admin", "everyone", "certusers", "localaccounts",
+        "_developer", "_appstore", "_lpadmin", "_lpoperator",
+        "_appserverusr", "_appserveradm", "_analyticsusers",
+    };
+    for (size_t i = 0; i < sizeof(kHiddenGroups) / sizeof(kHiddenGroups[0]); i++) {
+        if (strcmp(name, kHiddenGroups[i]) == 0) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static struct group *pt_tls_mobile_group(void) {
+    static _Thread_local struct group tls_grp;
+    static _Thread_local char tls_name[16];
+    static _Thread_local char tls_passwd[4];
+    static _Thread_local char *tls_members[2];
+    strlcpy(tls_name, "mobile", sizeof(tls_name));
+    strlcpy(tls_passwd, "*", sizeof(tls_passwd));
+    tls_members[0] = tls_name;
+    tls_members[1] = NULL;
+    tls_grp.gr_name = tls_name;
+    tls_grp.gr_passwd = tls_passwd;
+    tls_grp.gr_gid = 501;
+    tls_grp.gr_mem = tls_members;
+    return &tls_grp;
+}
+
+static int pt_fill_mobile_group_r(struct group *grp, char *buf, size_t bufsize, struct group **result) {
+    if (result != NULL) {
+        *result = NULL;
+    }
+    if (grp == NULL || buf == NULL) {
+        return EINVAL;
+    }
+    uintptr_t p = (uintptr_t)buf;
+    uintptr_t aligned = (p + (sizeof(char *) - 1U)) & ~(uintptr_t)(sizeof(char *) - 1U);
+    size_t pad = (size_t)(aligned - p);
+    size_t needed = pad + 2U * sizeof(char *) + 7U + 2U;
+    if (bufsize < needed) {
+        return ERANGE;
+    }
+    char **mem = (char **)aligned;
+    char *gname = (char *)(aligned + 2U * sizeof(char *));
+    char *gpass = gname + 7U;
+    memcpy(gname, "mobile", 7U);
+    memcpy(gpass, "*", 2U);
+    mem[0] = gname;
+    mem[1] = NULL;
+    grp->gr_name = gname;
+    grp->gr_passwd = gpass;
+    grp->gr_gid = 501;
+    grp->gr_mem = mem;
+    if (result != NULL) {
+        *result = grp;
+    }
+    return 0;
+}
+
+static struct group *pt_getgrgid(gid_t gid) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (gid == 501) {
+            return pt_tls_mobile_group();
+        }
+        if (gid == 20 || pt_is_desktop_supplemental_gid(gid)) {
+            return NULL;
+        }
+    }
+    return getgrgid(gid);
+}
+
+static int pt_getgrgid_r(gid_t gid, struct group *grp, char *buf, size_t bufsize, struct group **result) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (gid == 501) {
+            return pt_fill_mobile_group_r(grp, buf, bufsize, result);
+        }
+        if (gid == 20 || pt_is_desktop_supplemental_gid(gid)) {
+            if (result != NULL) {
+                *result = NULL;
+            }
+            return 0;
+        }
+    }
+    return getgrgid_r(gid, grp, buf, bufsize, result);
+}
+
+static struct group *pt_getgrnam(const char *name) {
+    if (name != NULL &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (strcmp(name, "mobile") == 0) {
+            return pt_tls_mobile_group();
+        }
+        if (pt_is_hidden_macos_group_name(name)) {
+            return NULL;
+        }
+    }
+    return getgrnam(name);
+}
+
+static int pt_getgrnam_r(const char *name, struct group *grp, char *buf, size_t bufsize, struct group **result) {
+    if (name != NULL &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (strcmp(name, "mobile") == 0) {
+            return pt_fill_mobile_group_r(grp, buf, bufsize, result);
+        }
+        if (pt_is_hidden_macos_group_name(name)) {
+            if (result != NULL) {
+                *result = NULL;
+            }
+            return 0;
+        }
+    }
+    return getgrnam_r(name, grp, buf, bufsize, result);
+}
+
+extern int pt_orig_getgrouplist(const char *name, int basegid, int *groups, int *ngroups) __asm("_getgrouplist");
+
+static int pt_getgrouplist(const char *name, int basegid, int *groups, int *ngroups) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (ngroups == NULL) {
+            errno = EINVAL;
+            return -1;
+        }
+        gid_t mapped = pt_map_spoofed_gid((gid_t)basegid);
+        if (pt_is_desktop_supplemental_gid(mapped)) {
+            mapped = 501;
+        }
+        if (*ngroups < 1) {
+            *ngroups = 1;
+            return -1;
+        }
+        if (groups == NULL) {
+            errno = EFAULT;
+            return -1;
+        }
+        groups[0] = (int)mapped;
+        *ngroups = 1;
+        return 0;
+    }
+    return pt_orig_getgrouplist(name, basegid, groups, ngroups);
+}
+
+struct utmpx;
+extern struct utmpx *pt_orig_getutxent(void) __asm("_getutxent");
+extern struct utmpx *pt_orig_getutxid(const struct utmpx *) __asm("_getutxid");
+extern struct utmpx *pt_orig_getutxline(const struct utmpx *) __asm("_getutxline");
+
+static struct utmpx *pt_getutxent(void) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return NULL;
+    }
+    return pt_orig_getutxent();
+}
+
+static struct utmpx *pt_getutxid(const struct utmpx *ut) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return NULL;
+    }
+    return pt_orig_getutxid(ut);
+}
+
+static struct utmpx *pt_getutxline(const struct utmpx *ut) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return NULL;
+    }
+    return pt_orig_getutxline(ut);
+}
+
+extern int pt_orig_gethostuuid(uuid_t id, const struct timespec *wait) __asm("_gethostuuid");
+
+__attribute__((visibility("hidden")))
+int pt_gethostuuid_with_caller(uuid_t id, const struct timespec *wait, const void *caller) {
+    if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller)) {
+        errno = EPERM;
+        return -1;
+    }
+    return pt_orig_gethostuuid(id, wait);
+}
+
+static int pt_gethostuuid(uuid_t id, const struct timespec *wait) {
+    return pt_gethostuuid_with_caller(id, wait, __builtin_return_address(0));
+}
+
+#define PT_THERMAL_NOTIFY_TOKEN_CAP 64U
+static os_unfair_lock s_thermal_notify_lock = OS_UNFAIR_LOCK_INIT;
+static int s_thermal_notify_tokens[PT_THERMAL_NOTIFY_TOKEN_CAP];
+static BOOL s_thermal_notify_valid[PT_THERMAL_NOTIFY_TOKEN_CAP];
+
+static void pt_record_thermal_notify_token(int token) {
+    os_unfair_lock_lock(&s_thermal_notify_lock);
+    int free_idx = -1;
+    for (size_t i = 0; i < PT_THERMAL_NOTIFY_TOKEN_CAP; i++) {
+        if (s_thermal_notify_valid[i] && s_thermal_notify_tokens[i] == token) {
+            os_unfair_lock_unlock(&s_thermal_notify_lock);
+            return;
+        }
+        if (!s_thermal_notify_valid[i] && free_idx < 0) {
+            free_idx = (int)i;
+        }
+    }
+    if (free_idx >= 0) {
+        s_thermal_notify_tokens[free_idx] = token;
+        s_thermal_notify_valid[free_idx] = YES;
+    }
+    os_unfair_lock_unlock(&s_thermal_notify_lock);
+}
+
+static void pt_remove_thermal_notify_token(int token) {
+    os_unfair_lock_lock(&s_thermal_notify_lock);
+    for (size_t i = 0; i < PT_THERMAL_NOTIFY_TOKEN_CAP; i++) {
+        if (s_thermal_notify_valid[i] && s_thermal_notify_tokens[i] == token) {
+            s_thermal_notify_valid[i] = NO;
+            s_thermal_notify_tokens[i] = 0;
+        }
+    }
+    os_unfair_lock_unlock(&s_thermal_notify_lock);
+}
+
+static BOOL pt_is_thermal_notify_token(int token) {
+    BOOL found = NO;
+    os_unfair_lock_lock(&s_thermal_notify_lock);
+    for (size_t i = 0; i < PT_THERMAL_NOTIFY_TOKEN_CAP; i++) {
+        if (s_thermal_notify_valid[i] && s_thermal_notify_tokens[i] == token) {
+            found = YES;
+            break;
+        }
+    }
+    os_unfair_lock_unlock(&s_thermal_notify_lock);
+    return found;
+}
+
+static uint32_t pt_notify_register_check(const char *name, int *out_token) {
+    uint32_t st = notify_register_check(name, out_token);
+    if (st == NOTIFY_STATUS_OK && out_token != NULL && name != NULL &&
+        strcmp(name, "com.apple.system.thermalpressurelevel") == 0) {
+        pt_record_thermal_notify_token(*out_token);
+    }
+    return st;
+}
+
+static uint32_t pt_notify_register_dispatch(const char *name,
+                                            int *out_token,
+                                            dispatch_queue_t queue,
+                                            notify_handler_t handler) {
+    uint32_t st = notify_register_dispatch(name, out_token, queue, handler);
+    if (st == NOTIFY_STATUS_OK && out_token != NULL && name != NULL &&
+        strcmp(name, "com.apple.system.thermalpressurelevel") == 0) {
+        pt_record_thermal_notify_token(*out_token);
+    }
+    return st;
+}
+
+static uint32_t pt_notify_cancel(int token) {
+    pt_remove_thermal_notify_token(token);
+    return notify_cancel(token);
+}
+
+static uint32_t pt_notify_get_state(int token, uint64_t *state64) {
+    uint32_t st = notify_get_state(token, state64);
+    if (st == NOTIFY_STATUS_OK && state64 != NULL &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_is_thermal_notify_token(token)) {
+        *state64 = 0ULL;
+    }
+    return st;
+}
+
 static long pt_sysconf(int name) {
     if (pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
@@ -6746,6 +7481,14 @@ static void pt_sanitize_task_audit_token_buf(audit_token_t *tok, size_t out_byte
     }
 }
 
+static void pt_sanitize_task_security_token_buf(security_token_t *tok, size_t out_bytes) {
+    if (tok != NULL && out_bytes >= sizeof(security_token_t)) {
+        if (tok->val[1] == 20U) {
+            tok->val[1] = 501U;
+        }
+    }
+}
+
 static kern_return_t pt_task_info(task_name_t target_task,
                                   task_flavor_t flavor,
                                   task_info_t task_info_out,
@@ -6761,10 +7504,12 @@ static kern_return_t pt_task_info(task_name_t target_task,
     }
 
     size_t out_bytes = (size_t)(*task_info_outCnt) * sizeof(natural_t);
-    if (flavor == TASK_VM_INFO) {
+    if (flavor == TASK_VM_INFO || flavor == TASK_VM_INFO_PURGEABLE) {
         pt_sanitize_task_vm_info_buf((task_vm_info_data_t *)task_info_out, out_bytes);
     } else if (flavor == TASK_AUDIT_TOKEN) {
         pt_sanitize_task_audit_token_buf((audit_token_t *)task_info_out, out_bytes);
+    } else if (flavor == TASK_SECURITY_TOKEN) {
+        pt_sanitize_task_security_token_buf((security_token_t *)task_info_out, out_bytes);
     } else if (flavor == TASK_DYLD_INFO && out_bytes >= sizeof(task_dyld_info_data_t)) {
         task_dyld_info_data_t *dyld_info = (task_dyld_info_data_t *)task_info_out;
         if (dyld_info->all_image_info_addr != 0 &&
@@ -7093,7 +7838,14 @@ static vm_prot_t pt_extract_vm_region_prot(vm_region_flavor_t flavor,
     }
 }
 
-static BOOL pt_is_hidden_unregistered_macho_region(uintptr_t addr, uintptr_t size, vm_prot_t prot) {
+#define PT_CPU_TYPE_APPLE_GPU ((cpu_type_t)0x01000013)
+
+static inline BOOL pt_is_sanitizable_macho_cputype(cpu_type_t ct) {
+    return (ct == CPU_TYPE_ARM64 || ct == PT_CPU_TYPE_APPLE_GPU);
+}
+
+__attribute__((visibility("hidden")))
+BOOL pt_is_hidden_unregistered_macho_region(uintptr_t addr, uintptr_t size, vm_prot_t prot) {
     if ((prot & (VM_PROT_READ | VM_PROT_EXECUTE)) != (VM_PROT_READ | VM_PROT_EXECUTE) ||
         addr == 0 ||
         size < sizeof(struct mach_header_64)) {
@@ -7126,7 +7878,14 @@ static void pt_sanitize_vm_read_buffer(uintptr_t read_start, uint8_t *dst, size_
         return;
     }
     pt_svc_restore_patched_bytes_in_buffer(read_start, dst, copied);
+    uintptr_t read_end = read_start + copied;
     const struct mach_header *mh = dyld_image_header_containing_address((const void *)read_start);
+    if (mh == NULL && copied > sizeof(struct mach_header_64)) {
+        uintptr_t next_page = (read_start + (uintptr_t)0x3FFFU) & ~(uintptr_t)0x3FFFU;
+        if (next_page > read_start && next_page < read_end) {
+            mh = dyld_image_header_containing_address((const void *)next_page);
+        }
+    }
     const struct mach_header_64 *mh64 = NULL;
     uintptr_t mh_base = 0;
     size_t real_hdr_total = 0;
@@ -7150,7 +7909,7 @@ static void pt_sanitize_vm_read_buffer(uintptr_t read_start, uint8_t *dst, size_
         if (copied >= sizeof(struct mach_header_64)) {
             memcpy(&hdr_copy, dst, sizeof(hdr_copy));
             if (hdr_copy.magic == MH_MAGIC_64 &&
-                hdr_copy.cputype == CPU_TYPE_ARM64 &&
+                pt_is_sanitizable_macho_cputype(hdr_copy.cputype) &&
                 hdr_copy.ncmds > 0 &&
                 hdr_copy.ncmds <= 4096U &&
                 hdr_copy.sizeofcmds > 0 &&
@@ -7158,25 +7917,55 @@ static void pt_sanitize_vm_read_buffer(uintptr_t read_start, uint8_t *dst, size_
                 cand_base = read_start;
             }
         }
+        if (cand_base == 0 && copied > sizeof(struct mach_header_64)) {
+            uintptr_t next_page = (read_start + (uintptr_t)0x3FFFU) & ~(uintptr_t)0x3FFFU;
+            if (next_page > read_start && next_page + sizeof(struct mach_header_64) <= read_end) {
+                memcpy(&hdr_copy, dst + (next_page - read_start), sizeof(hdr_copy));
+                if (hdr_copy.magic == MH_MAGIC_64 &&
+                    pt_is_sanitizable_macho_cputype(hdr_copy.cputype) &&
+                    hdr_copy.ncmds > 0 &&
+                    hdr_copy.ncmds <= 4096U &&
+                    hdr_copy.sizeofcmds > 0 &&
+                    hdr_copy.sizeofcmds <= (1U << 20)) {
+                    cand_base = next_page;
+                }
+            }
+        }
         if (cand_base == 0) {
-            uintptr_t page_base = read_start & ~(uintptr_t)0x3FFFU;
-            if (read_start > page_base && (read_start - page_base) <= 65536U) {
+            uintptr_t cur_page = read_start & ~(uintptr_t)0x3FFFU;
+            for (int p = 0; p < 4; p++) {
+                if (p > 0) {
+                    if (cur_page < (uintptr_t)0x4000U) {
+                        break;
+                    }
+                    cur_page -= (uintptr_t)0x4000U;
+                }
+                if (cur_page == read_start && copied >= sizeof(struct mach_header_64)) {
+                    continue;
+                }
+                if (read_start < cur_page || (read_start - cur_page) > 65536U) {
+                    break;
+                }
                 mach_vm_size_t hdr_out = 0;
                 kern_return_t hkr = pt_orig_mach_vm_read_overwrite(
                     mach_task_self(),
-                    (mach_vm_address_t)page_base,
+                    (mach_vm_address_t)cur_page,
                     sizeof(hdr_copy),
                     (mach_vm_address_t)(uintptr_t)&hdr_copy,
                     &hdr_out);
                 if (hkr == KERN_SUCCESS &&
                     hdr_out == sizeof(hdr_copy) &&
                     hdr_copy.magic == MH_MAGIC_64 &&
-                    hdr_copy.cputype == CPU_TYPE_ARM64 &&
+                    pt_is_sanitizable_macho_cputype(hdr_copy.cputype) &&
                     hdr_copy.ncmds > 0 &&
                     hdr_copy.ncmds <= 4096U &&
                     hdr_copy.sizeofcmds > 0 &&
                     hdr_copy.sizeofcmds <= (1U << 20)) {
-                    cand_base = page_base;
+                    size_t cand_total = sizeof(struct mach_header_64) + (size_t)hdr_copy.sizeofcmds;
+                    if (cur_page <= UINTPTR_MAX - cand_total && read_start < cur_page + cand_total) {
+                        cand_base = cur_page;
+                        break;
+                    }
                 }
             }
         }
@@ -7184,17 +7973,21 @@ static void pt_sanitize_vm_read_buffer(uintptr_t read_start, uint8_t *dst, size_
             return;
         }
         real_hdr_total = sizeof(struct mach_header_64) + (size_t)hdr_copy.sizeofcmds;
-        if (cand_base > UINTPTR_MAX - real_hdr_total ||
-            read_start < cand_base ||
-            read_start >= cand_base + real_hdr_total) {
+        if (cand_base > UINTPTR_MAX - real_hdr_total) {
+            return;
+        }
+        uintptr_t cand_end = cand_base + real_hdr_total;
+        uintptr_t ov_start = (read_start > cand_base) ? read_start : cand_base;
+        uintptr_t ov_end = (read_end < cand_end) ? read_end : cand_end;
+        if (ov_start >= ov_end) {
             return;
         }
         uint8_t *raw_hdr = (uint8_t *)malloc(real_hdr_total);
         uint8_t *san_hdr = (uint8_t *)malloc(real_hdr_total);
         if (raw_hdr != NULL && san_hdr != NULL) {
             const uint8_t *src_ptr = NULL;
-            if (cand_base == read_start && copied >= real_hdr_total) {
-                src_ptr = dst;
+            if (cand_base >= read_start && cand_end <= read_end) {
+                src_ptr = dst + (cand_base - read_start);
             } else {
                 mach_vm_size_t full_out = 0;
                 kern_return_t fkr = pt_orig_mach_vm_read_overwrite(
@@ -7212,12 +8005,10 @@ static void pt_sanitize_vm_read_buffer(uintptr_t read_start, uint8_t *dst, size_
                                                     san_hdr,
                                                     real_hdr_total,
                                                     NULL)) {
-                size_t rel_off = (size_t)(read_start - cand_base);
-                uintptr_t cand_end = cand_base + real_hdr_total;
-                uintptr_t read_end = read_start + copied;
-                uintptr_t ov_end = (read_end < cand_end) ? read_end : cand_end;
-                size_t ov_len = (size_t)(ov_end - read_start);
-                memcpy(dst, san_hdr + rel_off, ov_len);
+                size_t dst_off = (size_t)(ov_start - read_start);
+                size_t rel_off = (size_t)(ov_start - cand_base);
+                size_t ov_len = (size_t)(ov_end - ov_start);
+                memcpy(dst + dst_off, san_hdr + rel_off, ov_len);
             }
         }
         free(raw_hdr);
@@ -7226,11 +8017,12 @@ static void pt_sanitize_vm_read_buffer(uintptr_t read_start, uint8_t *dst, size_
     }
 
     uintptr_t mh_end = mh_base + real_hdr_total;
-    if (read_start >= mh_base && read_start < mh_end) {
-        uintptr_t read_end = read_start + copied;
-        uintptr_t ov_end = (read_end < mh_end) ? read_end : mh_end;
-        size_t rel_off = (size_t)(read_start - mh_base);
-        size_t ov_len = (size_t)(ov_end - read_start);
+    uintptr_t ov_start = (read_start > mh_base) ? read_start : mh_base;
+    uintptr_t ov_end = (read_end < mh_end) ? read_end : mh_end;
+    if (ov_start < ov_end) {
+        size_t dst_off = (size_t)(ov_start - read_start);
+        size_t rel_off = (size_t)(ov_start - mh_base);
+        size_t ov_len = (size_t)(ov_end - ov_start);
         BOOL handled_hdr = NO;
 
         if (mh == pt_get_main_executable_header()) {
@@ -7242,12 +8034,12 @@ static void pt_sanitize_vm_read_buffer(uintptr_t read_start, uint8_t *dst, size_
                     if (copy_len > backup_len - rel_off) {
                         copy_len = backup_len - rel_off;
                     }
-                    memcpy(dst, backup_hdr + rel_off, copy_len);
+                    memcpy(dst + dst_off, backup_hdr + rel_off, copy_len);
                     if (copy_len < ov_len) {
-                        memset(dst + copy_len, 0, ov_len - copy_len);
+                        memset(dst + dst_off + copy_len, 0, ov_len - copy_len);
                     }
                 } else {
-                    memset(dst, 0, ov_len);
+                    memset(dst + dst_off, 0, ov_len);
                 }
                 handled_hdr = YES;
             }
@@ -7263,7 +8055,7 @@ static void pt_sanitize_vm_read_buffer(uintptr_t read_start, uint8_t *dst, size_
             }
             if (work_buf != NULL &&
                 pt_build_sanitized_mach_header_copy(mh64, work_buf, real_hdr_total, NULL)) {
-                memcpy(dst, work_buf + rel_off, ov_len);
+                memcpy(dst + dst_off, work_buf + rel_off, ov_len);
             }
             free(heap_buf);
         }
@@ -7609,19 +8401,107 @@ intptr_t pt_syscall_dispatch_with_caller(int number,
             }
             return (intptr_t)pt_orig_kernel_sysctlbyname(name, namelen, oldp, oldlenp, newp, newlen);
         }
-        case 169: // SYS_csops
+        case 169: { // SYS_csops
+            pid_t pid = (pid_t)args[0];
+            unsigned int ops = (unsigned int)args[1];
+            void *useraddr = (void *)args[2];
+            size_t usersize = (size_t)args[3];
+            return (intptr_t)pt_csops_with_caller(pid, ops, useraddr, usersize, caller);
+        }
         case 170: { // SYS_csops_audittoken
             pid_t pid = (pid_t)args[0];
             unsigned int ops = (unsigned int)args[1];
             void *useraddr = (void *)args[2];
             size_t usersize = (size_t)args[3];
-            if (number == 169 || pid == 0 || pid == getpid()) {
-                return (intptr_t)pt_csops_with_caller(pid, ops, useraddr, usersize, caller);
+            audit_token_t *token = (audit_token_t *)(uintptr_t)args[4];
+            if (pid == 0 || pid == getpid()) {
+                return (intptr_t)pt_csops_audittoken_with_caller(pid, ops, useraddr, usersize, token, caller);
             }
             if (out_handled != NULL) {
                 *out_handled = NO;
             }
             return 0;
+        }
+        case 18:  // SYS_getfsstat
+        case 347: { // SYS_getfsstat64
+            return (intptr_t)pt_fs_getfsstat_with_caller(
+                (struct statfs *)(uintptr_t)args[0],
+                (int)args[1],
+                (int)args[2],
+                caller);
+        }
+        case 142: { // SYS_gethostuuid
+            return (intptr_t)pt_gethostuuid_with_caller(
+                (unsigned char *)(uintptr_t)args[0],
+                (const struct timespec *)(uintptr_t)args[1],
+                caller);
+        }
+        case 157: // SYS_statfs
+        case 345: { // SYS_statfs64
+            return (intptr_t)pt_fs_statfs_with_caller(
+                (const char *)(uintptr_t)args[0],
+                (struct statfs *)(uintptr_t)args[1],
+                caller);
+        }
+        case 158: // SYS_fstatfs
+        case 346: { // SYS_fstatfs64
+            return (intptr_t)pt_fs_fstatfs_with_caller(
+                (int)args[0],
+                (struct statfs *)(uintptr_t)args[1],
+                caller);
+        }
+        case 234: { // SYS_getxattr
+            return (intptr_t)pt_fs_getxattr_with_caller(
+                (const char *)(uintptr_t)args[0],
+                (const char *)(uintptr_t)args[1],
+                (void *)(uintptr_t)args[2],
+                (size_t)args[3],
+                (uint32_t)args[4],
+                (int)args[5],
+                caller);
+        }
+        case 235: { // SYS_fgetxattr
+            return (intptr_t)pt_fs_fgetxattr_with_caller(
+                (int)args[0],
+                (const char *)(uintptr_t)args[1],
+                (void *)(uintptr_t)args[2],
+                (size_t)args[3],
+                (uint32_t)args[4],
+                (int)args[5],
+                caller);
+        }
+        case 240: { // SYS_listxattr
+            return (intptr_t)pt_fs_listxattr_with_caller(
+                (const char *)(uintptr_t)args[0],
+                (char *)(uintptr_t)args[1],
+                (size_t)args[2],
+                (int)args[3],
+                caller);
+        }
+        case 241: { // SYS_flistxattr
+            return (intptr_t)pt_fs_flistxattr_with_caller(
+                (int)args[0],
+                (char *)(uintptr_t)args[1],
+                (size_t)args[2],
+                (int)args[3],
+                caller);
+        }
+        case 344: { // SYS_getdirentries64
+            return (intptr_t)pt_fs_getdirentries64_syscall_with_caller(
+                (int)args[0],
+                (void *)(uintptr_t)args[1],
+                (size_t)args[2],
+                (off_t *)(uintptr_t)args[3],
+                caller);
+        }
+        case 461: { // SYS_getattrlistbulk
+            return (intptr_t)pt_fs_getattrlistbulk_with_caller(
+                (int)args[0],
+                (void *)(uintptr_t)args[1],
+                (void *)(uintptr_t)args[2],
+                (size_t)args[3],
+                (uint64_t)args[4],
+                caller);
         }
         case 5: // SYS_open
         case 398: { // SYS_open_nocancel
@@ -7774,7 +8654,9 @@ intptr_t pt_syscall_dispatch_with_caller(int number,
             uint64_t arg = (uint64_t)args[3];
             void *buffer = (void *)args[4];
             int32_t buffersize = (int32_t)args[5];
-            if (callnum == 2) { // PROC_INFO_CALL_PIDINFO
+            if (callnum == 1) { // PROC_INFO_CALL_LISTPIDS
+                return (intptr_t)pt_fs_proc_listpids_syscall_with_caller((uint32_t)pid, (uint32_t)flavor, buffer, buffersize, caller);
+            } else if (callnum == 2) { // PROC_INFO_CALL_PIDINFO
                 return (intptr_t)pt_fs_proc_pidinfo_syscall_with_caller(pid, (int)flavor, arg, buffer, buffersize, caller);
             } else if (callnum == 3) { // PROC_INFO_CALL_PIDFDINFO
                 return (intptr_t)pt_fs_proc_pidfdinfo_syscall_with_caller(pid, (int)arg, (int)flavor, buffer, buffersize, caller);
@@ -8027,7 +8909,7 @@ static void pt_sanitize_mig_reply_if_needed(void *rcv_buf,
         pt_sanitize_host_basic_info_buf(&info_local, copy_bytes);
         memcpy(payload, &info_local, copy_bytes);
     } else if (reply_id == 3505 && target_is_self && req_id == 3405) {
-        if (req_flavor == TASK_VM_INFO) {
+        if (req_flavor == TASK_VM_INFO || req_flavor == TASK_VM_INFO_PURGEABLE) {
             task_vm_info_data_t vm_local;
             memset(&vm_local, 0, sizeof(vm_local));
             size_t copy_bytes = (payload_bytes < sizeof(vm_local)) ? payload_bytes : sizeof(vm_local);
@@ -8041,6 +8923,13 @@ static void pt_sanitize_mig_reply_if_needed(void *rcv_buf,
             memcpy(&tok_local, payload, copy_bytes);
             pt_sanitize_task_audit_token_buf(&tok_local, copy_bytes);
             memcpy(payload, &tok_local, copy_bytes);
+        } else if (req_flavor == TASK_SECURITY_TOKEN) {
+            security_token_t sec_local;
+            memset(&sec_local, 0, sizeof(sec_local));
+            size_t copy_bytes = (payload_bytes < sizeof(sec_local)) ? payload_bytes : sizeof(sec_local);
+            memcpy(&sec_local, payload, copy_bytes);
+            pt_sanitize_task_security_token_buf(&sec_local, copy_bytes);
+            memcpy(payload, &sec_local, copy_bytes);
         }
     }
 }
@@ -8288,6 +9177,36 @@ static kern_return_t pt_bootstrap_look_up2(mach_port_t bp,
     return PT_BOOTSTRAP_UNKNOWN_SERVICE;
 }
 
+static kern_return_t pt_bootstrap_look_up3(mach_port_t bp,
+                                           const char *service_name,
+                                           mach_port_t *sp,
+                                           pid_t target_pid,
+                                           const uuid_t instance_id,
+                                           uint64_t flags) {
+    if (service_name != NULL &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_is_hidden_macos_mach_service(service_name)) {
+        if (sp != NULL) {
+            *sp = MACH_PORT_NULL;
+        }
+        return PT_BOOTSTRAP_UNKNOWN_SERVICE;
+    }
+    typedef kern_return_t (*BootstrapLookUp3Fn)(mach_port_t, const char *, mach_port_t *, pid_t, const uuid_t, uint64_t);
+    static BootstrapLookUp3Fn s_orig = NULL;
+    static dispatch_once_t s_once;
+    dispatch_once(&s_once, ^{
+        s_orig = (BootstrapLookUp3Fn)dlsym(RTLD_NEXT, "bootstrap_look_up3");
+    });
+    if (s_orig != NULL) {
+        return s_orig(bp, service_name, sp, target_pid, instance_id, flags);
+    }
+    if (sp != NULL) {
+        *sp = MACH_PORT_NULL;
+    }
+    return PT_BOOTSTRAP_UNKNOWN_SERVICE;
+}
+
 static pid_t pt_responsibility_get_pid_responsible_for_pid(pid_t pid) {
     if (pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
@@ -8387,14 +9306,38 @@ void *pt_spoofer_dlsym_route(const char *symbol) {
     if (strcmp(symbol, "mach_vm_read") == 0) {
         return (void *)&pt_mach_vm_read;
     }
+    if (strcmp(symbol, "vm_read_overwrite") == 0) {
+        return (void *)&pt_vm_read_overwrite;
+    }
+    if (strcmp(symbol, "mach_vm_read_overwrite") == 0) {
+        return (void *)&pt_mach_vm_read_overwrite;
+    }
+    if (strcmp(symbol, "vm_region_64") == 0) {
+        return (void *)&pt_vm_region_64;
+    }
+    if (strcmp(symbol, "vm_region_recurse_64") == 0) {
+        return (void *)&pt_vm_region_recurse_64;
+    }
+    if (strcmp(symbol, "mach_vm_region") == 0) {
+        return (void *)&pt_mach_vm_region;
+    }
+    if (strcmp(symbol, "mach_vm_region_recurse") == 0) {
+        return (void *)&pt_mach_vm_region_recurse;
+    }
     if (strcmp(symbol, "IOIteratorNext") == 0) {
         return (void *)&pt_IOIteratorNext;
     }
     if (strcmp(symbol, "IOObjectGetClass") == 0) {
         return (void *)&pt_IOObjectGetClass;
     }
+    if (strcmp(symbol, "IOObjectConformsTo") == 0) {
+        return (void *)&pt_IOObjectConformsTo;
+    }
     if (strcmp(symbol, "IORegistryEntryGetName") == 0) {
         return (void *)&pt_IORegistryEntryGetName;
+    }
+    if (strcmp(symbol, "IORegistryEntryGetNameInPlane") == 0) {
+        return (void *)&pt_IORegistryEntryGetNameInPlane;
     }
     if (strcmp(symbol, "IORegistryEntryCreateCFProperty") == 0) {
         return (void *)&pt_IORegistryEntryCreateCFProperty;
@@ -8414,20 +9357,44 @@ void *pt_spoofer_dlsym_route(const char *symbol) {
     if (strcmp(symbol, "IOServiceGetMatchingServices") == 0) {
         return (void *)&pt_IOServiceGetMatchingServices;
     }
+    if (strcmp(symbol, "IOPSCopyPowerSourcesInfo") == 0) {
+        return (void *)&pt_IOPSCopyPowerSourcesInfo;
+    }
+    if (strcmp(symbol, "IOPSCopyPowerSourcesList") == 0) {
+        return (void *)&pt_IOPSCopyPowerSourcesList;
+    }
+    if (strcmp(symbol, "IOPSGetPowerSourceDescription") == 0) {
+        return (void *)&pt_IOPSGetPowerSourceDescription;
+    }
     if (strcmp(symbol, "sysctl") == 0) {
         return (void *)&pt_sysctl;
+    }
+    if (strcmp(symbol, "__sysctl") == 0) {
+        return (void *)&pt_kernel_sysctl;
     }
     if (strcmp(symbol, "sysctlbyname") == 0) {
         return (void *)&pt_sysctlbyname;
     }
+    if (strcmp(symbol, "__sysctlbyname") == 0) {
+        return (void *)&pt_kernel_sysctlbyname;
+    }
     if (strcmp(symbol, "sysctlnametomib") == 0) {
         return (void *)&pt_sysctlnametomib;
+    }
+    if (strcmp(symbol, "syscall") == 0) {
+        return (void *)&pt_syscall;
+    }
+    if (strcmp(symbol, "uname") == 0) {
+        return (void *)&pt_uname;
     }
     if (strcmp(symbol, "bootstrap_look_up") == 0) {
         return (void *)&pt_bootstrap_look_up;
     }
     if (strcmp(symbol, "bootstrap_look_up2") == 0) {
         return (void *)&pt_bootstrap_look_up2;
+    }
+    if (strcmp(symbol, "bootstrap_look_up3") == 0) {
+        return (void *)&pt_bootstrap_look_up3;
     }
     if (strcmp(symbol, "responsibility_get_pid_responsible_for_pid") == 0) {
         return (void *)&pt_responsibility_get_pid_responsible_for_pid;
@@ -8447,6 +9414,15 @@ void *pt_spoofer_dlsym_route(const char *symbol) {
     if (strcmp(symbol, "task_info") == 0) {
         return (void *)&pt_task_info;
     }
+    if (strcmp(symbol, "task_threads") == 0) {
+        return (void *)&pt_task_threads;
+    }
+    if (strcmp(symbol, "pthread_getname_np") == 0) {
+        return (void *)&pt_pthread_getname_np;
+    }
+    if (strcmp(symbol, "os_proc_available_memory") == 0) {
+        return (void *)&pt_os_proc_available_memory;
+    }
     if (strcmp(symbol, "mach_msg") == 0) {
         return (void *)&pt_mach_msg;
     }
@@ -8459,6 +9435,33 @@ void *pt_spoofer_dlsym_route(const char *symbol) {
         }
         return NULL;
     }
+    if (strcmp(symbol, "getenv") == 0) {
+        return (void *)&pt_getenv;
+    }
+    if (strcmp(symbol, "_NSGetEnviron") == 0) {
+        return (void *)&pt_NSGetEnviron;
+    }
+    if (strcmp(symbol, "_NSGetArgv") == 0) {
+        return (void *)&pt_NSGetArgv;
+    }
+    if (strcmp(symbol, "_NSGetArgc") == 0) {
+        return (void *)&pt_NSGetArgc;
+    }
+    if (strcmp(symbol, "_NSGetProgname") == 0) {
+        return (void *)&pt_NSGetProgname;
+    }
+    if (strcmp(symbol, "getprogname") == 0) {
+        return (void *)&pt_getprogname;
+    }
+    if (strcmp(symbol, "gethostname") == 0) {
+        return (void *)&pt_gethostname;
+    }
+    if (strcmp(symbol, "getppid") == 0) {
+        return (void *)&pt_getppid;
+    }
+    if (strcmp(symbol, "isatty") == 0) {
+        return (void *)&pt_isatty;
+    }
     if (strcmp(symbol, "getgid") == 0) {
         return (void *)&pt_getgid;
     }
@@ -8467,6 +9470,120 @@ void *pt_spoofer_dlsym_route(const char *symbol) {
     }
     if (strcmp(symbol, "getgroups") == 0) {
         return (void *)&pt_getgroups;
+    }
+    if (strcmp(symbol, "getgrouplist") == 0) {
+        return (void *)&pt_getgrouplist;
+    }
+    if (strcmp(symbol, "getgrgid") == 0) {
+        return (void *)&pt_getgrgid;
+    }
+    if (strcmp(symbol, "getgrgid_r") == 0) {
+        return (void *)&pt_getgrgid_r;
+    }
+    if (strcmp(symbol, "getgrnam") == 0) {
+        return (void *)&pt_getgrnam;
+    }
+    if (strcmp(symbol, "getgrnam_r") == 0) {
+        return (void *)&pt_getgrnam_r;
+    }
+    if (strcmp(symbol, "getpwuid") == 0) {
+        return (void *)&pt_getpwuid;
+    }
+    if (strcmp(symbol, "getpwuid_r") == 0) {
+        return (void *)&pt_getpwuid_r;
+    }
+    if (strcmp(symbol, "getpwnam") == 0) {
+        return (void *)&pt_getpwnam;
+    }
+    if (strcmp(symbol, "getpwnam_r") == 0) {
+        return (void *)&pt_getpwnam_r;
+    }
+    if (strcmp(symbol, "getlogin") == 0) {
+        return (void *)&pt_getlogin;
+    }
+    if (strcmp(symbol, "getlogin_r") == 0) {
+        return (void *)&pt_getlogin_r;
+    }
+    if (strcmp(symbol, "user_from_uid") == 0) {
+        return (void *)&pt_user_from_uid;
+    }
+    if (strcmp(symbol, "getutxent") == 0) {
+        return (void *)&pt_getutxent;
+    }
+    if (strcmp(symbol, "getutxid") == 0) {
+        return (void *)&pt_getutxid;
+    }
+    if (strcmp(symbol, "getutxline") == 0) {
+        return (void *)&pt_getutxline;
+    }
+    if (strcmp(symbol, "gethostuuid") == 0) {
+        return (void *)&pt_gethostuuid;
+    }
+    if (strcmp(symbol, "sysconf") == 0) {
+        return (void *)&pt_sysconf;
+    }
+    if (strcmp(symbol, "confstr") == 0) {
+        return (void *)&pt_confstr;
+    }
+    if (strcmp(symbol, "notify_register_check") == 0) {
+        return (void *)&pt_notify_register_check;
+    }
+    if (strcmp(symbol, "notify_register_dispatch") == 0) {
+        return (void *)&pt_notify_register_dispatch;
+    }
+    if (strcmp(symbol, "notify_cancel") == 0) {
+        return (void *)&pt_notify_cancel;
+    }
+    if (strcmp(symbol, "notify_get_state") == 0) {
+        return (void *)&pt_notify_get_state;
+    }
+    if (strcmp(symbol, "CFPreferencesCopyAppValue") == 0) {
+        return (void *)&pt_CFPreferencesCopyAppValue;
+    }
+    if (strcmp(symbol, "CFPreferencesCopyMultiple") == 0) {
+        return (void *)&pt_CFPreferencesCopyMultiple;
+    }
+    if (strcmp(symbol, "CFPropertyListCreateWithData") == 0) {
+        return (void *)&pt_CFPropertyListCreateWithData;
+    }
+    if (strcmp(symbol, "_CFCopySystemVersionDictionary") == 0) {
+        return (void *)&pt_CFCopySystemVersionDictionary;
+    }
+    if (strcmp(symbol, "MGCopyAnswer") == 0) {
+        return (void *)&pt_MGCopyAnswer;
+    }
+    if (strcmp(symbol, "MGCopyMultipleAnswers") == 0) {
+        return (void *)&pt_MGCopyMultipleAnswers;
+    }
+    if (strcmp(symbol, "MGGetBoolAnswer") == 0) {
+        return (void *)&pt_MGGetBoolAnswer;
+    }
+    if (strcmp(symbol, "MGGetSInt32Answer") == 0) {
+        return (void *)&pt_MGGetSInt32Answer;
+    }
+    if (strcmp(symbol, "MGGetStringAnswer") == 0) {
+        return (void *)&pt_MGGetStringAnswer;
+    }
+    if (strcmp(symbol, "MGGetProductType") == 0) {
+        return (void *)&pt_MGGetProductType;
+    }
+    if (strcmp(symbol, "fork") == 0) {
+        return (void *)&pt_fork;
+    }
+    if (strcmp(symbol, "vfork") == 0) {
+        return (void *)&pt_vfork;
+    }
+    if (strcmp(symbol, "popen") == 0) {
+        return (void *)&pt_popen;
+    }
+    if (strcmp(symbol, "posix_spawn") == 0) {
+        return (void *)&pt_posix_spawn;
+    }
+    if (strcmp(symbol, "posix_spawnp") == 0) {
+        return (void *)&pt_posix_spawnp;
+    }
+    if (strcmp(symbol, "system") == 0) {
+        return (void *)&pt_system;
     }
     return NULL;
 }
@@ -8587,6 +9704,23 @@ DYLD_INTERPOSE(pt_task_info, task_info)
 DYLD_INTERPOSE(pt_task_threads, task_threads)
 DYLD_INTERPOSE(pt_pthread_getname_np, pthread_getname_np)
 DYLD_INTERPOSE(pt_IORegistryEntryGetName, IORegistryEntryGetName)
+DYLD_INTERPOSE(pt_IORegistryEntryGetNameInPlane, IORegistryEntryGetNameInPlane)
+DYLD_INTERPOSE(pt_IOObjectConformsTo, IOObjectConformsTo)
+DYLD_INTERPOSE(pt_CFPreferencesCopyAppValue, CFPreferencesCopyAppValue)
+DYLD_INTERPOSE(pt_CFPreferencesCopyMultiple, CFPreferencesCopyMultiple)
+DYLD_INTERPOSE(pt_getgrgid, getgrgid)
+DYLD_INTERPOSE(pt_getgrgid_r, getgrgid_r)
+DYLD_INTERPOSE(pt_getgrnam, getgrnam)
+DYLD_INTERPOSE(pt_getgrnam_r, getgrnam_r)
+DYLD_INTERPOSE(pt_getgrouplist, pt_orig_getgrouplist)
+DYLD_INTERPOSE(pt_getutxent, pt_orig_getutxent)
+DYLD_INTERPOSE(pt_getutxid, pt_orig_getutxid)
+DYLD_INTERPOSE(pt_getutxline, pt_orig_getutxline)
+DYLD_INTERPOSE(pt_gethostuuid, pt_orig_gethostuuid)
+DYLD_INTERPOSE(pt_notify_register_check, notify_register_check)
+DYLD_INTERPOSE(pt_notify_register_dispatch, notify_register_dispatch)
+DYLD_INTERPOSE(pt_notify_cancel, notify_cancel)
+DYLD_INTERPOSE(pt_notify_get_state, notify_get_state)
 DYLD_INTERPOSE(pt_mach_msg, mach_msg)
 DYLD_INTERPOSE(pt_mach_msg_overwrite, mach_msg_overwrite)
 DYLD_INTERPOSE(pt_bootstrap_look_up, bootstrap_look_up)

@@ -7,7 +7,9 @@
 #include <ctype.h>
 #include <ifaddrs.h>
 #include <net/if.h>
+#include <net/if_media.h>
 #include <sys/ioctl.h>
+#include <time.h>
 
 
 typedef NS_ENUM(NSInteger, PSNetRuleAction) {
@@ -2247,25 +2249,124 @@ typedef struct {
 static os_unfair_lock s_ifaddrs_lock = OS_UNFAIR_LOCK_INIT;
 static pt_ifaddrs_head_entry_t s_ifaddrs_head_map[PT_IFADDRS_HEAD_MAP_CAP];
 
+#define PT_NET_IF_INACTIVE_CACHE_CAP 16U
+
+typedef struct {
+    char name[IFNAMSIZ];
+    BOOL inactive;
+    uint64_t ts_ns;
+} pt_net_if_inactive_cache_entry_t;
+
+static os_unfair_lock s_net_if_inactive_lock = OS_UNFAIR_LOCK_INIT;
+static pt_net_if_inactive_cache_entry_t s_net_if_inactive_cache[PT_NET_IF_INACTIVE_CACHE_CAP];
+
+static uint64_t pt_net_monotonic_ns(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC_RAW, &ts) == 0) {
+        return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+    }
+    return 0;
+}
+
 static BOOL pt_network_ifname_is_inactive(const char *name) {
     if (name == NULL || name[0] == '\0') {
         return NO;
     }
+    int saved_errno = errno;
+    uint64_t now_ns = pt_net_monotonic_ns();
+    if (now_ns != 0) {
+        os_unfair_lock_lock(&s_net_if_inactive_lock);
+        for (size_t i = 0; i < PT_NET_IF_INACTIVE_CACHE_CAP; i++) {
+            if (s_net_if_inactive_cache[i].name[0] != '\0' &&
+                strcmp(s_net_if_inactive_cache[i].name, name) == 0 &&
+                now_ns >= s_net_if_inactive_cache[i].ts_ns &&
+                (now_ns - s_net_if_inactive_cache[i].ts_ns) < 1000000000ULL) {
+                BOOL cached = s_net_if_inactive_cache[i].inactive;
+                os_unfair_lock_unlock(&s_net_if_inactive_lock);
+                errno = saved_errno;
+                return cached;
+            }
+        }
+        os_unfair_lock_unlock(&s_net_if_inactive_lock);
+    }
+
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) {
+        errno = saved_errno;
         return NO;
     }
     struct ifreq ifr;
     memset(&ifr, 0, sizeof(ifr));
     strlcpy(ifr.ifr_name, name, sizeof(ifr.ifr_name));
     BOOL inactive = NO;
+    BOOL media_active = NO;
     if (ioctl(fd, SIOCGIFFLAGS, &ifr) == 0) {
         short needed = (short)(IFF_UP | IFF_RUNNING);
         if ((ifr.ifr_flags & needed) != needed) {
             inactive = YES;
         }
     }
+#ifdef SIOCGIFMEDIA
+    if (!inactive) {
+        struct ifmediareq ifmr;
+        memset(&ifmr, 0, sizeof(ifmr));
+        strlcpy(ifmr.ifm_name, name, sizeof(ifmr.ifm_name));
+        if (ioctl(fd, SIOCGIFMEDIA, &ifmr) == 0 && (ifmr.ifm_status & IFM_AVALID) != 0) {
+            if ((ifmr.ifm_status & IFM_ACTIVE) == 0) {
+                inactive = YES;
+            } else {
+                media_active = YES;
+            }
+        }
+    }
+#endif
+    if (!inactive && !media_active) {
+        struct ifreq aifr;
+        memset(&aifr, 0, sizeof(aifr));
+        strlcpy(aifr.ifr_name, name, sizeof(aifr.ifr_name));
+        BOOL has_routable_v4 = NO;
+        if (ioctl(fd, SIOCGIFADDR, &aifr) == 0 && aifr.ifr_addr.sa_family == AF_INET) {
+            const struct sockaddr_in *sin = (const struct sockaddr_in *)&aifr.ifr_addr;
+            uint32_t ip = ntohl(sin->sin_addr.s_addr);
+            if (ip != 0U && (ip & 0xFFFF0000U) != 0xA9FE0000U) {
+                has_routable_v4 = YES;
+            }
+        }
+        if (!has_routable_v4) {
+            inactive = YES;
+        }
+    }
     close(fd);
+
+    if (now_ns != 0) {
+        os_unfair_lock_lock(&s_net_if_inactive_lock);
+        size_t slot = PT_NET_IF_INACTIVE_CACHE_CAP;
+        uint64_t oldest_ts = UINT64_MAX;
+        size_t oldest_slot = 0;
+        for (size_t i = 0; i < PT_NET_IF_INACTIVE_CACHE_CAP; i++) {
+            if (s_net_if_inactive_cache[i].name[0] != '\0' &&
+                strcmp(s_net_if_inactive_cache[i].name, name) == 0) {
+                slot = i;
+                break;
+            }
+            if (s_net_if_inactive_cache[i].name[0] == '\0' && slot == PT_NET_IF_INACTIVE_CACHE_CAP) {
+                slot = i;
+            }
+            if (s_net_if_inactive_cache[i].ts_ns < oldest_ts) {
+                oldest_ts = s_net_if_inactive_cache[i].ts_ns;
+                oldest_slot = i;
+            }
+        }
+        if (slot == PT_NET_IF_INACTIVE_CACHE_CAP) {
+            slot = oldest_slot;
+        }
+        strlcpy(s_net_if_inactive_cache[slot].name, name, sizeof(s_net_if_inactive_cache[slot].name));
+        s_net_if_inactive_cache[slot].inactive = inactive;
+        s_net_if_inactive_cache[slot].ts_ns = now_ns;
+        os_unfair_lock_unlock(&s_net_if_inactive_lock);
+    }
+
+    errno = saved_errno;
     return inactive;
 }
 
@@ -2281,7 +2382,7 @@ BOOL pt_is_hidden_network_ifname(const char *name) {
         return YES;
     }
     if (name[0] == 'e' && name[1] == 'n' &&
-        name[2] >= '1' && name[2] <= '4' && name[3] == '\0') {
+        name[2] >= '1' && name[2] <= '9' && name[3] == '\0') {
         return pt_network_ifname_is_inactive(name);
     }
     return NO;
@@ -2524,6 +2625,12 @@ void *pt_network_dlsym_route(const char *symbol) {
     if (symbol == NULL) {
         return NULL;
     }
+    if (strcmp(symbol, "getifaddrs") == 0) {
+        return (void *)&pt_getifaddrs;
+    }
+    if (strcmp(symbol, "freeifaddrs") == 0) {
+        return (void *)&pt_freeifaddrs;
+    }
     if (strcmp(symbol, "if_nameindex") == 0) {
         return (void *)&pt_if_nameindex;
     }
@@ -2541,6 +2648,36 @@ void *pt_network_dlsym_route(const char *symbol) {
     }
     if (strcmp(symbol, "dup2") == 0) {
         return (void *)&pt_dup2;
+    }
+    if (strcmp(symbol, "getaddrinfo") == 0) {
+        return (void *)&pt_getaddrinfo;
+    }
+    if (strcmp(symbol, "gethostbyname") == 0) {
+        return (void *)&pt_gethostbyname;
+    }
+    if (strcmp(symbol, "gethostbyname2") == 0) {
+        return (void *)&pt_gethostbyname2;
+    }
+    if (strcmp(symbol, "DNSServiceGetAddrInfo") == 0) {
+        return (void *)&pt_DNSServiceGetAddrInfo;
+    }
+    if (strcmp(symbol, "bind") == 0) {
+        return (void *)&pt_bind;
+    }
+    if (strcmp(symbol, "connect") == 0) {
+        return (void *)&pt_connect;
+    }
+    if (strcmp(symbol, "accept") == 0) {
+        return (void *)&pt_accept;
+    }
+    if (strcmp(symbol, "sendto") == 0) {
+        return (void *)&pt_sendto;
+    }
+    if (strcmp(symbol, "getsockname") == 0) {
+        return (void *)&pt_getsockname;
+    }
+    if (strcmp(symbol, "getpeername") == 0) {
+        return (void *)&pt_getpeername;
     }
     return NULL;
 }

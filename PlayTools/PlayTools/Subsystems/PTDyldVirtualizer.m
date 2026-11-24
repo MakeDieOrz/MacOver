@@ -72,7 +72,13 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_class(const char *n
                 PT_HAS_PREFIX_LIT(name, "NSRunningApplication") ||
                 PT_HAS_PREFIX_LIT(name, "NSScreen") ||
                 PT_HAS_PREFIX_LIT(name, "NSEvent") ||
-                PT_HAS_PREFIX_LIT(name, "NSPasteboard")) {
+                PT_HAS_PREFIX_LIT(name, "NSPasteboard") ||
+                PT_HAS_PREFIX_LIT(name, "NSCursor") ||
+                PT_HAS_PREFIX_LIT(name, "NSStatusBar") ||
+                PT_HAS_PREFIX_LIT(name, "NSDockTile") ||
+                PT_HAS_PREFIX_LIT(name, "NSOpenPanel") ||
+                PT_HAS_PREFIX_LIT(name, "NSSavePanel") ||
+                PT_HAS_PREFIX_LIT(name, "NSTouchBar")) {
                 return YES;
             }
             break;
@@ -112,7 +118,24 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_class(const char *n
                 if (strcmp(name, "GCMouse") == 0 ||
                     strcmp(name, "GCMouseInput") == 0 ||
                     strcmp(name, "GCKeyboard") == 0 ||
-                    strcmp(name, "GCKeyboardInput") == 0) {
+                    strcmp(name, "GCKeyboardInput") == 0 ||
+                    strcmp(name, "GCDevice") == 0 ||
+                    strcmp(name, "GCPhysicalInputProfile") == 0 ||
+                    strcmp(name, "GCHapticsLocality") == 0) {
+                    return YES;
+                }
+                break;
+            case 'N':
+                if (strcmp(name, "NSAttributedStringMarkdownParsingOptions") == 0 ||
+                    strcmp(name, "NSInflectionRule") == 0 ||
+                    strcmp(name, "NSMorphology") == 0) {
+                    return YES;
+                }
+                break;
+            case 'O':
+                if (strcmp(name, "OSLogStore") == 0 ||
+                    strcmp(name, "OSLogEntry") == 0 ||
+                    strcmp(name, "OSLogEntryLog") == 0) {
                     return YES;
                 }
                 break;
@@ -128,7 +151,17 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_class(const char *n
                 break;
             case 'U':
                 if (strcmp(name, "UIColorWell") == 0 ||
-                    strcmp(name, "UIColorPickerViewController") == 0) {
+                    strcmp(name, "UIColorPickerViewController") == 0 ||
+                    strcmp(name, "UIListContentConfiguration") == 0 ||
+                    strcmp(name, "UIBackgroundConfiguration") == 0 ||
+                    strcmp(name, "UICollectionLayoutListConfiguration") == 0 ||
+                    strcmp(name, "UICollectionViewCellRegistration") == 0 ||
+                    strcmp(name, "UIDeferredMenuElement") == 0 ||
+                    strcmp(name, "UISheetPresentationController") == 0 ||
+                    strcmp(name, "UICalendarView") == 0 ||
+                    strcmp(name, "UIPasteControl") == 0 ||
+                    strcmp(name, "UIHoverStyle") == 0 ||
+                    strcmp(name, "UTType") == 0) {
                     return YES;
                 }
                 break;
@@ -174,8 +207,21 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_protocol_name(const
         PT_HAS_PREFIX_LIT(name, "PlayCover") ||
         PT_HAS_PREFIX_LIT(name, "MacOver") ||
         PT_HAS_PREFIX_LIT(name, "PlayShadow") ||
-        PT_HAS_PREFIX_LIT(name, "AKInterface")) {
+        PT_HAS_PREFIX_LIT(name, "AKInterface") ||
+        PT_HAS_PREFIX_LIT(name, "UINS") ||
+        strcmp(name, "NSApplicationDelegate") == 0 ||
+        strcmp(name, "NSWindowDelegate") == 0 ||
+        strcmp(name, "NSMenuDelegate") == 0 ||
+        strcmp(name, "NSToolbarDelegate") == 0) {
         return YES;
+    }
+    if (pt_is_compat13_7_active()) {
+        if (strcmp(name, "PHPickerViewControllerDelegate") == 0 ||
+            strcmp(name, "UIColorPickerViewControllerDelegate") == 0 ||
+            strcmp(name, "SKOverlayDelegate") == 0 ||
+            strcmp(name, "WKScriptMessageHandlerWithReply") == 0) {
+            return YES;
+        }
     }
     if (strstr(name, "PlayTools") != NULL ||
         strstr(name, "AKInterface") != NULL) {
@@ -678,6 +724,10 @@ extern const char *dyld_shared_cache_file_path(void) __attribute__((weak_import)
 static const char *pt_dyld_shared_cache_file_path(void) {
     if (pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        const char *model = pt_get_device_model_cstr();
+        if (model != NULL && strcmp(model, "iPad6,7") == 0) {
+            return "/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64";
+        }
         return "/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64e";
     }
     return (dyld_shared_cache_file_path != NULL) ? dyld_shared_cache_file_path() : NULL;
@@ -699,11 +749,18 @@ static BOOL pt_path_is_post13_7_framework(const char *path) {
             strstr(path, "/AppIntents.framework") != NULL ||
             strstr(path, "/AppTrackingTransparency.framework") != NULL ||
             strstr(path, "/UniformTypeIdentifiers.framework") != NULL ||
+            strstr(path, "/Observation.framework") != NULL ||
+            strstr(path, "/SwiftData.framework") != NULL ||
+            strstr(path, "/ActivityKit.framework") != NULL ||
+            strstr(path, "/GroupActivities.framework") != NULL ||
+            strstr(path, "/NearbyInteraction.framework") != NULL ||
+            strstr(path, "/Charts.framework") != NULL ||
+            strstr(path, "/OSLog.framework") != NULL ||
             strstr(path, "libswift_Concurrency.dylib") != NULL ||
             strstr(path, "libswift_StringProcessing.dylib") != NULL);
 }
 
-static BOOL pt_is_post13_7_hidden_framework_path(const char *path) {
+__attribute__((visibility("hidden"))) BOOL pt_is_post13_7_hidden_framework_path(const char *path) {
     if (path == NULL || path[0] == '\0' || !pt_is_compat13_7_active()) {
         return NO;
     }
@@ -896,7 +953,20 @@ static BOOL pt_should_hide_resolved_objc_class_with_image(const char *name, Clas
                 pt_match_prefix_modulo_private(img, s_real_app_bundle_dir, s_real_app_bundle_len) != NULL) {
                 return NO;
             }
-            if (strcmp(name, "NSTask") == 0 || strcmp(name, "NSConcreteTask") == 0) {
+            if (strcmp(name, "NSTask") == 0 ||
+                strcmp(name, "NSConcreteTask") == 0 ||
+                PT_HAS_PREFIX_LIT(name, "NSCursor") ||
+                PT_HAS_PREFIX_LIT(name, "NSStatusBar") ||
+                PT_HAS_PREFIX_LIT(name, "NSDockTile") ||
+                PT_HAS_PREFIX_LIT(name, "NSOpenPanel") ||
+                PT_HAS_PREFIX_LIT(name, "NSSavePanel") ||
+                PT_HAS_PREFIX_LIT(name, "NSTouchBar")) {
+                return YES;
+            }
+            if (pt_is_compat13_7_active() &&
+                (strcmp(name, "NSAttributedStringMarkdownParsingOptions") == 0 ||
+                 strcmp(name, "NSInflectionRule") == 0 ||
+                 strcmp(name, "NSMorphology") == 0)) {
                 return YES;
             }
             return (pt_is_hidden_dyld_image_name(img) ||
@@ -1091,6 +1161,25 @@ static Protocol *pt_objc_getProtocol(const char *name) {
     return objc_getProtocol(name);
 }
 
+extern Protocol *pt_orig_NSProtocolFromString(NSString *namestr) __asm__("_NSProtocolFromString");
+
+static Protocol *pt_NSProtocolFromString(NSString *namestr) {
+    if (namestr != nil && pt_is_bypass_enabled()) {
+        char buf[256];
+        const char *cstr = CFStringGetCStringPtr((__bridge CFStringRef)namestr, kCFStringEncodingUTF8);
+        if (cstr == NULL &&
+            CFStringGetCString((__bridge CFStringRef)namestr, buf, sizeof(buf), kCFStringEncodingUTF8)) {
+            cstr = buf;
+        }
+        if (cstr != NULL &&
+            pt_is_hidden_objc_protocol_name(cstr) &&
+            !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+            return nil;
+        }
+    }
+    return pt_orig_NSProtocolFromString(namestr);
+}
+
 static Protocol * __unsafe_unretained *pt_objc_copyProtocolList(unsigned int *outCount) {
     unsigned int count = 0;
     Protocol * __unsafe_unretained *protos = objc_copyProtocolList(&count);
@@ -1115,6 +1204,56 @@ static Protocol * __unsafe_unretained *pt_objc_copyProtocolList(unsigned int *ou
         *outCount = count;
     }
     return protos;
+}
+
+static inline uint64_t pt_fnv1a_cstr(const char *s) {
+    uint64_t h = 14695981039346656037ULL;
+    const unsigned char *p = (const unsigned char *)s;
+    while (*p != '\0') {
+        h ^= (uint64_t)(*p++);
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static void pt_append_unique_cand_path(const char **cands, size_t *cand_count, size_t max_cands, const char *path) {
+    if (path == NULL || path[0] == '\0' || *cand_count >= max_cands) {
+        return;
+    }
+    for (size_t i = 0; i < *cand_count; i++) {
+        if (strcmp(cands[i], path) == 0) {
+            return;
+        }
+    }
+    cands[(*cand_count)++] = path;
+}
+
+static unsigned int pt_filter_class_names_in_place(const char **names, unsigned int count) {
+    unsigned int writeIdx = 0;
+    BOOL compat13 = pt_is_compat13_7_active();
+    for (unsigned int i = 0; i < count; i++) {
+        if (names[i] != NULL) {
+            if (pt_is_hidden_objc_class(names[i])) {
+                if (names[i][0] == 'N' && names[i][1] == 'S') {
+                    const void *cls = pt_orig_objc_lookUpClass(names[i]);
+                    if (cls != NULL && !pt_should_hide_resolved_objc_class(names[i], (__bridge Class)cls)) {
+                        names[writeIdx++] = names[i];
+                        continue;
+                    }
+                }
+                continue;
+            }
+            if (compat13) {
+                const void *cls = pt_orig_objc_lookUpClass(names[i]);
+                if (cls != NULL && pt_is_hidden_post13_7_class((__bridge Class)cls)) {
+                    continue;
+                }
+            }
+        }
+        names[writeIdx++] = names[i];
+    }
+    names[writeIdx] = NULL;
+    return writeIdx;
 }
 
 static const char **pt_objc_copyClassNamesForImage(const char *image, unsigned int *outCount) {
@@ -1148,38 +1287,53 @@ static const char **pt_objc_copyClassNamesForImage(const char *image, unsigned i
             }
             return NULL;
         }
-        const char *cand_paths[4] = { image, NULL, NULL, NULL };
+        const char *cand_paths[6] = { NULL, NULL, NULL, NULL, NULL, NULL };
         char ver_path[PATH_MAX];
         char ios_ver_path[PATH_MAX];
         char ios_path[PATH_MAX];
-        size_t cand_count = 1;
-        if (strncmp(image, "/System/", 8) == 0) {
-            const char *fw = strstr(image, ".framework/");
+        char stripped_ver_path[PATH_MAX];
+        size_t cand_count = 0;
+        pt_append_unique_cand_path(cand_paths, &cand_count, 6, image);
+
+        // Derive canonical non-/System/iOSSupport base path so both macOS & Catalyst slices are queried.
+        const char *canon = image;
+        if (strncmp(image, "/System/iOSSupport/", 19) == 0) {
+            canon = image + 18;
+            pt_append_unique_cand_path(cand_paths, &cand_count, 6, canon);
+        }
+        if (strncmp(canon, "/System/", 8) == 0) {
+            const char *fw = strstr(canon, ".framework/");
             if (fw != NULL && strstr(fw, ".framework/Versions/") == NULL) {
-                size_t prefix_len = (size_t)(fw + 10 - image);
+                size_t prefix_len = (size_t)(fw + 10 - canon);
                 int vn = snprintf(ver_path, sizeof(ver_path), "%.*s/Versions/A%s",
-                                  (int)prefix_len, image, fw + 10);
+                                  (int)prefix_len, canon, fw + 10);
                 if (vn > 0 && (size_t)vn < sizeof(ver_path)) {
-                    cand_paths[cand_count++] = ver_path;
-                    if (strncmp(ver_path, "/System/iOSSupport/", 19) != 0) {
-                        int ivn = snprintf(ios_ver_path, sizeof(ios_ver_path),
-                                           "/System/iOSSupport%s", ver_path);
-                        if (ivn > 0 && (size_t)ivn < sizeof(ios_ver_path)) {
-                            cand_paths[cand_count++] = ios_ver_path;
-                        }
+                    pt_append_unique_cand_path(cand_paths, &cand_count, 6, ver_path);
+                    int ivn = snprintf(ios_ver_path, sizeof(ios_ver_path),
+                                       "/System/iOSSupport%s", ver_path);
+                    if (ivn > 0 && (size_t)ivn < sizeof(ios_ver_path)) {
+                        pt_append_unique_cand_path(cand_paths, &cand_count, 6, ios_ver_path);
+                    }
+                }
+            } else if (fw != NULL) {
+                const char *ver_a = strstr(fw, ".framework/Versions/A/");
+                if (ver_a != NULL) {
+                    size_t prefix_len = (size_t)(ver_a + 10 - canon);
+                    int sn = snprintf(stripped_ver_path, sizeof(stripped_ver_path), "%.*s%s",
+                                      (int)prefix_len, canon, ver_a + 21);
+                    if (sn > 0 && (size_t)sn < sizeof(stripped_ver_path)) {
+                        pt_append_unique_cand_path(cand_paths, &cand_count, 6, stripped_ver_path);
                     }
                 }
             }
-            if (strncmp(image, "/System/iOSSupport/", 19) != 0) {
-                int isn = snprintf(ios_path, sizeof(ios_path), "/System/iOSSupport%s", image);
-                if (isn > 0 && (size_t)isn < sizeof(ios_path)) {
-                    cand_paths[cand_count++] = ios_path;
-                }
+            int isn = snprintf(ios_path, sizeof(ios_path), "/System/iOSSupport%s", canon);
+            if (isn > 0 && (size_t)isn < sizeof(ios_path)) {
+                pt_append_unique_cand_path(cand_paths, &cand_count, 6, ios_path);
             }
         }
 
-        const char **arrays[4] = { NULL, NULL, NULL, NULL };
-        unsigned int counts[4] = { 0, 0, 0, 0 };
+        const char **arrays[6] = { NULL, NULL, NULL, NULL, NULL, NULL };
+        unsigned int counts[6] = { 0, 0, 0, 0, 0, 0 };
         size_t total_raw = 0;
         size_t non_null_arrays = 0;
         size_t first_idx = 0;
@@ -1206,6 +1360,12 @@ static const char **pt_objc_copyClassNamesForImage(const char *image, unsigned i
         } else if (non_null_arrays > 1) {
             names = (const char **)malloc((total_raw + 1U) * sizeof(const char *));
             if (names != NULL) {
+                size_t ht_cap = 64U;
+                while (ht_cap < total_raw * 2U && ht_cap < (1U << 22)) {
+                    ht_cap <<= 1U;
+                }
+                const char **ht = (const char **)calloc(ht_cap, sizeof(const char *));
+                size_t ht_mask = ht_cap - 1U;
                 for (size_t c = 0; c < cand_count; c++) {
                     if (arrays[c] == NULL) {
                         continue;
@@ -1216,10 +1376,26 @@ static const char **pt_objc_copyClassNamesForImage(const char *image, unsigned i
                             continue;
                         }
                         BOOL dup = NO;
-                        for (unsigned int m = 0; m < count; m++) {
-                            if (names[m] == cname || strcmp(names[m], cname) == 0) {
-                                dup = YES;
-                                break;
+                        if (ht != NULL) {
+                            size_t slot = (size_t)pt_fnv1a_cstr(cname) & ht_mask;
+                            for (size_t probe = 0; probe < ht_cap; probe++) {
+                                const char *entry = ht[slot];
+                                if (entry == NULL) {
+                                    ht[slot] = cname;
+                                    break;
+                                }
+                                if (entry == cname || strcmp(entry, cname) == 0) {
+                                    dup = YES;
+                                    break;
+                                }
+                                slot = (slot + 1U) & ht_mask;
+                            }
+                        } else {
+                            for (unsigned int m = 0; m < count; m++) {
+                                if (names[m] == cname || strcmp(names[m], cname) == 0) {
+                                    dup = YES;
+                                    break;
+                                }
                             }
                         }
                         if (!dup) {
@@ -1228,6 +1404,7 @@ static const char **pt_objc_copyClassNamesForImage(const char *image, unsigned i
                     }
                     free((void *)arrays[c]);
                 }
+                free((void *)ht);
                 names[count] = NULL;
             } else {
                 for (size_t c = 0; c < cand_count; c++) {
@@ -1237,30 +1414,7 @@ static const char **pt_objc_copyClassNamesForImage(const char *image, unsigned i
         }
 
         if (names != NULL) {
-            unsigned int writeIdx = 0;
-            BOOL compat13 = pt_is_compat13_7_active();
-            for (unsigned int i = 0; i < count; i++) {
-                if (names[i] != NULL) {
-                    if (pt_is_hidden_objc_class(names[i])) {
-                        if (names[i][0] == 'N' && names[i][1] == 'S') {
-                            const void *cls = pt_orig_objc_lookUpClass(names[i]);
-                            if (cls != NULL && !pt_should_hide_resolved_objc_class(names[i], (__bridge Class)cls)) {
-                                names[writeIdx++] = names[i];
-                                continue;
-                            }
-                        }
-                        continue;
-                    }
-                    if (compat13) {
-                        const void *cls = pt_orig_objc_lookUpClass(names[i]);
-                        if (cls != NULL && pt_is_hidden_post13_7_class((__bridge Class)cls)) {
-                            continue;
-                        }
-                    }
-                }
-                names[writeIdx++] = names[i];
-            }
-            names[writeIdx] = NULL;
+            unsigned int writeIdx = pt_filter_class_names_in_place(names, count);
             if (outCount != NULL) {
                 *outCount = writeIdx;
             }
@@ -1270,6 +1424,44 @@ static const char **pt_objc_copyClassNamesForImage(const char *image, unsigned i
         return names;
     }
     return objc_copyClassNamesForImage(image, outCount);
+}
+
+extern const char **pt_orig_objc_copyClassNamesForImageHeader(const void *mh, unsigned int *outCount)
+    __asm__("_objc_copyClassNamesForImageHeader") __attribute__((weak_import));
+static const char *pt_dyld_lookup_image_name_for_mh(const struct mach_header *mh);
+
+static const char **pt_objc_copyClassNamesForImageHeader(const void *mh, unsigned int *outCount) {
+    if (pt_orig_objc_copyClassNamesForImageHeader == NULL || mh == NULL) {
+        if (outCount != NULL) {
+            *outCount = 0;
+        }
+        return NULL;
+    }
+    const struct mach_header *real_mh = pt_uncloak_shadow_mach_header((const struct mach_header *)mh);
+    const void *caller = __builtin_return_address(0);
+    if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller)) {
+        const char *img_name = pt_dyld_lookup_image_name_for_mh(real_mh);
+        if (pt_is_hidden_dyld_image_header(real_mh) ||
+            (img_name != NULL && (pt_is_hidden_dyld_image_name(img_name) ||
+                                  pt_is_post13_7_hidden_framework_path(img_name)))) {
+            if (outCount != NULL) {
+                *outCount = 0;
+            }
+            return NULL;
+        }
+        unsigned int count = 0;
+        const char **names = pt_orig_objc_copyClassNamesForImageHeader((const void *)real_mh, &count);
+        if (names != NULL) {
+            unsigned int writeIdx = pt_filter_class_names_in_place(names, count);
+            if (outCount != NULL) {
+                *outCount = writeIdx;
+            }
+        } else if (outCount != NULL) {
+            *outCount = 0;
+        }
+        return names;
+    }
+    return pt_orig_objc_copyClassNamesForImageHeader((const void *)real_mh, outCount);
 }
 
 static Class *pt_objc_copy_class_list_for_caller(unsigned int *outCount, const void *caller) {
@@ -1335,6 +1527,40 @@ static BOOL pt_class_is_or_inherits_from(Class cls, const char *targetName) {
     return NO;
 }
 
+static BOOL pt_class_is_mtl_device(Class cls) {
+    if (cls == Nil) {
+        return NO;
+    }
+    if (pt_class_is_or_inherits_from(cls, "_MTLDevice")) {
+        return YES;
+    }
+    const char *cname = class_getName(cls);
+    return (cname != NULL &&
+            strstr(cname, "Device") != NULL &&
+            (strstr(cname, "MTL") != NULL || strstr(cname, "AGX") != NULL));
+}
+
+static BOOL pt_is_hidden_macos_only_method(Class cls, SEL sel, BOOL isClassMethod) {
+    if (isClassMethod || cls == Nil || sel == NULL || !pt_is_bypass_enabled()) {
+        return NO;
+    }
+    const char *sname = sel_getName(sel);
+    if (sname == NULL || sname[0] == '\0') {
+        return NO;
+    }
+    if (strcmp(sname, "isLowPower") == 0 ||
+        strcmp(sname, "isHeadless") == 0 ||
+        strcmp(sname, "isRemovable") == 0 ||
+        strcmp(sname, "location") == 0 ||
+        strcmp(sname, "locationNumber") == 0 ||
+        strcmp(sname, "peerGroupID") == 0 ||
+        strcmp(sname, "peerIndex") == 0 ||
+        strcmp(sname, "peerCount") == 0) {
+        return pt_class_is_mtl_device(cls);
+    }
+    return NO;
+}
+
 static BOOL pt_is_hidden_post13_7_method(Class cls, SEL sel, BOOL isClassMethod) {
     if (cls == Nil || sel == NULL || !pt_is_compat13_7_active() || !pt_is_bypass_enabled()) {
         return NO;
@@ -1365,6 +1591,27 @@ static BOOL pt_is_hidden_post13_7_method(Class cls, SEL sel, BOOL isClassMethod)
             return pt_class_is_or_inherits_from(cls, "NSProcessInfo") ||
                    pt_class_is_or_inherits_from(cls, "_NSSwiftProcessInfo");
         }
+        if (strcmp(sname, "activeAppearance") == 0 ||
+            strcmp(sname, "toolbarItemPresentationSize") == 0) {
+            return pt_class_is_or_inherits_from(cls, "UITraitCollection");
+        }
+        if (strcmp(sname, "accuracyAuthorization") == 0 ||
+            strcmp(sname, "requestTemporaryFullAccuracyAuthorizationWithPurposeKey:completion:") == 0) {
+            return pt_class_is_or_inherits_from(cls, "CLLocationManager");
+        }
+        if (strcmp(sname, "architecture") == 0 ||
+            strcmp(sname, "supportsRaytracing") == 0 ||
+            strcmp(sname, "supportsRaytracingFromRender") == 0 ||
+            strcmp(sname, "supportsPrimitiveMotionBlur") == 0 ||
+            strcmp(sname, "supportsFunctionPointers") == 0 ||
+            strcmp(sname, "supportsFunctionPointersFromRender") == 0 ||
+            strcmp(sname, "supportsDynamicLibraries") == 0 ||
+            strcmp(sname, "supportsRenderDynamicLibraries") == 0 ||
+            strcmp(sname, "supportsPullModelInterpolation") == 0 ||
+            strcmp(sname, "supportsShaderBarycentricCoordinates") == 0 ||
+            strcmp(sname, "supportsQueryTextureLOD") == 0) {
+            return pt_class_is_mtl_device(cls);
+        }
     } else {
         if (strcmp(sname, "buttonWithType:primaryAction:") == 0 ||
             strcmp(sname, "systemButtonWithPrimaryAction:") == 0) {
@@ -1373,6 +1620,71 @@ static BOOL pt_is_hidden_post13_7_method(Class cls, SEL sel, BOOL isClassMethod)
         if (strcmp(sname, "actionWithHandler:") == 0) {
             return pt_class_is_or_inherits_from(cls, "UIAction");
         }
+        if (strcmp(sname, "shouldMonitorBackgroundEvents") == 0 ||
+            strcmp(sname, "setShouldMonitorBackgroundEvents:") == 0) {
+            return pt_class_is_or_inherits_from(cls, "GCController");
+        }
+        if (strcmp(sname, "systemImageNamed:variableValue:withConfiguration:") == 0) {
+            return pt_class_is_or_inherits_from(cls, "UIImage");
+        }
+    }
+    return NO;
+}
+
+static BOOL pt_is_hidden_objc_property(Class cls, const char *pname) {
+    if (cls == Nil || pname == NULL || pname[0] == '\0' || !pt_is_bypass_enabled()) {
+        return NO;
+    }
+    if (strcmp(pname, "lowPower") == 0 ||
+        strcmp(pname, "headless") == 0 ||
+        strcmp(pname, "removable") == 0 ||
+        strcmp(pname, "location") == 0 ||
+        strcmp(pname, "locationNumber") == 0 ||
+        strcmp(pname, "peerGroupID") == 0 ||
+        strcmp(pname, "peerIndex") == 0 ||
+        strcmp(pname, "peerCount") == 0) {
+        return pt_class_is_mtl_device(cls);
+    }
+    if (!pt_is_compat13_7_active()) {
+        return NO;
+    }
+    if (strcmp(pname, "iOSAppOnMac") == 0 ||
+        strcmp(pname, "isiOSAppOnMac") == 0 ||
+        strcmp(pname, "iOSAppOnVision") == 0 ||
+        strcmp(pname, "isiOSAppOnVision") == 0) {
+        return pt_class_is_or_inherits_from(cls, "NSProcessInfo") ||
+               pt_class_is_or_inherits_from(cls, "_NSSwiftProcessInfo");
+    }
+    if (strcmp(pname, "showsMenuAsPrimaryAction") == 0 ||
+        strcmp(pname, "contextMenuInteraction") == 0 ||
+        strcmp(pname, "contextMenuInteractionEnabled") == 0) {
+        return pt_class_is_or_inherits_from(cls, "UIControl");
+    }
+    if (strcmp(pname, "menu") == 0) {
+        return pt_class_is_or_inherits_from(cls, "UIButton");
+    }
+    if (strcmp(pname, "shouldMonitorBackgroundEvents") == 0) {
+        return pt_class_is_or_inherits_from(cls, "GCController");
+    }
+    if (strcmp(pname, "activeAppearance") == 0 ||
+        strcmp(pname, "toolbarItemPresentationSize") == 0) {
+        return pt_class_is_or_inherits_from(cls, "UITraitCollection");
+    }
+    if (strcmp(pname, "accuracyAuthorization") == 0) {
+        return pt_class_is_or_inherits_from(cls, "CLLocationManager");
+    }
+    if (strcmp(pname, "architecture") == 0 ||
+        strcmp(pname, "supportsDynamicLibraries") == 0 ||
+        strcmp(pname, "supportsRenderDynamicLibraries") == 0 ||
+        strcmp(pname, "supportsRaytracing") == 0 ||
+        strcmp(pname, "supportsRaytracingFromRender") == 0 ||
+        strcmp(pname, "supportsPrimitiveMotionBlur") == 0 ||
+        strcmp(pname, "supportsFunctionPointers") == 0 ||
+        strcmp(pname, "supportsFunctionPointersFromRender") == 0 ||
+        strcmp(pname, "supportsPullModelInterpolation") == 0 ||
+        strcmp(pname, "supportsShaderBarycentricCoordinates") == 0 ||
+        strcmp(pname, "supportsQueryTextureLOD") == 0) {
+        return pt_class_is_mtl_device(cls);
     }
     return NO;
 }
@@ -1394,15 +1706,26 @@ static Method pt_class_getInstanceMethod(Class cls, SEL name) {
         !pt_is_valid_user_pointer((const void *)name)) {
         return NULL;
     }
-    if (!pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
-        pt_is_hidden_post13_7_method(cls, name, NO)) {
-        return NULL;
+    const void *caller = __builtin_return_address(0);
+    int is_sys_caller = -1;
+    if (pt_is_bypass_enabled()) {
+        BOOL isMeta = class_isMetaClass(cls);
+        if (pt_is_hidden_post13_7_method(cls, name, isMeta) ||
+            pt_is_hidden_macos_only_method(cls, name, isMeta)) {
+            is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
+            if (is_sys_caller == 0) {
+                return NULL;
+            }
+        }
     }
     Method m = class_getInstanceMethod(cls, name);
-    if (m != NULL && pt_is_bypass_enabled() &&
-        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
-        pt_is_playtools_injected_method(m, name)) {
-        return NULL;
+    if (m != NULL && pt_is_bypass_enabled() && pt_is_playtools_injected_method(m, name)) {
+        if (is_sys_caller < 0) {
+            is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
+        }
+        if (is_sys_caller == 0) {
+            return NULL;
+        }
     }
     return m;
 }
@@ -1412,15 +1735,22 @@ static Method pt_class_getClassMethod(Class cls, SEL name) {
         !pt_is_valid_user_pointer((const void *)name)) {
         return NULL;
     }
-    if (!pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
-        pt_is_hidden_post13_7_method(cls, name, YES)) {
-        return NULL;
+    const void *caller = __builtin_return_address(0);
+    int is_sys_caller = -1;
+    if (pt_is_bypass_enabled() && pt_is_hidden_post13_7_method(cls, name, YES)) {
+        is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
+        if (is_sys_caller == 0) {
+            return NULL;
+        }
     }
     Method m = class_getClassMethod(cls, name);
-    if (m != NULL && pt_is_bypass_enabled() &&
-        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
-        pt_is_playtools_injected_method(m, name)) {
-        return NULL;
+    if (m != NULL && pt_is_bypass_enabled() && pt_is_playtools_injected_method(m, name)) {
+        if (is_sys_caller < 0) {
+            is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
+        }
+        if (is_sys_caller == 0) {
+            return NULL;
+        }
     }
     return m;
 }
@@ -1449,20 +1779,32 @@ static IMP pt_class_getMethodImplementation(Class cls, SEL name) {
         !pt_is_valid_user_pointer((const void *)name)) {
         return NULL;
     }
-    if (!pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
-        pt_is_hidden_post13_7_method(cls, name, class_isMetaClass(cls))) {
-        return class_getMethodImplementation(cls, sel_registerName("__pt_ps_nonexistent_sel_lookup__"));
+    const void *caller = __builtin_return_address(0);
+    int is_sys_caller = -1;
+    if (pt_is_bypass_enabled()) {
+        BOOL isMeta = class_isMetaClass(cls);
+        if (pt_is_hidden_post13_7_method(cls, name, isMeta) ||
+            pt_is_hidden_macos_only_method(cls, name, isMeta)) {
+            is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
+            if (is_sys_caller == 0) {
+                return class_getMethodImplementation(cls, sel_registerName("__pt_ps_nonexistent_sel_lookup__"));
+            }
+        }
     }
     IMP imp = class_getMethodImplementation(cls, name);
-    if (imp != NULL && pt_is_bypass_enabled() &&
-        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        Method m = class_getInstanceMethod(cls, name);
-        if (m != NULL && pt_is_playtools_injected_method(m, name)) {
-            return class_getMethodImplementation(cls, sel_registerName("__pt_ps_nonexistent_sel_lookup__"));
+    if (imp != NULL && pt_is_bypass_enabled()) {
+        if (is_sys_caller < 0) {
+            is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
         }
-        const void *orig = pt_lookup_swizzled_raw_orig_imp((const void *)imp);
-        if (orig != NULL) {
-            return (IMP)orig;
+        if (is_sys_caller == 0) {
+            Method m = class_getInstanceMethod(cls, name);
+            if (m != NULL && pt_is_playtools_injected_method(m, name)) {
+                return class_getMethodImplementation(cls, sel_registerName("__pt_ps_nonexistent_sel_lookup__"));
+            }
+            const void *orig = pt_lookup_swizzled_raw_orig_imp((const void *)imp);
+            if (orig != NULL) {
+                return (IMP)orig;
+            }
         }
     }
     return imp;
@@ -1481,7 +1823,8 @@ static Method *pt_class_copyMethodList(Class cls, unsigned int *outCount) {
                 SEL sel = method_getName(m);
                 if (sel != NULL &&
                     (pt_is_playtools_injected_method(m, sel) ||
-                     pt_is_hidden_post13_7_method(cls, sel, isMeta))) {
+                     pt_is_hidden_post13_7_method(cls, sel, isMeta) ||
+                     pt_is_hidden_macos_only_method(cls, sel, isMeta))) {
                     continue;
                 }
             }
@@ -1504,19 +1847,69 @@ static BOOL pt_class_respondsToSelector(Class cls, SEL sel) {
         !pt_is_valid_user_pointer((const void *)sel)) {
         return NO;
     }
-    if (!pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
-        pt_is_hidden_post13_7_method(cls, sel, class_isMetaClass(cls))) {
-        return NO;
+    const void *caller = __builtin_return_address(0);
+    int is_sys_caller = -1;
+    if (pt_is_bypass_enabled()) {
+        BOOL isMeta = class_isMetaClass(cls);
+        if (pt_is_hidden_post13_7_method(cls, sel, isMeta) ||
+            pt_is_hidden_macos_only_method(cls, sel, isMeta)) {
+            is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
+            if (is_sys_caller == 0) {
+                return NO;
+            }
+        }
     }
     BOOL orig = class_respondsToSelector(cls, sel);
-    if (orig && pt_is_bypass_enabled() &&
-        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (orig && pt_is_bypass_enabled()) {
         Method m = class_getInstanceMethod(cls, sel);
         if (m != NULL && pt_is_playtools_injected_method(m, sel)) {
-            return NO;
+            if (is_sys_caller < 0) {
+                is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
+            }
+            if (is_sys_caller == 0) {
+                return NO;
+            }
         }
     }
     return orig;
+}
+
+static objc_property_t pt_class_getProperty(Class cls, const char *name) {
+    if (!pt_is_valid_user_pointer((__bridge const void *)cls) ||
+        !pt_is_valid_user_pointer(name)) {
+        return NULL;
+    }
+    if (pt_is_hidden_objc_property(cls, name) &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return NULL;
+    }
+    return class_getProperty(cls, name);
+}
+
+static objc_property_t *pt_class_copyPropertyList(Class cls, unsigned int *outCount) {
+    unsigned int count = 0;
+    objc_property_t *props = class_copyPropertyList(cls, &count);
+    if (props != NULL && count > 0 && pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        unsigned int writeIdx = 0;
+        for (unsigned int i = 0; i < count; i++) {
+            objc_property_t p = props[i];
+            const char *pname = (p != NULL) ? property_getName(p) : NULL;
+            if (pname != NULL && pt_is_hidden_objc_property(cls, pname)) {
+                continue;
+            }
+            props[writeIdx++] = p;
+        }
+        props[writeIdx] = NULL;
+        if (outCount != NULL) {
+            *outCount = writeIdx;
+        }
+        return props;
+    }
+    if (outCount != NULL) {
+        *outCount = count;
+    }
+    return props;
 }
 
 static const char *pt_class_getName(Class cls) {
@@ -1532,28 +1925,116 @@ static const char *pt_class_getName(Class cls) {
     return orig;
 }
 
+static const char *pt_object_getClassName(id obj) {
+    const char *orig = object_getClassName(obj);
+    if (orig != NULL &&
+        orig[0] == '_' &&
+        pt_is_compat13_7_active() &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        strcmp(orig, "_NSSwiftProcessInfo") == 0) {
+        return "NSProcessInfo";
+    }
+    return orig;
+}
+
+extern NSString *pt_orig_NSStringFromClass(Class aClass) __asm__("_NSStringFromClass");
+
+static NSString *pt_NSStringFromClass(Class aClass) {
+    if (aClass != Nil &&
+        pt_is_compat13_7_active() &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        const char *raw = class_getName(aClass);
+        if (raw != NULL && raw[0] == '_' && strcmp(raw, "_NSSwiftProcessInfo") == 0) {
+            return @"NSProcessInfo";
+        }
+    }
+    return pt_orig_NSStringFromClass(aClass);
+}
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 extern int32_t NSVersionOfRunTimeLibrary(const char *libraryName);
+extern int32_t NSVersionOfLinkTimeLibrary(const char *libraryName);
+
+static int32_t pt_compat13_library_version(const char *libraryName) {
+    if (libraryName == NULL || libraryName[0] == '\0') {
+        return -1;
+    }
+    if (strcmp(libraryName, "Foundation") == 0 || strcmp(libraryName, "CoreFoundation") == 0) {
+        return (1677 << 16) | (104 << 8);
+    }
+    if (strcmp(libraryName, "UIKit") == 0 || strcmp(libraryName, "UIKitCore") == 0) {
+        return (3698 << 16) | (54 << 8);
+    }
+    if (strcmp(libraryName, "WebKit") == 0 || strcmp(libraryName, "JavaScriptCore") == 0) {
+        return (609 << 16) | (4 << 8);
+    }
+    if (strcmp(libraryName, "CFNetwork") == 0) {
+        return (1128 << 16);
+    }
+    if (strcmp(libraryName, "CoreGraphics") == 0) {
+        return (1355 << 16) | (13 << 8);
+    }
+    if (strcmp(libraryName, "QuartzCore") == 0) {
+        return (841 << 16) | (20 << 8);
+    }
+    if (strcmp(libraryName, "Metal") == 0) {
+        return (212 << 16) | (7 << 8);
+    }
+    if (strcmp(libraryName, "CoreMotion") == 0) {
+        return (2418 << 16) | (2 << 8);
+    }
+    if (strcmp(libraryName, "AVFoundation") == 0) {
+        return (1800 << 16) | (12 << 8);
+    }
+    if (strcmp(libraryName, "Security") == 0) {
+        return (59306 << 16) | (140 << 8);
+    }
+    if (strcmp(libraryName, "System") == 0 || strcmp(libraryName, "libSystem.B") == 0) {
+        return (1281 << 16) | (100 << 8);
+    }
+    if (strcmp(libraryName, "objc") == 0 || strcmp(libraryName, "libobjc.A") == 0) {
+        return (781 << 16) | (2 << 8);
+    }
+    if (strcmp(libraryName, "Photos") == 0) {
+        return (161 << 16);
+    }
+    if (strcmp(libraryName, "GameController") == 0) {
+        return (101 << 16);
+    }
+    return -1;
+}
 
 static int32_t pt_NSVersionOfRunTimeLibrary(const char *libraryName) {
     if (libraryName != NULL &&
         pt_is_compat13_7_active() &&
         pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        if (strcmp(libraryName, "Foundation") == 0 || strcmp(libraryName, "CoreFoundation") == 0) {
-            return (1677 << 16) | (104 << 8);
-        }
-        if (strcmp(libraryName, "UIKit") == 0 || strcmp(libraryName, "UIKitCore") == 0) {
-            return (3698 << 16) | (54 << 8);
-        }
-        if (strcmp(libraryName, "WebKit") == 0 || strcmp(libraryName, "JavaScriptCore") == 0) {
-            return (609 << 16) | (4 << 8);
-        }
-        if (strcmp(libraryName, "CFNetwork") == 0) {
-            return (1128 << 16);
+        int32_t spoofed = pt_compat13_library_version(libraryName);
+        if (spoofed != -1) {
+            return spoofed;
         }
     }
     return NSVersionOfRunTimeLibrary(libraryName);
 }
+
+static int32_t pt_NSVersionOfLinkTimeLibrary(const char *libraryName) {
+    int32_t orig = NSVersionOfLinkTimeLibrary(libraryName);
+    if (orig != -1 &&
+        libraryName != NULL &&
+        pt_is_compat13_7_active() &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        int32_t spoofed = pt_compat13_library_version(libraryName);
+        if (spoofed != -1) {
+            return spoofed;
+        }
+    }
+    return orig;
+}
+#pragma clang diagnostic pop
 
 static uint32_t pt_dyld_image_count(void) {
     if (pt_is_bypass_enabled() &&
@@ -1624,7 +2105,8 @@ static BOOL pt_mach_header_64_needs_shadow(const struct mach_header_64 *mh) {
         }
         if (lc->cmd == LC_BUILD_VERSION && lc->cmdsize >= sizeof(struct build_version_command)) {
             const struct build_version_command *bv = (const struct build_version_command *)lc;
-            if (bv->platform == PLATFORM_MACCATALYST || bv->platform == 1U) {
+            if (bv->platform == PLATFORM_MACCATALYST || bv->platform == 1U ||
+                (pt_is_compat13_7_active() && (bv->minos > 0x0d0700U || bv->sdk > 0x0d0700U))) {
                 return YES;
             }
         } else if (lc->cmd == LC_VERSION_MIN_MACOSX) {
@@ -1741,6 +2223,14 @@ BOOL pt_build_sanitized_mach_header_copy(const struct mach_header_64 *src_mh,
                 if (bv->platform != PLATFORM_IOS) {
                     bv->platform = PLATFORM_IOS;
                 }
+                if (pt_is_compat13_7_active()) {
+                    if (bv->minos > 0x0d0700U) {
+                        bv->minos = 0x0d0700U;
+                    }
+                    if (bv->sdk > 0x0d0700U) {
+                        bv->sdk = 0x0d0700U;
+                    }
+                }
                 emitted_build_version = YES;
                 write_off += cmdsize;
                 new_ncmds++;
@@ -1785,8 +2275,16 @@ BOOL pt_build_sanitized_mach_header_copy(const struct mach_header_64 *src_mh,
                 }
                 static const char kFallbackIdDylib[] = "/usr/lib/libobjc.A.dylib";
                 static const char kTinyIdDylib[] = "/usr/lib/dyld";
+                static const char kMicroIdDylib[] = "/a";
                 size_t fb_aligned = (sizeof(struct dylib_command) + sizeof(kFallbackIdDylib) + 7U) & ~7ULL;
-                replacement = (fb_aligned <= (size_t)cmdsize) ? kFallbackIdDylib : kTinyIdDylib;
+                size_t tiny_aligned = (sizeof(struct dylib_command) + sizeof(kTinyIdDylib) + 7U) & ~7ULL;
+                if (fb_aligned <= (size_t)cmdsize) {
+                    replacement = kFallbackIdDylib;
+                } else if (tiny_aligned <= (size_t)cmdsize) {
+                    replacement = kTinyIdDylib;
+                } else {
+                    replacement = kMicroIdDylib;
+                }
             }
             if (replacement == NULL && strncmp(nbuf, "/System/iOSSupport/usr/lib/swift/libswift", 41) == 0) {
                 snprintf(rewritten, sizeof(rewritten), "@rpath/%s", nbuf + 33);
@@ -1798,7 +2296,7 @@ BOOL pt_build_sanitized_mach_header_copy(const struct mach_header_64 *src_mh,
                 size_t rlen = strlen(replacement);
                 size_t raw_sz = sizeof(struct dylib_command) + rlen + 1U;
                 size_t aligned_sz = (raw_sz + 7U) & ~7ULL;
-                if (aligned_sz <= (size_t)cmdsize && write_off + aligned_sz <= total) {
+                if ((aligned_sz <= (size_t)cmdsize || cmd == LC_ID_DYLIB) && write_off + aligned_sz <= total) {
                     struct dylib_command ndc = *dc;
                     ndc.cmdsize = (uint32_t)aligned_sz;
                     ndc.dylib.name.offset = (uint32_t)sizeof(struct dylib_command);
@@ -2380,6 +2878,12 @@ static int pt_dladdr(const void *addr, Dl_info *info) {
             info->dli_saddr = NULL;
         } else {
             info->dli_fname = pt_sanitize_image_path_for_app(info->dli_fname);
+            if (info->dli_sname != NULL &&
+                (strstr(info->dli_sname, "isiOSAppOnVision") != NULL ||
+                 (pt_is_compat13_7_active() && strstr(info->dli_sname, "isiOSAppOnMac") != NULL))) {
+                info->dli_sname = NULL;
+                info->dli_saddr = NULL;
+            }
         }
     }
     return ret;
@@ -2650,6 +3154,7 @@ static BOOL pt_should_block_dlopen_path(const char *path, const void *caller) {
     }
     return (pt_is_hidden_path(path, caller) ||
             pt_is_hidden_dyld_image_name(path) ||
+            pt_is_post13_7_hidden_framework_path(path) ||
             pt_has_blocked_jailbreak_dlopen_component(path));
 }
 
@@ -2956,6 +3461,33 @@ static BOOL pt_is_hidden_swift_mangled_type_name(const char *typeNameStart, size
         pt_memmem_lit(typeNameStart, scan_len, "8AKPlugin", 9)) {
         return YES;
     }
+    if (pt_is_compat13_7_active()) {
+#define PT_MEMMEM_LIT(buf, len, lit) pt_memmem_lit((buf), (len), (lit), sizeof(lit) - 1U)
+        if (PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI10LazyVStack") ||
+            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI12ProgressView") ||
+            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI10LazyHStack") ||
+            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI9LazyVGrid") ||
+            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI9LazyHGrid") ||
+            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI10TextEditor") ||
+            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI11ColorPicker") ||
+            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI10AsyncImage") ||
+            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI15NavigationStack") ||
+            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI4GridV") ||
+            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI10AppStorage") ||
+            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI11StateObject") ||
+            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI12SceneStorage") ||
+            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI12ScaledMetric") ||
+            PT_MEMMEM_LIT(typeNameStart, scan_len, "12_Concurrency") ||
+            PT_MEMMEM_LIT(typeNameStart, scan_len, "22UniformTypeIdentifiers6UTType") ||
+            PT_MEMMEM_LIT(typeNameStart, scan_len, "5OSLog6Logger") ||
+            PT_MEMMEM_LIT(typeNameStart, scan_len, "SwiftUI.LazyVStack") ||
+            PT_MEMMEM_LIT(typeNameStart, scan_len, "SwiftUI.ProgressView") ||
+            PT_MEMMEM_LIT(typeNameStart, scan_len, "_Concurrency.Task") ||
+            (scan_len >= 3 && strncmp(typeNameStart, "ScT", 3) == 0)) {
+            return YES;
+        }
+#undef PT_MEMMEM_LIT
+    }
     if (pt_registered_hidden_module_count() > 0) {
         char tmp[1024];
         size_t copy_len = (scan_len >= sizeof(tmp)) ? (sizeof(tmp) - 1U) : scan_len;
@@ -3160,8 +3692,18 @@ static void *pt_dlsym(void *handle, const char *symbol) {
         } else if (strncmp(symbol, "SecCode", 7) == 0 ||
                    strncmp(symbol, "SecStaticCode", 13) == 0 ||
                    strncmp(symbol, "SecRequirementCreate", 20) == 0 ||
-                   strcmp(symbol, "AudioObjectGetPropertyDataSize") == 0 ||
-                   strcmp(symbol, "AudioObjectGetPropertyData") == 0 ||
+                   strncmp(symbol, "MTLCopyAllDevices", 17) == 0 ||
+                   strncmp(symbol, "AudioObject", 11) == 0 ||
+                   strncmp(symbol, "AudioHardware", 13) == 0 ||
+                   strcmp(symbol, "AudioDeviceCreateIOProcID") == 0 ||
+                   strcmp(symbol, "AudioDeviceDestroyIOProcID") == 0 ||
+                   strcmp(symbol, "AudioDeviceStart") == 0 ||
+                   strcmp(symbol, "AudioDeviceStop") == 0 ||
+                   strncmp(symbol, "AudioDeviceGetProperty", 22) == 0 ||
+                   strcmp(symbol, "AudioDeviceSetProperty") == 0 ||
+                   strcmp(symbol, "SCDynamicStoreCopyComputerName") == 0 ||
+                   strcmp(symbol, "SCDynamicStoreCopyLocalHostName") == 0 ||
+                   strcmp(symbol, "SCNetworkInterfaceCopyAll") == 0 ||
                    strcmp(symbol, "_LSCopyApplicationInformation") == 0 ||
                    strcmp(symbol, "_LSGetCurrentApplicationASN") == 0 ||
                    strncmp(symbol, "_LSASN", 6) == 0 ||
@@ -3169,16 +3711,32 @@ static void *pt_dlsym(void *handle, const char *symbol) {
                    (pt_is_compat13_7_active() &&
                     (strcmp(symbol, "freadlink") == 0 ||
                      strcmp(symbol, "objc_enumerateClasses") == 0 ||
-                     strncmp(symbol, "$s7SwiftUI10LazyVStack", 22) == 0 ||
-                     strncmp(symbol, "$s7SwiftUI12ProgressView", 24) == 0 ||
-                     strncmp(symbol, "$s7SwiftUI10LazyHStack", 22) == 0 ||
-                     strncmp(symbol, "$s7SwiftUI9LazyVGrid", 21) == 0 ||
-                     strncmp(symbol, "$s7SwiftUI9LazyHGrid", 21) == 0 ||
-                     strncmp(symbol, "$s7SwiftUI10TextEditor", 22) == 0 ||
-                     strncmp(symbol, "$s7SwiftUI11ColorPicker", 23) == 0))) {
+                     PT_HAS_PREFIX_LIT(symbol, "$s7SwiftUI10LazyVStack") ||
+                     PT_HAS_PREFIX_LIT(symbol, "$s7SwiftUI12ProgressView") ||
+                     PT_HAS_PREFIX_LIT(symbol, "$s7SwiftUI10LazyHStack") ||
+                     PT_HAS_PREFIX_LIT(symbol, "$s7SwiftUI9LazyVGrid") ||
+                     PT_HAS_PREFIX_LIT(symbol, "$s7SwiftUI9LazyHGrid") ||
+                     PT_HAS_PREFIX_LIT(symbol, "$s7SwiftUI10TextEditor") ||
+                     PT_HAS_PREFIX_LIT(symbol, "$s7SwiftUI11ColorPicker") ||
+                     PT_HAS_PREFIX_LIT(symbol, "$s7SwiftUI10AsyncImage") ||
+                     PT_HAS_PREFIX_LIT(symbol, "$s7SwiftUI15NavigationStack") ||
+                     PT_HAS_PREFIX_LIT(symbol, "$s7SwiftUI4GridV") ||
+                     PT_HAS_PREFIX_LIT(symbol, "$s7SwiftUI10AppStorage") ||
+                     PT_HAS_PREFIX_LIT(symbol, "$s7SwiftUI11StateObject") ||
+                     PT_HAS_PREFIX_LIT(symbol, "$s7SwiftUI12SceneStorage") ||
+                     PT_HAS_PREFIX_LIT(symbol, "$s7SwiftUI12ScaledMetric") ||
+                     PT_HAS_PREFIX_LIT(symbol, "$sScT") ||
+                     PT_HAS_PREFIX_LIT(symbol, "$s12_Concurrency") ||
+                     PT_HAS_PREFIX_LIT(symbol, "$s22UniformTypeIdentifiers6UTType") ||
+                     PT_HAS_PREFIX_LIT(symbol, "$s5OSLog6Logger")))) {
             PT_DEBUG_TRACE("dyld", "hid macOS-only symbol=%s", symbol);
             pt_set_synthetic_dlerror("symbol not found");
             return NULL;
+        } else if (pt_is_compat13_7_active() &&
+                   (strcmp(symbol, "kCFCoreFoundationVersionNumber") == 0 ||
+                    strcmp(symbol, "NSFoundationVersionNumber") == 0)) {
+            static const double s_compat13_cf_version = 1677.104;
+            return (void *)&s_compat13_cf_version;
         } else if (strcmp(symbol, "_dyld_shared_cache_contains_path") == 0) {
             return (void *)&pt_dyld_shared_cache_contains_path;
         } else if (strcmp(symbol, "_availability_version_check") == 0) {
@@ -3246,6 +3804,12 @@ static void *pt_dlsym(void *handle, const char *symbol) {
             if (strcmp(symbol, "NSClassFromString") == 0) {
                 return (void *)&pt_NSClassFromString;
             }
+            if (strcmp(symbol, "NSStringFromClass") == 0) {
+                return (void *)&pt_NSStringFromClass;
+            }
+            if (strcmp(symbol, "NSProtocolFromString") == 0) {
+                return (void *)&pt_NSProtocolFromString;
+            }
             if (strcmp(symbol, "objc_copyClassList") == 0) {
                 return (void *)&pt_objc_copyClassList;
             }
@@ -3258,14 +3822,120 @@ static void *pt_dlsym(void *handle, const char *symbol) {
             if (strcmp(symbol, "objc_copyClassNamesForImage") == 0) {
                 return (void *)&pt_objc_copyClassNamesForImage;
             }
+            if (strcmp(symbol, "objc_copyClassNamesForImageHeader") == 0 &&
+                &pt_orig_objc_copyClassNamesForImageHeader != NULL) {
+                return (void *)&pt_objc_copyClassNamesForImageHeader;
+            }
             if (strcmp(symbol, "objc_copyImageNames") == 0) {
                 return (void *)&pt_objc_copyImageNames;
             }
             if (strcmp(symbol, "class_getName") == 0) {
                 return (void *)&pt_class_getName;
             }
+            if (strcmp(symbol, "object_getClassName") == 0) {
+                return (void *)&pt_object_getClassName;
+            }
+            if (strcmp(symbol, "class_getInstanceMethod") == 0) {
+                return (void *)&pt_class_getInstanceMethod;
+            }
+            if (strcmp(symbol, "class_getClassMethod") == 0) {
+                return (void *)&pt_class_getClassMethod;
+            }
+            if (strcmp(symbol, "method_getImplementation") == 0) {
+                return (void *)&pt_method_getImplementation;
+            }
+            if (strcmp(symbol, "class_getMethodImplementation") == 0) {
+                return (void *)&pt_class_getMethodImplementation;
+            }
+            if (strcmp(symbol, "class_copyMethodList") == 0) {
+                return (void *)&pt_class_copyMethodList;
+            }
+            if (strcmp(symbol, "class_respondsToSelector") == 0) {
+                return (void *)&pt_class_respondsToSelector;
+            }
+            if (strcmp(symbol, "class_getProperty") == 0) {
+                return (void *)&pt_class_getProperty;
+            }
+            if (strcmp(symbol, "class_copyPropertyList") == 0) {
+                return (void *)&pt_class_copyPropertyList;
+            }
+            if (strcmp(symbol, "objc_getProtocol") == 0) {
+                return (void *)&pt_objc_getProtocol;
+            }
+            if (strcmp(symbol, "objc_copyProtocolList") == 0) {
+                return (void *)&pt_objc_copyProtocolList;
+            }
             if (strcmp(symbol, "NSVersionOfRunTimeLibrary") == 0) {
                 return (void *)&pt_NSVersionOfRunTimeLibrary;
+            }
+            if (strcmp(symbol, "NSVersionOfLinkTimeLibrary") == 0) {
+                return (void *)&pt_NSVersionOfLinkTimeLibrary;
+            }
+            if (strcmp(symbol, "_dyld_image_count") == 0) {
+                return (void *)&pt_dyld_image_count;
+            }
+            if (strcmp(symbol, "_dyld_get_image_name") == 0) {
+                return (void *)&pt_dyld_get_image_name;
+            }
+            if (strcmp(symbol, "_dyld_get_image_header") == 0) {
+                return (void *)&pt_dyld_get_image_header;
+            }
+            if (strcmp(symbol, "_dyld_get_image_vmaddr_slide") == 0) {
+                return (void *)&pt_dyld_get_image_vmaddr_slide;
+            }
+            if (strcmp(symbol, "_dyld_register_func_for_add_image") == 0) {
+                return (void *)&pt_dyld_register_func_for_add_image;
+            }
+            if (strcmp(symbol, "_dyld_register_func_for_remove_image") == 0) {
+                return (void *)&pt_dyld_register_func_for_remove_image;
+            }
+            if (strcmp(symbol, "dyld_image_path_containing_address") == 0) {
+                return (void *)&pt_dyld_image_path_containing_address;
+            }
+            if (strcmp(symbol, "dyld_image_header_containing_address") == 0) {
+                return (void *)&pt_dyld_image_header_containing_address;
+            }
+            if (strcmp(symbol, "dyld_get_active_platform") == 0 && &dyld_get_active_platform != NULL) {
+                return (void *)&pt_dyld_get_active_platform;
+            }
+            if (strcmp(symbol, "dyld_get_base_platform") == 0 && &dyld_get_base_platform != NULL) {
+                return (void *)&pt_dyld_get_base_platform;
+            }
+            if (strcmp(symbol, "dyld_get_image_versions") == 0 && &pt_orig_dyld_get_image_versions != NULL) {
+                return (void *)&pt_dyld_get_image_versions;
+            }
+            if (strcmp(symbol, "dyld_sdk_at_least") == 0 && &pt_orig_dyld_sdk_at_least != NULL) {
+                return (void *)&pt_dyld_sdk_at_least;
+            }
+            if (strcmp(symbol, "dyld_minos_at_least") == 0 && &pt_orig_dyld_minos_at_least != NULL) {
+                return (void *)&pt_dyld_minos_at_least;
+            }
+            if (strcmp(symbol, "dyld_shared_cache_file_path") == 0 && &dyld_shared_cache_file_path != NULL) {
+                return (void *)&pt_dyld_shared_cache_file_path;
+            }
+            if (strcmp(symbol, "dladdr") == 0) {
+                return (void *)&pt_dladdr;
+            }
+            if (strcmp(symbol, "dlopen") == 0) {
+                return (void *)&pt_dlopen;
+            }
+            if (strcmp(symbol, "dlopen_preflight") == 0) {
+                return (void *)&pt_dlopen_preflight;
+            }
+            if (strcmp(symbol, "dlerror") == 0) {
+                return (void *)&pt_dlerror;
+            }
+            if (strcmp(symbol, "dlsym") == 0) {
+                return (void *)&pt_dlsym;
+            }
+            if (strcmp(symbol, "getsectiondata") == 0) {
+                return (void *)&pt_getsectiondata;
+            }
+            if (strcmp(symbol, "getsegmentdata") == 0) {
+                return (void *)&pt_getsegmentdata;
+            }
+            if (strcmp(symbol, "getsectdatafromheader_64") == 0) {
+                return (void *)&pt_getsectdatafromheader_64;
             }
             void *routed = pt_fs_dlsym_route(symbol);
             if (routed != NULL) {
@@ -3280,6 +3950,14 @@ static void *pt_dlsym(void *handle, const char *symbol) {
                 return routed;
             }
             routed = pt_entitlements_dlsym_route(symbol);
+            if (routed != NULL) {
+                return routed;
+            }
+            routed = pt_svc_dlsym_route(symbol);
+            if (routed != NULL) {
+                return routed;
+            }
+            routed = pt_objc_spoofer_dlsym_route(symbol);
             if (routed != NULL) {
                 return routed;
             }
@@ -3305,7 +3983,9 @@ static void *pt_dlsym(void *handle, const char *symbol) {
                     if (img_name == NULL) {
                         continue;
                     }
-                    if (app_caller && pt_is_hidden_dyld_image_name(img_name)) {
+                    if (app_caller &&
+                        (pt_is_hidden_dyld_image_name(img_name) ||
+                         pt_is_post13_7_hidden_framework_path(img_name))) {
                         continue;
                     }
                     if (strstr(img_name, "PlayTools") != NULL ||
@@ -3352,7 +4032,8 @@ static void *pt_dlsym(void *handle, const char *symbol) {
         if (target_sym == sym) {
             Dl_info sym_info;
             if (dladdr(target_sym, &sym_info) != 0 && sym_info.dli_fname != NULL &&
-                pt_is_hidden_dyld_image_name(sym_info.dli_fname)) {
+                (pt_is_hidden_dyld_image_name(sym_info.dli_fname) ||
+                 pt_is_post13_7_hidden_framework_path(sym_info.dli_fname))) {
                 PT_DEBUG_TRACE("dyld", "hid dlsym symbol=%s", symbol != NULL ? symbol : "<null>");
                 pt_set_synthetic_dlerror("symbol not found");
                 return NULL;
@@ -3375,9 +4056,12 @@ DYLD_INTERPOSE(pt_objc_lookUpClass, objc_lookUpClass)
 DYLD_INTERPOSE(pt_objc_getMetaClass, objc_getMetaClass)
 DYLD_INTERPOSE(pt_objc_getRequiredClass, objc_getRequiredClass)
 DYLD_INTERPOSE(pt_NSClassFromString, NSClassFromString)
+DYLD_INTERPOSE(pt_NSStringFromClass, pt_orig_NSStringFromClass)
+DYLD_INTERPOSE(pt_NSProtocolFromString, pt_orig_NSProtocolFromString)
 DYLD_INTERPOSE(pt_objc_copyImageNames, objc_copyImageNames)
 DYLD_INTERPOSE(pt_class_getImageName, class_getImageName)
 DYLD_INTERPOSE(pt_objc_copyClassNamesForImage, objc_copyClassNamesForImage)
+DYLD_INTERPOSE(pt_objc_copyClassNamesForImageHeader, pt_orig_objc_copyClassNamesForImageHeader)
 DYLD_INTERPOSE(pt_objc_copyClassList, objc_copyClassList)
 DYLD_INTERPOSE(pt_objc_getClassList, objc_getClassList)
 DYLD_INTERPOSE(pt_class_getInstanceMethod, class_getInstanceMethod)
@@ -3386,8 +4070,15 @@ DYLD_INTERPOSE(pt_method_getImplementation, method_getImplementation)
 DYLD_INTERPOSE(pt_class_getMethodImplementation, class_getMethodImplementation)
 DYLD_INTERPOSE(pt_class_copyMethodList, class_copyMethodList)
 DYLD_INTERPOSE(pt_class_respondsToSelector, class_respondsToSelector)
+DYLD_INTERPOSE(pt_class_getProperty, class_getProperty)
+DYLD_INTERPOSE(pt_class_copyPropertyList, class_copyPropertyList)
 DYLD_INTERPOSE(pt_class_getName, class_getName)
+DYLD_INTERPOSE(pt_object_getClassName, object_getClassName)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 DYLD_INTERPOSE(pt_NSVersionOfRunTimeLibrary, NSVersionOfRunTimeLibrary)
+DYLD_INTERPOSE(pt_NSVersionOfLinkTimeLibrary, NSVersionOfLinkTimeLibrary)
+#pragma clang diagnostic pop
 DYLD_INTERPOSE(pt_objc_getProtocol, objc_getProtocol)
 DYLD_INTERPOSE(pt_objc_copyProtocolList, objc_copyProtocolList)
 DYLD_INTERPOSE(pt_dyld_image_count, _dyld_image_count)
@@ -3423,18 +4114,19 @@ static IMP s_nsobject_notFoundIMP = NULL;
 static inline BOOL ps_should_hide_selector_for_target_class(Class targetCls, SEL aSelector, const void *caller) {
     if (targetCls == Nil ||
         aSelector == NULL ||
-        !pt_is_bypass_enabled() ||
-        pt_is_effective_system_or_playtools_caller(caller)) {
+        !pt_is_bypass_enabled()) {
         return NO;
     }
-    if (pt_is_hidden_post13_7_method(targetCls, aSelector, class_isMetaClass(targetCls))) {
-        return YES;
+    BOOL isMeta = class_isMetaClass(targetCls);
+    if (pt_is_hidden_post13_7_method(targetCls, aSelector, isMeta) ||
+        pt_is_hidden_macos_only_method(targetCls, aSelector, isMeta)) {
+        return !pt_is_effective_system_or_playtools_caller(caller);
     }
     Method m = class_getInstanceMethod(targetCls, aSelector);
-    if (m == NULL) {
+    if (m == NULL || !pt_is_playtools_injected_method(m, aSelector)) {
         return NO;
     }
-    return pt_is_playtools_injected_method(m, aSelector);
+    return !pt_is_effective_system_or_playtools_caller(caller);
 }
 
 static BOOL ps_hook_nsobject_respondsToSelector(id self, SEL _cmd, SEL aSelector) {

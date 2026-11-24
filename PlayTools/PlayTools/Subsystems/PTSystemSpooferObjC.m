@@ -5,6 +5,7 @@
 
 #import "PSInternal.h"
 @import CoreText;
+@import JavaScriptCore;
 #include <math.h>
 
 static BOOL ps_is_hidden_desktop_font_name(NSString *name) {
@@ -136,6 +137,77 @@ DYLD_INTERPOSE(pt_CTFontCreateWithName, CTFontCreateWithName)
 DYLD_INTERPOSE(pt_CTFontCreateWithNameAndOptions, CTFontCreateWithNameAndOptions)
 DYLD_INTERPOSE(pt_CTFontManagerCopyAvailableFontFamilyNames, CTFontManagerCopyAvailableFontFamilyNames)
 DYLD_INTERPOSE(pt_CTFontManagerCopyAvailablePostScriptNames, CTFontManagerCopyAvailablePostScriptNames)
+
+static void ps_sanitize_jsc_global_context_ref(JSGlobalContextRef ctx, const void *caller) {
+    static _Thread_local BOOL s_tls_in_jsc_c_sanitize = NO;
+    if (ctx == NULL || s_tls_in_jsc_c_sanitize ||
+        !pt_is_bypass_enabled() ||
+        !pt_is_compat13_7_active() ||
+        ps_is_effective_system_or_playtools_caller(caller)) {
+        return;
+    }
+    static const char kCleanupJS[] =
+        "try{"
+        "delete globalThis.WeakRef;"
+        "delete globalThis.FinalizationRegistry;"
+        "delete globalThis.BigInt;"
+        "if(typeof Promise==='function'){delete Promise.any;}"
+        "if(typeof Object==='function'){delete Object.hasOwn;}"
+        "if(typeof Array==='function'&&Array.prototype){delete Array.prototype.at;}"
+        "}catch(e){}";
+    s_tls_in_jsc_c_sanitize = YES;
+    JSStringRef jsStr = JSStringCreateWithUTF8CString(kCleanupJS);
+    if (jsStr != NULL) {
+        JSValueRef exc = NULL;
+        (void)JSEvaluateScript(ctx, jsStr, NULL, NULL, 1, &exc);
+        JSStringRelease(jsStr);
+    }
+    s_tls_in_jsc_c_sanitize = NO;
+}
+
+static JSGlobalContextRef pt_JSGlobalContextCreate(JSClassRef globalObjectClass) {
+    JSGlobalContextRef ctx = JSGlobalContextCreate(globalObjectClass);
+    if (ctx != NULL) {
+        ps_sanitize_jsc_global_context_ref(ctx, __builtin_return_address(0));
+    }
+    return ctx;
+}
+
+static JSGlobalContextRef pt_JSGlobalContextCreateInGroup(JSContextGroupRef group, JSClassRef globalObjectClass) {
+    JSGlobalContextRef ctx = JSGlobalContextCreateInGroup(group, globalObjectClass);
+    if (ctx != NULL) {
+        ps_sanitize_jsc_global_context_ref(ctx, __builtin_return_address(0));
+    }
+    return ctx;
+}
+
+DYLD_INTERPOSE(pt_JSGlobalContextCreate, JSGlobalContextCreate)
+DYLD_INTERPOSE(pt_JSGlobalContextCreateInGroup, JSGlobalContextCreateInGroup)
+
+__attribute__((visibility("hidden"))) void *pt_objc_spoofer_dlsym_route(const char *symbol) {
+    if (symbol == NULL) {
+        return NULL;
+    }
+    if (strcmp(symbol, "CTFontCreateWithName") == 0) {
+        return (void *)&pt_CTFontCreateWithName;
+    }
+    if (strcmp(symbol, "CTFontCreateWithNameAndOptions") == 0) {
+        return (void *)&pt_CTFontCreateWithNameAndOptions;
+    }
+    if (strcmp(symbol, "CTFontManagerCopyAvailableFontFamilyNames") == 0) {
+        return (void *)&pt_CTFontManagerCopyAvailableFontFamilyNames;
+    }
+    if (strcmp(symbol, "CTFontManagerCopyAvailablePostScriptNames") == 0) {
+        return (void *)&pt_CTFontManagerCopyAvailablePostScriptNames;
+    }
+    if (strcmp(symbol, "JSGlobalContextCreate") == 0) {
+        return (void *)&pt_JSGlobalContextCreate;
+    }
+    if (strcmp(symbol, "JSGlobalContextCreateInGroup") == 0) {
+        return (void *)&pt_JSGlobalContextCreateInGroup;
+    }
+    return NULL;
+}
 
 @implementation PSSwizzleHooks (PlayShadowSystem)
 
@@ -294,6 +366,23 @@ __attribute__((visibility("hidden"))) NSUUID *ps_hook_device_identifierForVendor
     return orig;
 }
 
+- (NSString *) pm_hook_traitDescription {
+    NSString *desc = [self pm_hook_traitDescription];
+    if (desc.length > 0 &&
+        pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        BOOL isIPhone = ps_is_iphone_device_model();
+        NSString *target = isIPhone ? @"UserInterfaceIdiom = Phone" : @"UserInterfaceIdiom = Pad";
+        if ([desc containsString:@"UserInterfaceIdiom = Mac"]) {
+            desc = [desc stringByReplacingOccurrencesOfString:@"UserInterfaceIdiom = Mac" withString:target];
+        }
+        if (isIPhone && [desc containsString:@"UserInterfaceIdiom = Pad"]) {
+            desc = [desc stringByReplacingOccurrencesOfString:@"UserInterfaceIdiom = Pad" withString:@"UserInterfaceIdiom = Phone"];
+        }
+    }
+    return desc;
+}
+
 - (BOOL) pm_canOpenURL:(NSURL *)url {
     if (url != nil && url.scheme != nil) {
         static NSSet<NSString *> *s_blockedSchemes = nil;
@@ -382,6 +471,27 @@ static BOOL ps_is_hidden_bundle_identifier(NSString *bId) {
     if (cId != NULL && pt_is_registered_hidden_module(cId)) {
         return YES;
     }
+    if ([bId hasPrefix:@"com.apple.AGXMetal"]) {
+        return YES;
+    }
+    if (pt_is_compat13_7_active()) {
+        if ([bId isEqualToString:@"com.apple.AppTrackingTransparency"] ||
+            [bId isEqualToString:@"com.apple.WidgetKit"] ||
+            [bId isEqualToString:@"com.apple.ExtensionKit"] ||
+            [bId isEqualToString:@"com.apple.ExtensionFoundation"] ||
+            [bId isEqualToString:@"com.apple.UniformTypeIdentifiers"] ||
+            [bId isEqualToString:@"com.apple.TipKit"] ||
+            [bId isEqualToString:@"com.apple.AppIntents"] ||
+            [bId isEqualToString:@"com.apple.OSLog"] ||
+            [bId isEqualToString:@"com.apple.SwiftData"] ||
+            [bId isEqualToString:@"com.apple.Observation"] ||
+            [bId isEqualToString:@"com.apple.ActivityKit"] ||
+            [bId isEqualToString:@"com.apple.GroupActivities"] ||
+            [bId isEqualToString:@"com.apple.NearbyInteraction"] ||
+            [bId isEqualToString:@"com.apple.Charts"]) {
+            return YES;
+        }
+    }
     return ([bId containsString:@"PlayTools"] ||
             [bId containsString:@"AKInterface"] ||
             [bId containsString:@"playcover"] ||
@@ -402,6 +512,7 @@ static BOOL ps_is_hidden_bundle(NSBundle *bundle, const void *caller) {
         return NO;
     }
     NSString *bPath = bundle.bundlePath ?: @"";
+    const char *cPath = [bPath UTF8String];
     if ([bPath containsString:@"PlayTools"] ||
         [bPath containsString:@"AKInterface"] ||
         [bPath containsString:@"UserPlugins"] ||
@@ -412,7 +523,9 @@ static BOOL ps_is_hidden_bundle(NSBundle *bundle, const void *caller) {
         [bPath containsString:@"HIToolbox.framework"] ||
         [bPath containsString:@"Carbon.framework"] ||
         [bPath containsString:@"Cocoa.framework"] ||
-        ([bPath UTF8String] != NULL && pt_is_registered_hidden_module([bPath UTF8String])) ||
+        (cPath != NULL && (pt_is_registered_hidden_module(cPath) ||
+                           pt_is_hidden_dyld_image_name(cPath) ||
+                           pt_is_post13_7_hidden_framework_path(cPath))) ||
         ps_is_hidden_path(ps_strip_iossupport_nsstring(bPath), caller)) {
         return YES;
     }
@@ -618,6 +731,31 @@ __attribute__((visibility("hidden"))) NSString *ps_app_settings_plist_path(void)
     return ps_virtualize_bundle_url_for_caller([self pm_ps_appStoreReceiptURL], __builtin_return_address(0));
 }
 
+- (NSString *) pm_ps_pathForAuxiliaryExecutable:(NSString *)executableName {
+    return ps_virtualize_bundle_path_for_caller([self pm_ps_pathForAuxiliaryExecutable:executableName], __builtin_return_address(0));
+}
+
+- (NSURL *) pm_ps_URLForAuxiliaryExecutable:(NSString *)executableName {
+    return ps_virtualize_bundle_url_for_caller([self pm_ps_URLForAuxiliaryExecutable:executableName], __builtin_return_address(0));
+}
+
+- (NSDictionary<NSString *, id> *) pm_ps_localizedInfoDictionary {
+    NSDictionary<NSString *, id> *orig = [self pm_ps_localizedInfoDictionary];
+    if (orig != nil &&
+        pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (pt_info_dict_needs_sanitize(orig)) {
+            NSDictionary<NSString *, id> *clean = [orig isKindOfClass:[NSMutableDictionary class]]
+                ? pt_build_sanitized_mutable_info_dict(orig)
+                : pt_build_sanitized_info_dict(orig);
+            if (clean != nil) {
+                return clean;
+            }
+        }
+    }
+    return orig;
+}
+
 - (NSDictionary<NSString *, id> *) pm_ps_infoDictionary {
     NSDictionary<NSString *, id> *orig = [self pm_ps_infoDictionary];
     if (orig != nil &&
@@ -639,7 +777,7 @@ __attribute__((visibility("hidden"))) NSString *ps_app_settings_plist_path(void)
     if (key != nil &&
         pt_is_bypass_enabled() &&
         !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        NSDictionary<NSString *, id> *loc = [(NSBundle *)(id)self localizedInfoDictionary];
+        NSDictionary<NSString *, id> *loc = [self pm_ps_localizedInfoDictionary];
         if (loc != nil) {
             NSDictionary<NSString *, id> *cleanLoc = pt_info_dict_needs_sanitize(loc)
                 ? pt_build_sanitized_info_dict(loc)
@@ -1113,6 +1251,14 @@ static NSMutableDictionary *ps_sanitized_system_version_mutable_dict(NSDictionar
         return NO;
     }
     return [self pm_swift_isiOSAppOnMac];
+}
+
+- (BOOL) pm_isiOSAppOnVision_no {
+    return NO;
+}
+
+- (BOOL) pm_swift_isiOSAppOnVision_no {
+    return NO;
 }
 
 - (BOOL) pm_macCatalystVersionIsAtLeastVersion:(NSOperatingSystemVersion)version {
@@ -1655,6 +1801,9 @@ static CFMutableDictionaryRef s_av_orig_torch_imps = NULL;
             if (pos == 2) {
                 return NO;
             }
+            if (pos == 1) {
+                return YES;
+            }
         }
     }
     return orig;
@@ -1678,6 +1827,9 @@ static CFMutableDictionaryRef s_av_orig_torch_imps = NULL;
             NSInteger pos = ((NSInteger (*)(id, SEL))objc_msgSend)(self, posSel);
             if (pos == 2) {
                 return NO;
+            }
+            if (pos == 1) {
+                return YES;
             }
         }
     }
@@ -1802,25 +1954,28 @@ static NSArray *ps_filter_capture_devices(NSArray *devices, BOOL isAppCaller) {
         return nil;
     }
     NSMutableArray *filtered = isAppCaller ? [NSMutableArray arrayWithCapacity:devices.count] : nil;
-    NSMutableSet<NSString *> *seenCamKeys = isAppCaller ? [NSMutableSet set] : nil;
+    NSMutableDictionary<NSString *, NSNumber *> *seenCamIdx = isAppCaller ? [NSMutableDictionary dictionary] : nil;
     SEL dtSel = sel_registerName("deviceType");
     SEL posSel = sel_registerName("position");
     SEL hasMediaSel = sel_registerName("hasMediaType:");
+    SEL hasFlashSel = sel_registerName("hasFlash");
     SEL activeFmtSel = sel_registerName("activeFormat");
     SEL fmtsSel = sel_registerName("formats");
     for (id dev in devices) {
         if (dev != nil) {
             ps_swizzle_capture_device_class(object_getClass(dev));
-            if ([dev respondsToSelector:activeFmtSel]) {
-                id activeFmt = ((id (*)(id, SEL))objc_msgSend)(dev, activeFmtSel);
-                if (activeFmt != nil) {
-                    ps_swizzle_capture_format_class(object_getClass(activeFmt));
+            if (isAppCaller) {
+                if ([dev respondsToSelector:activeFmtSel]) {
+                    id activeFmt = ((id (*)(id, SEL))objc_msgSend)(dev, activeFmtSel);
+                    if (activeFmt != nil) {
+                        ps_swizzle_capture_format_class(object_getClass(activeFmt));
+                    }
                 }
-            }
-            if ([dev respondsToSelector:fmtsSel]) {
-                NSArray *fmts = ((NSArray *(*)(id, SEL))objc_msgSend)(dev, fmtsSel);
-                if ([fmts isKindOfClass:[NSArray class]] && fmts.count > 0 && fmts.firstObject != nil) {
-                    ps_swizzle_capture_format_class(object_getClass(fmts.firstObject));
+                if ([dev respondsToSelector:fmtsSel]) {
+                    NSArray *fmts = ((NSArray *(*)(id, SEL))objc_msgSend)(dev, fmtsSel);
+                    if ([fmts isKindOfClass:[NSArray class]] && fmts.count > 0 && fmts.firstObject != nil) {
+                        ps_swizzle_capture_format_class(object_getClass(fmts.firstObject));
+                    }
                 }
             }
             if (isAppCaller && !ps_is_hidden_capture_device(dev)) {
@@ -1831,10 +1986,31 @@ static NSArray *ps_filter_capture_devices(NSArray *devices, BOOL isAppCaller) {
                     NSString *dt = ((NSString *(*)(id, SEL))objc_msgSend)(dev, dtSel) ?: @"";
                     NSInteger pos = ((NSInteger (*)(id, SEL))objc_msgSend)(dev, posSel);
                     NSString *dedupKey = [NSString stringWithFormat:@"%@:%ld", dt, (long)pos];
-                    if ([seenCamKeys containsObject:dedupKey]) {
+                    NSNumber *existingIdx = seenCamIdx[dedupKey];
+                    if (existingIdx != nil) {
+                        if (pos == 1 && [dev respondsToSelector:hasFlashSel]) {
+                            BOOL newHasFlash = NO;
+                            BOOL pushed = NO;
+                            IMP origFlashIMP = ps_lookup_orig_imp_and_push(&s_av_swizzle_lock, s_av_orig_flash_imps, dev, &pushed);
+                            if (origFlashIMP != NULL) {
+                                @try {
+                                    newHasFlash = ((BOOL (*)(id, SEL))origFlashIMP)(dev, hasFlashSel);
+                                } @finally {
+                                    ps_pop_orig_imp_frame(pushed);
+                                }
+                            } else {
+                                newHasFlash = ((BOOL (*)(id, SEL))objc_msgSend)(dev, hasFlashSel);
+                            }
+                            if (newHasFlash) {
+                                NSUInteger idx = existingIdx.unsignedIntegerValue;
+                                if (idx < filtered.count) {
+                                    filtered[idx] = dev;
+                                }
+                            }
+                        }
                         continue;
                     }
-                    [seenCamKeys addObject:dedupKey];
+                    seenCamIdx[dedupKey] = @(filtered.count);
                 }
                 [filtered addObject:dev];
             }
@@ -1899,11 +2075,20 @@ static NSArray *ps_filter_capture_devices(NSArray *devices, BOOL isAppCaller) {
     id dev = [self pm_ps_av_defaultDeviceWithMediaType:mediaType];
     if (dev != nil) {
         ps_swizzle_capture_device_class(object_getClass(dev));
-        if (pt_is_bypass_enabled() &&
-            !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
-            ps_is_hidden_capture_device(dev)) {
-            NSArray *fallback = ps_filter_capture_devices([self pm_ps_av_devicesWithMediaType:mediaType], YES);
-            return fallback.firstObject;
+        BOOL isAppCaller = pt_is_bypass_enabled() &&
+            !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0));
+        if (isAppCaller) {
+            SEL activeFmtSel = sel_registerName("activeFormat");
+            if ([dev respondsToSelector:activeFmtSel]) {
+                id activeFmt = ((id (*)(id, SEL))objc_msgSend)(dev, activeFmtSel);
+                if (activeFmt != nil) {
+                    ps_swizzle_capture_format_class(object_getClass(activeFmt));
+                }
+            }
+            if (ps_is_hidden_capture_device(dev)) {
+                NSArray *fallback = ps_filter_capture_devices([self pm_ps_av_devicesWithMediaType:mediaType], YES);
+                return fallback.firstObject;
+            }
         }
     }
     return dev;
@@ -1913,10 +2098,19 @@ static NSArray *ps_filter_capture_devices(NSArray *devices, BOOL isAppCaller) {
     id dev = [self pm_ps_av_defaultDeviceWithDeviceType:deviceType mediaType:mediaType position:position];
     if (dev != nil) {
         ps_swizzle_capture_device_class(object_getClass(dev));
-        if (pt_is_bypass_enabled() &&
-            !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
-            ps_is_hidden_capture_device(dev)) {
-            return nil;
+        BOOL isAppCaller = pt_is_bypass_enabled() &&
+            !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0));
+        if (isAppCaller) {
+            SEL activeFmtSel = sel_registerName("activeFormat");
+            if ([dev respondsToSelector:activeFmtSel]) {
+                id activeFmt = ((id (*)(id, SEL))objc_msgSend)(dev, activeFmtSel);
+                if (activeFmt != nil) {
+                    ps_swizzle_capture_format_class(object_getClass(activeFmt));
+                }
+            }
+            if (ps_is_hidden_capture_device(dev)) {
+                return nil;
+            }
         }
     }
     return dev;
@@ -1929,24 +2123,80 @@ static NSArray *ps_filter_capture_devices(NSArray *devices, BOOL isAppCaller) {
     return ps_filter_capture_devices(devices, isAppCaller);
 }
 
+static BOOL ps_is_hidden_user_default_key(NSString *key) {
+    if (key == nil || key.length == 0) {
+        return NO;
+    }
+    if ([key isEqualToString:@"playtoolsKeymappingDisabledAt"]) {
+        return YES;
+    }
+    const char *ckey = [key UTF8String];
+    return (ckey != NULL && pt_is_hidden_macos_pref_key(ckey));
+}
+
+static BOOL ps_user_default_val_leaks_host_user(id val) {
+    if ([val isKindOfClass:[NSString class]]) {
+        return [(NSString *)val containsString:@"/Users/"];
+    }
+    return NO;
+}
+
+static NSDictionary<NSString *, id> *ps_sanitize_user_defaults_dict(NSDictionary<NSString *, id> *dict) {
+    if (dict == nil || dict.count == 0) {
+        return dict;
+    }
+    NSMutableDictionary<NSString *, id> *filtered = nil;
+    for (NSString *k in dict) {
+        id v = dict[k];
+        if (ps_is_hidden_user_default_key(k) || ps_user_default_val_leaks_host_user(v)) {
+            if (filtered == nil) {
+                filtered = [dict mutableCopy];
+            }
+            [filtered removeObjectForKey:k];
+        }
+    }
+    return (filtered != nil) ? [filtered copy] : dict;
+}
+
 - (id) pm_ps_objectForKey:(NSString *)defaultName {
-    if ([defaultName isEqualToString:@"playtoolsKeymappingDisabledAt"] &&
-        pt_is_bypass_enabled() &&
-        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    const void *caller = __builtin_return_address(0);
+    BOOL isAppCaller = pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(caller);
+    if (isAppCaller && ps_is_hidden_user_default_key(defaultName)) {
         return nil;
     }
-    return [self pm_ps_objectForKey:defaultName];
+    id val = [self pm_ps_objectForKey:defaultName];
+    if (isAppCaller && ps_user_default_val_leaks_host_user(val)) {
+        return nil;
+    }
+    return val;
 }
 
 - (NSDictionary<NSString *, id> *) pm_ps_dictionaryRepresentation {
     NSDictionary<NSString *, id> *dict = [self pm_ps_dictionaryRepresentation];
     if (dict != nil &&
-        dict[@"playtoolsKeymappingDisabledAt"] != nil &&
         pt_is_bypass_enabled() &&
         !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        NSMutableDictionary<NSString *, id> *filtered = [dict mutableCopy];
-        [filtered removeObjectForKey:@"playtoolsKeymappingDisabledAt"];
-        return [filtered copy];
+        return ps_sanitize_user_defaults_dict(dict);
+    }
+    return dict;
+}
+
+- (NSDictionary<NSString *, id> *) pm_ps_persistentDomainForName:(NSString *)domainName {
+    NSDictionary<NSString *, id> *dict = [self pm_ps_persistentDomainForName:domainName];
+    if (dict != nil &&
+        pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return ps_sanitize_user_defaults_dict(dict);
+    }
+    return dict;
+}
+
+- (NSDictionary<NSString *, id> *) pm_ps_volatileDomainForName:(NSString *)domainName {
+    NSDictionary<NSString *, id> *dict = [self pm_ps_volatileDomainForName:domainName];
+    if (dict != nil &&
+        pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return ps_sanitize_user_defaults_dict(dict);
     }
     return dict;
 }
@@ -2375,7 +2625,8 @@ static NSString *ps_build_wk_env_user_script_source_uncached(NSString *plat,
                                                              unsigned int cores,
                                                              int ptWidth,
                                                              int ptHeight,
-                                                             double dpr) {
+                                                             double dpr,
+                                                             BOOL compat13) {
     NSString *preamble = [NSString stringWithFormat:
         @"%@\n"
         "(function(){\n"
@@ -2384,8 +2635,9 @@ static NSString *ps_build_wk_env_user_script_source_uncached(NSString *plat,
         "  const cores = %u;\n"
         "  const ptWidth = %d;\n"
         "  const ptHeight = %d;\n"
-        "  const dpr = %.6g;\n",
-        kPSWKEnvScriptMarker, plat, uaToken, cores, ptWidth, ptHeight, dpr];
+        "  const dpr = %.6g;\n"
+        "  const compat13 = %s;\n",
+        kPSWKEnvScriptMarker, plat, uaToken, cores, ptWidth, ptHeight, dpr, compat13 ? "true" : "false"];
 
     static NSString * const kEnvScriptBody =
         @"  const wrappedFns = new WeakSet();\n"
@@ -2430,7 +2682,17 @@ static NSString *ps_build_wk_env_user_script_source_uncached(NSString *plat,
         "      });\n"
         "    } catch (_) {}\n"
         "  }\n"
-        "  function workerBootstrap(p, u, c, baseHref, isShared, bootFnSrc, sharedName) {\n"
+        "  function workerBootstrap(p, u, c, baseHref, isShared, bootFnSrc, sharedName, wCompat13) {\n"
+        "    if (wCompat13 === true) {\n"
+        "      try {\n"
+        "        delete globalThis.WeakRef;\n"
+        "        delete globalThis.FinalizationRegistry;\n"
+        "        delete globalThis.BigInt;\n"
+        "        if (typeof Promise === 'function') { delete Promise.any; }\n"
+        "        if (typeof Object === 'function') { delete Object.hasOwn; }\n"
+        "        if (typeof Array === 'function' && Array.prototype) { delete Array.prototype.at; }\n"
+        "      } catch (_) {}\n"
+        "    }\n"
         "    const wWrappedFns = new WeakSet();\n"
         "    const wToStringMap = new WeakMap();\n"
         "    const wDebugExtContexts = new WeakSet();\n"
@@ -2503,6 +2765,10 @@ static NSString *ps_build_wk_env_user_script_source_uncached(NSString *plat,
         "      wDefGetter(np, 'hardwareConcurrency', function() { return c; });\n"
         "      wDefGetter(np, 'maxTouchPoints', function() { return 5; });\n"
         "      wDefGetter(np, 'vendor', function() { return 'Apple Computer, Inc.'; });\n"
+        "      if (wCompat13 === true && ('gpu' in np)) {\n"
+        "        try { delete np.gpu; } catch (_) {}\n"
+        "        if ('gpu' in np) wDefGetter(np, 'gpu', function() { return undefined; });\n"
+        "      }\n"
         "      if (oua && typeof oua.get === 'function') {\n"
         "        wDefGetter(np, 'userAgent', function() {\n"
         "          return String(oua.get.call(this) || '').replace(/Macintosh;\\s*(?:Intel|Apple)?\\s*Mac OS X[^)]*/g, u);\n"
@@ -2779,7 +3045,7 @@ static NSString *ps_build_wk_env_user_script_source_uncached(NSString *plat,
         "          JSON.stringify(u) + ',' +\n"
         "          c + ',' +\n"
         "          JSON.stringify(cBaseHref || '') + ',false,' +\n"
-        "          JSON.stringify(childBootSrc) + ');';\n"
+        "          JSON.stringify(childBootSrc) + ',undefined,' + (wCompat13 === true ? 'true' : 'false') + ');';\n"
         "      }\n"
         "      const WrappedChildWorker = function Worker(scriptURL) {\n"
         "        if (arguments.length === 0) {\n"
@@ -3026,10 +3292,8 @@ static NSString *ps_build_wk_env_user_script_source_uncached(NSString *plat,
         "  function buildWorkerSetupCode(baseHref, isShared, sharedName) {\n"
         "    const bHref = (typeof baseHref === 'string') ? baseHref : '';\n"
         "    const sharedFlag = Boolean(isShared);\n"
-        "    let argsStr = JSON.stringify(plat) + ',' + JSON.stringify(uaToken) + ',' + cores + ',' + JSON.stringify(bHref) + ',' + (sharedFlag ? 'true' : 'false') + ',' + JSON.stringify(workerBootSrc);\n"
-        "    if (typeof sharedName === 'string') {\n"
-        "      argsStr += ',' + JSON.stringify(sharedName);\n"
-        "    }\n"
+        "    const sNameArg = (typeof sharedName === 'string') ? JSON.stringify(sharedName) : 'undefined';\n"
+        "    const argsStr = JSON.stringify(plat) + ',' + JSON.stringify(uaToken) + ',' + cores + ',' + JSON.stringify(bHref) + ',' + (sharedFlag ? 'true' : 'false') + ',' + JSON.stringify(workerBootSrc) + ',' + sNameArg + ',' + (compat13 ? 'true' : 'false');\n"
         "    return '(' + workerBootSrc + ')(' + argsStr + ');';\n"
         "  }\n"
         "  function patchWebGL(ctor, ObjCtor) {\n"
@@ -3165,6 +3429,20 @@ static NSString *ps_build_wk_env_user_script_source_uncached(NSString *plat,
         "        }\n"
         "        if ('userAgentData' in navProto) {\n"
         "          defGetter(navProto, 'userAgentData', () => undefined, win);\n"
+        "        }\n"
+        "        if (compat13) {\n"
+        "          try {\n"
+        "            if ('gpu' in navProto) {\n"
+        "              try { delete navProto.gpu; } catch (_) {}\n"
+        "              if ('gpu' in navProto) defGetter(navProto, 'gpu', () => undefined, win);\n"
+        "            }\n"
+        "            delete win.WeakRef;\n"
+        "            delete win.FinalizationRegistry;\n"
+        "            delete win.BigInt;\n"
+        "            if (win.Promise) delete win.Promise.any;\n"
+        "            if (win.Object) delete win.Object.hasOwn;\n"
+        "            if (win.Array && win.Array.prototype) delete win.Array.prototype.at;\n"
+        "          } catch (_) {}\n"
         "        }\n"
         "        const emptyPlugins = makeEmptyArrayLike(win.PluginArray ? win.PluginArray.prototype : winObj.prototype, win);\n"
         "        const emptyMimeTypes = makeEmptyArrayLike(win.MimeTypeArray ? win.MimeTypeArray.prototype : winObj.prototype, win);\n"
@@ -3950,6 +4228,7 @@ static unsigned int s_cachedWKEnvCores = 0;
 static int s_cachedWKEnvPtW = 0;
 static int s_cachedWKEnvPtH = 0;
 static double s_cachedWKEnvDpr = 0.0;
+static BOOL s_cachedWKEnvCompat13 = NO;
 static NSString *s_cachedWKEnvSource = nil;
 static id s_cachedWKEnvScript = nil;
 
@@ -3962,6 +4241,7 @@ static void ps_get_cached_wk_env(NSString **outSource, id *outScript) {
     int ptWidth = 0;
     int ptHeight = 0;
     double dpr = 0.0;
+    BOOL compat13 = pt_is_compat13_7_active();
     ps_get_wk_env_profile_params(&plat, &uaToken, &cores, &ptWidth, &ptHeight, &dpr);
 
     os_unfair_lock_lock(&s_wkEnvCacheLock);
@@ -3969,6 +4249,7 @@ static void ps_get_cached_wk_env(NSString **outSource, id *outScript) {
                      s_cachedWKEnvCores == cores &&
                      s_cachedWKEnvPtW == ptWidth &&
                      s_cachedWKEnvPtH == ptHeight &&
+                     s_cachedWKEnvCompat13 == compat13 &&
                      fabs(s_cachedWKEnvDpr - dpr) < 1e-6 &&
                      [s_cachedWKEnvPlat isEqualToString:plat] &&
                      [s_cachedWKEnvUaToken isEqualToString:uaToken]);
@@ -3994,7 +4275,7 @@ static void ps_get_cached_wk_env(NSString **outSource, id *outScript) {
     }
     os_unfair_lock_unlock(&s_wkEnvCacheLock);
 
-    NSString *built = ps_build_wk_env_user_script_source_uncached(plat, uaToken, cores, ptWidth, ptHeight, dpr);
+    NSString *built = ps_build_wk_env_user_script_source_uncached(plat, uaToken, cores, ptWidth, ptHeight, dpr, compat13);
     id builtScript = (outScript != NULL || objc_getClass("WKUserScript") != Nil) ? ps_create_wk_user_script(built) : nil;
 
     os_unfair_lock_lock(&s_wkEnvCacheLock);
@@ -4004,9 +4285,12 @@ static void ps_get_cached_wk_env(NSString **outSource, id *outScript) {
     s_cachedWKEnvPtW = ptWidth;
     s_cachedWKEnvPtH = ptHeight;
     s_cachedWKEnvDpr = dpr;
+    s_cachedWKEnvCompat13 = compat13;
     s_cachedWKEnvSource = built;
     if (builtScript != nil) {
         s_cachedWKEnvScript = builtScript;
+    } else {
+        s_cachedWKEnvScript = nil;
     }
     os_unfair_lock_unlock(&s_wkEnvCacheLock);
 
@@ -4750,7 +5034,6 @@ static BOOL ps_is_faceid_device_model(void) {
 
 + (NSArray *) pm_ps_gc_mice {
     if (pt_is_bypass_enabled() &&
-        (pt_is_compat13_7_active() || ps_is_reported_ios_13_or_older()) &&
         !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return @[];
     }
@@ -4759,7 +5042,6 @@ static BOOL ps_is_faceid_device_model(void) {
 
 + (id) pm_ps_gc_currentMouse {
     if (pt_is_bypass_enabled() &&
-        (pt_is_compat13_7_active() || ps_is_reported_ios_13_or_older()) &&
         !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return nil;
     }
@@ -4768,7 +5050,6 @@ static BOOL ps_is_faceid_device_model(void) {
 
 + (id) pm_ps_gc_coalescedKeyboard {
     if (pt_is_bypass_enabled() &&
-        (pt_is_compat13_7_active() || ps_is_reported_ios_13_or_older()) &&
         !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return nil;
     }
@@ -4798,7 +5079,7 @@ static void ps_sanitize_jscontext_for_compat13(id ctx, const void *caller) {
              "if(typeof Object==='function'){delete Object.hasOwn;}"
              "if(typeof Array==='function'&&Array.prototype){delete Array.prototype.at;}"
              "}catch(e){}";
-        ((void (*)(id, SEL, NSString *))objc_msgSend)(ctx, evalSel, cleanupJS);
+        (void)((id (*)(id, SEL, NSString *))objc_msgSend)(ctx, evalSel, cleanupJS);
         SEL setExcSel = sel_registerName("setException:");
         if ([ctx respondsToSelector:setExcSel]) {
             ((void (*)(id, SEL, id))objc_msgSend)(ctx, setExcSel, nil);
@@ -4825,6 +5106,15 @@ static void ps_sanitize_jscontext_for_compat13(id ctx, const void *caller) {
         ps_sanitize_jscontext_for_compat13(self, caller);
     }
     return self;
+}
+
++ (id) pm_ps_jsc_contextWithJSGlobalContextRef:(void *)jsGlobalContextRef {
+    const void *caller = __builtin_return_address(0);
+    id ctx = [self pm_ps_jsc_contextWithJSGlobalContextRef:jsGlobalContextRef];
+    if (ctx != nil) {
+        ps_sanitize_jscontext_for_compat13(ctx, caller);
+    }
+    return ctx;
 }
 
 static int ps_sf_symbol_bsearch_cmp(const void *key, const void *elem) {
@@ -4865,40 +5155,55 @@ static BOOL ps_is_post13_7_sf_symbol_name(NSString *name) {
         }
     }
     static const char *const kPost13Symbols[] = {
-        "airpodsmax", "airpodspro", "allergens", "ant", "applescript", "applewatch",
+        "airpodsmax", "airpodspro", "airtag", "allergens", "ant",
+        "apple.intelligence", "applelogo", "applescript", "appletv", "applewatch",
         "banknote", "barometer", "bicycle", "binoculars", "books.vertical", "brain.head.profile",
-        "building.columns", "bus", "case", "character", "checklist", "comb", "cpu",
-        "cross.case", "crown", "cup.and.saucer", "cursorarrow", "diamond", "esim",
-        "externaldrive", "ferry", "figure.walk", "fingerprint", "fork.knife", "fuelpump",
-        "gearshape", "giftcard", "graduationcap", "guitars", "gyroscope", "hifispeaker",
-        "homepod", "horn", "humidity", "hurricane", "internaldrive", "ladybug",
-        "lanyardcard", "laptopcomputer", "leaf", "level", "list.bullet.rectangle", "lungs",
-        "macmini", "macpro", "macstudio", "megaphone", "memorychip", "menucard",
-        "metronome", "newspaper", "note.text", "octagon", "opticaldisc", "opticid",
-        "paintpalette", "parkingsign", "pawprint", "pc", "pianokeys", "pills",
-        "puzzlepiece", "radio", "recordingtape", "ruler", "scroll", "seal",
-        "server.rack", "shareplay", "shippingbox", "sidebar.leading", "sidebar.trailing", "simcard",
-        "sparkles.tv", "swift", "tablecells", "takeoutbag", "terminal", "theatermasks",
-        "tornado", "touchid", "tram", "tropicalstorm", "tuningfork", "visionpro",
-        "wallet.pass", "wrench.and.screwdriver", "xserve"
+        "building.columns", "bus", "case", "character", "checklist", "checklist.checked", "comb",
+        "cpu", "cross.case", "crown", "cup.and.saucer", "cursorarrow", "cylinder",
+        "diamond", "display", "esim", "externaldrive",
+        "ferry", "figure.walk", "fingerprint", "fork.knife", "fuelpump",
+        "gearshape", "gearshape.2", "giftcard", "graduationcap", "guitars", "gyroscope",
+        "hifispeaker", "homepod", "homepodmini", "horn", "humidity", "hurricane",
+        "internaldrive", "ipad", "iphone",
+        "ladybug", "lanyardcard", "laptopcomputer", "leaf", "level", "list.bullet.rectangle",
+        "lock.shield", "lungs",
+        "macbook", "macmini", "macpro", "macstudio", "magicmouse", "megaphone", "memorychip",
+        "menucard", "metronome",
+        "network", "newspaper", "note.text",
+        "octagon", "opticaldisc", "opticid",
+        "paintpalette", "parkingsign", "pawprint", "pc", "pianokeys", "pills", "puzzlepiece",
+        "radio", "recordingtape", "ruler",
+        "scroll", "seal", "server.rack", "shareplay", "shazam.logo", "shippingbox",
+        "sidebar.leading", "sidebar.trailing", "simcard", "sparkles.tv", "swift",
+        "tablecells", "takeoutbag", "terminal", "theatermasks", "tornado", "touchid", "tram",
+        "tropicalstorm", "tuningfork",
+        "visionpro", "wallet.pass", "wrench.and.screwdriver", "xserve"
     };
+    const size_t kSymCount = sizeof(kPost13Symbols) / sizeof(kPost13Symbols[0]);
     char base[128];
     strlcpy(base, s, sizeof(base));
-    if (bsearch(base, kPost13Symbols, sizeof(kPost13Symbols) / sizeof(kPost13Symbols[0]),
-                sizeof(kPost13Symbols[0]), ps_sf_symbol_bsearch_cmp) != NULL) {
+    if (bsearch(base, kPost13Symbols, kSymCount, sizeof(kPost13Symbols[0]), ps_sf_symbol_bsearch_cmp) != NULL) {
         return YES;
     }
-    static const char *const kSuffixes[] = { ".fill", ".circle", ".square", ".slash" };
-    for (size_t i = 0; i < sizeof(kSuffixes) / sizeof(kSuffixes[0]); i++) {
-        size_t slen = strlen(kSuffixes[i]);
+    static const char *const kSuffixes[] = {
+        ".badge.exclamationmark", ".badge.questionmark", ".badge.checkmark",
+        ".badge.minus", ".badge.plus", ".badge.xmark",
+        ".checked", ".circle", ".square", ".slash", ".fill", ".rtl", ".2", ".3"
+    };
+    BOOL stripped = YES;
+    while (stripped) {
+        stripped = NO;
         size_t blen = strlen(base);
-        if (blen > slen && strcmp(base + blen - slen, kSuffixes[i]) == 0) {
-            base[blen - slen] = '\0';
-            if (bsearch(base, kPost13Symbols, sizeof(kPost13Symbols) / sizeof(kPost13Symbols[0]),
-                        sizeof(kPost13Symbols[0]), ps_sf_symbol_bsearch_cmp) != NULL) {
-                return YES;
+        for (size_t i = 0; i < sizeof(kSuffixes) / sizeof(kSuffixes[0]); i++) {
+            size_t slen = strlen(kSuffixes[i]);
+            if (blen > slen && strcmp(base + blen - slen, kSuffixes[i]) == 0) {
+                base[blen - slen] = '\0';
+                if (bsearch(base, kPost13Symbols, kSymCount, sizeof(kPost13Symbols[0]), ps_sf_symbol_bsearch_cmp) != NULL) {
+                    return YES;
+                }
+                stripped = YES;
+                break;
             }
-            break;
         }
     }
     return NO;
@@ -4932,6 +5237,17 @@ static BOOL ps_is_post13_7_sf_symbol_name(NSString *name) {
         return nil;
     }
     return [self pm_ps_uiimage_systemImageNamed:name compatibleWithTraitCollection:traitCollection];
+}
+
++ (UIImage *) pm_ps_uiimage_systemImageNamed:(NSString *)name
+                               variableValue:(double)value
+                           withConfiguration:(UIImageConfiguration *)configuration {
+    if (pt_is_bypass_enabled() &&
+        pt_is_compat13_7_active() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return nil;
+    }
+    return [self pm_ps_uiimage_systemImageNamed:name variableValue:value withConfiguration:configuration];
 }
 
 + (NSArray<NSString *> *) pm_ps_uifont_familyNames {
@@ -5379,6 +5695,10 @@ static void ps_install_avcapture_hooks_if_loaded(void) {
                 ps_swizzle_class_method(avCls, defTypeSel, @selector(pm_ps_av_defaultDeviceWithDeviceType:mediaType:position:));
             }
             ps_swizzle_capture_device_class(avCls);
+            Class avFmtCls = objc_getClass("AVCaptureDeviceFormat");
+            if (avFmtCls != Nil) {
+                ps_swizzle_capture_format_class(avFmtCls);
+            }
             s_av_device_hooks_installed = YES;
         }
     }
@@ -5443,7 +5763,7 @@ void ps_load_environment_bypass_hooks(void) {
     ps_register_safe_false_cf_imp([PSSwizzleHooks class], @selector(pm_isiOSAppOnMac));
     ps_swizzle_instance_method(piClass, @selector(isMacCatalystApp), @selector(pm_isMacCatalystApp));
     ps_swizzle_instance_method(piClass, @selector(isiOSAppOnMac), @selector(pm_isiOSAppOnMac));
-    ps_replace_instance_method(piClass, NSSelectorFromString(@"isiOSAppOnVision"), @selector(pm_return_no));
+    ps_replace_instance_method(piClass, NSSelectorFromString(@"isiOSAppOnVision"), @selector(pm_isiOSAppOnVision_no));
     ps_swizzle_instance_method(piClass, NSSelectorFromString(@"macCatalystVersionIsAtLeastVersion:"), @selector(pm_macCatalystVersionIsAtLeastVersion:));
     ps_swizzle_instance_method(piClass, @selector(isLowPowerModeEnabled), @selector(pm_ps_isLowPowerModeEnabled));
     ps_swizzle_instance_method(piClass, @selector(thermalState), @selector(pm_ps_thermalState));
@@ -5484,7 +5804,7 @@ void ps_load_environment_bypass_hooks(void) {
         }
         SEL visionSel = NSSelectorFromString(@"isiOSAppOnVision");
         if (ps_class_defines_instance_method(concretePIClass, visionSel)) {
-            ps_replace_instance_method(concretePIClass, visionSel, @selector(pm_return_no));
+            ps_replace_instance_method(concretePIClass, visionSel, @selector(pm_swift_isiOSAppOnVision_no));
         }
         SEL catAtLeastSel = NSSelectorFromString(@"macCatalystVersionIsAtLeastVersion:");
         if (ps_class_defines_instance_method(concretePIClass, catAtLeastSel)) {
@@ -5540,6 +5860,12 @@ void ps_load_environment_bypass_hooks(void) {
     if (udCls != Nil) {
         ps_swizzle_instance_method(udCls, @selector(objectForKey:), @selector(pm_ps_objectForKey:));
         ps_swizzle_instance_method(udCls, @selector(dictionaryRepresentation), @selector(pm_ps_dictionaryRepresentation));
+        if (class_getInstanceMethod(udCls, @selector(persistentDomainForName:)) != NULL) {
+            ps_swizzle_instance_method(udCls, @selector(persistentDomainForName:), @selector(pm_ps_persistentDomainForName:));
+        }
+        if (class_getInstanceMethod(udCls, @selector(volatileDomainForName:)) != NULL) {
+            ps_swizzle_instance_method(udCls, @selector(volatileDomainForName:), @selector(pm_ps_volatileDomainForName:));
+        }
     }
 
     Class viewCls = objc_getClass("UIView");
@@ -7765,6 +8091,10 @@ static void ps_install_jscontext_hooks_if_loaded(void) {
             if (class_getInstanceMethod(jscCls, initVMSel) != NULL) {
                 ps_swizzle_instance_method(jscCls, initVMSel, @selector(pm_ps_jsc_initWithVirtualMachine:));
             }
+            SEL ctxRefSel = NSSelectorFromString(@"contextWithJSGlobalContextRef:");
+            if (class_getClassMethod(jscCls, ctxRefSel) != NULL) {
+                ps_swizzle_class_method(jscCls, ctxRefSel, @selector(pm_ps_jsc_contextWithJSGlobalContextRef:));
+            }
         });
     }
 }
@@ -8005,13 +8335,18 @@ void ps_install_system_jailbreak_bypass_hooks(void) {
             }
         }
     }
-    ps_swizzle_instance_method(objc_getClass("UITraitCollection"), @selector(userInterfaceIdiom), @selector(pm_hook_traitUserInterfaceIdiom));
+    Class traitCls = objc_getClass("UITraitCollection");
+    ps_swizzle_instance_method(traitCls, @selector(userInterfaceIdiom), @selector(pm_hook_traitUserInterfaceIdiom));
+    if (traitCls != Nil && class_getInstanceMethod(traitCls, @selector(description)) != NULL) {
+        ps_swizzle_instance_method(traitCls, @selector(description), @selector(pm_hook_traitDescription));
+    }
     {
         Class imgCls = objc_getClass("UIImage");
         if (imgCls != Nil) {
             SEL sys1 = sel_registerName("systemImageNamed:");
             SEL sys2 = sel_registerName("systemImageNamed:withConfiguration:");
             SEL sys3 = sel_registerName("systemImageNamed:compatibleWithTraitCollection:");
+            SEL sys4 = sel_registerName("systemImageNamed:variableValue:withConfiguration:");
             if (class_getClassMethod(imgCls, sys1) != NULL) {
                 ps_swizzle_class_method(imgCls, sys1, @selector(pm_ps_uiimage_systemImageNamed:));
             }
@@ -8020,6 +8355,9 @@ void ps_install_system_jailbreak_bypass_hooks(void) {
             }
             if (class_getClassMethod(imgCls, sys3) != NULL) {
                 ps_swizzle_class_method(imgCls, sys3, @selector(pm_ps_uiimage_systemImageNamed:compatibleWithTraitCollection:));
+            }
+            if (class_getClassMethod(imgCls, sys4) != NULL) {
+                ps_swizzle_class_method(imgCls, sys4, @selector(pm_ps_uiimage_systemImageNamed:variableValue:withConfiguration:));
             }
         }
     }
@@ -8151,6 +8489,8 @@ void ps_install_system_jailbreak_bypass_hooks(void) {
         { @selector(sharedSupportURL), @selector(pm_ps_sharedSupportURL) },
         { @selector(builtInPlugInsURL), @selector(pm_ps_builtInPlugInsURL) },
         { @selector(appStoreReceiptURL), @selector(pm_ps_appStoreReceiptURL) },
+        { @selector(pathForAuxiliaryExecutable:), @selector(pm_ps_pathForAuxiliaryExecutable:) },
+        { @selector(URLForAuxiliaryExecutable:), @selector(pm_ps_URLForAuxiliaryExecutable:) },
         { @selector(pathForResource:ofType:), @selector(pm_ps_pathForResource:ofType:) },
         { @selector(pathForResource:ofType:inDirectory:), @selector(pm_ps_pathForResource:ofType:inDirectory:) },
         { @selector(pathForResource:ofType:inDirectory:forLocalization:), @selector(pm_ps_pathForResource:ofType:inDirectory:forLocalization:) },
@@ -8160,6 +8500,7 @@ void ps_install_system_jailbreak_bypass_hooks(void) {
         { @selector(pathsForResourcesOfType:inDirectory:), @selector(pm_ps_pathsForResourcesOfType:inDirectory:) },
         { @selector(URLsForResourcesWithExtension:subdirectory:), @selector(pm_ps_URLsForResourcesWithExtension:subdirectory:) },
         { @selector(URLsForResourcesWithExtension:subdirectory:localization:), @selector(pm_ps_URLsForResourcesWithExtension:subdirectory:localization:) },
+        { @selector(localizedInfoDictionary), @selector(pm_ps_localizedInfoDictionary) },
         { @selector(infoDictionary), @selector(pm_ps_infoDictionary) },
         { @selector(objectForInfoDictionaryKey:), @selector(pm_ps_objectForInfoDictionaryKey:) },
         { @selector(description), @selector(pm_ps_bundle_description) }

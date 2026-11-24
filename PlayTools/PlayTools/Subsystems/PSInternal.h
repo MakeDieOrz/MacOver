@@ -115,6 +115,7 @@ __attribute__((visibility("hidden")))
 - (instancetype) pm_wk_cfg_initWithCoder:(NSCoder *)coder __attribute__((objc_method_family(init)));
 - (instancetype) pm_ps_jsc_init __attribute__((objc_method_family(init)));
 - (instancetype) pm_ps_jsc_initWithVirtualMachine:(id)virtualMachine __attribute__((objc_method_family(init)));
++ (id) pm_ps_jsc_contextWithJSGlobalContextRef:(void *)jsGlobalContextRef;
 - (NSURL *) pm_wk_URL;
 - (NSURLRequest *) pm_wk_nav_request;
 - (NSURLRequest *) pm_wk_frame_request;

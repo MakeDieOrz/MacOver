@@ -764,13 +764,22 @@ static id pt_hook_CMMotionManager_init(id self, SEL _cmd) {
     return motionManager;
 }
 
+static GCMouse *(*s_orig_GCMouse_current)(id, SEL) = NULL;
+static NSArray *(*s_orig_GCMouse_mice)(id, SEL) = NULL;
+
 static GCMouse *pt_hook_GCMouse_current(id self, SEL _cmd) {
-    (void)self; (void)_cmd;
+    if (pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        s_orig_GCMouse_current != NULL) {
+        return s_orig_GCMouse_current(self, _cmd);
+    }
     return nil;
 }
 
 static NSArray *pt_hook_GCMouse_mice(id self, SEL _cmd) {
-    (void)self; (void)_cmd;
+    if (pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        s_orig_GCMouse_mice != NULL) {
+        return s_orig_GCMouse_mice(self, _cmd);
+    }
     return @[];
 }
 
@@ -1002,8 +1011,8 @@ static Class pt_resolve_frontboard_frame_class(Class sceneCoreCls, Class sceneCl
     }
 
     if ([[PlaySettings shared] disableBuiltinMouse]) {
-        pt_replace_class_imp(objc_getClass("GCMouse"), @selector(current), (IMP)pt_hook_GCMouse_current, NULL);
-        pt_replace_class_imp(objc_getClass("GCMouse"), @selector(mice), (IMP)pt_hook_GCMouse_mice, NULL);
+        pt_replace_class_imp(objc_getClass("GCMouse"), @selector(current), (IMP)pt_hook_GCMouse_current, (IMP *)&s_orig_GCMouse_current);
+        pt_replace_class_imp(objc_getClass("GCMouse"), @selector(mice), (IMP)pt_hook_GCMouse_mice, (IMP *)&s_orig_GCMouse_mice);
     }
 
     if ([[PlaySettings shared] ignoreUnityKeyboardInitializationError]) {

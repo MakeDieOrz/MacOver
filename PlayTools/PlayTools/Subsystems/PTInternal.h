@@ -61,6 +61,7 @@
 #include <sys/xattr.h>
 #include <unistd.h>
 #include <utime.h>
+#include <uuid/uuid.h>
 #include <stdint.h>
 #import "../PTCallerAddressMath.h"
 #import "PTDebugTrace.h"
@@ -554,6 +555,10 @@ __attribute__((visibility("hidden"))) int32_t pt_MGGetSInt32Answer(CFStringRef q
 __attribute__((visibility("hidden"))) CFStringRef pt_MGGetStringAnswer(CFStringRef question);
 __attribute__((visibility("hidden"))) int32_t pt_MGGetProductType(void);
 __attribute__((visibility("hidden"))) void *pt_spoofer_dlsym_route(const char *symbol);
+__attribute__((visibility("hidden"))) void *pt_objc_spoofer_dlsym_route(const char *symbol);
+__attribute__((visibility("hidden"))) BOOL pt_is_hidden_macos_pref_key(const char *key);
+__attribute__((visibility("hidden"))) BOOL pt_is_hidden_unregistered_macho_region(uintptr_t addr, uintptr_t size, vm_prot_t prot);
+__attribute__((visibility("hidden"))) int pt_gethostuuid_with_caller(uuid_t id, const struct timespec *wait, const void *caller);
 __attribute__((visibility("hidden"))) int pt_sysctl_with_caller(int *name, u_int types, void *buf, size_t *size, void *arg0, size_t arg1, const void *caller);
 __attribute__((visibility("hidden"))) int pt_sysctlbyname_with_caller(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen, const void *caller);
 __attribute__((visibility("hidden"))) intptr_t pt_syscall_dispatch_with_caller(int number, const uintptr_t args[8], const void *caller, BOOL *out_handled);
@@ -561,6 +566,7 @@ __attribute__((visibility("hidden"))) char ***pt_get_app_shadow_environ_ptr(void
 
 // Entitlements exports
 __attribute__((visibility("hidden"))) int pt_csops_with_caller(pid_t pid, unsigned int ops, void *useraddr, size_t usersize, const void *caller);
+__attribute__((visibility("hidden"))) int pt_csops_audittoken_with_caller(pid_t pid, unsigned int ops, void *useraddr, size_t usersize, audit_token_t *token, const void *caller);
 __attribute__((visibility("hidden"))) int pt_ptrace_with_caller(int request, pid_t pid, caddr_t addr, int data, const void *caller);
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_macos_mach_service(const char *name);
 
@@ -604,10 +610,22 @@ __attribute__((visibility("hidden"))) int pt_fs_fcntl_with_caller(int fd, int cm
 __attribute__((visibility("hidden"))) int pt_fs_proc_pidinfo_with_caller(int pid, int flavor, uint64_t arg, void *buffer, int buffersize, const void *caller);
 __attribute__((visibility("hidden"))) int pt_fs_proc_pidinfo_syscall_with_caller(int pid, int flavor, uint64_t arg, void *buffer, int buffersize, const void *caller);
 __attribute__((visibility("hidden"))) int pt_fs_proc_pidfdinfo_syscall_with_caller(int pid, int fd, int flavor, void *buffer, int buffersize, const void *caller);
+__attribute__((visibility("hidden"))) int pt_fs_proc_listpids_syscall_with_caller(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize, const void *caller);
 __attribute__((visibility("hidden"))) int pt_fs_getattrlist_with_caller(const char *path, void *attrList, void *attrBuf, size_t attrBufSize, unsigned int options, const void *caller);
 __attribute__((visibility("hidden"))) int pt_fs_fgetattrlist_with_caller(int fd, void *attrList, void *attrBuf, size_t attrBufSize, unsigned int options, const void *caller);
 __attribute__((visibility("hidden"))) int pt_fs_getattrlistat_with_caller(int fd, const char *path, void *attrList, void *attrBuf, size_t attrBufSize, unsigned long options, const void *caller);
+__attribute__((visibility("hidden"))) int pt_fs_getattrlistbulk_with_caller(int dirfd, void *attrList, void *attrBuf, size_t attrBufSize, uint64_t options, const void *caller);
+__attribute__((visibility("hidden"))) int pt_fs_statfs_with_caller(const char *path, struct statfs *buf, const void *caller);
+__attribute__((visibility("hidden"))) int pt_fs_fstatfs_with_caller(int fd, struct statfs *buf, const void *caller);
+__attribute__((visibility("hidden"))) int pt_fs_getfsstat_with_caller(struct statfs *buf, int bufsize, int mode, const void *caller);
+__attribute__((visibility("hidden"))) ssize_t pt_fs_getdirentries64_syscall_with_caller(int fd, void *buf, size_t bufsize, off_t *position, const void *caller);
+__attribute__((visibility("hidden"))) ssize_t pt_fs_getxattr_with_caller(const char *path, const char *name, void *value, size_t size, u_int32_t position, int options, const void *caller);
+__attribute__((visibility("hidden"))) ssize_t pt_fs_fgetxattr_with_caller(int fd, const char *name, void *value, size_t size, u_int32_t position, int options, const void *caller);
+__attribute__((visibility("hidden"))) ssize_t pt_fs_listxattr_with_caller(const char *path, char *namebuff, size_t size, int options, const void *caller);
+__attribute__((visibility("hidden"))) ssize_t pt_fs_flistxattr_with_caller(int fd, char *namebuff, size_t size, int options, const void *caller);
 __attribute__((visibility("hidden"))) ssize_t pt_fs_fsgetpath_with_caller(char *buf, size_t bufsize, fsid_t *fsid, uint64_t objid, const void *caller);
+__attribute__((visibility("hidden"))) Boolean pt_CFURLCopyResourcePropertyForKey(CFURLRef url, CFStringRef key, void *propertyValueTypeRefPtr, CFErrorRef *error);
+__attribute__((visibility("hidden"))) CFDictionaryRef pt_CFURLCopyResourcePropertiesForKeys(CFURLRef url, CFArrayRef keys, CFErrorRef *error);
 __attribute__((visibility("hidden"))) void *pt_fs_dlsym_route(const char *symbol);
 
 // DyldVirtualizer exports
@@ -615,6 +633,7 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_class(const char *n
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_protocol_name(const char *name);
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_selector_name(const char *selName);
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_dyld_image_name(const char *name);
+__attribute__((visibility("hidden"))) BOOL pt_is_post13_7_hidden_framework_path(const char *path);
 __attribute__((visibility("hidden"))) BOOL pt_should_hide_dyld_image(const char *name);
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_dyld_image_header(const struct mach_header *mh);
 __attribute__((visibility("hidden"))) const char *pt_fallback_system_image_path(void);
@@ -636,6 +655,7 @@ __attribute__((visibility("hidden"))) void *pt_network_dlsym_route(const char *s
 // SvcInterceptor exports
 __attribute__((visibility("hidden"))) void pt_svc_interceptor_init_early(void);
 __attribute__((visibility("hidden"))) void pt_svc_restore_patched_bytes_in_buffer(uintptr_t read_start, uint8_t *dst, size_t copied);
+__attribute__((visibility("hidden"))) void *pt_svc_dlsym_route(const char *symbol);
 
 // Entitlements exports
 __attribute__((visibility("hidden"))) void *pt_entitlements_dlsym_route(const char *symbol);

@@ -66,6 +66,7 @@ MOCK_TARGET_M = r"""
 @import WebKit;
 @import PlayTools;
 #include <arpa/inet.h>
+#include <CommonCrypto/CommonDigest.h>
 #include <dlfcn.h>
 #include <crt_externs.h>
 #include <errno.h>
@@ -1657,6 +1658,9 @@ int main(int argc, const char *argv[]) {
         BOOL s11ResponsibilitySelfOK = NO;
         BOOL s11LsAsnHiddenOK = NO;
         BOOL s11ObjcMetaAndReqHiddenOK = NO;
+        BOOL s11Round1DlsymAndProcOK = NO;
+        BOOL s11Round1VolumeAndCodeResOK = NO;
+        BOOL s11Round1AppKitAndSuperBlobOK = NO;
         const char *testS11Env = getenv("HARNESS_TEST_SCENARIO11");
         if (testS11Env != NULL && strcmp(testS11Env, "1") == 0) {
             // 1. PROC_PIDPATHINFO (libproc + SYS_proc_info) returns 0 and virtualized iOS bundle path
@@ -2271,6 +2275,157 @@ int main(int argc, const char *argv[]) {
                 s11ObjcMetaAndReqHiddenOK = (objc_getMetaClass("NSApplication") == Nil &&
                                              objc_getRequiredClass("NSApplication") == Nil);
             }
+
+            // 18. Round 1 parity: dlsym routing, utmpx/hostuuid/grouplist/kinfo_proc, volumes, AppKit hiding, SuperBlob CD hash
+            {
+                BOOL noMetalAll = (dlsym(RTLD_DEFAULT, "MTLCopyAllDevices") == NULL);
+                BOOL noAudioHas = (dlsym(RTLD_DEFAULT, "AudioObjectHasProperty") == NULL);
+                BOOL noMacSC = (dlsym(RTLD_DEFAULT, "SCDynamicStoreCopyComputerName") == NULL &&
+                                dlsym(RTLD_DEFAULT, "SCNetworkInterfaceCopyAll") == NULL);
+                BOOL hasDlsymRoutes = (dlsym(RTLD_DEFAULT, "task_get_exception_ports") != NULL &&
+                                       dlsym(RTLD_DEFAULT, "getifaddrs") != NULL);
+                void (*setUtx)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "setutxent");
+                void *(*getUtx)(void) = (void *(*)(void))dlsym(RTLD_DEFAULT, "getutxent");
+                void (*endUtx)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "endutxent");
+                BOOL utmpxClean = YES;
+                if (setUtx != NULL && getUtx != NULL && endUtx != NULL) {
+                    setUtx();
+                    utmpxClean = (getUtx() == NULL);
+                    endUtx();
+                }
+                int kpMib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid() };
+                struct kinfo_proc kp;
+                memset(&kp, 0, sizeof(kp));
+                size_t kpSz = sizeof(kp);
+                BOOL kpClean = NO;
+                if (sysctl(kpMib, 4, &kp, &kpSz, NULL, 0) == 0 && kpSz >= sizeof(kp)) {
+                    kpClean = YES;
+                    int ng = kp.kp_eproc.e_ucred.cr_ngroups;
+                    if (ng > 16) ng = 16;
+                    for (int gi = 0; gi < ng; gi++) {
+                        gid_t g = kp.kp_eproc.e_ucred.cr_groups[gi];
+                        if (g == 20U || g == 80U || g == 81U || g == 204U || g == 395U || g == 400U) {
+                            kpClean = NO;
+                            break;
+                        }
+                    }
+                }
+                int glBuf[32] = {0};
+                int glN = 32;
+                int (*fnGL)(const char *, int, int *, int *) = (int (*)(const char *, int, int *, int *))dlsym(RTLD_DEFAULT, "getgrouplist");
+                BOOL glClean = YES;
+                if (fnGL != NULL && fnGL("mobile", (int)getgid(), glBuf, &glN) == 0 && glN > 0 && glN <= 32) {
+                    for (int gi = 0; gi < glN; gi++) {
+                        int g = glBuf[gi];
+                        if (g == 20 || g == 80 || g == 81 || g == 204 || g == 395 || g == 400) {
+                            glClean = NO;
+                            break;
+                        }
+                    }
+                }
+                s11Round1DlsymAndProcOK = (noMetalAll && noAudioHas && noMacSC && hasDlsymRoutes && utmpxClean && kpClean && glClean);
+
+                NSURL *homeURL = [NSURL fileURLWithPath:NSHomeDirectory() isDirectory:YES];
+                id vName = nil, vURL = nil;
+                [homeURL getResourceValue:&vName forKey:NSURLVolumeNameKey error:nil];
+                [homeURL getResourceValue:&vURL forKey:NSURLVolumeURLKey error:nil];
+                BOOL volClean = (!([vName isKindOfClass:[NSString class]] && [(NSString *)vName containsString:@"Macintosh HD"]) &&
+                                 !([vURL isKindOfClass:[NSURL class]] && [[(NSURL *)vURL path] hasPrefix:@"/System/Volumes/Data"]));
+                NSArray<NSURL *> *mounted = [[NSFileManager defaultManager] mountedVolumeURLsIncludingResourceValuesForKeys:nil options:0];
+                for (NSURL *mu in mounted) {
+                    if ([mu.path hasPrefix:@"/System/Volumes/Data"] || [mu.path hasPrefix:@"/Volumes/"]) {
+                        volClean = NO;
+                    }
+                }
+                char csTmp[PATH_MAX] = {0};
+                BOOL confstrClean = (confstr(_CS_DARWIN_USER_TEMP_DIR, csTmp, sizeof(csTmp)) == 0 ||
+                                     strstr(csTmp, "/var/folders/") == NULL);
+                BOOL crPathClean = YES;
+                NSString *crP = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"_CodeSignature/CodeResources"];
+                int crFd = open(crP.fileSystemRepresentation, O_RDONLY | O_CLOEXEC);
+                if (crFd >= 0) {
+                    char crReal[PATH_MAX] = {0};
+                    if (fcntl(crFd, F_GETPATH, crReal) == 0 &&
+                        (strstr(crReal, ".pt_coderes_") != NULL || strstr(crReal, "/AppBackups/") != NULL)) {
+                        crPathClean = NO;
+                    }
+                    close(crFd);
+                }
+                s11Round1VolumeAndCodeResOK = (volClean && confstrClean && crPathClean);
+
+                BOOL appkitHidden = (NSClassFromString(@"NSCursor") == Nil &&
+                                     NSClassFromString(@"NSStatusBar") == Nil &&
+                                     NSClassFromString(@"NSDockTile") == Nil &&
+                                     NSClassFromString(@"NSOpenPanel") == Nil &&
+                                     NSClassFromString(@"NSTouchBar") == Nil &&
+                                     objc_getMetaClass("NSCursor") == Nil);
+                const char **(*fnCopyHdr)(const void *, unsigned int *) =
+                    (const char **(*)(const void *, unsigned int *))dlsym(RTLD_DEFAULT, "objc_copyClassNamesForImageHeader");
+                BOOL hdrClean = YES;
+                if (fnCopyHdr != NULL) {
+                    unsigned int hn = 0;
+                    const char **hnames = fnCopyHdr(_dyld_get_image_header(0), &hn);
+                    if (hnames != NULL) {
+                        for (unsigned int hi = 0; hi < hn; hi++) {
+                            if (hnames[hi] != NULL && strstr(hnames[hi], "PlayTools") != NULL) {
+                                hdrClean = NO;
+                                break;
+                            }
+                        }
+                        free((void *)hnames);
+                    }
+                }
+                BOOL superBlobCDMatch = YES;
+                NSMutableData *sbData = [NSMutableData dataWithLength:(1U << 19)];
+                if (pt_harness_csops(0, 10U, sbData.mutableBytes, sbData.length) == 0) {
+                    const uint8_t *sb = (const uint8_t *)sbData.bytes;
+                    uint32_t sbm = 0, sbl = 0, sbc = 0;
+                    memcpy(&sbm, sb, 4); memcpy(&sbl, sb + 4, 4); memcpy(&sbc, sb + 8, 4);
+                    sbm = ntohl(sbm); sbl = ntohl(sbl); sbc = ntohl(sbc);
+                    if (sbm == 0xfade0cc0U && sbl <= sbData.length && sbc <= 128U) {
+                        const uint8_t *cdPtr = NULL, *s5Ptr = NULL, *s7Ptr = NULL;
+                        uint32_t cdLen = 0, s5Len = 0, s7Len = 0;
+                        for (uint32_t si = 0; si < sbc; si++) {
+                            uint32_t st = 0, so = 0;
+                            memcpy(&st, sb + 12U + si * 8U, 4);
+                            memcpy(&so, sb + 16U + si * 8U, 4);
+                            st = ntohl(st); so = ntohl(so);
+                            if (so + 8U > sbl) continue;
+                            uint32_t cm = 0, cl = 0;
+                            memcpy(&cm, sb + so, 4); memcpy(&cl, sb + so + 4, 4);
+                            cm = ntohl(cm); cl = ntohl(cl);
+                            if (cl < 8U || so + cl > sbl) continue;
+                            if (st == 0U && cm == 0xfade0c02U && cl >= 44U && sb[so + 37U] == 2U && sb[so + 36U] == 32U) {
+                                cdPtr = sb + so; cdLen = cl;
+                            } else if (st == 5U && cm == 0xfade7171U) {
+                                s5Ptr = sb + so; s5Len = cl;
+                            } else if (st == 7U && cm == 0xfade7172U) {
+                                s7Ptr = sb + so; s7Len = cl;
+                            }
+                        }
+                        if (cdPtr != NULL) {
+                            uint32_t hoff = 0, nsp = 0;
+                            memcpy(&hoff, cdPtr + 16U, 4); memcpy(&nsp, cdPtr + 24U, 4);
+                            hoff = ntohl(hoff); nsp = ntohl(nsp);
+                            if (s5Ptr != NULL && nsp >= 5U && hoff >= 160U && hoff <= cdLen) {
+                                uint8_t d5[32];
+                                CC_SHA256(s5Ptr, (CC_LONG)s5Len, d5);
+                                BOOL zero5 = YES;
+                                for (int zi = 0; zi < 32; zi++) if (cdPtr[hoff - 160U + (uint32_t)zi] != 0) zero5 = NO;
+                                if (!zero5 && memcmp(cdPtr + hoff - 160U, d5, 32U) != 0) superBlobCDMatch = NO;
+                            }
+                            if (s7Ptr != NULL && nsp >= 7U && hoff >= 224U && hoff <= cdLen) {
+                                uint8_t d7[32];
+                                CC_SHA256(s7Ptr, (CC_LONG)s7Len, d7);
+                                BOOL zero7 = YES;
+                                for (int zi = 0; zi < 32; zi++) if (cdPtr[hoff - 224U + (uint32_t)zi] != 0) zero7 = NO;
+                                if (!zero7 && memcmp(cdPtr + hoff - 224U, d7, 32U) != 0) superBlobCDMatch = NO;
+                            }
+                        }
+                    }
+                }
+                s11Round1AppKitAndSuperBlobOK = (appkitHidden && hdrClean && superBlobCDMatch);
+            }
         }
 
         // Scenario 12: compat13_7 parity checks
@@ -2279,6 +2434,8 @@ int main(int argc, const char *argv[]) {
         BOOL s12MetalCompat13GateOK = NO;
         BOOL s12IORegGpuSanitizedOK = NO;
         BOOL s12Post13EpochCleanOK = NO;
+        BOOL s12Round1JscCAPICleanOK = NO;
+        BOOL s12Round1ReflectionParityOK = NO;
         const char *testS12Env = getenv("HARNESS_TEST_SCENARIO12");
         if (testS12Env != NULL && strcmp(testS12Env, "1") == 0) {
             s12FreadlinkHiddenOK = (dlsym(RTLD_DEFAULT, "freadlink") == NULL);
@@ -2460,6 +2617,47 @@ int main(int argc, const char *argv[]) {
                 }
                 s12Post13EpochCleanOK = (noEnum && noLazyV && noWKWorld && noGC &&
                                          piClsNameOK && noVision && noMacSel && rtVerOK && icuOK && jscOK);
+
+                // Round 1 compat13_7: JSC C API + reflection parity (metaclass, class_getProperty, NSStringFromClass, LinkTimeLibrary)
+                if (jscH != NULL) {
+                    typedef void *(*JSCCreateFn)(void *);
+                    typedef void (*JSCReleaseFn)(void *);
+                    typedef void *(*JSCStrCreateFn)(const char *);
+                    typedef void (*JSCStrReleaseFn)(void *);
+                    typedef void *(*JSCEvalFn)(void *, void *, void *, void *, int, void **);
+                    typedef bool (*JSCToBoolFn)(void *, void *);
+                    JSCCreateFn fnCreate = (JSCCreateFn)dlsym(RTLD_DEFAULT, "JSGlobalContextCreate");
+                    JSCReleaseFn fnRel = (JSCReleaseFn)dlsym(RTLD_DEFAULT, "JSGlobalContextRelease");
+                    JSCStrCreateFn fnStr = (JSCStrCreateFn)dlsym(RTLD_DEFAULT, "JSStringCreateWithUTF8CString");
+                    JSCStrReleaseFn fnStrRel = (JSCStrReleaseFn)dlsym(RTLD_DEFAULT, "JSStringRelease");
+                    JSCEvalFn fnEval = (JSCEvalFn)dlsym(RTLD_DEFAULT, "JSEvaluateScript");
+                    JSCToBoolFn fnBool = (JSCToBoolFn)dlsym(RTLD_DEFAULT, "JSValueToBoolean");
+                    if (fnCreate != NULL && fnRel != NULL && fnStr != NULL && fnStrRel != NULL && fnEval != NULL && fnBool != NULL) {
+                        void *gctx = fnCreate(NULL);
+                        if (gctx != NULL) {
+                            void *s1 = fnStr("typeof WeakRef === 'undefined' && typeof BigInt === 'undefined'");
+                            void *exc = NULL;
+                            void *rv = fnEval(gctx, s1, NULL, NULL, 1, &exc);
+                            s12Round1JscCAPICleanOK = (rv != NULL && exc == NULL && fnBool(gctx, rv));
+                            fnStrRel(s1);
+                            fnRel(gctx);
+                        }
+                    }
+                }
+                BOOL noMacProp = (class_getProperty([NSProcessInfo class], "iOSAppOnMac") == NULL &&
+                                  class_getProperty([NSProcessInfo class], "isiOSAppOnMac") == NULL &&
+                                  class_getProperty([NSProcessInfo class], "iOSAppOnVision") == NULL &&
+                                  class_getProperty([NSProcessInfo class], "isiOSAppOnVision") == NULL);
+                NSString *nsClsName = NSStringFromClass([NSProcessInfo processInfo].class);
+                const char *objClsName = object_getClassName([NSProcessInfo processInfo]);
+                BOOL clsNamesParity = ([nsClsName isEqualToString:@"NSProcessInfo"] &&
+                                       objClsName != NULL && strcmp(objClsName, "NSProcessInfo") == 0);
+                Class uiBtnMeta = object_getClass(NSClassFromString(@"UIButton"));
+                BOOL metaMethodHidden = (uiBtnMeta == Nil ||
+                                         class_getInstanceMethod(uiBtnMeta, NSSelectorFromString(@"buttonWithType:primaryAction:")) == NULL);
+                NSVerFn fnLinkVer = (NSVerFn)dlsym(RTLD_DEFAULT, "NSVersionOfLinkTimeLibrary");
+                BOOL linkVerOK = (fnLinkVer == NULL || (fnLinkVer("Foundation") >> 16) == 1677);
+                s12Round1ReflectionParityOK = (noMacProp && clsNamesParity && metaMethodHidden && linkVerOK);
             }
         }
 
@@ -2597,11 +2795,16 @@ int main(int argc, const char *argv[]) {
             @"s11ResponsibilitySelfOK": s11ResponsibilitySelfOK ? @YES : @NO,
             @"s11LsAsnHiddenOK": s11LsAsnHiddenOK ? @YES : @NO,
             @"s11ObjcMetaAndReqHiddenOK": s11ObjcMetaAndReqHiddenOK ? @YES : @NO,
+            @"s11Round1DlsymAndProcOK": s11Round1DlsymAndProcOK ? @YES : @NO,
+            @"s11Round1VolumeAndCodeResOK": s11Round1VolumeAndCodeResOK ? @YES : @NO,
+            @"s11Round1AppKitAndSuperBlobOK": s11Round1AppKitAndSuperBlobOK ? @YES : @NO,
             @"s12FreadlinkHiddenOK": s12FreadlinkHiddenOK ? @YES : @NO,
             @"s12ExtensionKitHiddenOK": s12ExtensionKitHiddenOK ? @YES : @NO,
             @"s12MetalCompat13GateOK": s12MetalCompat13GateOK ? @YES : @NO,
             @"s12IORegGpuSanitizedOK": s12IORegGpuSanitizedOK ? @YES : @NO,
             @"s12Post13EpochCleanOK": s12Post13EpochCleanOK ? @YES : @NO,
+            @"s12Round1JscCAPICleanOK": s12Round1JscCAPICleanOK ? @YES : @NO,
+            @"s12Round1ReflectionParityOK": s12Round1ReflectionParityOK ? @YES : @NO,
             @"provPath": provPath,
             @"hidPCInstallGen": (hidPCInstallGenNS && hidPCInstallGenCF) ? @YES : @NO,
             @"provURLPath": provURLPath,
@@ -3816,6 +4019,9 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info11["s11ResponsibilitySelfOK"] is True,
         info11["s11LsAsnHiddenOK"] is True,
         info11["s11ObjcMetaAndReqHiddenOK"] is True,
+        info11["s11Round1DlsymAndProcOK"] is True,
+        info11["s11Round1VolumeAndCodeResOK"] is True,
+        info11["s11Round1AppKitAndSuperBlobOK"] is True,
     ]
     results.append(ScenarioResult(
         name="11. 1.0.4 audit & detect-v2 parity checks",
@@ -3876,6 +4082,8 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info12["s12MetalCompat13GateOK"] is True,
         info12["s12IORegGpuSanitizedOK"] is True,
         info12["s12Post13EpochCleanOK"] is True,
+        info12["s12Round1JscCAPICleanOK"] is True,
+        info12["s12Round1ReflectionParityOK"] is True,
     ]
     results.append(ScenarioResult(
         name="12. compat13_7 parity (freadlink, ExtensionKit, Metal 2.3 gate, AGX IORegistry)",
