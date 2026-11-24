@@ -459,6 +459,8 @@ typedef struct {
     uint32_t max_fps;
     int32_t max_apple_gpu_family;
     const char *gpu_arch;
+    uint32_t gpu_cores;
+    const char *gpu_gen;
 } pt_device_profile_t;
 
 typedef enum {

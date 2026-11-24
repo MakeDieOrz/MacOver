@@ -15,6 +15,8 @@ static CFMutableDictionaryRef s_mtl_orig_working_set_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_max_buf_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_supports_family_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_supports_fset_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_supports_bc_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_supports_32f_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_architecture_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_arch_name_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_new_lib_sync_imps = NULL;
@@ -76,10 +78,20 @@ static BOOL pt_mtl_should_reject_source_for_compat13(NSString *source, id option
         return NO;
     }
     if (outError != NULL) {
+        NSString *msg = @"Compilation failed:\nInvalid languageVersion";
+        if (source != nil && [source isKindOfClass:[NSString class]]) {
+            if ([source containsString:@"metal_simdgroup_matrix"]) {
+                msg = @"program_source:1:10: fatal error: 'metal_simdgroup_matrix' file not found\n"
+                       "#include <metal_simdgroup_matrix>\n"
+                       "         ^~~~~~~~~~~~~~~~~~~~~~~~";
+            } else if ([source containsString:@"simdgroup_multiply_accumulate"]) {
+                msg = @"program_source:3:5: error: use of undeclared identifier 'simdgroup_multiply_accumulate'";
+            }
+        }
         *outError = [NSError errorWithDomain:@"MTLLibraryErrorDomain"
                                         code:3
                                     userInfo:@{
-                                        NSLocalizedDescriptionKey : @"Metal language feature unsupported on iOS 13.7 target"
+                                        NSLocalizedDescriptionKey : msg
                                     }];
     }
     return YES;
@@ -227,6 +239,42 @@ static uint64_t ps_mtl_memory_cap(void) {
     if (origIMP != NULL) {
         @try {
             return ((BOOL (*)(id, SEL, NSUInteger))origIMP)(self, sel, featureSet);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    return NO;
+}
+
+- (BOOL) pm_ps_mtl_supportsBCTextureCompression {
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return NO;
+    }
+    SEL sel = sel_registerName("supportsBCTextureCompression");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_supports_bc_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            return ((BOOL (*)(id, SEL))origIMP)(self, sel);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    return NO;
+}
+
+- (BOOL) pm_ps_mtl_supports32BitFloatFiltering {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_get_spoofed_max_apple_gpu_family() < 1007) {
+        return NO;
+    }
+    SEL sel = sel_registerName("supports32BitFloatFiltering");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_supports_32f_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            return ((BOOL (*)(id, SEL))origIMP)(self, sel);
         } @finally {
             ps_pop_orig_imp_frame(pushed);
         }
@@ -408,6 +456,12 @@ static void ps_swizzle_mtl_device_class(Class cls) {
     ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_supports_fset_imps, cls,
                                      sel_registerName("supportsFeatureSet:"),
                                      @selector(pm_ps_mtl_supportsFeatureSet:));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_supports_bc_imps, cls,
+                                     sel_registerName("supportsBCTextureCompression"),
+                                     @selector(pm_ps_mtl_supportsBCTextureCompression));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_supports_32f_imps, cls,
+                                     sel_registerName("supports32BitFloatFiltering"),
+                                     @selector(pm_ps_mtl_supports32BitFloatFiltering));
     ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_architecture_imps, cls,
                                      sel_registerName("architecture"),
                                      @selector(pm_ps_mtl_architecture));

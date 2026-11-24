@@ -129,6 +129,9 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_class(const char *n
                 break;
         }
     }
+    if (strstr(name, "CatalystPoster") != NULL) {
+        return YES;
+    }
     if (name[0] == '_' || strchr(name, '_') != NULL) {
         if (strstr(name, "Play") != NULL &&
             (strstr(name, "PlayTools") != NULL ||
@@ -858,6 +861,8 @@ static bool pt_dyld_shared_cache_contains_path(const char *path) {
 
 extern const void *pt_orig_objc_getClass(const char *name) __asm__("_objc_getClass");
 extern const void *pt_orig_objc_lookUpClass(const char *name) __asm__("_objc_lookUpClass");
+extern const void *pt_orig_objc_getMetaClass(const char *name) __asm__("_objc_getMetaClass");
+extern const void *pt_orig_objc_getRequiredClass(const char *name) __asm__("_objc_getRequiredClass");
 extern const void *pt_orig_NSClassFromString(CFStringRef aClassName) __asm__("_NSClassFromString");
 
 static BOOL pt_should_hide_resolved_objc_class_with_image(const char *name, Class cls, const char *preloaded_img) {
@@ -938,6 +943,50 @@ static const void *pt_objc_lookUpClass(const char *name) {
         return cls;
     }
     return pt_orig_objc_lookUpClass(name);
+}
+
+static const void *pt_objc_getMetaClass(const char *name) {
+    if (name != NULL && pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (pt_is_hidden_objc_class(name)) {
+            if (name[0] == 'N' && name[1] == 'S') {
+                const void *cls = pt_orig_objc_lookUpClass(name);
+                if (cls != NULL && !pt_should_hide_resolved_objc_class(name, (__bridge Class)cls)) {
+                    return pt_orig_objc_getMetaClass(name);
+                }
+            }
+            PT_DEBUG_TRACE("dyld", "hid metaclass=%s", name);
+            return NULL;
+        }
+        const void *cls = pt_orig_objc_lookUpClass(name);
+        if (cls != NULL && pt_is_hidden_post13_7_class((__bridge Class)cls)) {
+            PT_DEBUG_TRACE("dyld", "hid compat13_7 metaclass=%s", name);
+            return NULL;
+        }
+    }
+    return pt_orig_objc_getMetaClass(name);
+}
+
+static const void *pt_objc_getRequiredClass(const char *name) {
+    if (name != NULL && pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (pt_is_hidden_objc_class(name)) {
+            if (name[0] == 'N' && name[1] == 'S') {
+                const void *cls = pt_orig_objc_lookUpClass(name);
+                if (cls != NULL && !pt_should_hide_resolved_objc_class(name, (__bridge Class)cls)) {
+                    return pt_orig_objc_getRequiredClass(name);
+                }
+            }
+            PT_DEBUG_TRACE("dyld", "hid required class=%s", name);
+            return NULL;
+        }
+        const void *cls = pt_orig_objc_lookUpClass(name);
+        if (cls != NULL && pt_is_hidden_post13_7_class((__bridge Class)cls)) {
+            PT_DEBUG_TRACE("dyld", "hid compat13_7 required class=%s", name);
+            return NULL;
+        }
+    }
+    return pt_orig_objc_getRequiredClass(name);
 }
 
 static const void *pt_NSClassFromString(CFStringRef aClassName) {
@@ -1087,40 +1136,115 @@ static const char **pt_objc_copyClassNamesForImage(const char *image, unsigned i
             }
             return NULL;
         }
-        unsigned int count = 0;
-        const char **names = objc_copyClassNamesForImage(image, &count);
-        if (names == NULL && strncmp(image, "/System/", 8) == 0) {
+        const char *cand_paths[4] = { image, NULL, NULL, NULL };
+        char ver_path[PATH_MAX];
+        char ios_ver_path[PATH_MAX];
+        char ios_path[PATH_MAX];
+        size_t cand_count = 1;
+        if (strncmp(image, "/System/", 8) == 0) {
             const char *fw = strstr(image, ".framework/");
             if (fw != NULL && strstr(fw, ".framework/Versions/") == NULL) {
-                char ver_path[PATH_MAX];
                 size_t prefix_len = (size_t)(fw + 10 - image);
-                snprintf(ver_path, sizeof(ver_path), "%.*s/Versions/A%s",
-                         (int)prefix_len, image, fw + 10);
-                names = objc_copyClassNamesForImage(ver_path, &count);
-                if (names == NULL && strncmp(ver_path, "/System/iOSSupport/", 19) != 0) {
-                    char ios_ver_path[PATH_MAX];
-                    snprintf(ios_ver_path, sizeof(ios_ver_path), "/System/iOSSupport%s", ver_path);
-                    names = objc_copyClassNamesForImage(ios_ver_path, &count);
+                int vn = snprintf(ver_path, sizeof(ver_path), "%.*s/Versions/A%s",
+                                  (int)prefix_len, image, fw + 10);
+                if (vn > 0 && (size_t)vn < sizeof(ver_path)) {
+                    cand_paths[cand_count++] = ver_path;
+                    if (strncmp(ver_path, "/System/iOSSupport/", 19) != 0) {
+                        int ivn = snprintf(ios_ver_path, sizeof(ios_ver_path),
+                                           "/System/iOSSupport%s", ver_path);
+                        if (ivn > 0 && (size_t)ivn < sizeof(ios_ver_path)) {
+                            cand_paths[cand_count++] = ios_ver_path;
+                        }
+                    }
                 }
             }
-            if (names == NULL && strncmp(image, "/System/iOSSupport/", 19) != 0) {
-                char ios_path[PATH_MAX];
-                snprintf(ios_path, sizeof(ios_path), "/System/iOSSupport%s", image);
-                names = objc_copyClassNamesForImage(ios_path, &count);
+            if (strncmp(image, "/System/iOSSupport/", 19) != 0) {
+                int isn = snprintf(ios_path, sizeof(ios_path), "/System/iOSSupport%s", image);
+                if (isn > 0 && (size_t)isn < sizeof(ios_path)) {
+                    cand_paths[cand_count++] = ios_path;
+                }
             }
         }
+
+        const char **arrays[4] = { NULL, NULL, NULL, NULL };
+        unsigned int counts[4] = { 0, 0, 0, 0 };
+        size_t total_raw = 0;
+        size_t non_null_arrays = 0;
+        size_t first_idx = 0;
+        for (size_t c = 0; c < cand_count; c++) {
+            const char *cp = cand_paths[c];
+            if (cp == NULL) {
+                continue;
+            }
+            arrays[c] = objc_copyClassNamesForImage(cp, &counts[c]);
+            if (arrays[c] != NULL) {
+                if (non_null_arrays == 0) {
+                    first_idx = c;
+                }
+                non_null_arrays++;
+                total_raw += counts[c];
+            }
+        }
+
+        const char **names = NULL;
+        unsigned int count = 0;
+        if (non_null_arrays == 1) {
+            names = arrays[first_idx];
+            count = counts[first_idx];
+        } else if (non_null_arrays > 1) {
+            names = (const char **)malloc((total_raw + 1U) * sizeof(const char *));
+            if (names != NULL) {
+                for (size_t c = 0; c < cand_count; c++) {
+                    if (arrays[c] == NULL) {
+                        continue;
+                    }
+                    for (unsigned int k = 0; k < counts[c]; k++) {
+                        const char *cname = arrays[c][k];
+                        if (cname == NULL) {
+                            continue;
+                        }
+                        BOOL dup = NO;
+                        for (unsigned int m = 0; m < count; m++) {
+                            if (names[m] == cname || strcmp(names[m], cname) == 0) {
+                                dup = YES;
+                                break;
+                            }
+                        }
+                        if (!dup) {
+                            names[count++] = cname;
+                        }
+                    }
+                    free((void *)arrays[c]);
+                }
+                names[count] = NULL;
+            } else {
+                for (size_t c = 0; c < cand_count; c++) {
+                    free((void *)arrays[c]);
+                }
+            }
+        }
+
         if (names != NULL) {
             unsigned int writeIdx = 0;
+            BOOL compat13 = pt_is_compat13_7_active();
             for (unsigned int i = 0; i < count; i++) {
-                if (names[i] != NULL && pt_is_hidden_objc_class(names[i])) {
-                    if (names[i][0] == 'N' && names[i][1] == 'S') {
+                if (names[i] != NULL) {
+                    if (pt_is_hidden_objc_class(names[i])) {
+                        if (names[i][0] == 'N' && names[i][1] == 'S') {
+                            const void *cls = pt_orig_objc_lookUpClass(names[i]);
+                            if (cls != NULL && !pt_should_hide_resolved_objc_class(names[i], (__bridge Class)cls)) {
+                                names[writeIdx++] = names[i];
+                                continue;
+                            }
+                        }
+                        continue;
+                    }
+                    if (compat13) {
                         const void *cls = pt_orig_objc_lookUpClass(names[i]);
-                        if (cls != NULL && !pt_should_hide_resolved_objc_class(names[i], (__bridge Class)cls)) {
-                            names[writeIdx++] = names[i];
+                        if (cls != NULL && pt_is_hidden_post13_7_class((__bridge Class)cls)) {
                             continue;
                         }
                     }
-                    continue;
                 }
                 names[writeIdx++] = names[i];
             }
@@ -2976,6 +3100,36 @@ static void *pt_dlsym(void *handle, const char *symbol) {
                 &pt_orig_swift_typeByName != NULL) {
                 return (void *)&pt_swift_typeByName;
             }
+            if (strcmp(symbol, "objc_getClass") == 0) {
+                return (void *)&pt_objc_getClass;
+            }
+            if (strcmp(symbol, "objc_lookUpClass") == 0) {
+                return (void *)&pt_objc_lookUpClass;
+            }
+            if (strcmp(symbol, "objc_getMetaClass") == 0) {
+                return (void *)&pt_objc_getMetaClass;
+            }
+            if (strcmp(symbol, "objc_getRequiredClass") == 0) {
+                return (void *)&pt_objc_getRequiredClass;
+            }
+            if (strcmp(symbol, "NSClassFromString") == 0) {
+                return (void *)&pt_NSClassFromString;
+            }
+            if (strcmp(symbol, "objc_copyClassList") == 0) {
+                return (void *)&pt_objc_copyClassList;
+            }
+            if (strcmp(symbol, "objc_getClassList") == 0) {
+                return (void *)&pt_objc_getClassList;
+            }
+            if (strcmp(symbol, "class_getImageName") == 0) {
+                return (void *)&pt_class_getImageName;
+            }
+            if (strcmp(symbol, "objc_copyClassNamesForImage") == 0) {
+                return (void *)&pt_objc_copyClassNamesForImage;
+            }
+            if (strcmp(symbol, "objc_copyImageNames") == 0) {
+                return (void *)&pt_objc_copyImageNames;
+            }
             void *routed = pt_fs_dlsym_route(symbol);
             if (routed != NULL) {
                 return routed;
@@ -3081,6 +3235,8 @@ DYLD_INTERPOSE(pt_dyld_shared_cache_file_path, dyld_shared_cache_file_path)
 DYLD_INTERPOSE(pt_dyld_shared_cache_contains_path, pt_orig_dyld_shared_cache_contains_path)
 DYLD_INTERPOSE(pt_objc_getClass, objc_getClass)
 DYLD_INTERPOSE(pt_objc_lookUpClass, objc_lookUpClass)
+DYLD_INTERPOSE(pt_objc_getMetaClass, objc_getMetaClass)
+DYLD_INTERPOSE(pt_objc_getRequiredClass, objc_getRequiredClass)
 DYLD_INTERPOSE(pt_NSClassFromString, NSClassFromString)
 DYLD_INTERPOSE(pt_objc_copyImageNames, objc_copyImageNames)
 DYLD_INTERPOSE(pt_class_getImageName, class_getImageName)

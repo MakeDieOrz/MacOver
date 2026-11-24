@@ -1656,6 +1656,7 @@ int main(int argc, const char *argv[]) {
         BOOL s11SysctlSwapAndTreeOK = NO;
         BOOL s11ResponsibilitySelfOK = NO;
         BOOL s11LsAsnHiddenOK = NO;
+        BOOL s11ObjcMetaAndReqHiddenOK = NO;
         const char *testS11Env = getenv("HARNESS_TEST_SCENARIO11");
         if (testS11Env != NULL && strcmp(testS11Env, "1") == 0) {
             // 1. PROC_PIDPATHINFO (libproc + SYS_proc_info) returns 0 and virtualized iOS bundle path
@@ -2265,6 +2266,9 @@ int main(int argc, const char *argv[]) {
                 s11LsAsnHiddenOK = (dlsym(RTLD_DEFAULT, "_LSGetCurrentApplicationASN") == NULL &&
                                     dlsym(RTLD_DEFAULT, "_LSASNCreateWithPid") == NULL &&
                                     dlsym(RTLD_DEFAULT, "_LSCopyApplicationInformation") == NULL);
+
+                s11ObjcMetaAndReqHiddenOK = (objc_getMetaClass("NSApplication") == Nil &&
+                                             objc_getRequiredClass("NSApplication") == Nil);
             }
         }
 
@@ -2335,7 +2339,18 @@ int main(int argc, const char *argv[]) {
                     id optsBenign = [optsCls new];
                     id libBenign = fnNewLib(dev, newLibSel, trivialSrc, optsBenign, &errBenign);
 
+                    SEL supportsBCSel = sel_registerName("supportsBCTextureCompression");
+                    SEL supports32FSel = sel_registerName("supports32BitFloatFiltering");
+                    BOOL bcSupported = [dev respondsToSelector:supportsBCSel]
+                        ? ((BOOL (*)(id, SEL))objc_msgSend)(dev, supportsBCSel)
+                        : NO;
+                    BOOL f32Supported = [dev respondsToSelector:supports32FSel]
+                        ? ((BOOL (*)(id, SEL))objc_msgSend)(dev, supports32FSel)
+                        : NO;
+
                     s12MetalCompat13GateOK = (defaultVer == ((2U << 16) | 2U) &&
+                                              !bcSupported &&
+                                              !f32Supported &&
                                               lib23 == nil && err23 != nil &&
                                               [err23.domain isEqualToString:@"MTLLibraryErrorDomain"] && err23.code == 3 &&
                                               libSimd == nil && errSimd != nil &&
@@ -2389,6 +2404,12 @@ int main(int argc, const char *argv[]) {
                                     if (gen >= 13UL) {
                                         foundBad = YES;
                                     }
+                                }
+                                if (strstr(s, "T8103") != NULL ||
+                                    strstr(s, "AGXFirmwareKextG13") != NULL ||
+                                    strstr(s, "AppleH13CamIn") != NULL ||
+                                    strstr(s, "EndpointSecurityDriver") != NULL) {
+                                    foundBad = YES;
                                 }
                             }
                             fnRelease(entry);
@@ -2533,6 +2554,7 @@ int main(int argc, const char *argv[]) {
             @"s11SysctlSwapAndTreeOK": s11SysctlSwapAndTreeOK ? @YES : @NO,
             @"s11ResponsibilitySelfOK": s11ResponsibilitySelfOK ? @YES : @NO,
             @"s11LsAsnHiddenOK": s11LsAsnHiddenOK ? @YES : @NO,
+            @"s11ObjcMetaAndReqHiddenOK": s11ObjcMetaAndReqHiddenOK ? @YES : @NO,
             @"s12FreadlinkHiddenOK": s12FreadlinkHiddenOK ? @YES : @NO,
             @"s12ExtensionKitHiddenOK": s12ExtensionKitHiddenOK ? @YES : @NO,
             @"s12MetalCompat13GateOK": s12MetalCompat13GateOK ? @YES : @NO,
@@ -3750,6 +3772,7 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info11["s11SysctlSwapAndTreeOK"] is True,
         info11["s11ResponsibilitySelfOK"] is True,
         info11["s11LsAsnHiddenOK"] is True,
+        info11["s11ObjcMetaAndReqHiddenOK"] is True,
     ]
     results.append(ScenarioResult(
         name="11. 1.0.4 audit & detect-v2 parity checks",

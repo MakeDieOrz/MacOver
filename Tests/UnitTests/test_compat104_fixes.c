@@ -204,11 +204,57 @@ static void test_sysctl_filters(void) {
     assert(is_hidden_sysctl_name("vm.swapfileprefix", 1, 4) == 0);
 }
 
+/* ---------- Batch 2 Unit Tests ---------- */
+
+static void replace_substr(char *buf, size_t cap, const char *needle, const char *repl) {
+    size_t nlen = strlen(needle), rlen = strlen(repl);
+    if (nlen == 0 || strcmp(needle, repl) == 0) return;
+    size_t pos = 0;
+    while (1) {
+        char *hit = strstr(buf + pos, needle);
+        if (!hit) break;
+        size_t off = (size_t)(hit - buf);
+        size_t cur = strlen(buf);
+        if (cur - nlen + rlen >= cap) break;
+        if (rlen != nlen) memmove(hit + rlen, hit + nlen, cur - off - nlen + 1U);
+        memcpy(hit, repl, rlen);
+        pos = off + rlen;
+    }
+}
+
+static void sanitize_io_compat13(char *buf, size_t cap) {
+    static const char *const kSocs[] = { "T8103", "T8101", "T810x", "T6000" };
+    for (size_t i = 0; i < sizeof(kSocs) / sizeof(kSocs[0]); i++) {
+        replace_substr(buf, cap, kSocs[i], "T8027");
+    }
+    if (strstr(buf, "AGX") != NULL) {
+        replace_substr(buf, cap, "G13", "G11");
+    }
+    if (strstr(buf, "CamIn") != NULL) {
+        replace_substr(buf, cap, "H13", "H11");
+    }
+}
+
+static void test_ioreg_compat13_sanitize(void) {
+    char b1[128] = "AGXFirmwareKextG13RTBuddy";
+    sanitize_io_compat13(b1, sizeof(b1));
+    assert(strcmp(b1, "AGXFirmwareKextG11RTBuddy") == 0);
+
+    char b2[128] = "AppleH13CamIn";
+    sanitize_io_compat13(b2, sizeof(b2));
+    assert(strcmp(b2, "AppleH11CamIn") == 0);
+
+    char b3[256] = "IOService:/AppleT810xIO/gpio@T8101GPIOIC/pci@T8103";
+    sanitize_io_compat13(b3, sizeof(b3));
+    assert(strcmp(b3, "IOService:/AppleT8027IO/gpio@T8027GPIOIC/pci@T8027") == 0);
+}
+
 int main(void) {
     test_der_entitlements_encoding_and_superblob_rewrite();
     test_attr_ref_zero_fill();
     test_getgroups_filter();
     test_sysctl_filters();
+    test_ioreg_compat13_sanitize();
     printf("All compat104 unit tests passed.\n");
     return 0;
 }

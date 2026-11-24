@@ -38,18 +38,18 @@ __attribute__((visibility("hidden"))) _Thread_local BOOL s_tls_initializing_devi
 
 
 static const pt_device_profile_t s_device_profiles[] = {
-    { "iPad6,7",    "J98aAP",  "Apple A9X",        "Apple A9X GPU",     2, 2, 0, 4ULL << 30, 0x67ceee93U, "RELEASE_ARM64_T8000", "t8000", "iPad Pro (12.9-inch)",                  "ML0F2", "A1584", YES, 2048, 2732, 2.0, 60,  1003, "applegpu_g8s"  },
-    { "iPad8,6",    "J320xAP", "Apple A12X Bionic","Apple A12X GPU",    8, 4, 4, 4ULL << 30, 0x07d34b9fU, "RELEASE_ARM64_T8027", "t8027", "iPad Pro (12.9-inch) (3rd generation)", "MTEL2", "A1876", YES, 2048, 2732, 2.0, 120, 1005, "applegpu_g11g" },
-    { "iPad13,8",   "J522AP",  "Apple M1",         "Apple M1 GPU",      8, 4, 4, 8ULL << 30, 0x1b588bb3U, "RELEASE_ARM64_T8103", "t8103", "iPad Pro (12.9-inch) (5th generation)", "MHNF3", "A2378", YES, 2048, 2732, 2.0, 120, 1007, "applegpu_g13g" },
-    { "iPad14,5",   "J620AP",  "Apple M2",         "Apple M2 GPU",      8, 4, 4, 8ULL << 30, 0xda33d83dU, "RELEASE_ARM64_T8112", "t8112", "iPad Pro (12.9-inch) (6th generation)", "MNXP3", "A2436", YES, 2048, 2732, 2.0, 120, 1008, "applegpu_g14g" },
-    { "iPad16,6",   "J720AP",  "Apple M4",         "Apple M4 GPU",      9, 3, 6, 8ULL << 30, 0x6f5129acU, "RELEASE_ARM64_T8132", "t8132", "iPad Pro 13-inch (M4)",                 "MVX23", "A2925", YES, 2064, 2752, 2.0, 120, 1009, "applegpu_g16g" },
-    { "iPad17,3",   "J820AP",  "Apple M5",         "Apple M5 GPU",      9, 3, 6, 12ULL << 30, 0x1d5a87e8U, "RELEASE_ARM64_T8142", "t8142", "iPad Pro 13-inch (M5)",                 "MD8R4", "A3360", YES, 2064, 2752, 2.0, 120, 1010, "applegpu_g18g" },
-    { "iPhone12,5", "D431AP",  "Apple A13 Bionic", "Apple A13 GPU",     6, 2, 4, 4ULL << 30, 0x573b5eecU, "RELEASE_ARM64_T8030", "t8030", "iPhone 11 Pro Max",                     "MWHD2", "A2161", NO,  1242, 2688, 3.0, 60,  1006, "applegpu_g12p" },
-    { "iPhone14,3", "D64AP",   "Apple A15 Bionic", "Apple A15 GPU",     6, 2, 4, 6ULL << 30, 0xda33d83dU, "RELEASE_ARM64_T8110", "t8110", "iPhone 13 Pro Max",                     "MLL63", "A2484", NO,  1284, 2778, 3.0, 120, 1008, "applegpu_g14p" },
-    { "iPhone15,3", "D74AP",   "Apple A16 Bionic", "Apple A16 GPU",     6, 2, 4, 6ULL << 30, 0x8765edeaU, "RELEASE_ARM64_T8120", "t8120", "iPhone 14 Pro Max",                     "MQ8N3", "A2651", NO,  1290, 2796, 3.0, 120, 1008, "applegpu_g15p" },
-    { "iPhone16,2", "D84AP",   "Apple A17 Pro",    "Apple A17 Pro GPU", 6, 2, 4, 8ULL << 30, 0xfa33415eU, "RELEASE_ARM64_T8130", "t8130", "iPhone 15 Pro Max",                     "MU683", "A2849", NO,  1290, 2796, 3.0, 120, 1009, "applegpu_g16p" },
-    { "iPhone17,2", "D94AP",   "Apple A18 Pro",    "Apple A18 Pro GPU", 6, 2, 4, 8ULL << 30, 0x75d4acb9U, "RELEASE_ARM64_T8140", "t8140", "iPhone 16 Pro Max",                     "MYWV3", "A3084", NO,  1320, 2868, 3.0, 120, 1009, "applegpu_g17p" },
-    { "iPhone18,2", "D94xAP",  "Apple A19 Pro",    "Apple A19 Pro GPU", 6, 2, 4, 12ULL << 30, 0xab345f09U, "RELEASE_ARM64_T8150", "t8150", "iPhone 17 Pro Max",                     "MFY84", "A3257", NO,  1320, 2868, 3.0, 120, 1010, "applegpu_g18p" },
+    { "iPad6,7",    "J98aAP",  "Apple A9X",        "Apple A9X GPU",     2, 2, 0, 4ULL << 30, 0x67ceee93U, "RELEASE_ARM64_T8000", "t8000", "iPad Pro (12.9-inch)",                  "ML0F2", "A1584", YES, 2048, 2732, 2.0, 60,  1003, "applegpu_g8s",  12, "G8S"  },
+    { "iPad8,6",    "J320xAP", "Apple A12X Bionic","Apple A12X GPU",    8, 4, 4, 4ULL << 30, 0x07d34b9fU, "RELEASE_ARM64_T8027", "t8027", "iPad Pro (12.9-inch) (3rd generation)", "MTEL2", "A1876", YES, 2048, 2732, 2.0, 120, 1005, "applegpu_g11g",  7, "G11G" },
+    { "iPad13,8",   "J522AP",  "Apple M1",         "Apple M1 GPU",      8, 4, 4, 8ULL << 30, 0x1b588bb3U, "RELEASE_ARM64_T8103", "t8103", "iPad Pro (12.9-inch) (5th generation)", "MHNF3", "A2378", YES, 2048, 2732, 2.0, 120, 1007, "applegpu_g13g",  8, "G13G" },
+    { "iPad14,5",   "J620AP",  "Apple M2",         "Apple M2 GPU",      8, 4, 4, 8ULL << 30, 0xda33d83dU, "RELEASE_ARM64_T8112", "t8112", "iPad Pro (12.9-inch) (6th generation)", "MNXP3", "A2436", YES, 2048, 2732, 2.0, 120, 1008, "applegpu_g14g", 10, "G14G" },
+    { "iPad16,6",   "J720AP",  "Apple M4",         "Apple M4 GPU",      9, 3, 6, 8ULL << 30, 0x6f5129acU, "RELEASE_ARM64_T8132", "t8132", "iPad Pro 13-inch (M4)",                 "MVX23", "A2925", YES, 2064, 2752, 2.0, 120, 1009, "applegpu_g16g", 10, "G16G" },
+    { "iPad17,3",   "J820AP",  "Apple M5",         "Apple M5 GPU",      9, 3, 6, 12ULL << 30, 0x1d5a87e8U, "RELEASE_ARM64_T8142", "t8142", "iPad Pro 13-inch (M5)",                 "MD8R4", "A3360", YES, 2064, 2752, 2.0, 120, 1010, "applegpu_g18g", 10, "G18G" },
+    { "iPhone12,5", "D431AP",  "Apple A13 Bionic", "Apple A13 GPU",     6, 2, 4, 4ULL << 30, 0x573b5eecU, "RELEASE_ARM64_T8030", "t8030", "iPhone 11 Pro Max",                     "MWHD2", "A2161", NO,  1242, 2688, 3.0, 60,  1006, "applegpu_g12p",  4, "G12P" },
+    { "iPhone14,3", "D64AP",   "Apple A15 Bionic", "Apple A15 GPU",     6, 2, 4, 6ULL << 30, 0xda33d83dU, "RELEASE_ARM64_T8110", "t8110", "iPhone 13 Pro Max",                     "MLL63", "A2484", NO,  1284, 2778, 3.0, 120, 1008, "applegpu_g14p",  5, "G14P" },
+    { "iPhone15,3", "D74AP",   "Apple A16 Bionic", "Apple A16 GPU",     6, 2, 4, 6ULL << 30, 0x8765edeaU, "RELEASE_ARM64_T8120", "t8120", "iPhone 14 Pro Max",                     "MQ8N3", "A2651", NO,  1290, 2796, 3.0, 120, 1008, "applegpu_g15p",  5, "G15P" },
+    { "iPhone16,2", "D84AP",   "Apple A17 Pro",    "Apple A17 Pro GPU", 6, 2, 4, 8ULL << 30, 0xfa33415eU, "RELEASE_ARM64_T8130", "t8130", "iPhone 15 Pro Max",                     "MU683", "A2849", NO,  1290, 2796, 3.0, 120, 1009, "applegpu_g16p",  6, "G16P" },
+    { "iPhone17,2", "D94AP",   "Apple A18 Pro",    "Apple A18 Pro GPU", 6, 2, 4, 8ULL << 30, 0x75d4acb9U, "RELEASE_ARM64_T8140", "t8140", "iPhone 16 Pro Max",                     "MYWV3", "A3084", NO,  1320, 2868, 3.0, 120, 1009, "applegpu_g17p",  6, "G17P" },
+    { "iPhone18,2", "D94xAP",  "Apple A19 Pro",    "Apple A19 Pro GPU", 6, 2, 4, 12ULL << 30, 0xab345f09U, "RELEASE_ARM64_T8150", "t8150", "iPhone 17 Pro Max",                     "MFY84", "A3257", NO,  1320, 2868, 3.0, 120, 1010, "applegpu_g18p",  6, "G18P" },
 };
 
 static _Atomic(const pt_device_profile_t *) s_active_device_profile = &s_device_profiles[2];
@@ -3411,7 +3411,7 @@ static NSArray<NSString *> *pt_spoofed_ioreg_keys_list(void) {
         s_keys = @[
             @"model", @"target-type", @"target-sub-type", @"compatible",
             @"model-number", @"regulatory-model-number", @"platform-name",
-            @"product-name", @"manufacturer"
+            @"product-name", @"manufacturer", @"gpu-core-count", @"metal-plugin-name"
         ];
     });
     return s_keys;
@@ -3485,6 +3485,23 @@ static CFTypeRef pt_spoof_ioreg_value_for_key(CFStringRef key, CFTypeRef orig_va
     }
     if (CFStringCompare(key, CFSTR("manufacturer"), 0) == kCFCompareEqualTo) {
         return pt_create_ioreg_cstr_like("Apple Inc.", orig_val, allocator);
+    }
+    if (CFStringCompare(key, CFSTR("gpu-core-count"), 0) == kCFCompareEqualTo) {
+        if (CFGetTypeID(orig_val) == CFNumberGetTypeID()) {
+            int32_t cores = (int32_t)profile->gpu_cores;
+            return CFNumberCreate(allocator, kCFNumberSInt32Type, &cores);
+        }
+        if (CFGetTypeID(orig_val) == CFDataGetTypeID() && CFDataGetLength((CFDataRef)orig_val) == sizeof(uint32_t)) {
+            uint32_t cores = profile->gpu_cores;
+            return CFDataCreate(allocator, (const UInt8 *)&cores, sizeof(cores));
+        }
+        return NULL;
+    }
+    if (CFStringCompare(key, CFSTR("metal-plugin-name"), 0) == kCFCompareEqualTo) {
+        char plugin[64];
+        const char *ggen = (profile->gpu_gen != NULL) ? profile->gpu_gen : "G13G";
+        snprintf(plugin, sizeof(plugin), "AGXMetal%s", ggen);
+        return pt_create_ioreg_cstr_like(plugin, orig_val, allocator);
     }
     return NULL;
 }
@@ -3561,6 +3578,8 @@ static kern_return_t pt_IORegistryEntryCreateCFProperties(mach_port_t entry, CFM
     return kr;
 }
 
+static void pt_sanitize_io_hardware_name(char *buf, size_t cap);
+
 extern kern_return_t IORegistryEntryGetPath(mach_port_t entry, const char *plane, char *path);
 static kern_return_t pt_IORegistryEntryGetPath(mach_port_t entry, const char *plane, char *path) {
     kern_return_t kr = IORegistryEntryGetPath(entry, plane, path);
@@ -3571,6 +3590,8 @@ static kern_return_t pt_IORegistryEntryGetPath(mach_port_t entry, const char *pl
             strstr(path, "AppleSMC") != NULL ||
             strstr(path, "Mac") != NULL) {
             strlcpy(path, "IOService:/AppleARMPE", 512);
+        } else {
+            pt_sanitize_io_hardware_name(path, 512U);
         }
     }
     return kr;
@@ -3638,44 +3659,143 @@ static kern_return_t pt_IOServiceGetMatchingServices(mach_port_t mainPort, CFDic
 }
 
 static BOOL pt_is_hidden_io_class_or_name(const char *cls_name, const char *entry_name) {
+    const char *names[2] = { cls_name, entry_name };
+    for (int i = 0; i < 2; i++) {
+        const char *s = names[i];
+        if (s == NULL || s[0] == '\0') {
+            continue;
+        }
+        if (strstr(s, "Mac") != NULL ||
+            strncmp(s, "AppleSMC", 8) == 0 ||
+            strstr(s, "EndpointSecurity") != NULL ||
+            strcmp(s, "IOBluetoothACPIMethods") == 0 ||
+            strcmp(s, "AppleMultitouchTrackpadHIDEventDriver") == 0 ||
+            strcmp(s, "AppleActuatorHIDEventDriver") == 0 ||
+            strcmp(s, "AppleHIDKeyboardEventDriverV2") == 0 ||
+            strncmp(s, "AppleHIDTransport", 17) == 0 ||
+            strcmp(s, "AppleT8103ATCDPXBAR") == 0) {
+            return YES;
+        }
+    }
     if (cls_name != NULL && cls_name[0] != '\0') {
         if (strncmp(cls_name, "AppleACPI", 9) == 0 ||
-            strncmp(cls_name, "AppleSMC", 8) == 0 ||
             strncmp(cls_name, "AppleSMBus", 10) == 0 ||
             strncmp(cls_name, "IOThunderbolt", 13) == 0 ||
             strncmp(cls_name, "AppleThunderbolt", 16) == 0 ||
             strcmp(cls_name, "AppleBacklightDisplay") == 0 ||
             strcmp(cls_name, "IODisplayWrangler") == 0 ||
-            strcmp(cls_name, "AGPM") == 0 ||
-            strstr(cls_name, "Mac") != NULL) {
+            strcmp(cls_name, "AGPM") == 0) {
             return YES;
         }
-    }
-    if (entry_name != NULL && entry_name[0] != '\0' &&
-        (strstr(entry_name, "Mac") != NULL ||
-         strncmp(entry_name, "AppleSMC", 8) == 0)) {
-        return YES;
     }
     return NO;
 }
 
-static void pt_sanitize_io_gpu_name_for_compat13(io_name_t buf) {
-    if (buf == NULL || !pt_is_compat13_7_active()) {
+static void pt_replace_substr_in_buf(char *buf, size_t cap, const char *needle, const char *repl) {
+    if (buf == NULL || cap == 0 || needle == NULL || repl == NULL) {
         return;
     }
-    const char *digits = NULL;
-    const char *replacement = NULL;
-    if (strncmp(buf, "AGXAcceleratorG", 15) == 0) {
-        digits = buf + 15;
-        replacement = "AGXAcceleratorG11G";
-    } else if (strncmp(buf, "AGXMetalG", 9) == 0) {
-        digits = buf + 9;
-        replacement = "AGXMetalG11G";
+    size_t nlen = strlen(needle);
+    size_t rlen = strlen(repl);
+    if (nlen == 0 || strcmp(needle, repl) == 0) {
+        return;
     }
-    if (digits != NULL && digits[0] >= '0' && digits[0] <= '9') {
-        unsigned long gen = strtoul(digits, NULL, 10);
-        if (gen >= 13UL) {
-            strlcpy(buf, replacement, sizeof(io_name_t));
+    size_t pos = 0;
+    for (int guard = 0; guard < 16; guard++) {
+        char *hit = strstr(buf + pos, needle);
+        if (hit == NULL) {
+            break;
+        }
+        size_t off = (size_t)(hit - buf);
+        size_t cur_len = strlen(buf);
+        if (cur_len - nlen + rlen >= cap) {
+            break;
+        }
+        if (rlen != nlen) {
+            memmove(hit + rlen, hit + nlen, cur_len - off - nlen + 1U);
+        }
+        memcpy(hit, repl, rlen);
+        pos = off + rlen;
+    }
+}
+
+static void pt_sanitize_io_hardware_name(char *buf, size_t cap) {
+    if (buf == NULL || cap == 0 || buf[0] == '\0') {
+        return;
+    }
+    const pt_device_profile_t *profile = pt_get_active_device_profile();
+    const char *lower_soc = (profile != NULL && profile->soc_code != NULL) ? profile->soc_code : "t8103";
+    char upper_soc[16] = {0};
+    for (size_t i = 0; i + 1U < sizeof(upper_soc) && lower_soc[i] != '\0'; i++) {
+        char c = lower_soc[i];
+        upper_soc[i] = (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
+    }
+    const char *gpu_gen = (profile != NULL && profile->gpu_gen != NULL) ? profile->gpu_gen : "G13G";
+    char gpu_short[8] = "G13";
+    if (gpu_gen[0] == 'G' && gpu_gen[1] >= '0' && gpu_gen[1] <= '9') {
+        size_t gl = 2U;
+        while (gl + 1U < sizeof(gpu_short) && gpu_gen[gl] >= '0' && gpu_gen[gl] <= '9') {
+            gl++;
+        }
+        memcpy(gpu_short, gpu_gen, gl);
+        gpu_short[gl] = '\0';
+    }
+    const char *isp_gen = (strcmp(upper_soc, "T8027") == 0 || strcmp(upper_soc, "T8000") == 0)
+        ? "H11"
+        : (strcmp(upper_soc, "T8030") == 0 ? "H12" : "H13");
+
+    static const char *const kHostSocs[] = {
+        "T8103", "T8101", "T8102", "T810x", "T8112", "T8122", "T8132",
+        "T6000", "T6001", "T6002", "T6020", "T6030", "T6040"
+    };
+    static const char *const kHostSocsLower[] = {
+        "t8103", "t8101", "t8102", "t810x", "t8112", "t8122", "t8132",
+        "t6000", "t6001", "t6002", "t6020", "t6030", "t6040"
+    };
+    for (size_t i = 0; i < sizeof(kHostSocs) / sizeof(kHostSocs[0]); i++) {
+        if (strcmp(kHostSocs[i], upper_soc) != 0) {
+            pt_replace_substr_in_buf(buf, cap, kHostSocs[i], upper_soc);
+            pt_replace_substr_in_buf(buf, cap, kHostSocsLower[i], lower_soc);
+        }
+    }
+
+    if (strncmp(buf, "AGXAcceleratorG", 15) == 0 && buf[15] >= '0' && buf[15] <= '9') {
+        unsigned long gen = strtoul(buf + 15, NULL, 10);
+        unsigned long target_gen = strtoul(gpu_short + 1, NULL, 10);
+        if (gen > target_gen || (pt_is_compat13_7_active() && gen >= 13UL)) {
+            char repl[64];
+            snprintf(repl, sizeof(repl), "AGXAccelerator%s", gpu_gen);
+            strlcpy(buf, repl, cap);
+            return;
+        }
+    }
+    if (strncmp(buf, "AGXMetalG", 9) == 0 && buf[9] >= '0' && buf[9] <= '9') {
+        unsigned long gen = strtoul(buf + 9, NULL, 10);
+        unsigned long target_gen = strtoul(gpu_short + 1, NULL, 10);
+        if (gen > target_gen || (pt_is_compat13_7_active() && gen >= 13UL)) {
+            char repl[64];
+            snprintf(repl, sizeof(repl), "AGXMetal%s", gpu_gen);
+            strlcpy(buf, repl, cap);
+            return;
+        }
+    }
+
+    static const char *const kGpuShorts[] = { "G13", "G14", "G15", "G16", "G17", "G18" };
+    static const char *const kIspGens[] = { "H13", "H14", "H15", "H16" };
+    if (strncmp(buf, "AGXFirmwareKext", 15) == 0 || pt_is_compat13_7_active() || strcmp(upper_soc, "T8103") != 0) {
+        if (strstr(buf, "AGX") != NULL) {
+            for (size_t i = 0; i < sizeof(kGpuShorts) / sizeof(kGpuShorts[0]); i++) {
+                if (strcmp(kGpuShorts[i], gpu_short) != 0) {
+                    pt_replace_substr_in_buf(buf, cap, kGpuShorts[i], gpu_short);
+                }
+            }
+        }
+        if (strstr(buf, "CamIn") != NULL) {
+            for (size_t i = 0; i < sizeof(kIspGens) / sizeof(kIspGens[0]); i++) {
+                if (strcmp(kIspGens[i], isp_gen) != 0) {
+                    pt_replace_substr_in_buf(buf, cap, kIspGens[i], isp_gen);
+                }
+            }
         }
     }
 }
@@ -3690,7 +3810,7 @@ static kern_return_t pt_IOObjectGetClass(io_object_t object, io_name_t className
         } else if (pt_is_hidden_io_class_or_name(className, NULL)) {
             strlcpy(className, "IOService", sizeof(io_name_t));
         } else {
-            pt_sanitize_io_gpu_name_for_compat13(className);
+            pt_sanitize_io_hardware_name(className, sizeof(io_name_t));
         }
     }
     return kr;
@@ -3704,7 +3824,7 @@ static kern_return_t pt_IORegistryEntryGetName(io_registry_entry_t entry, io_nam
         if (pt_is_hidden_io_class_or_name(NULL, name)) {
             strlcpy(name, "IOService", sizeof(io_name_t));
         } else {
-            pt_sanitize_io_gpu_name_for_compat13(name);
+            pt_sanitize_io_hardware_name(name, sizeof(io_name_t));
         }
     }
     return kr;
