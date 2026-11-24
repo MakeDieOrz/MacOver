@@ -81,25 +81,13 @@ struct ConfigDisplayPane: View {
 
     private var strictModeBannerSection: some View {
         Section {
-            HStack(spacing: 10) {
-                Image(systemName: "lock.shield.fill")
-                    .foregroundStyle(Color.accentColor)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("strict.banner.title")
-                        .font(.callout.weight(.semibold))
-                    Text("strict.banner.displayNote")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                if let onOpenStrictMode {
-                    Button("strict.openAdvanced") {
-                        onOpenStrictMode()
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                }
-            }
+            ConfigStateCallout(
+                style: .strict,
+                titleKey: "strict.banner.title",
+                noteKey: "strict.banner.displayNote",
+                actionKey: onOpenStrictMode == nil ? nil : "strict.openAdvanced",
+                action: onOpenStrictMode
+            )
         }
     }
 

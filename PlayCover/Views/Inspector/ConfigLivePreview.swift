@@ -40,13 +40,38 @@ struct ConfigLivePreview: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("inspector.previewTitle")
-                    .font(.subheadline.weight(.medium))
+                HStack(spacing: 6) {
+                    Text("inspector.previewTitle")
+                        .font(.subheadline.weight(.medium))
+                    Spacer(minLength: 4)
+                    if settings.settings.strictEmulationMode {
+                        AppStatusPill(kind: .strict, compact: true)
+                    }
+                }
 
                 windowSchematic
 
                 VStack(alignment: .leading, spacing: 6) {
                     let data = settings.settings
+                    if data.strictEmulationMode {
+                        LabeledContent("strict.section.title") {
+                            let orientKey = data.strictViewportOrientation == .portrait
+                                ? "strict.orientation.portrait"
+                                : "strict.orientation.landscape"
+                            let scaleKey = data.strictViewportScaleMode == .native1x
+                                ? "strict.scaleMode.native1xShort"
+                                : "strict.scaleMode.fitScreenShort"
+                            Text("\(NSLocalizedString(orientKey, comment: "")) · "
+                                 + "\(NSLocalizedString(scaleKey, comment: ""))")
+                                .font(.caption)
+                                .foregroundStyle(Color.accentColor)
+                        }
+                    }
+                    LabeledContent("settings.picker.iosDevice") {
+                        Text(DeviceProfileOption.displayName(for: data.effectiveIOSDeviceModel))
+                            .font(.caption)
+                            .lineLimit(1)
+                    }
                     LabeledContent("settings.picker.adaptiveRes") {
                         let scalerText = String(format: "%.1f×", data.effectiveCustomScaler)
                         Text("\(data.effectiveWindowWidth)×\(data.effectiveWindowHeight) @ \(scalerText)")
@@ -58,8 +83,13 @@ struct ConfigLivePreview: View {
                     }
                     LabeledContent("device.layoutTitle") {
                         let isPhone = DeviceProfileOption.isIPhone(data.effectiveIOSDeviceModel)
-                        Text(isPhone ? "Compact (iPhone)" : "Regular (iPad)")
-                            .font(.caption)
+                        Label(
+                            LocalizedStringKey(isPhone ? "device.layout.compact" : "device.layout.regular"),
+                            systemImage: isPhone ? "iphone" : "ipad.landscape"
+                        )
+                        .font(.caption)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.trailing)
                     }
                 }
 

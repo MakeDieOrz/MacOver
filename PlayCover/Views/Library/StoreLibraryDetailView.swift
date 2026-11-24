@@ -117,14 +117,14 @@ struct StoreLibraryDetailView: View {
                 Button {
                     addSourcePresented = true
                 } label: {
-                    Image(systemName: "plus")
+                    Label("playapp.addSource", systemImage: "plus")
                 }
                 .help("playapp.addSource")
 
                 Button {
                     storeVM.resolveSources()
                 } label: {
-                    Image(systemName: "arrow.clockwise")
+                    Label("playapp.refreshSources", systemImage: "arrow.clockwise")
                 }
                 .disabled(enabledSources.isEmpty)
                 .help("playapp.refreshSources")
@@ -149,7 +149,7 @@ struct StoreLibraryDetailView: View {
                 Button {
                     navState.showInspector.toggle()
                 } label: {
-                    Image(systemName: "sidebar.right")
+                    Label("inspector.toggle", systemImage: "sidebar.right")
                 }
                 .help("inspector.toggle")
             }

@@ -144,7 +144,7 @@ struct ConfigDevicePane: View {
                 }
 
                 Toggle(
-                    "Notch",
+                    "restart.field.notch",
                     isOn: Binding(
                         get: { settings.settings.effectiveNotch },
                         set: { newValue in
@@ -156,19 +156,7 @@ struct ConfigDevicePane: View {
                 .disabled(isStrictMode)
 
                 if isStrictMode {
-                    HStack(spacing: 8) {
-                        Label("strict.notchLockedNote", systemImage: "lock.fill")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        if let onOpenStrictMode {
-                            Button("strict.openAdvanced") {
-                                onOpenStrictMode()
-                            }
-                            .buttonStyle(.link)
-                            .font(.caption)
-                        }
-                    }
+                    StrictLockedNote(textKey: "strict.notchLockedNote", onOpenStrictMode: onOpenStrictMode)
                 }
             }
         }

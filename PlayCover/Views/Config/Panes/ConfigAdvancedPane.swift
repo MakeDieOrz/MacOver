@@ -83,9 +83,7 @@ struct ConfigAdvancedPane: View {
                 }
 
                 if isStrictMode {
-                    Label("strict.lockedByMode.bypasses", systemImage: "lock.fill")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    StrictLockedNote(textKey: "strict.lockedByMode.bypasses")
                 }
             }
 
@@ -279,9 +277,7 @@ struct ConfigAdvancedPane: View {
     @ViewBuilder
     private var troubleshootingRows: some View {
         if isStrictMode {
-            Label("strict.lockedByMode.troubleshooting", systemImage: "lock.fill")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            StrictLockedNote(textKey: "strict.lockedByMode.troubleshooting")
         }
 
         rowWithRestartBadge {

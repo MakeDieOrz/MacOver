@@ -171,16 +171,18 @@ struct RootSplitView: View {
             )
         case let .safeModeActivated(appName, _, breadcrumbPath):
             return Alert(
-                title: Text("\(appName) Safe Mode"),
-                message: Text(
-                    "\(appName) exited abnormally within 3 seconds of launch. " +
-                    "The next launch will automatically run in Safe Mode with user plugins " +
-                    "and bypass hooks disabled."
-                ),
+                title: Text(String(
+                    format: NSLocalizedString("safeMode.alert.title", comment: ""),
+                    appName
+                )),
+                message: Text(String(
+                    format: NSLocalizedString("safeMode.alert.message", comment: ""),
+                    appName
+                )),
                 primaryButton: .default(Text("button.OK")) {
                     startupAlerts.dismissCurrent()
                 },
-                secondaryButton: .destructive(Text("Clear Safe Mode")) {
+                secondaryButton: .destructive(Text("safeMode.alert.clear")) {
                     try? FileManager.default.removeItem(atPath: breadcrumbPath)
                     startupAlerts.dismissCurrent()
                 }

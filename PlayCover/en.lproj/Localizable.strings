@@ -577,3 +577,10 @@
 "strict.notchLockedNote" = "Notch simulation is locked off while Strict Emulation Mode is active.";
 "strict.lockedByMode.bypasses" = "Jailbreak Bypass and Inline Syscall Interception are locked ON by Strict Emulation Mode.";
 "strict.lockedByMode.troubleshooting" = "Root WorkDir is locked ON, while PlayChain Debug, Introspection, Metal HUD, and LLDB are locked OFF by Strict Emulation Mode.";
+"strict.pill" = "Strict Mode";
+"strict.lockedPane.help" = "Some settings in this pane are locked by Strict Emulation Mode";
+"inspector.noPlayToolsNote" = "Install PlayTools from Plugins & Safety to edit these controls.";
+"action.moreActions" = "More Actions";
+"safeMode.alert.title" = "%@ Safe Mode";
+"safeMode.alert.message" = "%@ exited abnormally within 3 seconds of launch. The next launch will automatically run in Safe Mode with user plugins and bypass hooks disabled.";
+"safeMode.alert.clear" = "Clear Safe Mode";

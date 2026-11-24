@@ -151,8 +151,9 @@ struct AppConfigurationView: View {
                         showResetConfirm = true
                     }
                 } label: {
-                    Image(systemName: "ellipsis.circle")
+                    Label("action.moreActions", systemImage: "ellipsis.circle")
                 }
+                .help("action.moreActions")
             }
 
             ToolbarSpacer(.fixed, placement: .primaryAction)
@@ -161,7 +162,7 @@ struct AppConfigurationView: View {
                 Button {
                     navState.showInspector.toggle()
                 } label: {
-                    Image(systemName: "sidebar.right")
+                    Label("inspector.toggle", systemImage: "sidebar.right")
                 }
                 .help("inspector.toggle")
             }
@@ -227,19 +228,15 @@ struct AppConfigurationView: View {
     }
 
     private var noPlayToolsBanner: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
-            Text("settings.noPlayTools")
-                .font(.caption)
-            Spacer()
-            Button(NSLocalizedString("config.pane.plugins", comment: "")) {
-                navState.activeConfigPane = .plugins
-            }
-            .controlSize(.small)
-        }
+        ConfigStateCallout(
+            style: .noPlayTools,
+            titleKey: "settings.noPlayTools",
+            noteKey: navState.activeConfigPane == .plugins ? nil : "inspector.noPlayToolsNote",
+            actionKey: navState.activeConfigPane == .plugins ? nil : "config.pane.plugins",
+            action: { navState.activeConfigPane = .plugins }
+        )
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
-        .background(Color.yellow.opacity(0.12))
+        .background(Color.orange.opacity(0.10))
     }
 }

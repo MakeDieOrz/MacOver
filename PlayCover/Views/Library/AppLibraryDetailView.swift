@@ -74,7 +74,7 @@ struct AppLibraryDetailView: View {
                 Button {
                     navState.pendingImportIPATrigger = UUID()
                 } label: {
-                    Image(systemName: "plus")
+                    Label("playapp.add", systemImage: "plus")
                 }
                 .help("playapp.add")
 
@@ -83,7 +83,7 @@ struct AppLibraryDetailView: View {
                         navState.openConfiguration(for: selectedApp, pane: .overview)
                     }
                 } label: {
-                    Image(systemName: "slider.horizontal.3")
+                    Label("action.configure", systemImage: "slider.horizontal.3")
                 }
                 .disabled(selectedApp == nil)
                 .help("action.configure")
@@ -105,7 +105,7 @@ struct AppLibraryDetailView: View {
                 Button {
                     navState.showInspector.toggle()
                 } label: {
-                    Image(systemName: "sidebar.right")
+                    Label("inspector.toggle", systemImage: "sidebar.right")
                 }
                 .help("inspector.toggle")
             }

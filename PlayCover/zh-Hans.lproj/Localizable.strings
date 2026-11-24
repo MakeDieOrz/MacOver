@@ -672,3 +672,10 @@
 "strict.notchLockedNote" = "严格仿真模式下已强制关闭刘海适配（设备机型与系统版本仍可自由选择）。";
 "strict.lockedByMode.bypasses" = "环境伪装与内联系统调用拦截已被严格仿真模式强制锁定开启。";
 "strict.lockedByMode.troubleshooting" = "严格仿真模式下已强制锁定开启根目录兼容，并锁定关闭 PlayChain 调试、内省库、Metal HUD 与 LLDB。";
+"strict.pill" = "严格模式";
+"strict.lockedPane.help" = "此面板中的部分设置已被严格仿真模式锁定";
+"inspector.noPlayToolsNote" = "请在“插件与安全”中安装 PlayTools 后再编辑这些控制项。";
+"action.moreActions" = "更多操作";
+"safeMode.alert.title" = "%@ 安全模式";
+"safeMode.alert.message" = "%@ 在启动后 3 秒内异常退出。下次启动将自动进入安全模式，并停用用户插件与绕过钩子。";
+"safeMode.alert.clear" = "清除安全模式";

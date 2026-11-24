@@ -93,10 +93,19 @@ private struct TableAppDeviceCell: View {
     @ObservedObject var settings: AppSettings
 
     var body: some View {
-        Text(DeviceProfileOption.displayName(for: settings.settings.effectiveIOSDeviceModel))
-            .font(.callout)
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
+        HStack(spacing: 4) {
+            if settings.settings.strictEmulationMode {
+                Image(systemName: "lock.shield.fill")
+                    .font(.caption)
+                    .foregroundStyle(Color.accentColor)
+                    .help("strict.banner.title")
+                    .accessibilityLabel(Text("strict.banner.title"))
+            }
+            Text(DeviceProfileOption.displayName(for: settings.settings.effectiveIOSDeviceModel))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
     }
 }
 

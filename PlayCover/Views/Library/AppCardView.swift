@@ -119,10 +119,17 @@ struct AppCardView: View {
                     .font(.subheadline.weight(.medium))
                     .lineLimit(1)
                     .multilineTextAlignment(.center)
-                Text(app.info.bundleVersion)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                HStack(spacing: 3) {
+                    if settings.settings.strictEmulationMode {
+                        Image(systemName: "lock.shield.fill")
+                            .foregroundStyle(Color.accentColor)
+                            .help("strict.banner.title")
+                    }
+                    Text(app.info.bundleVersion)
+                        .foregroundStyle(.secondary)
+                }
+                .font(.caption2)
+                .lineLimit(1)
             }
         }
         .padding(10)
@@ -136,6 +143,25 @@ struct AppCardView: View {
                 )
         )
         .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(app.name))
+        .accessibilityValue(Text(accessibilityStatus))
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAction {
+            navState.selectedAppID = app.id
+        }
+        .accessibilityAction(named: Text(app.isRunning ? "action.quit" : "action.launch")) {
+            Task(priority: .userInitiated) {
+                if app.isRunning {
+                    await app.terminate()
+                } else if !app.isStarting {
+                    await app.launch()
+                }
+            }
+        }
+        .accessibilityAction(named: Text("action.configure")) {
+            navState.openConfiguration(for: app, pane: .overview)
+        }
         .onHover { hovering in
             withAnimation(.snappy(duration: 0.18)) {
                 isHovered = hovering
@@ -165,6 +191,20 @@ struct AppCardView: View {
             }.value
             hasPlayTools = installed
         }
+    }
+
+    private var accessibilityStatus: String {
+        var parts = [app.info.bundleVersion]
+        if app.isRunning {
+            parts.append(NSLocalizedString("sidebar.runningBadge", comment: ""))
+        }
+        if !hasPlayTools {
+            parts.append(NSLocalizedString("settings.noPlayTools", comment: ""))
+        }
+        if settings.settings.strictEmulationMode {
+            parts.append(NSLocalizedString("strict.banner.title", comment: ""))
+        }
+        return parts.joined(separator: ", ")
     }
 
     private var cardBackground: some View {

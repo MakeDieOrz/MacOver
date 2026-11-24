@@ -31,10 +31,33 @@ struct AppQuickInspector: View {
                     restartCallout
                 }
 
+                if !hasPlayTools {
+                    ConfigStateCallout(
+                        style: .noPlayTools,
+                        titleKey: "settings.noPlayTools",
+                        noteKey: "inspector.noPlayToolsNote",
+                        actionKey: "config.pane.plugins",
+                        action: { navState.openConfiguration(for: app, pane: .plugins) }
+                    )
+                    .padding(10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(Color.orange.opacity(0.10))
+                    )
+                }
+
                 Divider()
 
-                presetsSection
-                    .disabled(!hasPlayTools || settings.settings.strictEmulationMode)
+                VStack(alignment: .leading, spacing: 8) {
+                    presetsSection
+                        .disabled(!hasPlayTools || settings.settings.strictEmulationMode)
+                    if settings.settings.strictEmulationMode {
+                        StrictLockedNote(
+                            textKey: "strict.banner.overviewNote",
+                            onOpenStrictMode: { navState.openConfiguration(for: app, pane: .advanced) }
+                        )
+                    }
+                }
 
                 Divider()
 
@@ -80,12 +103,10 @@ struct AppQuickInspector: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     if app.isRunning {
-                        Text("sidebar.runningBadge")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.green)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 1)
-                            .background(Capsule().fill(Color.green.opacity(0.16)))
+                        AppStatusPill(kind: .running, compact: true)
+                    }
+                    if settings.settings.strictEmulationMode {
+                        AppStatusPill(kind: .strict, compact: true)
                     }
                 }
             }
@@ -135,6 +156,8 @@ struct AppQuickInspector: View {
                 }
                 .buttonStyle(.bordered)
                 .menuIndicator(.hidden)
+                .help("action.moreActions")
+                .accessibilityLabel(Text("action.moreActions"))
             }
 
             Button {
@@ -218,9 +241,13 @@ struct AppQuickInspector: View {
             .disabled(!hasPlayTools || settings.settings.strictEmulationMode)
             Toggle("settings.network.enable", isOn: $settings.settings.enableNetworkRules)
             Toggle("settings.toggle.disableDisplaySleep", isOn: $settings.settings.disableTimeout)
+            if settings.settings.strictEmulationMode {
+                StrictLockedNote(textKey: "strict.lockedByMode.bypasses")
+            }
         }
         .toggleStyle(.switch)
         .controlSize(.small)
+        .disabled(!hasPlayTools)
     }
 
     private var defaultKeymapSection: some View {

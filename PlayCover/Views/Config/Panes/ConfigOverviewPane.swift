@@ -53,25 +53,13 @@ struct ConfigOverviewPane: View {
 
             if settings.settings.strictEmulationMode {
                 Section {
-                    HStack(spacing: 10) {
-                        Image(systemName: "lock.shield.fill")
-                            .foregroundStyle(Color.accentColor)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("strict.banner.title")
-                                .font(.callout.weight(.semibold))
-                            Text("strict.banner.overviewNote")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        if let onOpenStrictMode {
-                            Button("strict.openAdvanced") {
-                                onOpenStrictMode()
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                        }
-                    }
+                    ConfigStateCallout(
+                        style: .strict,
+                        titleKey: "strict.banner.title",
+                        noteKey: "strict.banner.overviewNote",
+                        actionKey: onOpenStrictMode == nil ? nil : "strict.openAdvanced",
+                        action: onOpenStrictMode
+                    )
                 }
             }
 
@@ -180,13 +168,15 @@ struct ConfigOverviewPane: View {
                 HStack(spacing: 8) {
                     Text(app.name)
                         .font(.title2.bold())
+                        .lineLimit(2)
                     if app.isRunning {
-                        Text("sidebar.runningBadge")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.green)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 2)
-                            .background(Capsule().fill(Color.green.opacity(0.16)))
+                        AppStatusPill(kind: .running)
+                    }
+                    if settings.settings.strictEmulationMode {
+                        AppStatusPill(kind: .strict)
+                    }
+                    if !hasPlayTools {
+                        AppStatusPill(kind: .noPlayTools)
                     }
                 }
                 Text("\(app.info.bundleIdentifier) · \(app.info.bundleVersion)")

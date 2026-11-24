@@ -45,20 +45,53 @@ struct ConfigSidebar: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 4)
+                if settings.settings.strictEmulationMode {
+                    Image(systemName: "lock.shield.fill")
+                        .font(.caption)
+                        .foregroundStyle(Color.accentColor)
+                        .help("strict.banner.title")
+                        .accessibilityLabel(Text("strict.banner.title"))
+                }
                 if app.isRunning {
                     Circle()
                         .fill(.green)
                         .frame(width: 8, height: 8)
+                        .help("sidebar.runningBadge")
+                        .accessibilityElement()
+                        .accessibilityLabel(Text("sidebar.runningBadge"))
                 }
             }
             .padding(.horizontal, 14)
 
             List(ConfigPane.allCases, selection: $navState.activeConfigPane) { pane in
-                Label(LocalizedStringKey(pane.titleKey), systemImage: pane.systemImage)
-                    .badge(badgeValue(for: pane))
-                    .tag(pane)
+                Label {
+                    HStack(spacing: 4) {
+                        Text(LocalizedStringKey(pane.titleKey))
+                        if isLockedByStrictMode(pane) {
+                            Image(systemName: "lock.fill")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .help("strict.lockedPane.help")
+                                .accessibilityLabel(Text("strict.lockedPane.help"))
+                        }
+                    }
+                } icon: {
+                    Image(systemName: pane.systemImage)
+                }
+                .badge(badgeValue(for: pane))
+                .tag(pane)
             }
             .listStyle(.sidebar)
+        }
+    }
+
+    private func isLockedByStrictMode(_ pane: ConfigPane) -> Bool {
+        guard settings.settings.strictEmulationMode else { return false }
+        switch pane {
+        case .overview, .display, .device, .advanced:
+            return true
+        default:
+            return false
         }
     }
 
