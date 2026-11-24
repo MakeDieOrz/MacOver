@@ -15,24 +15,15 @@ static BOOL ps_is_hidden_desktop_font_name(NSString *name) {
         @"monaco",
         @"geneva",
         @"herculanum",
-        @"lucida grande"
+        @"lucida grande",
+        @"lucidagrande"
     };
     NSString *trimmed = [name stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     NSString *lower = [trimmed lowercaseString];
     for (size_t i = 0; i < sizeof(kHiddenFontPrefixes) / sizeof(kHiddenFontPrefixes[0]); i++) {
-        NSString *prefix = kHiddenFontPrefixes[i];
-        if ([lower isEqualToString:prefix]) {
+        if ([lower hasPrefix:kHiddenFontPrefixes[i]]) {
             return YES;
         }
-        if ([lower hasPrefix:prefix]) {
-            unichar next = [lower characterAtIndex:prefix.length];
-            if (next == '-' || next == ' ' || next == '_') {
-                return YES;
-            }
-        }
-    }
-    if ([lower hasPrefix:@"lucidagrande"]) {
-        return YES;
     }
     return NO;
 }
@@ -65,41 +56,70 @@ static CFArrayRef ps_filter_desktop_font_cfarray(CFArrayRef CF_CONSUMED rawArray
         ps_is_effective_system_or_playtools_caller(caller)) {
         return rawArray;
     }
-    CFIndex count = CFArrayGetCount(rawArray);
-    BOOL hasHidden = NO;
-    for (CFIndex i = 0; i < count; i++) {
-        CFTypeRef val = CFArrayGetValueAtIndex(rawArray, i);
-        if (val != NULL && CFGetTypeID(val) == CFStringGetTypeID() &&
-            ps_is_hidden_desktop_font_name((__bridge NSString *)val)) {
-            hasHidden = YES;
-            break;
+    CFArrayRef outArray = rawArray;
+    @autoreleasepool {
+        CFIndex count = CFArrayGetCount(rawArray);
+        BOOL hasHidden = NO;
+        for (CFIndex i = 0; i < count; i++) {
+            CFTypeRef val = CFArrayGetValueAtIndex(rawArray, i);
+            if (val != NULL && CFGetTypeID(val) == CFStringGetTypeID() &&
+                ps_is_hidden_desktop_font_name((__bridge NSString *)val)) {
+                hasHidden = YES;
+                break;
+            }
+        }
+        if (hasHidden) {
+            CFMutableArrayRef filtered = CFArrayCreateMutable(kCFAllocatorDefault, count, &kCFTypeArrayCallBacks);
+            if (filtered != NULL) {
+                for (CFIndex i = 0; i < count; i++) {
+                    CFTypeRef val = CFArrayGetValueAtIndex(rawArray, i);
+                    if (val == NULL) {
+                        continue;
+                    }
+                    if (CFGetTypeID(val) == CFStringGetTypeID() &&
+                        ps_is_hidden_desktop_font_name((__bridge NSString *)val)) {
+                        continue;
+                    }
+                    CFArrayAppendValue(filtered, val);
+                }
+                CFArrayRef copy = CFArrayCreateCopy(kCFAllocatorDefault, filtered);
+                CFRelease(filtered);
+                if (copy != NULL) {
+                    CFRelease(rawArray);
+                    outArray = copy;
+                }
+            }
         }
     }
-    if (!hasHidden) {
-        return rawArray;
-    }
-    CFMutableArrayRef filtered = CFArrayCreateMutable(kCFAllocatorDefault, count, &kCFTypeArrayCallBacks);
-    if (filtered == NULL) {
-        return rawArray;
-    }
-    for (CFIndex i = 0; i < count; i++) {
-        CFTypeRef val = CFArrayGetValueAtIndex(rawArray, i);
-        if (val == NULL) {
-            continue;
+    return outArray;
+}
+
+static CFStringRef ps_sanitize_ctfont_requested_name(CFStringRef name, const void *caller) {
+    if (name != NULL &&
+        pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(caller)) {
+        @autoreleasepool {
+            if (ps_is_hidden_desktop_font_name((__bridge NSString *)name)) {
+                return CFSTR("Helvetica");
+            }
         }
-        if (CFGetTypeID(val) == CFStringGetTypeID() &&
-            ps_is_hidden_desktop_font_name((__bridge NSString *)val)) {
-            continue;
-        }
-        CFArrayAppendValue(filtered, val);
     }
-    CFArrayRef result = CFArrayCreateCopy(kCFAllocatorDefault, filtered);
-    CFRelease(filtered);
-    if (result == NULL) {
-        return rawArray;
-    }
-    CFRelease(rawArray);
-    return result;
+    return name;
+}
+
+static CTFontRef pt_CTFontCreateWithName(CFStringRef name,
+                                         CGFloat size,
+                                         const CGAffineTransform * _Nullable matrix) CF_RETURNS_RETAINED {
+    CFStringRef effectiveName = ps_sanitize_ctfont_requested_name(name, __builtin_return_address(0));
+    return CTFontCreateWithName(effectiveName, size, matrix);
+}
+
+static CTFontRef pt_CTFontCreateWithNameAndOptions(CFStringRef name,
+                                                   CGFloat size,
+                                                   const CGAffineTransform * _Nullable matrix,
+                                                   CTFontOptions options) CF_RETURNS_RETAINED {
+    CFStringRef effectiveName = ps_sanitize_ctfont_requested_name(name, __builtin_return_address(0));
+    return CTFontCreateWithNameAndOptions(effectiveName, size, matrix, options);
 }
 
 static CFArrayRef pt_CTFontManagerCopyAvailableFontFamilyNames(void) CF_RETURNS_RETAINED {
@@ -112,6 +132,8 @@ static CFArrayRef pt_CTFontManagerCopyAvailablePostScriptNames(void) CF_RETURNS_
                                             __builtin_return_address(0));
 }
 
+DYLD_INTERPOSE(pt_CTFontCreateWithName, CTFontCreateWithName)
+DYLD_INTERPOSE(pt_CTFontCreateWithNameAndOptions, CTFontCreateWithNameAndOptions)
 DYLD_INTERPOSE(pt_CTFontManagerCopyAvailableFontFamilyNames, CTFontManagerCopyAvailableFontFamilyNames)
 DYLD_INTERPOSE(pt_CTFontManagerCopyAvailablePostScriptNames, CTFontManagerCopyAvailablePostScriptNames)
 
@@ -4481,21 +4503,129 @@ static void ps_prepare_wk_configuration(id cfg) {
     return self;
 }
 
-- (id) pm_wk_cfg_urlSchemeHandlerForURLScheme:(NSString *)urlScheme {
+static const char kPSWKAppVFileSchemeHandlerKey = 0;
+static const char kPSLAContextEvaluatedKey = 0;
+
+static BOOL ps_is_reported_ios_13_or_older(void) {
+    if (pt_is_compat13_7_active()) {
+        return YES;
+    }
+    NSOperatingSystemVersion ver = {0, 0, 0};
+    if (ps_get_cached_ios_sysver(&ver, NULL) && ver.majorVersion > 0 && ver.majorVersion <= 13) {
+        return YES;
+    }
+    return NO;
+}
+
+static BOOL ps_is_faceid_device_model(void) {
+    const char *m = pt_get_device_model_cstr();
+    if (m == NULL || m[0] == '\0') {
+        return NO;
+    }
+    static const char * const kFaceIDModels[] = {
+        "iPad8,6", "iPad13,8", "iPad14,5", "iPad16,6", "iPad17,3",
+        "iPhone12,5", "iPhone14,3", "iPhone15,3", "iPhone16,2", "iPhone17,2", "iPhone18,2"
+    };
+    for (size_t i = 0; i < sizeof(kFaceIDModels) / sizeof(kFaceIDModels[0]); i++) {
+        if (strcmp(m, kFaceIDModels[i]) == 0) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+- (void) pm_wk_cfg_setURLSchemeHandler:(id)urlSchemeHandler forURLScheme:(NSString *)urlScheme {
     const void *caller = __builtin_return_address(0);
-    id result = [self pm_wk_cfg_urlSchemeHandlerForURLScheme:urlScheme];
-    if (result != nil &&
-        [urlScheme isKindOfClass:[NSString class]] &&
+    if ([urlScheme isKindOfClass:[NSString class]] &&
         [urlScheme caseInsensitiveCompare:@"pt-vfile"] == NSOrderedSame &&
         pt_is_bypass_enabled() &&
         !ps_is_effective_system_or_playtools_caller(caller)) {
-        id sharedVFile = ps_shared_vfile_scheme_handler();
-        Class vfileCls = (sharedVFile != nil) ? object_getClass(sharedVFile) : Nil;
-        if (result == sharedVFile || (vfileCls != Nil && [result isKindOfClass:vfileCls])) {
-            return nil;
+        objc_setAssociatedObject(self,
+                                 &kPSWKAppVFileSchemeHandlerKey,
+                                 urlSchemeHandler,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return;
+    }
+    [self pm_wk_cfg_setURLSchemeHandler:urlSchemeHandler forURLScheme:urlScheme];
+}
+
+- (id) pm_wk_cfg_urlSchemeHandlerForURLScheme:(NSString *)urlScheme {
+    const void *caller = __builtin_return_address(0);
+    id result = [self pm_wk_cfg_urlSchemeHandlerForURLScheme:urlScheme];
+    if ([urlScheme isKindOfClass:[NSString class]] &&
+        [urlScheme caseInsensitiveCompare:@"pt-vfile"] == NSOrderedSame &&
+        pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(caller)) {
+        id appHandler = objc_getAssociatedObject(self, &kPSWKAppVFileSchemeHandlerKey);
+        if (appHandler != nil) {
+            return appHandler;
+        }
+        if (result != nil) {
+            id sharedVFile = ps_shared_vfile_scheme_handler();
+            Class vfileCls = (sharedVFile != nil) ? object_getClass(sharedVFile) : Nil;
+            if (result == sharedVFile || (vfileCls != Nil && [result isKindOfClass:vfileCls])) {
+                return nil;
+            }
         }
     }
     return result;
+}
+
++ (UIFont *) pm_ps_uifont_fontWithName:(NSString *)fontName size:(CGFloat)fontSize {
+    const void *caller = __builtin_return_address(0);
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(caller) &&
+        ps_is_hidden_desktop_font_name(fontName)) {
+        return nil;
+    }
+    return [self pm_ps_uifont_fontWithName:fontName size:fontSize];
+}
+
+- (BOOL) pm_ps_la_canEvaluatePolicy:(NSInteger)policy error:(NSError **)error {
+    BOOL ok = [self pm_ps_la_canEvaluatePolicy:policy error:error];
+    objc_setAssociatedObject(self,
+                             &kPSLAContextEvaluatedKey,
+                             ok ? @YES : @NO,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return ok;
+}
+
+- (NSInteger) pm_ps_la_biometryType {
+    NSInteger orig = [self pm_ps_la_biometryType];
+    const void *caller = __builtin_return_address(0);
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(caller) &&
+        ps_is_faceid_device_model() &&
+        orig == 1) {
+        NSNumber *eval = objc_getAssociatedObject(self, &kPSLAContextEvaluatedKey);
+        return [eval boolValue] ? 2 : 0;
+    }
+    return orig;
+}
+
++ (BOOL) pm_ps_gc_shouldMonitorBackgroundEvents {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return NO;
+    }
+    return [self pm_ps_gc_shouldMonitorBackgroundEvents];
+}
+
++ (BOOL) pm_ps_gc_respondsToSelector:(SEL)aSelector {
+    const void *caller = __builtin_return_address(0);
+    if (aSelector != NULL &&
+        pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(caller)) {
+        if (pt_is_hidden_objc_selector_name(sel_getName(aSelector))) {
+            return NO;
+        }
+        if ((aSelector == NSSelectorFromString(@"shouldMonitorBackgroundEvents") ||
+             aSelector == NSSelectorFromString(@"setShouldMonitorBackgroundEvents:")) &&
+            ps_is_reported_ios_13_or_older()) {
+            return NO;
+        }
+    }
+    return [self pm_ps_gc_respondsToSelector:aSelector];
 }
 
 + (NSArray<NSString *> *) pm_ps_uifont_familyNames {
@@ -4961,9 +5091,24 @@ static void ps_install_avcapture_hooks_if_loaded(void) {
 
 static _Atomic bool s_ps_dynamic_hooks_ready = false;
 
+static void ps_register_safe_false_cf_imp(Class cls, SEL hookSel) {
+    Method safeFalseM = class_getInstanceMethod([NSObject class], NSSelectorFromString(@"isNSString__"));
+    IMP safeFalseCFImp = (safeFalseM != NULL) ? method_getImplementation(safeFalseM) : NULL;
+    if (safeFalseCFImp == NULL) {
+        return;
+    }
+    Method hookM = class_getInstanceMethod(cls, hookSel);
+    if (hookM != NULL) {
+        pt_register_swizzled_imp((const void *)method_getImplementation(hookM),
+                                 (const void *)safeFalseCFImp);
+    }
+}
+
 __attribute__((visibility("hidden")))
 void ps_load_environment_bypass_hooks(void) {
     Class piClass = objc_getClass("NSProcessInfo");
+    ps_register_safe_false_cf_imp([PSSwizzleHooks class], @selector(pm_isMacCatalystApp));
+    ps_register_safe_false_cf_imp([PSSwizzleHooks class], @selector(pm_isiOSAppOnMac));
     ps_swizzle_instance_method(piClass, @selector(isMacCatalystApp), @selector(pm_isMacCatalystApp));
     ps_swizzle_instance_method(piClass, @selector(isiOSAppOnMac), @selector(pm_isiOSAppOnMac));
     ps_replace_instance_method(piClass, NSSelectorFromString(@"isiOSAppOnVision"), @selector(pm_return_no));
@@ -4998,9 +5143,11 @@ void ps_load_environment_bypass_hooks(void) {
     Class concretePIClass = object_getClass([NSProcessInfo processInfo]);
     if (concretePIClass != nil && concretePIClass != piClass) {
         if (ps_class_defines_instance_method(concretePIClass, @selector(isMacCatalystApp))) {
+            ps_register_safe_false_cf_imp([PSSwizzleHooks class], @selector(pm_swift_isMacCatalystApp));
             ps_swizzle_instance_method(concretePIClass, @selector(isMacCatalystApp), @selector(pm_swift_isMacCatalystApp));
         }
         if (ps_class_defines_instance_method(concretePIClass, @selector(isiOSAppOnMac))) {
+            ps_register_safe_false_cf_imp([PSSwizzleHooks class], @selector(pm_swift_isiOSAppOnMac));
             ps_swizzle_instance_method(concretePIClass, @selector(isiOSAppOnMac), @selector(pm_swift_isiOSAppOnMac));
         }
         SEL visionSel = NSSelectorFromString(@"isiOSAppOnVision");
@@ -5179,12 +5326,15 @@ static const char kPSAltimeterStateAssocKey = 0;
 static const char kPSMotionSamplePayloadKey = 0;
 static const char kPSAttitudePayloadKey = 0;
 static const char kPSRealAlignedTimestampKey = 0;
+static const char kPSRealAlignedContinuousTimestampKey = 0;
 static const char kPSRealDMMagneticFieldKey = 0;
 static _Atomic uint64_t s_ps_motion_tick = 1ULL;
 
 static os_unfair_lock s_ps_cm_clock_lock = OS_UNFAIR_LOCK_INIT;
-static BOOL s_ps_cm_has_real_offset = NO;
-static double s_ps_cm_real_offset = 0.0;
+static BOOL s_ps_cm_has_real_ts_offset = NO;
+static double s_ps_cm_real_ts_offset = 0.0;
+static BOOL s_ps_cm_has_real_cont_ts_offset = NO;
+static double s_ps_cm_real_cont_ts_offset = 0.0;
 static double s_ps_cm_last_virtual_ts = 0.0;
 
 static os_unfair_lock s_cm_swizzle_lock = OS_UNFAIR_LOCK_INIT;
@@ -5311,9 +5461,15 @@ static BOOL ps_is_virtual_motion_sample(id sample) {
 }
 
 static NSTimeInterval ps_cm_next_virtual_timestamp_locked(double up) {
+    static const double kMaxLeadSeconds = 0.01;
     double ts = (isfinite(up) && up >= 0.0) ? up : 0.0;
     if (ts <= s_ps_cm_last_virtual_ts) {
-        ts = s_ps_cm_last_virtual_ts + 0.0001;
+        double nudged = s_ps_cm_last_virtual_ts + 0.0001;
+        double ceiling = ts + kMaxLeadSeconds;
+        ts = (nudged <= ceiling) ? nudged : ceiling;
+        if (ts < s_ps_cm_last_virtual_ts) {
+            ts = s_ps_cm_last_virtual_ts;
+        }
     }
     s_ps_cm_last_virtual_ts = ts;
     return ts;
@@ -5330,12 +5486,13 @@ static NSTimeInterval ps_cm_next_virtual_timestamp(void) {
     return ts;
 }
 
-static NSTimeInterval ps_cm_aligned_real_timestamp(id sample, double rawTs) {
+static NSTimeInterval ps_cm_aligned_real_timestamp(id sample, double rawTs, BOOL isContinuous) {
     if (sample == nil) {
         return ps_cm_next_virtual_timestamp();
     }
+    const void *assocKey = isContinuous ? &kPSRealAlignedContinuousTimestampKey : &kPSRealAlignedTimestampKey;
     @synchronized (sample) {
-        NSNumber *cached = objc_getAssociatedObject(sample, &kPSRealAlignedTimestampKey);
+        NSNumber *cached = objc_getAssociatedObject(sample, assocKey);
         if (cached != nil) {
             return [cached doubleValue];
         }
@@ -5348,20 +5505,22 @@ static NSTimeInterval ps_cm_aligned_real_timestamp(id sample, double rawTs) {
         if (!isfinite(rawTs) || rawTs <= 0.0) {
             aligned = ps_cm_next_virtual_timestamp_locked(up);
         } else {
-            double candidate = s_ps_cm_has_real_offset ? (rawTs + s_ps_cm_real_offset) : rawTs;
+            BOOL *hasOffsetPtr = isContinuous ? &s_ps_cm_has_real_cont_ts_offset : &s_ps_cm_has_real_ts_offset;
+            double *offsetPtr = isContinuous ? &s_ps_cm_real_cont_ts_offset : &s_ps_cm_real_ts_offset;
+            double candidate = *hasOffsetPtr ? (rawTs + *offsetPtr) : rawTs;
             if (!isfinite(candidate) || candidate > up + 0.01 || candidate < 0.0 || (up - candidate) > 60.0) {
-                s_ps_cm_real_offset = up - rawTs;
-                s_ps_cm_has_real_offset = YES;
+                *offsetPtr = up - rawTs;
+                *hasOffsetPtr = YES;
                 candidate = up;
             }
             aligned = candidate;
-            if (aligned > s_ps_cm_last_virtual_ts) {
+            if (!isContinuous && aligned > s_ps_cm_last_virtual_ts) {
                 s_ps_cm_last_virtual_ts = aligned;
             }
         }
         os_unfair_lock_unlock(&s_ps_cm_clock_lock);
         objc_setAssociatedObject(sample,
-                                 &kPSRealAlignedTimestampKey,
+                                 assocKey,
                                  @(aligned),
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         return aligned;
@@ -5372,11 +5531,15 @@ static void ps_cm_observe_real_sample(id sample) {
     if (sample == nil || ps_is_virtual_motion_sample(sample)) {
         return;
     }
-    if (![sample respondsToSelector:@selector(timestamp)]) {
-        return;
+    if ([sample respondsToSelector:@selector(timestamp)]) {
+        double rawTs = ((double (*)(id, SEL))objc_msgSend)(sample, @selector(timestamp));
+        (void)ps_cm_aligned_real_timestamp(sample, rawTs, NO);
     }
-    double rawTs = ((double (*)(id, SEL))objc_msgSend)(sample, @selector(timestamp));
-    (void)ps_cm_aligned_real_timestamp(sample, rawTs);
+    SEL contTsSel = NSSelectorFromString(@"continuousTimestamp");
+    if ([sample respondsToSelector:contTsSel]) {
+        double rawContTs = ((double (*)(id, SEL))objc_msgSend)(sample, contTsSel);
+        (void)ps_cm_aligned_real_timestamp(sample, rawContTs, YES);
+    }
 }
 
 static void ps_attitude_update_from_quaternion_locked(PSVirtualAttitudePayload *att, CMQuaternion q) {
@@ -5498,6 +5661,14 @@ static PSVirtualMotionSamplePayload *ps_make_initialized_motion_payload(BOOL inc
             .w = 0.99999079
         };
         payload->_attitude = ps_make_virtual_attitude_with_quaternion(q);
+        PSVirtualAttitudePayload *attP = ps_attitude_payload(payload->_attitude, NO);
+        if (attP != nil) {
+            payload->_gravity = (CMAcceleration){
+                .x = -attP->_rotationMatrix.m31,
+                .y = -attP->_rotationMatrix.m32,
+                .z = -attP->_rotationMatrix.m33
+            };
+        }
     }
     payload->_relativeAltitude = @(0.0);
     payload->_pressure = @(101.325);
@@ -5613,6 +5784,84 @@ static inline void ps_swizzle_cm_sel_if_defined(CFMutableDictionaryRef *dictPtr,
 
 typedef id (*ps_cm_copy_zone_imp_t)(id, SEL, NSZone *) NS_RETURNS_RETAINED;
 
+__attribute__((visibility("hidden")))
+@interface PSVirtualAttitudeCoder : NSCoder {
+@public
+    CMQuaternion _q;
+}
+- (instancetype)initWithQuaternion:(CMQuaternion)q;
+@end
+
+@implementation PSVirtualAttitudeCoder
+- (instancetype)initWithQuaternion:(CMQuaternion)q {
+    self = [super init];
+    if (self != nil) {
+        _q = q;
+    }
+    return self;
+}
+- (BOOL)allowsKeyedCoding {
+    return YES;
+}
+- (BOOL)requiresSecureCoding {
+    return YES;
+}
+- (BOOL)containsValueForKey:(NSString *)key {
+    return [key isEqualToString:@"kCMAttitudeCodingKeyQW"] ||
+           [key isEqualToString:@"kCMAttitudeCodingKeyQX"] ||
+           [key isEqualToString:@"kCMAttitudeCodingKeyQY"] ||
+           [key isEqualToString:@"kCMAttitudeCodingKeyQZ"];
+}
+- (double)decodeDoubleForKey:(NSString *)key {
+    if ([key isEqualToString:@"kCMAttitudeCodingKeyQW"]) return _q.w;
+    if ([key isEqualToString:@"kCMAttitudeCodingKeyQX"]) return _q.x;
+    if ([key isEqualToString:@"kCMAttitudeCodingKeyQY"]) return _q.y;
+    if ([key isEqualToString:@"kCMAttitudeCodingKeyQZ"]) return _q.z;
+    return 0.0;
+}
+@end
+
+static NSInteger ps_cm_calibration_level_for_accuracy(CMMagneticFieldCalibrationAccuracy accuracy) {
+    switch (accuracy) {
+        case CMMagneticFieldCalibrationAccuracyHigh:
+            return 6;
+        case CMMagneticFieldCalibrationAccuracyMedium:
+            return 4;
+        case CMMagneticFieldCalibrationAccuracyLow:
+            return 2;
+        case CMMagneticFieldCalibrationAccuracyUncalibrated:
+        default:
+            return 0;
+    }
+}
+
+static NSTimeInterval ps_cm_effective_sample_timestamp(id sample) {
+    PSVirtualMotionSamplePayload *payload = ps_motion_sample_payload(sample, NO);
+    if (payload != nil) {
+        os_unfair_lock_lock(&payload->_lock);
+        if (!payload->_hasTimestamp) {
+            payload->_timestamp = ps_cm_next_virtual_timestamp();
+            payload->_hasTimestamp = YES;
+        }
+        NSTimeInterval ts = payload->_timestamp;
+        os_unfair_lock_unlock(&payload->_lock);
+        return ts;
+    }
+    NSNumber *cached = objc_getAssociatedObject(sample, &kPSRealAlignedTimestampKey);
+    if (cached != nil) {
+        return [cached doubleValue];
+    }
+    return [sample respondsToSelector:@selector(timestamp)]
+        ? ((double (*)(id, SEL))objc_msgSend)(sample, @selector(timestamp))
+        : 0.0;
+}
+
+static BOOL ps_cm_vec3_close(double ax, double ay, double az,
+                             double bx, double by, double bz,
+                             double tol) {
+    return (fabs(ax - bx) < tol && fabs(ay - by) < tol && fabs(az - bz) < tol);
+}
+
 @implementation PSSwizzleHooks (PlayShadowCoreMotion)
 
 - (id) pm_ps_cm_copyWithZone:(NSZone *)zone NS_RETURNS_RETAINED {
@@ -5624,7 +5873,35 @@ typedef id (*ps_cm_copy_zone_imp_t)(id, SEL, NSZone *) NS_RETURNS_RETAINED;
         CMAttitude *cloned = ps_make_virtual_attitude_with_quaternion(q);
         return cloned ?: self;
     }
-    if (ps_motion_sample_payload(self, NO) != nil) {
+    PSVirtualMotionSamplePayload *payload = ps_motion_sample_payload(self, NO);
+    if (payload != nil) {
+        Class dmCls = objc_getClass("CMDeviceMotion");
+        if (dmCls != Nil && [self isKindOfClass:dmCls]) {
+            CMDeviceMotion *cloned = [[object_getClass(self) alloc] init];
+            if (cloned != nil) {
+                PSVirtualMotionSamplePayload *copyPayload = [[PSVirtualMotionSamplePayload alloc] init];
+                os_unfair_lock_lock(&payload->_lock);
+                copyPayload->_hasTimestamp = payload->_hasTimestamp;
+                copyPayload->_timestamp = payload->_timestamp;
+                copyPayload->_acceleration = payload->_acceleration;
+                copyPayload->_rotationRate = payload->_rotationRate;
+                copyPayload->_magneticField = payload->_magneticField;
+                copyPayload->_gravity = payload->_gravity;
+                copyPayload->_userAcceleration = payload->_userAcceleration;
+                copyPayload->_calibratedMagneticField = payload->_calibratedMagneticField;
+                copyPayload->_heading = payload->_heading;
+                copyPayload->_relativeAltitude = [payload->_relativeAltitude copy];
+                copyPayload->_pressure = [payload->_pressure copy];
+                CMAttitude *att = payload->_attitude;
+                os_unfair_lock_unlock(&payload->_lock);
+                copyPayload->_attitude = [att copyWithZone:zone];
+                objc_setAssociatedObject(cloned,
+                                         &kPSMotionSamplePayloadKey,
+                                         copyPayload,
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                return cloned;
+            }
+        }
         return self;
     }
     BOOL pushed = NO;
@@ -5660,7 +5937,7 @@ typedef id (*ps_cm_copy_zone_imp_t)(id, SEL, NSZone *) NS_RETURNS_RETAINED;
         os_unfair_lock_unlock(&payload->_lock);
 
         [coder encodeDouble:ts forKey:@"kCMLogItemCodingKeyTimestamp"];
-        [coder encodeDouble:0.0 forKey:@"kCMLogItemCodingKeyContinuousTimestamp"];
+        [coder encodeDouble:ts forKey:@"kCMLogItemCodingKeyContinuousTimestamp"];
 
         Class selfCls = object_getClass(self);
         if (selfCls == objc_getClass("CMAccelerometerData")) {
@@ -5694,7 +5971,7 @@ typedef id (*ps_cm_copy_zone_imp_t)(id, SEL, NSZone *) NS_RETURNS_RETAINED;
             [coder encodeDouble:payload->_calibratedMagneticField.field.x forKey:@"kCMDeviceMotionCodingKeyMagneticFieldX"];
             [coder encodeDouble:payload->_calibratedMagneticField.field.y forKey:@"kCMDeviceMotionCodingKeyMagneticFieldY"];
             [coder encodeDouble:payload->_calibratedMagneticField.field.z forKey:@"kCMDeviceMotionCodingKeyMagneticFieldZ"];
-            [coder encodeInteger:(NSInteger)payload->_calibratedMagneticField.accuracy
+            [coder encodeInteger:ps_cm_calibration_level_for_accuracy(payload->_calibratedMagneticField.accuracy)
                           forKey:@"kCMDeviceMotionCodingKeyMagneticFieldCalibrationLevel"];
             [coder encodeBool:YES forKey:@"kCMDeviceMotionCodingKeyDoingYawCorrection"];
             [coder encodeBool:YES forKey:@"kCMDeviceMotionCodingKeyDoingBiasEstimation"];
@@ -5774,50 +6051,65 @@ typedef id (*ps_cm_copy_zone_imp_t)(id, SEL, NSZone *) NS_RETURNS_RETAINED;
 }
 
 - (BOOL) pm_ps_cm_isEqual:(id)other {
-    PSVirtualAttitudePayload *attPayload = ps_attitude_payload(self, NO);
-    if (attPayload != nil) {
-        if (other == self) {
-            return YES;
-        }
-        Class attCls = objc_getClass("CMAttitude");
-        if (attCls == Nil || ![other isKindOfClass:attCls]) {
-            return NO;
-        }
-        os_unfair_lock_lock(&attPayload->_lock);
-        CMQuaternion q1 = attPayload->_quaternion;
-        os_unfair_lock_unlock(&attPayload->_lock);
-        CMQuaternion q2 = ((CMAttitude *)other).quaternion;
-        return (fabs(q1.x - q2.x) < 1e-12 &&
-                fabs(q1.y - q2.y) < 1e-12 &&
-                fabs(q1.z - q2.z) < 1e-12 &&
-                fabs(q1.w - q2.w) < 1e-12);
+    if (other == self) {
+        return YES;
     }
-    PSVirtualMotionSamplePayload *payload = ps_motion_sample_payload(self, NO);
-    if (payload != nil) {
-        if (other == self) {
-            return YES;
+    if (other == nil) {
+        return NO;
+    }
+    PSVirtualAttitudePayload *selfAttPayload = ps_attitude_payload(self, NO);
+    PSVirtualAttitudePayload *otherAttPayload = ps_attitude_payload(other, NO);
+    if (selfAttPayload != nil || otherAttPayload != nil) {
+        Class attCls = objc_getClass("CMAttitude");
+        if (attCls == Nil || ![self isKindOfClass:attCls] || ![other isKindOfClass:attCls]) {
+            return NO;
         }
+        CMQuaternion q1 = ((CMAttitude *)self).quaternion;
+        CMQuaternion q2 = ((CMAttitude *)other).quaternion;
+        return (fabs(q1.x - q2.x) < 1e-6 &&
+                fabs(q1.y - q2.y) < 1e-6 &&
+                fabs(q1.z - q2.z) < 1e-6 &&
+                fabs(q1.w - q2.w) < 1e-6);
+    }
+    PSVirtualMotionSamplePayload *selfPayload = ps_motion_sample_payload(self, NO);
+    PSVirtualMotionSamplePayload *otherPayload = ps_motion_sample_payload(other, NO);
+    if (selfPayload != nil || otherPayload != nil) {
         Class dmCls = objc_getClass("CMDeviceMotion");
-        if (dmCls == Nil || ![other isKindOfClass:dmCls]) {
+        if (dmCls == Nil || ![self isKindOfClass:dmCls] || ![other isKindOfClass:dmCls]) {
             return NO;
         }
-        PSVirtualMotionSamplePayload *otherPayload = ps_motion_sample_payload(other, NO);
-        if (otherPayload == nil) {
+        CMDeviceMotion *dm1 = (CMDeviceMotion *)self;
+        CMDeviceMotion *dm2 = (CMDeviceMotion *)other;
+        NSTimeInterval ts1 = ps_cm_effective_sample_timestamp(dm1);
+        NSTimeInterval ts2 = ps_cm_effective_sample_timestamp(dm2);
+        if (fabs(ts1 - ts2) >= 1e-9 || fabs(dm1.heading - dm2.heading) >= 1e-4) {
             return NO;
         }
-        return (fabs(payload->_timestamp - otherPayload->_timestamp) < 1e-9 &&
-                fabs(payload->_heading - otherPayload->_heading) < 1e-9 &&
-                fabs(payload->_gravity.x - otherPayload->_gravity.x) < 1e-9 &&
-                fabs(payload->_gravity.y - otherPayload->_gravity.y) < 1e-9 &&
-                fabs(payload->_gravity.z - otherPayload->_gravity.z) < 1e-9 &&
-                fabs(payload->_userAcceleration.x - otherPayload->_userAcceleration.x) < 1e-9 &&
-                fabs(payload->_userAcceleration.y - otherPayload->_userAcceleration.y) < 1e-9 &&
-                fabs(payload->_userAcceleration.z - otherPayload->_userAcceleration.z) < 1e-9 &&
-                fabs(payload->_rotationRate.x - otherPayload->_rotationRate.x) < 1e-9 &&
-                fabs(payload->_rotationRate.y - otherPayload->_rotationRate.y) < 1e-9 &&
-                fabs(payload->_rotationRate.z - otherPayload->_rotationRate.z) < 1e-9 &&
-                ((payload->_attitude == otherPayload->_attitude) ||
-                 [payload->_attitude isEqual:otherPayload->_attitude]));
+        CMAcceleration g1 = dm1.gravity;
+        CMAcceleration g2 = dm2.gravity;
+        if (!ps_cm_vec3_close(g1.x, g1.y, g1.z, g2.x, g2.y, g2.z, 1e-4)) {
+            return NO;
+        }
+        CMAcceleration ua1 = dm1.userAcceleration;
+        CMAcceleration ua2 = dm2.userAcceleration;
+        if (!ps_cm_vec3_close(ua1.x, ua1.y, ua1.z, ua2.x, ua2.y, ua2.z, 1e-4)) {
+            return NO;
+        }
+        CMRotationRate rr1 = dm1.rotationRate;
+        CMRotationRate rr2 = dm2.rotationRate;
+        if (!ps_cm_vec3_close(rr1.x, rr1.y, rr1.z, rr2.x, rr2.y, rr2.z, 1e-4)) {
+            return NO;
+        }
+        CMCalibratedMagneticField mf1 = dm1.magneticField;
+        CMCalibratedMagneticField mf2 = dm2.magneticField;
+        if (mf1.accuracy != mf2.accuracy ||
+            !ps_cm_vec3_close(mf1.field.x, mf1.field.y, mf1.field.z,
+                              mf2.field.x, mf2.field.y, mf2.field.z, 1e-4)) {
+            return NO;
+        }
+        CMAttitude *att1 = dm1.attitude;
+        CMAttitude *att2 = dm2.attitude;
+        return ((att1 == att2) || (att1 != nil && att2 != nil && [att1 isEqual:att2]));
     }
     BOOL pushed = NO;
     IMP origIMP = ps_lookup_orig_imp_and_push(&s_cm_swizzle_lock, s_cm_orig_isEqual_imps, self, &pushed);
@@ -5855,7 +6147,7 @@ typedef id (*ps_cm_copy_zone_imp_t)(id, SEL, NSZone *) NS_RETURNS_RETAINED;
     }
     if (pt_is_bypass_enabled() &&
         !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        return ps_cm_aligned_real_timestamp(self, orig);
+        return ps_cm_aligned_real_timestamp(self, orig, NO);
     }
     return orig;
 }
@@ -5884,7 +6176,7 @@ typedef id (*ps_cm_copy_zone_imp_t)(id, SEL, NSZone *) NS_RETURNS_RETAINED;
     }
     if (pt_is_bypass_enabled() &&
         !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        return ps_cm_aligned_real_timestamp(self, orig);
+        return ps_cm_aligned_real_timestamp(self, orig, YES);
     }
     return orig;
 }
@@ -6065,20 +6357,37 @@ typedef id (*ps_cm_copy_zone_imp_t)(id, SEL, NSZone *) NS_RETURNS_RETAINED;
         os_unfair_lock_lock(&att->_lock);
         CMQuaternion q1 = att->_quaternion;
         CMQuaternion res = {
-            .w = q1.w * q2Inv.w - q1.x * q2Inv.x - q1.y * q2Inv.y - q1.z * q2Inv.z,
-            .x = q1.w * q2Inv.x + q1.x * q2Inv.w + q1.y * q2Inv.z - q1.z * q2Inv.y,
-            .y = q1.w * q2Inv.y - q1.x * q2Inv.z + q1.y * q2Inv.w + q1.z * q2Inv.x,
-            .z = q1.w * q2Inv.z + q1.x * q2Inv.y - q1.y * q2Inv.x + q1.z * q2Inv.w
+            .w = q2Inv.w * q1.w - q2Inv.x * q1.x - q2Inv.y * q1.y - q2Inv.z * q1.z,
+            .x = q2Inv.w * q1.x + q2Inv.x * q1.w + q2Inv.y * q1.z - q2Inv.z * q1.y,
+            .y = q2Inv.w * q1.y - q2Inv.x * q1.z + q2Inv.y * q1.w + q2Inv.z * q1.x,
+            .z = q2Inv.w * q1.z + q2Inv.x * q1.y - q2Inv.y * q1.x + q2Inv.z * q1.w
         };
         ps_attitude_update_from_quaternion_locked(att, res);
         os_unfair_lock_unlock(&att->_lock);
+        return;
+    }
+    CMAttitude *effectiveArg = attitude;
+    PSVirtualAttitudePayload *otherAtt = ps_attitude_payload(attitude, NO);
+    if (otherAtt != nil) {
+        os_unfair_lock_lock(&otherAtt->_lock);
+        CMQuaternion q2 = otherAtt->_quaternion;
+        os_unfair_lock_unlock(&otherAtt->_lock);
+        Class attCls = objc_getClass("CMAttitude");
+        CMAttitude *genuineTemp = (attCls != Nil)
+            ? [[attCls alloc] initWithCoder:[[PSVirtualAttitudeCoder alloc] initWithQuaternion:q2]]
+            : nil;
+        if (genuineTemp == nil) {
+            return;
+        }
+        effectiveArg = genuineTemp;
+    } else if (ps_is_virtual_motion_sample(attitude)) {
         return;
     }
     BOOL pushed = NO;
     IMP origIMP = ps_lookup_orig_imp_and_push(&s_cm_swizzle_lock, s_cm_orig_att_mul_imps, self, &pushed);
     if (origIMP != NULL) {
         @try {
-            ((void (*)(id, SEL, CMAttitude *))origIMP)(self, @selector(multiplyByInverseOfAttitude:), attitude);
+            ((void (*)(id, SEL, CMAttitude *))origIMP)(self, @selector(multiplyByInverseOfAttitude:), effectiveArg);
         } @finally {
             ps_pop_orig_imp_frame(pushed);
         }
@@ -6341,8 +6650,17 @@ typedef id (*ps_cm_copy_zone_imp_t)(id, SEL, NSZone *) NS_RETURNS_RETAINED;
         PSVirtualMotionState *st = ps_motion_state(self, YES);
         if (st != nil) {
             @synchronized (st) {
+                double prev = st.hasExplicitMagUpdateInterval ? st.explicitMagUpdateInterval : 0.01;
+                BOOL changed = (!st.hasExplicitMagUpdateInterval || fabs(prev - effective) > 1e-9);
                 st.hasExplicitMagUpdateInterval = YES;
                 st.explicitMagUpdateInterval = effective;
+                if (changed && st.magActive && st.magTimer != nil) {
+                    uint64_t ns = (uint64_t)(effective * (double)NSEC_PER_SEC);
+                    dispatch_source_set_timer(st.magTimer,
+                                              dispatch_time(DISPATCH_TIME_NOW, (int64_t)ns),
+                                              ns,
+                                              ns / 5ULL);
+                }
             }
         }
     }
@@ -6897,6 +7215,10 @@ typedef id (*ps_cm_copy_zone_imp_t)(id, SEL, NSZone *) NS_RETURNS_RETAINED;
 
 @end
 
+@interface PSSwizzleHooks (PlayShadowNSURLFilePath)
+- (NSURL *) pm_filePathURL;
+@end
+
 static void ps_install_uifont_hooks_if_loaded(void) {
     Class fontCls = objc_getClass("UIFont");
     if (fontCls != Nil) {
@@ -6909,6 +7231,11 @@ static void ps_install_uifont_hooks_if_loaded(void) {
                 ps_swizzle_class_method(fontCls,
                                         @selector(fontNamesForFamilyName:),
                                         @selector(pm_ps_uifont_fontNamesForFamilyName:));
+            }
+            if (class_getClassMethod(fontCls, @selector(fontWithName:size:)) != NULL) {
+                ps_swizzle_class_method(fontCls,
+                                        @selector(fontWithName:size:),
+                                        @selector(pm_ps_uifont_fontWithName:size:));
             }
         });
     }
@@ -6924,6 +7251,53 @@ static void ps_install_wk_scheme_privacy_hooks_if_loaded(void) {
                 ps_swizzle_instance_method(wkCfgCls,
                                            getHandlerSel,
                                            @selector(pm_wk_cfg_urlSchemeHandlerForURLScheme:));
+            }
+            SEL setHandlerSel = NSSelectorFromString(@"setURLSchemeHandler:forURLScheme:");
+            if (class_getInstanceMethod(wkCfgCls, setHandlerSel) != NULL) {
+                ps_swizzle_instance_method(wkCfgCls,
+                                           setHandlerSel,
+                                           @selector(pm_wk_cfg_setURLSchemeHandler:forURLScheme:));
+            }
+        });
+    }
+}
+
+static void ps_install_local_auth_hooks_if_loaded(void) {
+    Class laCtxCls = NSClassFromString(@"LAContext");
+    if (laCtxCls != Nil) {
+        static dispatch_once_t laOnce;
+        dispatch_once(&laOnce, ^{
+            SEL canEvalSel = NSSelectorFromString(@"canEvaluatePolicy:error:");
+            if (class_getInstanceMethod(laCtxCls, canEvalSel) != NULL) {
+                ps_swizzle_instance_method(laCtxCls,
+                                           canEvalSel,
+                                           @selector(pm_ps_la_canEvaluatePolicy:error:));
+            }
+            SEL biometrySel = NSSelectorFromString(@"biometryType");
+            if (class_getInstanceMethod(laCtxCls, biometrySel) != NULL) {
+                ps_swizzle_instance_method(laCtxCls,
+                                           biometrySel,
+                                           @selector(pm_ps_la_biometryType));
+            }
+        });
+    }
+}
+
+static void ps_install_game_controller_hooks_if_loaded(void) {
+    Class gcCls = objc_getClass("GCController");
+    if (gcCls != Nil) {
+        static dispatch_once_t gcOnce;
+        dispatch_once(&gcOnce, ^{
+            SEL bgSel = NSSelectorFromString(@"shouldMonitorBackgroundEvents");
+            if (class_getClassMethod(gcCls, bgSel) != NULL) {
+                ps_swizzle_class_method(gcCls,
+                                        bgSel,
+                                        @selector(pm_ps_gc_shouldMonitorBackgroundEvents));
+            }
+            if (class_getClassMethod(gcCls, @selector(respondsToSelector:)) != NULL) {
+                ps_swizzle_class_method(gcCls,
+                                        @selector(respondsToSelector:),
+                                        @selector(pm_ps_gc_respondsToSelector:));
             }
         });
     }
@@ -7063,6 +7437,8 @@ void ps_install_dynamic_system_bundle_hooks(void) {
         ps_install_avcapture_hooks_if_loaded();
         ps_install_app_attest_hooks_if_loaded();
         ps_install_coremotion_hooks_if_loaded();
+        ps_install_local_auth_hooks_if_loaded();
+        ps_install_game_controller_hooks_if_loaded();
     } while (s_tls_needs_rescan);
     s_tls_installing_dynamic_hooks = false;
 }
@@ -7117,6 +7493,7 @@ void ps_install_system_jailbreak_bypass_hooks(void) {
     ps_swizzle_instance_method(objc_getClass("NSURL"), @selector(getResourceValue:forKey:error:), @selector(pm_getResourceValue:forKey:error:));
     ps_swizzle_instance_method(objc_getClass("NSURL"), @selector(URLByResolvingSymlinksInPath), @selector(pm_URLByResolvingSymlinksInPath));
     ps_swizzle_instance_method(objc_getClass("NSURL"), @selector(URLByStandardizingPath), @selector(pm_URLByStandardizingPath));
+    ps_swizzle_instance_method(objc_getClass("NSURL"), @selector(filePathURL), @selector(pm_filePathURL));
     ps_swizzle_instance_method(objc_getClass("NSFileManager"), @selector(contentsOfDirectoryAtPath:error:), @selector(pm_contentsOfDirectoryAtPath:error:));
     ps_swizzle_instance_method(objc_getClass("NSFileManager"), @selector(subpathsOfDirectoryAtPath:error:), @selector(pm_subpathsOfDirectoryAtPath:error:));
     ps_swizzle_instance_method(objc_getClass("NSFileManager"), @selector(subpathsAtPath:), @selector(pm_subpathsAtPath:));

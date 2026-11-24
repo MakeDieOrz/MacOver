@@ -1520,6 +1520,85 @@ __attribute__((visibility("hidden"))) id ps_shared_vfile_scheme_handler(void) {
     return s_handler;
 }
 
+static NSString *ps_normalize_virtual_ancestor_nsstring(NSString *path) {
+    NSString *norm = ps_resolve_virtual_nsstring_path(path);
+    if ([norm hasPrefix:@"/private/"]) {
+        norm = [norm substringFromIndex:8];
+    }
+    while (norm.length > 1 && [norm hasSuffix:@"/"]) {
+        norm = [norm substringToIndex:norm.length - 1];
+    }
+    return norm;
+}
+
+static NSURL *ps_sanitize_file_path_nsurl(NSURL *url,
+                                          BOOL usePrivatePrefix,
+                                          const void *caller,
+                                          BOOL *outHidden) {
+    if (outHidden != NULL) {
+        *outHidden = NO;
+    }
+    if (url == nil || ![url isFileURL]) {
+        return url;
+    }
+    NSURL *virt = ps_virtualize_nsurl_for_app(url, usePrivatePrefix);
+    if (virt != nil && virt != url && ![virt isEqual:url]) {
+        return virt;
+    }
+    NSString *resPath = [url path];
+    if (resPath.length > 0) {
+        if (ps_is_hidden_path(resPath, caller)) {
+            if (outHidden != NULL) {
+                *outHidden = YES;
+            }
+            return nil;
+        }
+        if (ps_is_virtual_ancestor_nsstring(resPath)) {
+            return ps_rebuild_file_nsurl(url, ps_normalize_virtual_ancestor_nsstring(resPath));
+        }
+    }
+    return url;
+}
+
+static CFURLRef ps_CFURLCreateFilePathURL(CFAllocatorRef allocator,
+                                          CFURLRef url,
+                                          CFErrorRef *error) CF_RETURNS_RETAINED {
+    const void *caller = __builtin_return_address(0);
+    CFURLRef result = CFURLCreateFilePathURL(allocator, url, error);
+    if (result == NULL ||
+        !pt_is_bypass_enabled() ||
+        ps_is_effective_system_or_playtools_caller(caller)) {
+        return result;
+    }
+    NSURL *sanitized = nil;
+    BOOL isHidden = NO;
+    @autoreleasepool {
+        NSURL *nsResult = (__bridge NSURL *)result;
+        sanitized = ps_sanitize_file_path_nsurl(nsResult, NO, caller, &isHidden);
+    }
+    if (isHidden) {
+        if (error != NULL) {
+            *error = CFErrorCreate(allocator,
+                                   (__bridge CFStringRef)NSCocoaErrorDomain,
+                                   NSFileReadNoSuchFileError,
+                                   NULL);
+        }
+        CFRelease(result);
+        return NULL;
+    }
+    if (sanitized != nil && sanitized != (__bridge NSURL *)result) {
+        CFRelease(result);
+        return (__bridge_retained CFURLRef)sanitized;
+    }
+    return result;
+}
+
+DYLD_INTERPOSE(ps_CFURLCreateFilePathURL, CFURLCreateFilePathURL)
+
+@interface PSSwizzleHooks (PlayShadowNSURLFilePath)
+- (NSURL *) pm_filePathURL;
+@end
+
 
 @implementation PSSwizzleHooks (PlayShadowFS)
 
@@ -2828,17 +2907,6 @@ static void ps_prepare_file_url_for_io(NSURL *url,
     return ok;
 }
 
-static NSString *ps_normalize_virtual_ancestor_nsstring(NSString *path) {
-    NSString *norm = ps_resolve_virtual_nsstring_path(path);
-    if ([norm hasPrefix:@"/private/"]) {
-        norm = [norm substringFromIndex:8];
-    }
-    while (norm.length > 1 && [norm hasSuffix:@"/"]) {
-        norm = [norm substringToIndex:norm.length - 1];
-    }
-    return norm;
-}
-
 - (NSString *) pm_stringByExpandingTildeInPath {
     const void *caller = __builtin_return_address(0);
     NSString *expanded = [self pm_stringByExpandingTildeInPath];
@@ -2955,6 +3023,31 @@ static NSString *ps_normalize_virtual_ancestor_nsstring(NSString *path) {
         }
     }
     return [self pm_URLByStandardizingPath];
+}
+
+- (NSURL *) pm_filePathURL {
+    const void *caller = __builtin_return_address(0);
+    if (!pt_is_bypass_enabled() || ps_is_effective_system_or_playtools_caller(caller)) {
+        return [self pm_filePathURL];
+    }
+    NSURL *selfURL = (NSURL *)self;
+    BOOL usePrivatePrefix = NO;
+    if ([selfURL isFileURL]) {
+        NSString *origPath = [selfURL path];
+        if (origPath.length > 0) {
+            if (ps_is_hidden_path(origPath, caller)) {
+                return nil;
+            }
+            if (ps_is_virtual_ancestor_nsstring(origPath)) {
+                return ps_rebuild_file_nsurl(selfURL, ps_normalize_virtual_ancestor_nsstring(origPath));
+            }
+            usePrivatePrefix = [origPath hasPrefix:@"/private/"];
+        }
+    }
+    NSURL *res = [self pm_filePathURL];
+    BOOL isHidden = NO;
+    NSURL *sanitized = ps_sanitize_file_path_nsurl(res, usePrivatePrefix, caller, &isHidden);
+    return isHidden ? nil : sanitized;
 }
 
 
