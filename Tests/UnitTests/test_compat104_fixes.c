@@ -318,6 +318,37 @@ static void test_sf_symbols_and_versions(void) {
     assert((uik13 >> 16) == 3698);
 }
 
+/* ---------- Batch 4 Unit Tests ---------- */
+
+static int is_hidden_ifname_prefix(const char *name) {
+    if (!name || !name[0]) return 0;
+    return (strncmp(name, "vmenet", 6) == 0 ||
+            strncmp(name, "vmnet", 5) == 0 ||
+            strncmp(name, "bridge", 6) == 0 ||
+            strncmp(name, "anpi", 4) == 0) ? 1 : 0;
+}
+
+static int is_code_res_key_dirty(const char *k) {
+    if (!k) return 0;
+    return (strstr(k, "PlayTools") != NULL ||
+            strstr(k, "AKInterface") != NULL ||
+            strstr(k, "SVCPatches") != NULL ||
+            strstr(k, "Playtools.strings") != NULL ||
+            strstr(k, "UserPlugins") != NULL) ? 1 : 0;
+}
+
+static void test_network_and_coderesources(void) {
+    assert(is_hidden_ifname_prefix("anpi0") == 1);
+    assert(is_hidden_ifname_prefix("anpi2") == 1);
+    assert(is_hidden_ifname_prefix("bridge100") == 1);
+    assert(is_hidden_ifname_prefix("en0") == 0);
+    assert(is_hidden_ifname_prefix("lo0") == 0);
+
+    assert(is_code_res_key_dirty("Frameworks/AKInterface.framework/AKInterface") == 1);
+    assert(is_code_res_key_dirty("Frameworks/PlayTools.framework/PlayTools") == 1);
+    assert(is_code_res_key_dirty("Info.plist") == 0);
+}
+
 int main(void) {
     test_der_entitlements_encoding_and_superblob_rewrite();
     test_attr_ref_zero_fill();
@@ -325,6 +356,7 @@ int main(void) {
     test_sysctl_filters();
     test_ioreg_compat13_sanitize();
     test_sf_symbols_and_versions();
+    test_network_and_coderesources();
     printf("All compat104 unit tests passed.\n");
     return 0;
 }

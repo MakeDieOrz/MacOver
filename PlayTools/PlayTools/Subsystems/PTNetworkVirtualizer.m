@@ -7,6 +7,7 @@
 #include <ctype.h>
 #include <ifaddrs.h>
 #include <net/if.h>
+#include <sys/ioctl.h>
 
 
 typedef NS_ENUM(NSInteger, PSNetRuleAction) {
@@ -2246,6 +2247,28 @@ typedef struct {
 static os_unfair_lock s_ifaddrs_lock = OS_UNFAIR_LOCK_INIT;
 static pt_ifaddrs_head_entry_t s_ifaddrs_head_map[PT_IFADDRS_HEAD_MAP_CAP];
 
+static BOOL pt_network_ifname_is_inactive(const char *name) {
+    if (name == NULL || name[0] == '\0') {
+        return NO;
+    }
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        return NO;
+    }
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    strlcpy(ifr.ifr_name, name, sizeof(ifr.ifr_name));
+    BOOL inactive = NO;
+    if (ioctl(fd, SIOCGIFFLAGS, &ifr) == 0) {
+        short needed = (short)(IFF_UP | IFF_RUNNING);
+        if ((ifr.ifr_flags & needed) != needed) {
+            inactive = YES;
+        }
+    }
+    close(fd);
+    return inactive;
+}
+
 __attribute__((visibility("hidden")))
 BOOL pt_is_hidden_network_ifname(const char *name) {
     if (name == NULL || name[0] == '\0') {
@@ -2253,8 +2276,13 @@ BOOL pt_is_hidden_network_ifname(const char *name) {
     }
     if (strncmp(name, "vmenet", 6) == 0 ||
         strncmp(name, "vmnet", 5) == 0 ||
-        strncmp(name, "bridge", 6) == 0) {
+        strncmp(name, "bridge", 6) == 0 ||
+        strncmp(name, "anpi", 4) == 0) {
         return YES;
+    }
+    if (name[0] == 'e' && name[1] == 'n' &&
+        name[2] >= '1' && name[2] <= '4' && name[3] == '\0') {
+        return pt_network_ifname_is_inactive(name);
     }
     return NO;
 }

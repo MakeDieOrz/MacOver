@@ -340,6 +340,16 @@ static size_t s_backup_info_plist_len = 0;
 static dev_t s_backup_info_plist_dev = 0;
 static ino_t s_backup_info_plist_ino = 0;
 static BOOL s_has_backup_info_plist = NO;
+static char s_backup_code_resources_path[PATH_MAX];
+static size_t s_backup_code_resources_len = 0;
+static dev_t s_backup_code_resources_dev = 0;
+static ino_t s_backup_code_resources_ino = 0;
+static BOOL s_has_backup_code_resources = NO;
+static os_unfair_lock s_synth_code_res_lock = OS_UNFAIR_LOCK_INIT;
+static _Atomic bool s_has_synth_code_res = false;
+static char s_synth_code_res_path[PATH_MAX];
+static dev_t s_synth_code_res_dev = 0;
+static ino_t s_synth_code_res_ino = 0;
 static char s_backup_executable_path[PATH_MAX];
 static size_t s_backup_executable_len = 0;
 static dev_t s_backup_executable_dev = 0;
@@ -1294,6 +1304,15 @@ static void pt_init_app_backup_map(void) {
             s_has_backup_info_plist = YES;
         }
 
+        int crn = snprintf(cand, sizeof(cand), "%s/CodeResources", s_app_backup_dir);
+        if (crn > 0 && (size_t)crn < sizeof(cand) && lstat(cand, &st) == 0 && S_ISREG(st.st_mode)) {
+            strlcpy(s_backup_code_resources_path, cand, sizeof(s_backup_code_resources_path));
+            s_backup_code_resources_len = (size_t)crn;
+            s_backup_code_resources_dev = st.st_dev;
+            s_backup_code_resources_ino = st.st_ino;
+            s_has_backup_code_resources = YES;
+        }
+
         int en = snprintf(cand, sizeof(cand), "%s/executable", s_app_backup_dir);
         if (en > 0 && (size_t)en < sizeof(cand) && lstat(cand, &st) == 0 && S_ISREG(st.st_mode)) {
             dev_t exec_dev = st.st_dev;
@@ -1395,6 +1414,176 @@ const char *pt_copy_virtual_mobileprovision_path(char *buf, size_t bufsize) {
                              "/embedded.mobileprovision");
 }
 
+static NSMutableDictionary *pt_clean_code_resources_subdict(NSDictionary *sub) {
+    NSMutableDictionary *clean = nil;
+    for (id key in sub) {
+        if ([key isKindOfClass:[NSString class]]) {
+            NSString *k = (NSString *)key;
+            if ([k containsString:@"PlayTools"] ||
+                [k containsString:@"AKInterface"] ||
+                [k containsString:@"SVCPatches"] ||
+                [k containsString:@"Playtools.strings"] ||
+                [k containsString:@"UserPlugins"]) {
+                if (clean == nil) {
+                    clean = [sub mutableCopy];
+                }
+                [clean removeObjectForKey:key];
+            }
+        }
+    }
+    return clean;
+}
+
+static const char *pt_get_or_build_sanitized_code_resources_path(void) {
+    if (s_real_app_bundle_len == 0) {
+        return NULL;
+    }
+    os_unfair_lock_lock(&s_synth_code_res_lock);
+    if (s_synth_code_res_path[0] != '\0') {
+        pt_enter_internal_scope();
+        struct stat st;
+        BOOL alive = (stat(s_synth_code_res_path, &st) == 0 &&
+                      st.st_dev == s_synth_code_res_dev &&
+                      st.st_ino == s_synth_code_res_ino);
+        pt_leave_internal_scope();
+        if (alive) {
+            os_unfair_lock_unlock(&s_synth_code_res_lock);
+            return s_synth_code_res_path;
+        }
+    }
+
+    char src_path[PATH_MAX];
+    int sn = snprintf(src_path, sizeof(src_path), "%s/_CodeSignature/CodeResources", s_real_app_bundle_dir);
+    pt_enter_internal_scope();
+    int rfd = (sn > 0 && (size_t)sn < sizeof(src_path)) ? pt_orig_open_nocancel(src_path, O_RDONLY) : -1;
+    if (rfd < 0) {
+        sn = snprintf(src_path, sizeof(src_path), "%s/Contents/_CodeSignature/CodeResources", s_real_app_bundle_dir);
+        if (sn > 0 && (size_t)sn < sizeof(src_path)) {
+            rfd = pt_orig_open_nocancel(src_path, O_RDONLY);
+        }
+    }
+    if (rfd < 0) {
+        pt_leave_internal_scope();
+        os_unfair_lock_unlock(&s_synth_code_res_lock);
+        return NULL;
+    }
+    size_t raw_len = 0;
+    size_t map_size = 0;
+    uint8_t *raw_bytes = pt_read_fd_plist_bytes(rfd, &raw_len, &map_size);
+    close(rfd);
+    pt_leave_internal_scope();
+    if (raw_bytes == NULL || raw_len == 0) {
+        if (raw_bytes != NULL) {
+            munmap(raw_bytes, map_size);
+        }
+        os_unfair_lock_unlock(&s_synth_code_res_lock);
+        return NULL;
+    }
+    NSData *rawData = [NSData dataWithBytes:raw_bytes length:raw_len];
+    munmap(raw_bytes, map_size);
+
+    id plist = [NSPropertyListSerialization propertyListWithData:rawData
+                                                         options:NSPropertyListImmutable
+                                                          format:nil
+                                                           error:nil];
+    if (![plist isKindOfClass:[NSDictionary class]]) {
+        os_unfair_lock_unlock(&s_synth_code_res_lock);
+        return NULL;
+    }
+    NSDictionary *dict = (NSDictionary *)plist;
+    NSArray<NSString *> *subkeys = @[@"files", @"files2", @"rules", @"rules2"];
+    NSMutableDictionary *cleanDict = nil;
+    for (NSString *sk in subkeys) {
+        id sub = dict[sk];
+        if ([sub isKindOfClass:[NSDictionary class]]) {
+            NSMutableDictionary *csub = pt_clean_code_resources_subdict((NSDictionary *)sub);
+            if (csub != nil) {
+                if (cleanDict == nil) {
+                    cleanDict = [dict mutableCopy];
+                }
+                cleanDict[sk] = [csub copy];
+            }
+        }
+    }
+    if (cleanDict == nil) {
+        os_unfair_lock_unlock(&s_synth_code_res_lock);
+        return NULL;
+    }
+    NSData *xmlOut = [NSPropertyListSerialization dataWithPropertyList:cleanDict
+                                                               format:NSPropertyListXMLFormat_v1_0
+                                                              options:0
+                                                                error:nil];
+    if (xmlOut == nil || xmlOut.length == 0) {
+        os_unfair_lock_unlock(&s_synth_code_res_lock);
+        return NULL;
+    }
+
+    pt_ensure_data_container_map();
+    char container_tmp[PATH_MAX];
+    const char *dirs[3] = { NULL, NULL, "/tmp" };
+    if (s_real_data_container_len > 0) {
+        int dn = snprintf(container_tmp, sizeof(container_tmp), "%s/tmp", s_real_data_container_dir);
+        if (dn > 0 && (size_t)dn < sizeof(container_tmp)) {
+            dirs[0] = container_tmp;
+        }
+    }
+    const char *env_tmp = pt_raw_getenv("TMPDIR");
+    char env_tmp_buf[PATH_MAX];
+    if (env_tmp != NULL && env_tmp[0] == '/') {
+        strlcpy(env_tmp_buf, env_tmp, sizeof(env_tmp_buf));
+        size_t el = strlen(env_tmp_buf);
+        while (el > 1 && env_tmp_buf[el - 1] == '/') {
+            env_tmp_buf[--el] = '\0';
+        }
+        dirs[1] = env_tmp_buf;
+    }
+
+    const char *res_path = NULL;
+    pt_enter_internal_scope();
+    for (size_t i = 0; i < 3 && res_path == NULL; i++) {
+        if (dirs[i] == NULL || dirs[i][0] != '/') {
+            continue;
+        }
+        char tmpl[PATH_MAX];
+        int tn = snprintf(tmpl, sizeof(tmpl), "%s/.pt_coderes_XXXXXX", dirs[i]);
+        if (tn <= 0 || (size_t)tn >= sizeof(tmpl)) {
+            continue;
+        }
+        int fd = mkstemp(tmpl);
+        if (fd < 0) {
+            continue;
+        }
+        (void)fchmod(fd, 0444);
+        const uint8_t *wptr = (const uint8_t *)xmlOut.bytes;
+        size_t rem = xmlOut.length;
+        BOOL wrote = YES;
+        while (rem > 0) {
+            ssize_t w = write(fd, wptr, rem);
+            if (w <= 0) {
+                wrote = NO;
+                break;
+            }
+            wptr += (size_t)w;
+            rem -= (size_t)w;
+        }
+        struct stat st;
+        if (wrote && fstat(fd, &st) == 0) {
+            close(fd);
+            strlcpy(s_synth_code_res_path, tmpl, sizeof(s_synth_code_res_path));
+            s_synth_code_res_dev = st.st_dev;
+            s_synth_code_res_ino = st.st_ino;
+            atomic_store_explicit(&s_has_synth_code_res, true, memory_order_release);
+            res_path = s_synth_code_res_path;
+            break;
+        }
+        close(fd);
+        unlink(tmpl);
+    }
+    pt_leave_internal_scope();
+    os_unfair_lock_unlock(&s_synth_code_res_lock);
+    return res_path;
+}
+
 static const char *pt_lookup_app_backup_redirect_unlocked(const char *p, const char *bundle_rel) {
     if (s_has_backup_mobileprovision && bundle_rel != NULL &&
         (strcmp(bundle_rel, "/embedded.mobileprovision") == 0 ||
@@ -1411,6 +1600,20 @@ static const char *pt_lookup_app_backup_redirect_unlocked(const char *p, const c
             s_backup_info_plist_path, s_backup_info_plist_dev, s_backup_info_plist_ino)
             ? s_backup_info_plist_path
             : NULL;
+    }
+    if (bundle_rel != NULL &&
+        (strcmp(bundle_rel, "/_CodeSignature/CodeResources") == 0 ||
+         strcmp(bundle_rel, "/Contents/_CodeSignature/CodeResources") == 0)) {
+        if (s_has_backup_code_resources) {
+            const char *pinned = pt_verify_pinned_backup_file(
+                s_backup_code_resources_path, s_backup_code_resources_dev, s_backup_code_resources_ino)
+                ? s_backup_code_resources_path
+                : NULL;
+            if (pinned != NULL) {
+                return pinned;
+            }
+        }
+        return pt_get_or_build_sanitized_code_resources_path();
     }
     if (s_has_backup_executable && s_real_main_exec_len > 0 && p != NULL) {
         const char *erel = pt_match_prefix_modulo_private(p, s_real_main_exec_path, s_real_main_exec_len);
@@ -1595,6 +1798,16 @@ static BOOL pt_is_active_app_backup_file_path(const char *p) {
             return YES;
         }
     }
+    if (s_has_backup_code_resources && s_backup_code_resources_len > 0) {
+        const char *rel = pt_match_prefix_modulo_private(p, s_backup_code_resources_path, s_backup_code_resources_len);
+        if (rel != NULL && rel[0] == '\0') {
+            return YES;
+        }
+    }
+    if (atomic_load_explicit(&s_has_synth_code_res, memory_order_acquire) &&
+        strcmp(p, s_synth_code_res_path) == 0) {
+        return YES;
+    }
     if (s_has_backup_executable && s_backup_executable_len > 0) {
         const char *rel = pt_match_prefix_modulo_private(p, s_backup_executable_path, s_backup_executable_len);
         if (rel != NULL && rel[0] == '\0') {
@@ -1627,6 +1840,16 @@ static const char *pt_virtualize_app_backup_path(const char *p, char *buf, size_
         if (rel != NULL && rel[0] == '\0') {
             return pt_join_path_fast(buf, bufsize, prefix, plen, "/Info.plist");
         }
+    }
+    if (s_has_backup_code_resources && s_backup_code_resources_len > 0) {
+        const char *rel = pt_match_prefix_modulo_private(p, s_backup_code_resources_path, s_backup_code_resources_len);
+        if (rel != NULL && rel[0] == '\0') {
+            return pt_join_path_fast(buf, bufsize, prefix, plen, "/_CodeSignature/CodeResources");
+        }
+    }
+    if (atomic_load_explicit(&s_has_synth_code_res, memory_order_acquire) &&
+        strcmp(p, s_synth_code_res_path) == 0) {
+        return pt_join_path_fast(buf, bufsize, prefix, plen, "/_CodeSignature/CodeResources");
     }
     if (s_has_backup_executable && s_backup_executable_len > 0 && s_real_main_exec_rel_path[0] == '/') {
         const char *rel = pt_match_prefix_modulo_private(p, s_backup_executable_path, s_backup_executable_len);

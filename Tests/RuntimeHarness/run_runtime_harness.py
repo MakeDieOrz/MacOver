@@ -1872,7 +1872,8 @@ int main(int argc, const char *argv[]) {
                         sawAny = YES;
                         if (strncmp(p->if_name, "bridge", 6) == 0 ||
                             strncmp(p->if_name, "vmenet", 6) == 0 ||
-                            strncmp(p->if_name, "vmnet", 5) == 0) {
+                            strncmp(p->if_name, "vmnet", 5) == 0 ||
+                            strncmp(p->if_name, "anpi", 4) == 0) {
                             leaked = YES;
                         }
                     }

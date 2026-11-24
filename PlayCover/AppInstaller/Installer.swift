@@ -612,6 +612,14 @@ class Installer {
         let infoPlistURL = baseApp.url.appendingPathComponent("Info.plist")
         let hasInfoPlist = checkBackupSourceRegularFile(at: infoPlistURL, label: "Info.plist")
 
+        let codeResourcesURL = baseApp.url
+            .appendingPathComponent("_CodeSignature")
+            .appendingPathComponent("CodeResources")
+        let hasCodeResources = checkBackupSourceRegularFile(
+            at: codeResourcesURL,
+            label: "_CodeSignature/CodeResources"
+        )
+
         let hasThinExecutable: Bool
         if checkBackupSourceRegularFile(at: baseApp.executable, label: "executable") {
             do {
@@ -628,7 +636,7 @@ class Installer {
             hasThinExecutable = false
         }
 
-        guard hasProvision || hasThinExecutable || hasInfoPlist else {
+        guard hasProvision || hasThinExecutable || hasInfoPlist || hasCodeResources else {
             return .noneApplicable
         }
 
@@ -637,6 +645,19 @@ class Installer {
         } catch {
             PlayCoverDiagnostics.log("Failed to create AppBackups staging dir: \(error)", isError: true)
             return .failed
+        }
+
+        if hasCodeResources {
+            do {
+                try cloneOrCopyRegularFileNoFollow(
+                    from: codeResourcesURL,
+                    to: stagingDir.appendingPathComponent("CodeResources")
+                )
+            } catch {
+                PlayCoverDiagnostics.log("Failed to stage CodeResources backup: \(error)", isError: true)
+                try? fm.removeItem(at: stagingDir)
+                return .failed
+            }
         }
 
         if hasInfoPlist {

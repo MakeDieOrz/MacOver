@@ -1632,6 +1632,88 @@ static NSString *ps_audio_port_type(id portDesc) {
 static os_unfair_lock s_av_swizzle_lock = OS_UNFAIR_LOCK_INIT;
 static CFMutableDictionaryRef s_av_orig_name_imps = NULL;
 static CFMutableDictionaryRef s_av_orig_modelid_imps = NULL;
+static CFMutableDictionaryRef s_av_orig_fov_imps = NULL;
+static CFMutableDictionaryRef s_av_orig_flash_imps = NULL;
+static CFMutableDictionaryRef s_av_orig_torch_imps = NULL;
+
+- (BOOL) pm_ps_av_hasFlash {
+    SEL sel = sel_registerName("hasFlash");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_av_swizzle_lock, s_av_orig_flash_imps, self, &pushed);
+    BOOL orig = NO;
+    if (origIMP != NULL) {
+        @try {
+            orig = ((BOOL (*)(id, SEL))origIMP)(self, sel);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        SEL posSel = sel_registerName("position");
+        if ([self respondsToSelector:posSel]) {
+            NSInteger pos = ((NSInteger (*)(id, SEL))objc_msgSend)(self, posSel);
+            if (pos == 2) {
+                return NO;
+            }
+        }
+    }
+    return orig;
+}
+
+- (BOOL) pm_ps_av_hasTorch {
+    SEL sel = sel_registerName("hasTorch");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_av_swizzle_lock, s_av_orig_torch_imps, self, &pushed);
+    BOOL orig = NO;
+    if (origIMP != NULL) {
+        @try {
+            orig = ((BOOL (*)(id, SEL))origIMP)(self, sel);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        SEL posSel = sel_registerName("position");
+        if ([self respondsToSelector:posSel]) {
+            NSInteger pos = ((NSInteger (*)(id, SEL))objc_msgSend)(self, posSel);
+            if (pos == 2) {
+                return NO;
+            }
+        }
+    }
+    return orig;
+}
+
+- (float) pm_ps_av_videoFieldOfView {
+    SEL sel = sel_registerName("videoFieldOfView");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_av_swizzle_lock, s_av_orig_fov_imps, self, &pushed);
+    float orig = 0.0f;
+    if (origIMP != NULL) {
+        @try {
+            orig = ((float (*)(id, SEL))origIMP)(self, sel);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        (!isfinite(orig) || orig <= 0.0f)) {
+        return 63.0f;
+    }
+    return orig;
+}
+
+static void ps_swizzle_capture_format_class(Class cls) {
+    if (cls == Nil) {
+        return;
+    }
+    SEL fovSel = sel_registerName("videoFieldOfView");
+    if (class_getInstanceMethod(cls, fovSel) != NULL) {
+        ps_swizzle_class_sel_storing_imp(&s_av_swizzle_lock, &s_av_orig_fov_imps, cls,
+                                         fovSel, @selector(pm_ps_av_videoFieldOfView));
+    }
+}
 
 static void ps_swizzle_capture_device_class(Class cls) {
     if (cls == Nil) {
@@ -1641,6 +1723,14 @@ static void ps_swizzle_capture_device_class(Class cls) {
                                      sel_registerName("localizedName"), @selector(pm_ps_av_localizedName));
     ps_swizzle_class_sel_storing_imp(&s_av_swizzle_lock, &s_av_orig_modelid_imps, cls,
                                      sel_registerName("modelID"), @selector(pm_ps_av_modelID));
+    if (class_getInstanceMethod(cls, sel_registerName("hasFlash")) != NULL) {
+        ps_swizzle_class_sel_storing_imp(&s_av_swizzle_lock, &s_av_orig_flash_imps, cls,
+                                         sel_registerName("hasFlash"), @selector(pm_ps_av_hasFlash));
+    }
+    if (class_getInstanceMethod(cls, sel_registerName("hasTorch")) != NULL) {
+        ps_swizzle_class_sel_storing_imp(&s_av_swizzle_lock, &s_av_orig_torch_imps, cls,
+                                         sel_registerName("hasTorch"), @selector(pm_ps_av_hasTorch));
+    }
 }
 
 static BOOL ps_is_hidden_capture_device(id dev) {
@@ -1712,10 +1802,40 @@ static NSArray *ps_filter_capture_devices(NSArray *devices, BOOL isAppCaller) {
         return nil;
     }
     NSMutableArray *filtered = isAppCaller ? [NSMutableArray arrayWithCapacity:devices.count] : nil;
+    NSMutableSet<NSString *> *seenCamKeys = isAppCaller ? [NSMutableSet set] : nil;
+    SEL dtSel = sel_registerName("deviceType");
+    SEL posSel = sel_registerName("position");
+    SEL hasMediaSel = sel_registerName("hasMediaType:");
+    SEL activeFmtSel = sel_registerName("activeFormat");
+    SEL fmtsSel = sel_registerName("formats");
     for (id dev in devices) {
         if (dev != nil) {
             ps_swizzle_capture_device_class(object_getClass(dev));
+            if ([dev respondsToSelector:activeFmtSel]) {
+                id activeFmt = ((id (*)(id, SEL))objc_msgSend)(dev, activeFmtSel);
+                if (activeFmt != nil) {
+                    ps_swizzle_capture_format_class(object_getClass(activeFmt));
+                }
+            }
+            if ([dev respondsToSelector:fmtsSel]) {
+                NSArray *fmts = ((NSArray *(*)(id, SEL))objc_msgSend)(dev, fmtsSel);
+                if ([fmts isKindOfClass:[NSArray class]] && fmts.count > 0 && fmts.firstObject != nil) {
+                    ps_swizzle_capture_format_class(object_getClass(fmts.firstObject));
+                }
+            }
             if (isAppCaller && !ps_is_hidden_capture_device(dev)) {
+                BOOL isVideo = [dev respondsToSelector:hasMediaSel]
+                    ? ((BOOL (*)(id, SEL, NSString *))objc_msgSend)(dev, hasMediaSel, @"vide")
+                    : NO;
+                if (isVideo && [dev respondsToSelector:dtSel] && [dev respondsToSelector:posSel]) {
+                    NSString *dt = ((NSString *(*)(id, SEL))objc_msgSend)(dev, dtSel) ?: @"";
+                    NSInteger pos = ((NSInteger (*)(id, SEL))objc_msgSend)(dev, posSel);
+                    NSString *dedupKey = [NSString stringWithFormat:@"%@:%ld", dt, (long)pos];
+                    if ([seenCamKeys containsObject:dedupKey]) {
+                        continue;
+                    }
+                    [seenCamKeys addObject:dedupKey];
+                }
                 [filtered addObject:dev];
             }
         }
