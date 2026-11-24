@@ -71,12 +71,16 @@ MOCK_TARGET_M = r"""
 #include <errno.h>
 #include <fcntl.h>
 #include <ifaddrs.h>
+#include <libproc.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <mach-o/dyld.h>
 #include <mach-o/fat.h>
 #include <mach-o/getsect.h>
 #include <mach-o/loader.h>
+#include <net/if.h>
+#include <net/if_dl.h>
+#include <net/route.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
 #include <pthread.h>
@@ -107,6 +111,13 @@ extern void pt_harness_dyld_get_image_versions(
     const struct mach_header *mh,
     void (^callback)(uint32_t platform, uint32_t sdk, uint32_t minos))
     __asm("_dyld_get_image_versions") __attribute__((weak_import));
+#if __has_attribute(swiftcall)
+typedef const void *(*pt_harness_swift_lookup_fn)(
+    const char *typeNameStart,
+    size_t typeNameLength,
+    const void *context,
+    const void *const *genericArgs) __attribute__((swiftcall));
+#endif
 
 static struct utsname g_earlyUts;
 static int g_earlyUtsRC = -1;
@@ -1618,6 +1629,416 @@ int main(int argc, const char *argv[]) {
             }
         }
 
+        // Scenario 11: 1.0.4 audit & detect-v2 parity checks
+        BOOL s11ProcPidPathInfoOK = NO;
+        BOOL s11SmallCapExcPortsOK = NO;
+        BOOL s11CoreMotionCrossCompareOK = NO;
+        BOOL s11PlayChainAppGroupAndSEOK = NO;
+        BOOL s11CatalystImpUnwrapOK = NO;
+        BOOL s11SwiftMangledHiddenOK = NO;
+        BOOL s11NetIfListHiddenOK = NO;
+        BOOL s11CacheL2AlignedOK = NO;
+        BOOL s11GidNotStaffOK = NO;
+        BOOL s11MonacoFontHiddenOK = NO;
+        BOOL s11FileRefAndFsgetpathOK = NO;
+        BOOL s11FileRefUrlOK = NO;
+        BOOL s11DownloadsHidden = NO;
+        BOOL s11FsgetpathOK = NO;
+        NSString *s11FileRefPathValue = @"";
+        BOOL s11MGCopyAnswerWithErrorOK = NO;
+        BOOL s11AudioAndUTTypeHiddenOK = NO;
+        const char *testS11Env = getenv("HARNESS_TEST_SCENARIO11");
+        if (testS11Env != NULL && strcmp(testS11Env, "1") == 0) {
+            // 1. PROC_PIDPATHINFO (libproc + SYS_proc_info) returns 0 and virtualized iOS bundle path
+            {
+                typedef int (*PidInfoFn)(int, int, uint64_t, void *, int);
+                PidInfoFn fnPidInfo = (PidInfoFn)dlsym(RTLD_DEFAULT, "proc_pidinfo");
+                char pbuf1[PROC_PIDPATHINFO_MAXSIZE] = {0};
+                errno = 0;
+                int rc1 = (fnPidInfo != NULL) ? fnPidInfo(getpid(), PROC_PIDPATHINFO, 0, pbuf1, (int)sizeof(pbuf1)) : -1;
+                int err1 = errno;
+                BOOL directPathOK = (rc1 == 0 && err1 == 0 &&
+                                     (strncmp(pbuf1, "/private/var/containers/Bundle/Application/", 43) == 0 ||
+                                      strncmp(pbuf1, "/var/containers/Bundle/Application/", 35) == 0));
+                BOOL svcPathOK = YES;
+#if defined(__arm64__) || defined(__aarch64__)
+                char pbuf2[PROC_PIDPATHINFO_MAXSIZE] = {0};
+                int svcErr = 0;
+                int64_t rc2 = pt_harness_raw_svc(336 /* SYS_proc_info */,
+                                                 2 /* PROC_INFO_CALL_PIDINFO */,
+                                                 (uintptr_t)getpid(),
+                                                 PROC_PIDPATHINFO,
+                                                 0,
+                                                 (uintptr_t)pbuf2,
+                                                 (uintptr_t)sizeof(pbuf2),
+                                                 &svcErr);
+                svcPathOK = (rc2 == 0 && svcErr == 0 &&
+                             (strncmp(pbuf2, "/private/var/containers/Bundle/Application/", 43) == 0 ||
+                              strncmp(pbuf2, "/var/containers/Bundle/Application/", 35) == 0));
+#endif
+                s11ProcPidPathInfoOK = (directPathOK && svcPathOK);
+            }
+
+            // 2. Small-capacity (cnt = 1) task_get_exception_ports bounded write & redaction
+            {
+                exception_mask_t masks[2] = {0, 0};
+                mach_msg_type_number_t count = 1;
+                mach_port_t ports[2] = {MACH_PORT_NULL, (mach_port_t)0xCAFEBABEU};
+                exception_behavior_t behaviors[2] = {0, 0x5A5A5A5A};
+                thread_state_flavor_t flavors[2] = {0, 0x5A5A5A5A};
+                kern_return_t kr = task_get_exception_ports(
+                    mach_task_self(), EXC_MASK_ALL, masks, &count, ports, behaviors, flavors);
+                BOOL noOverflow = (ports[1] == (mach_port_t)0xCAFEBABEU &&
+                                   behaviors[1] == 0x5A5A5A5A &&
+                                   flavors[1] == 0x5A5A5A5A &&
+                                   count <= 1);
+                BOOL noBrkPort = YES;
+                if (kr == KERN_SUCCESS && count == 1) {
+                    if ((masks[0] & EXC_MASK_BREAKPOINT) != 0 && MACH_PORT_VALID(ports[0])) {
+                        noBrkPort = NO;
+                    }
+                    if (MACH_PORT_VALID(ports[0])) {
+                        mach_port_deallocate(mach_task_self(), ports[0]);
+                    }
+                }
+                s11SmallCapExcPortsOK = (kr == KERN_SUCCESS && noOverflow && noBrkPort);
+            }
+
+            // 3. CoreMotion virtual vs unarchived genuine isEqual: and multiplyByInverseOfAttitude: no-crash
+            {
+                CMMotionManager *m11 = [[CMMotionManager alloc] init];
+                m11.deviceMotionUpdateInterval = 0.02;
+                NSOperationQueue *q11 = [[NSOperationQueue alloc] init];
+                q11.maxConcurrentOperationCount = 1;
+                __block CMDeviceMotion *dmSample11 = nil;
+                __block BOOL gotDM11 = NO;
+                dispatch_group_t grp11 = dispatch_group_create();
+                dispatch_group_enter(grp11);
+                [m11 startDeviceMotionUpdatesToQueue:q11 withHandler:^(CMDeviceMotion *data, NSError *err) {
+                    (void)err;
+                    if (!gotDM11 && data != nil) {
+                        gotDM11 = YES;
+                        dmSample11 = data;
+                        dispatch_group_leave(grp11);
+                    }
+                }];
+                NSDate *dl11 = [NSDate dateWithTimeIntervalSinceNow:1.2];
+                while (dispatch_group_wait(grp11, DISPATCH_TIME_NOW) != 0 &&
+                       [[NSDate date] compare:dl11] == NSOrderedAscending) {
+                    [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+                }
+                [m11 stopDeviceMotionUpdates];
+                [q11 waitUntilAllOperationsAreFinished];
+                if (dmSample11 != nil && dmSample11.attitude != nil) {
+                    NSData *dmData = [NSKeyedArchiver archivedDataWithRootObject:dmSample11
+                                                           requiringSecureCoding:YES
+                                                                           error:nil];
+                    NSData *attData = [NSKeyedArchiver archivedDataWithRootObject:dmSample11.attitude
+                                                            requiringSecureCoding:YES
+                                                                            error:nil];
+                    CMDeviceMotion *genDM = dmData
+                        ? [NSKeyedUnarchiver unarchivedObjectOfClass:[CMDeviceMotion class]
+                                                            fromData:dmData
+                                                               error:nil]
+                        : nil;
+                    CMAttitude *genAtt = attData
+                        ? [NSKeyedUnarchiver unarchivedObjectOfClass:[CMAttitude class]
+                                                            fromData:attData
+                                                               error:nil]
+                        : nil;
+                    if (genDM != nil && genAtt != nil) {
+                        BOOL dmEqFwd = [dmSample11 isEqual:genDM];
+                        BOOL dmEqRev = [genDM isEqual:dmSample11];
+                        BOOL attEqFwd = [dmSample11.attitude isEqual:genAtt];
+                        BOOL attEqRev = [genAtt isEqual:dmSample11.attitude];
+                        [dmSample11.attitude multiplyByInverseOfAttitude:genAtt];
+                        [genAtt multiplyByInverseOfAttitude:dmSample11.attitude];
+                        (void)dmEqFwd;
+                        (void)dmEqRev;
+                        s11CoreMotionCrossCompareOK = (attEqFwd && attEqRev);
+                    }
+                }
+            }
+
+            // 4. PlayChain App Group allowed, NSNull rejected, & SecKeyCopyAttributes SE redaction
+            {
+                NSString *grpSvc = [NSString stringWithFormat:@"sc11.grp.%d", getpid()];
+                NSDictionary *grpQ = @{
+                    (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+                    (__bridge id)kSecAttrService: grpSvc,
+                    (__bridge id)kSecAttrAccount: @"sc11-acct",
+                    (__bridge id)kSecAttrAccessGroup: @"group.app.makedie.harness.shared",
+                    (__bridge id)kSecValueData: [@"sc11-grp-secret" dataUsingEncoding:NSUTF8StringEncoding],
+                };
+                OSStatus grpAddSt = SecItemAdd((__bridge CFDictionaryRef)grpQ, NULL);
+                SecItemDelete((__bridge CFDictionaryRef)@{
+                    (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+                    (__bridge id)kSecAttrService: grpSvc,
+                    (__bridge id)kSecAttrAccount: @"sc11-acct",
+                });
+
+                NSDictionary *nullGrpQ = @{
+                    (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+                    (__bridge id)kSecAttrService: [grpSvc stringByAppendingString:@".null"],
+                    (__bridge id)kSecAttrAccount: @"sc11-acct",
+                    (__bridge id)kSecAttrAccessGroup: [NSNull null],
+                    (__bridge id)kSecValueData: [@"x" dataUsingEncoding:NSUTF8StringEncoding],
+                };
+                OSStatus nullGrpSt = SecItemAdd((__bridge CFDictionaryRef)nullGrpQ, NULL);
+
+                NSDictionary *seParams11 = @{
+                    (__bridge id)kSecAttrKeyType: (__bridge id)kSecAttrKeyTypeECSECPrimeRandom,
+                    (__bridge id)kSecAttrKeySizeInBits: @256,
+                    (__bridge id)kSecAttrTokenID: (__bridge id)kSecAttrTokenIDSecureEnclave,
+                    (__bridge id)kSecPrivateKeyAttrs: @{
+                        (__bridge id)kSecAttrIsPermanent: @NO,
+                    },
+                };
+                SecKeyRef seKey11 = SecKeyCreateRandomKey((__bridge CFDictionaryRef)seParams11, NULL);
+                BOOL seAttrsOK = NO;
+                if (seKey11 != NULL) {
+                    NSDictionary *attrs = CFBridgingRelease(SecKeyCopyAttributes(seKey11));
+                    seAttrsOK = (attrs != nil &&
+                                 attrs[(__bridge id)kSecValueData] == nil &&
+                                 [attrs[(__bridge id)kSecAttrTokenID] isEqual:(__bridge id)kSecAttrTokenIDSecureEnclave]);
+                    CFRelease(seKey11);
+                }
+                s11PlayChainAppGroupAndSEOK = (grpAddSt == errSecSuccess && nullGrpSt == errSecParam && seAttrsOK);
+            }
+
+            // 5. version.imp_unwrap_catalyst_bool: CoreFoundation IMP returns NO
+            {
+                NSProcessInfo *pi = [NSProcessInfo processInfo];
+                BOOL allOK = YES;
+                NSArray<NSString *> *sels = @[ @"isMacCatalystApp", @"isiOSAppOnMac" ];
+                for (NSString *selName in sels) {
+                    SEL s = NSSelectorFromString(selName);
+                    Method m = class_getInstanceMethod([pi class], s);
+                    if (m == NULL) {
+                        allOK = NO;
+                        break;
+                    }
+                    IMP imp = method_getImplementation(m);
+                    Dl_info dl;
+                    memset(&dl, 0, sizeof(dl));
+                    BOOL isCF = (imp != NULL && dladdr((const void *)imp, &dl) != 0 &&
+                                 dl.dli_fname != NULL && strstr(dl.dli_fname, "CoreFoundation") != NULL);
+                    BOOL msgVal = ((BOOL (*)(id, SEL))objc_msgSend)(pi, s);
+                    BOOL impVal = (imp != NULL) ? ((BOOL (*)(id, SEL))imp)(pi, s) : YES;
+                    if (!isCF || msgVal || impVal) {
+                        allOK = NO;
+                        break;
+                    }
+                }
+                s11CatalystImpUnwrapOK = allOK;
+            }
+
+            // 6. swift_getTypeByMangledNameInContext hides PlayTools & AKInterface
+            {
+#if __has_attribute(swiftcall)
+                pt_harness_swift_lookup_fn swiftLookup =
+                    (pt_harness_swift_lookup_fn)dlsym(RTLD_DEFAULT, "swift_getTypeByMangledNameInContext");
+                if (swiftLookup != NULL) {
+                    const char *ptName = "9PlayTools12PlaySettingsC";
+                    const char *akName = "11AKInterface8AKPluginC";
+                    const void *ptType = swiftLookup(ptName, strlen(ptName), NULL, NULL);
+                    const void *akType = swiftLookup(akName, strlen(akName), NULL, NULL);
+                    s11SwiftMangledHiddenOK = (ptType == NULL && akType == NULL);
+                }
+#endif
+            }
+
+            // 7. if_nameindex + NET_RT_IFLIST hide bridge*/vmenet*/vmnet*
+            {
+                BOOL nameIndexClean = NO;
+                struct if_nameindex *ifs = if_nameindex();
+                if (ifs != NULL) {
+                    BOOL sawAny = NO;
+                    BOOL leaked = NO;
+                    for (struct if_nameindex *p = ifs; p->if_index != 0 || p->if_name != NULL; p++) {
+                        if (p->if_name == NULL) {
+                            continue;
+                        }
+                        sawAny = YES;
+                        if (strncmp(p->if_name, "bridge", 6) == 0 ||
+                            strncmp(p->if_name, "vmenet", 6) == 0 ||
+                            strncmp(p->if_name, "vmnet", 5) == 0) {
+                            leaked = YES;
+                        }
+                    }
+                    if_freenameindex(ifs);
+                    nameIndexClean = (sawAny && !leaked);
+                }
+
+                BOOL routeListClean = NO;
+                int rtMib[6] = {CTL_NET, PF_ROUTE, 0, 0, NET_RT_IFLIST, 0};
+                size_t rtLen = 0;
+                if (sysctl(rtMib, 6, NULL, &rtLen, NULL, 0) == 0 && rtLen > 0) {
+                    NSMutableData *rtBuf = [NSMutableData dataWithLength:rtLen];
+                    if (sysctl(rtMib, 6, rtBuf.mutableBytes, &rtLen, NULL, 0) == 0 && rtLen > 0) {
+                        const uint8_t *cur = (const uint8_t *)rtBuf.bytes;
+                        const uint8_t *end = cur + rtLen;
+                        BOOL sawIf = NO;
+                        BOOL leaked = NO;
+                        while (cur + sizeof(struct if_msghdr) <= end) {
+                            const struct if_msghdr *ifm = (const struct if_msghdr *)cur;
+                            if (ifm->ifm_msglen < sizeof(struct if_msghdr) || cur + ifm->ifm_msglen > end) {
+                                break;
+                            }
+                            if (ifm->ifm_type == RTM_IFINFO &&
+                                cur + sizeof(struct if_msghdr) + sizeof(struct sockaddr_dl) <= end) {
+                                const struct sockaddr_dl *sdl = (const struct sockaddr_dl *)(cur + sizeof(struct if_msghdr));
+                                if (sdl->sdl_family == AF_LINK && sdl->sdl_nlen > 0 && sdl->sdl_nlen < 64) {
+                                    char ifn[64] = {0};
+                                    memcpy(ifn, sdl->sdl_data, sdl->sdl_nlen);
+                                    sawIf = YES;
+                                    if (strncmp(ifn, "bridge", 6) == 0 ||
+                                        strncmp(ifn, "vmenet", 6) == 0 ||
+                                        strncmp(ifn, "vmnet", 5) == 0) {
+                                        leaked = YES;
+                                    }
+                                }
+                            }
+                            cur += ifm->ifm_msglen;
+                        }
+                        routeListClean = (sawIf && !leaked);
+                    }
+                }
+                s11NetIfListHiddenOK = (nameIndexClean && routeListClean);
+            }
+
+            // 8. hw.cachesize[1] == hw.l1dcachesize and hw.cachesize[2] == hw.l2cachesize
+            {
+                uint64_t l1d = 0, l2 = 0;
+                size_t l1Len = sizeof(l1d), l2Len = sizeof(l2);
+                uint64_t csz[10] = {0};
+                size_t cszLen = sizeof(csz);
+                if (sysctlbyname("hw.l1dcachesize", &l1d, &l1Len, NULL, 0) == 0 &&
+                    sysctlbyname("hw.l2cachesize", &l2, &l2Len, NULL, 0) == 0 &&
+                    sysctlbyname("hw.cachesize", csz, &cszLen, NULL, 0) == 0 &&
+                    cszLen >= (3U * sizeof(uint64_t))) {
+                    s11CacheL2AlignedOK = (l1d > 0 && l2 > 0 && csz[1] == l1d && csz[2] == l2);
+                }
+            }
+
+            // 9. getgid()/getegid()/getgroups() exclude staff gid 20
+            {
+                gid_t grps[128] = {0};
+                int ng = getgroups(128, grps);
+                BOOL has20 = NO;
+                for (int i = 0; i < ng; i++) {
+                    if (grps[i] == 20) {
+                        has20 = YES;
+                    }
+                }
+                s11GidNotStaffOK = (getgid() != 20 && getegid() != 20 && ng >= 0 && !has20);
+            }
+
+            // 10. UIFont fontWithName:@"Monaco" & CTFontCreateWithName("Monaco") hidden/substituted
+            {
+                UIFont *uiMonaco = [UIFont fontWithName:@"Monaco" size:12.0];
+                CTFontRef ctMonaco = CTFontCreateWithName(CFSTR("Monaco"), 12.0, NULL);
+                BOOL ctOK = NO;
+                if (ctMonaco != NULL) {
+                    NSString *psName = CFBridgingRelease(CTFontCopyPostScriptName(ctMonaco));
+                    ctOK = (psName != nil && ![psName hasPrefix:@"Monaco"]);
+                    CFRelease(ctMonaco);
+                } else {
+                    ctOK = YES;
+                }
+                s11MonacoFontHiddenOK = (uiMonaco == nil && ctOK);
+            }
+
+            // 11. NSURL fileReferenceURL -> filePathURL virtualized, Downloads symlink hidden, fsgetpath virtualized
+            {
+                NSURL *homeURL = [NSURL fileURLWithPath:NSHomeDirectory() isDirectory:YES];
+                NSURL *refURL = [homeURL fileReferenceURL];
+                NSURL *roundTripURL = [refURL filePathURL];
+                NSString *rtPath = roundTripURL.path;
+                s11FileRefPathValue = rtPath ?: @"";
+                BOOL urlOK = (rtPath.length > 0 &&
+                              [rtPath rangeOfString:@"/Users/"].location == NSNotFound &&
+                              [rtPath rangeOfString:@"/Library/Containers/"].location == NSNotFound);
+
+                NSString *dlLink = [NSHomeDirectory() stringByAppendingPathComponent:@"Downloads"];
+                struct stat dlSt = {0};
+                errno = 0;
+                BOOL dlHidden = (lstat(dlLink.fileSystemRepresentation, &dlSt) != 0 && errno == ENOENT);
+
+                BOOL fsgetOK = NO;
+                typedef ssize_t (*FsGetPathFn)(char *, size_t, fsid_t *, uint64_t);
+                FsGetPathFn fnFsGetPath = (FsGetPathFn)dlsym(RTLD_DEFAULT, "fsgetpath");
+                const char *execPath = _dyld_get_image_name(0);
+                struct stat exSt = {0};
+                struct statfs exFs;
+                memset(&exFs, 0, sizeof(exFs));
+                if (fnFsGetPath != NULL && execPath != NULL &&
+                    stat(execPath, &exSt) == 0 && statfs(execPath, &exFs) == 0) {
+                    char fgp[PATH_MAX] = {0};
+                    ssize_t fgpLen = fnFsGetPath(fgp, sizeof(fgp), &exFs.f_fsid, exSt.st_ino);
+                    fsgetOK = (fgpLen > 0 &&
+                               (strncmp(fgp, "/private/var/containers/Bundle/Application/", 43) == 0 ||
+                                strncmp(fgp, "/var/containers/Bundle/Application/", 35) == 0));
+                }
+                s11FileRefUrlOK = urlOK;
+                s11DownloadsHidden = dlHidden;
+                s11FsgetpathOK = fsgetOK;
+                s11FileRefAndFsgetpathOK = (urlOK && dlHidden && fsgetOK);
+            }
+
+            // 12. MGCopyAnswerWithError spoofed
+            {
+                typedef CFTypeRef (*MGErrFn)(CFStringRef, CFDictionaryRef, int *);
+                MGErrFn fnMG = (MGErrFn)dlsym(RTLD_DEFAULT, "MGCopyAnswerWithError");
+                if (fnMG != NULL) {
+                    int err1 = -1, err2 = -1;
+                    NSString *pn = CFBridgingRelease(fnMG(CFSTR("ProductName"), NULL, &err1));
+                    NSString *pt = CFBridgingRelease(fnMG(CFSTR("ProductType"), NULL, &err2));
+                    s11MGCopyAnswerWithErrorOK = (err1 == 0 && err2 == 0 &&
+                                                  [pn isEqualToString:@"iPhone OS"] &&
+                                                  ([pt hasPrefix:@"iPad"] || [pt hasPrefix:@"iPhone"]));
+                }
+            }
+
+            // 13. AudioObjectGetPropertyDataSize/AudioComponentFindNext('ahal')/UTType desktop declarations hidden
+            {
+                (void)dlopen("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox", RTLD_LAZY);
+                (void)dlopen("/System/Library/Frameworks/CoreServices.framework/CoreServices", RTLD_LAZY);
+                BOOL noHAL = (dlsym(RTLD_DEFAULT, "AudioObjectGetPropertyDataSize") == NULL &&
+                              dlsym(RTLD_DEFAULT, "AudioObjectGetPropertyData") == NULL);
+
+                typedef struct {
+                    OSType componentType;
+                    OSType componentSubType;
+                    OSType componentManufacturer;
+                    UInt32 componentFlags;
+                    UInt32 componentFlagsMask;
+                } HarnessAudioComponentDesc;
+                typedef void *(*AudioFindNextFn)(void *, const HarnessAudioComponentDesc *);
+                AudioFindNextFn fnFindNext = (AudioFindNextFn)dlsym(RTLD_DEFAULT, "AudioComponentFindNext");
+                BOOL noAhal = NO;
+                if (fnFindNext != NULL) {
+                    HarnessAudioComponentDesc d = {'auou', 'ahal', 'appl', 0, 0};
+                    noAhal = (fnFindNext(NULL, &d) == NULL);
+                }
+
+                typedef CFURLRef (*UTCopyURLFn)(CFStringRef);
+                typedef CFDictionaryRef (*UTCopyDeclFn)(CFStringRef);
+                UTCopyURLFn fnUTURL = (UTCopyURLFn)dlsym(RTLD_DEFAULT, "UTTypeCopyDeclaringBundleURL");
+                UTCopyDeclFn fnUTDecl = (UTCopyDeclFn)dlsym(RTLD_DEFAULT, "UTTypeCopyDeclaration");
+                BOOL utOK = NO;
+                if (fnUTURL != NULL && fnUTDecl != NULL) {
+                    NSURL *macURL = CFBridgingRelease(fnUTURL(CFSTR("com.apple.mac")));
+                    NSURL *finderURL = CFBridgingRelease(fnUTURL(CFSTR("com.apple.finder")));
+                    NSDictionary *finderDecl = CFBridgingRelease(fnUTDecl(CFSTR("com.apple.finder")));
+                    BOOL macNotCoreTypes = (macURL == nil ||
+                                            ![macURL.path.lastPathComponent isEqualToString:@"CoreTypes.bundle"]);
+                    utOK = (macNotCoreTypes && finderURL == nil && finderDecl == nil);
+                }
+                s11AudioAndUTTypeHiddenOK = (noHAL && noAhal && utOK);
+            }
+        }
+
         NSString *stateDir = pt_state_dir();
         NSString *crumbPath = [stateDir stringByAppendingPathComponent:@".launching_in_progress"];
         NSString *triggeredPath = [stateDir stringByAppendingPathComponent:@".safe_mode_last_triggered"];
@@ -1726,6 +2147,23 @@ int main(int argc, const char *argv[]) {
             @"s10UnixRelativeSocketOK": s10UnixRelativeSocketOK ? @YES : @NO,
             @"s10ExceptionPortsHidden": s10ExceptionPortsHidden ? @YES : @NO,
             @"s10SysctlCacheTopologyOK": s10SysctlCacheTopologyOK ? @YES : @NO,
+            @"s11ProcPidPathInfoOK": s11ProcPidPathInfoOK ? @YES : @NO,
+            @"s11SmallCapExcPortsOK": s11SmallCapExcPortsOK ? @YES : @NO,
+            @"s11CoreMotionCrossCompareOK": s11CoreMotionCrossCompareOK ? @YES : @NO,
+            @"s11PlayChainAppGroupAndSEOK": s11PlayChainAppGroupAndSEOK ? @YES : @NO,
+            @"s11CatalystImpUnwrapOK": s11CatalystImpUnwrapOK ? @YES : @NO,
+            @"s11SwiftMangledHiddenOK": s11SwiftMangledHiddenOK ? @YES : @NO,
+            @"s11NetIfListHiddenOK": s11NetIfListHiddenOK ? @YES : @NO,
+            @"s11CacheL2AlignedOK": s11CacheL2AlignedOK ? @YES : @NO,
+            @"s11GidNotStaffOK": s11GidNotStaffOK ? @YES : @NO,
+            @"s11MonacoFontHiddenOK": s11MonacoFontHiddenOK ? @YES : @NO,
+            @"s11FileRefAndFsgetpathOK": s11FileRefAndFsgetpathOK ? @YES : @NO,
+            @"s11FileRefUrlOK": s11FileRefUrlOK ? @YES : @NO,
+            @"s11DownloadsHidden": s11DownloadsHidden ? @YES : @NO,
+            @"s11FsgetpathOK": s11FsgetpathOK ? @YES : @NO,
+            @"s11FileRefPathValue": s11FileRefPathValue ?: @"",
+            @"s11MGCopyAnswerWithErrorOK": s11MGCopyAnswerWithErrorOK ? @YES : @NO,
+            @"s11AudioAndUTTypeHiddenOK": s11AudioAndUTTypeHiddenOK ? @YES : @NO,
             @"provPath": provPath,
             @"hidPCInstallGen": (hidPCInstallGenNS && hidPCInstallGenCF) ? @YES : @NO,
             @"provURLPath": provURLPath,
@@ -2867,6 +3305,83 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
     ))
     if verbose:
         print("  Scenario 10 payload:", {k: v for k, v in info10.items() if k.startswith("s10")})
+
+    # Scenario 11: 1.0.4 audit & detect-v2 parity checks
+    t10 = time.monotonic()
+    isolated_root_11 = work_dir / "IsolatedHome11"
+    container_data_11 = isolated_root_11 / "Library/Containers/app.makedie.harness.mockapp/Data"
+    container_data_11.mkdir(parents=True, exist_ok=True)
+    downloads_link_11 = container_data_11 / "Downloads"
+    if not downloads_link_11.exists() and not downloads_link_11.is_symlink():
+        os.symlink("/Users/example/Downloads", str(downloads_link_11))
+    ent_dir_11 = isolated_root_11 / "Library/Containers/app.makedie.MacOver/Entitlements"
+    ent_dir_11.mkdir(parents=True, exist_ok=True)
+    with open(ent_dir_11 / "app.makedie.harness.mockapp.plist", "wb") as fp:
+        plistlib.dump({
+            "com.apple.security.application-groups": ["group.app.makedie.harness.shared"],
+        }, fp)
+    plist11_dir = isolated_root_11 / "Library/Containers/app.makedie.MacOver/PlayTools"
+    plist11_dir.mkdir(parents=True, exist_ok=True)
+    plist11 = plist11_dir / "app.makedie.harness.mockapp.plist"
+    with open(plist11, "wb") as fp:
+        plistlib.dump({
+            "bypass": False,
+            "strictEmulationMode": True,
+            "strictViewportOrientation": "landscape",
+            "strictViewportScaleMode": "fitScreen",
+            "playChain": True,
+        }, fp)
+    marker11 = work_dir / "marker_11.txt"
+    env11 = env9(
+        marker11,
+        HARNESS_TEST_SCENARIO11="1",
+        HARNESS_TEST_INLINE_SVC="1",
+        APP_SANDBOX_CONTAINER_ID="app.makedie.harness.mockapp",
+        HARNESS_GRACEFUL_EXIT="1",
+    )
+    env11["HOME"] = str(container_data_11)
+    env11["CFFIXED_USER_HOME"] = str(container_data_11)
+    env11["PLAYTOOLS_SETTINGS_PLIST"] = str(plist11)
+    proc11 = run_cmd([str(patched_bin)], env=env11, check=False)
+    if proc11.returncode != 0:
+        results.append(ScenarioResult(
+            name="11. 1.0.4 audit & detect-v2 parity checks",
+            passed=False,
+            duration_sec=time.monotonic() - t10,
+            details=f"rc={proc11.returncode}\nstdout={proc11.stdout}\nstderr={proc11.stderr}",
+        ))
+        return results
+
+    info11 = parse_harness_json(proc11.stdout)
+    checks11 = [
+        info11["safeModeActive"] is False,
+        info11["inlineSvcMachine"] == info11["sysctlMachine"] and len(info11["inlineSvcMachine"]) > 0,
+        info11["s11ProcPidPathInfoOK"] is True,
+        info11["s11SmallCapExcPortsOK"] is True,
+        info11["s11CoreMotionCrossCompareOK"] is True,
+        info11["s11PlayChainAppGroupAndSEOK"] is True,
+        info11["s11CatalystImpUnwrapOK"] is True,
+        info11["s11SwiftMangledHiddenOK"] is True,
+        info11["s11NetIfListHiddenOK"] is True,
+        info11["s11CacheL2AlignedOK"] is True,
+        info11["s11GidNotStaffOK"] is True,
+        info11["s11MonacoFontHiddenOK"] is True,
+        info11["s11FileRefAndFsgetpathOK"] is True,
+        info11["s11MGCopyAnswerWithErrorOK"] is True,
+        info11["s11AudioAndUTTypeHiddenOK"] is True,
+    ]
+    results.append(ScenarioResult(
+        name="11. 1.0.4 audit & detect-v2 parity checks",
+        passed=all(checks11),
+        duration_sec=time.monotonic() - t10,
+        details=json.dumps({
+            "inlineSvcMachine": info11["inlineSvcMachine"],
+            "sysctlMachine": info11["sysctlMachine"],
+            **{k: v for k, v in info11.items() if k.startswith("s11")},
+        }, sort_keys=True),
+    ))
+    if verbose:
+        print("  Scenario 11 payload:", {k: v for k, v in info11.items() if k.startswith("s11")})
 
     return results
 

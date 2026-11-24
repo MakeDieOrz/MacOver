@@ -387,6 +387,66 @@ static void pt_svc_redact_exc_ports_array(mach_port_t svc_port,
     *masksCnt = write_idx;
 }
 
+typedef struct {
+    exception_mask_t masks[EXC_TYPES_COUNT];
+    mach_port_t handlers[EXC_TYPES_COUNT];
+    exception_behavior_t behaviors[EXC_TYPES_COUNT];
+    thread_state_flavor_t flavors[EXC_TYPES_COUNT];
+    mach_msg_type_number_t count;
+} pt_svc_local_exc_ports_t;
+
+static void pt_svc_publish_redacted_exc_ports(mach_port_t svc_port,
+                                              BOOL inject_if_missing_bp,
+                                              pt_svc_saved_exc_handler_t *retained_saved,
+                                              pt_svc_local_exc_ports_t *local,
+                                              mach_msg_type_number_t caller_capacity,
+                                              exception_mask_array_t masks,
+                                              mach_msg_type_number_t *masksCnt,
+                                              exception_handler_array_t old_handlers,
+                                              exception_behavior_array_t old_behaviors,
+                                              exception_flavor_array_t old_flavors) {
+    if (local == NULL) {
+        if (retained_saved != NULL) {
+            pt_svc_release_send_right(retained_saved->port);
+            retained_saved->port = MACH_PORT_NULL;
+            retained_saved->valid = NO;
+        }
+        return;
+    }
+    pt_svc_redact_exc_ports_array(svc_port,
+                                  inject_if_missing_bp,
+                                  retained_saved,
+                                  (mach_msg_type_number_t)EXC_TYPES_COUNT,
+                                  local->masks,
+                                  &local->count,
+                                  local->handlers,
+                                  local->behaviors,
+                                  local->flavors);
+    mach_msg_type_number_t copy_count = (local->count < caller_capacity) ? local->count : caller_capacity;
+    if (copy_count > (mach_msg_type_number_t)EXC_TYPES_COUNT) {
+        copy_count = (mach_msg_type_number_t)EXC_TYPES_COUNT;
+    }
+    if (masks == NULL || old_handlers == NULL || old_behaviors == NULL || old_flavors == NULL) {
+        copy_count = 0;
+    } else {
+        for (mach_msg_type_number_t i = 0; i < copy_count; i++) {
+            masks[i] = local->masks[i];
+            old_handlers[i] = local->handlers[i];
+            old_behaviors[i] = local->behaviors[i];
+            old_flavors[i] = local->flavors[i];
+        }
+    }
+    for (mach_msg_type_number_t i = copy_count;
+         i < local->count && i < (mach_msg_type_number_t)EXC_TYPES_COUNT;
+         i++) {
+        pt_svc_release_send_right(local->handlers[i]);
+        local->handlers[i] = MACH_PORT_NULL;
+    }
+    if (masksCnt != NULL) {
+        *masksCnt = copy_count;
+    }
+}
+
 static BOOL pt_svc_env_flag_true(const char *val) {
     if (val == NULL) {
         return NO;
@@ -1854,37 +1914,62 @@ static kern_return_t pt_task_swap_exception_ports(task_t task,
         task == mach_task_self() &&
         (exception_mask & EXC_MASK_BREAKPOINT) != 0 &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        BOOL has_out_arrays = (masks != NULL && masksCnt != NULL &&
+                               old_handlers != NULL && old_behaviors != NULL && old_flavors != NULL);
         mach_msg_type_number_t caller_capacity = (masksCnt != NULL) ? *masksCnt : 0;
         mach_port_t retained_new = pt_svc_retain_send_right(new_port);
         if (MACH_PORT_VALID(new_port) && !MACH_PORT_VALID(retained_new)) {
             return KERN_INVALID_RIGHT;
         }
+        pt_svc_local_exc_ports_t local = {0};
+        local.count = EXC_TYPES_COUNT;
         exception_mask_t filtered = exception_mask & ~((exception_mask_t)EXC_MASK_BREAKPOINT);
         if (filtered != 0) {
-            kern_return_t kr = pt_orig_task_swap_exception_ports(task,
-                                                                 filtered,
-                                                                 new_port,
-                                                                 behavior,
-                                                                 new_flavor,
-                                                                 masks,
-                                                                 masksCnt,
-                                                                 old_handlers,
-                                                                 old_behaviors,
-                                                                 old_flavors);
+            kern_return_t kr = pt_orig_task_swap_exception_ports(
+                task,
+                filtered,
+                new_port,
+                behavior,
+                new_flavor,
+                has_out_arrays ? local.masks : masks,
+                has_out_arrays ? &local.count : masksCnt,
+                has_out_arrays ? local.handlers : old_handlers,
+                has_out_arrays ? local.behaviors : old_behaviors,
+                has_out_arrays ? local.flavors : old_flavors);
             if (kr != KERN_SUCCESS) {
                 pt_svc_release_send_right(retained_new);
                 return kr;
             }
-        } else if (masksCnt != NULL) {
-            *masksCnt = 0;
+        } else {
+            local.count = 0;
         }
         pt_svc_saved_exc_handler_t prev_bp = {0};
         os_unfair_lock_lock(&s_svc_exc_snapshot_lock);
         pt_svc_swap_saved_slot_locked(&s_saved_task_bp_handler, exception_mask, retained_new, behavior, new_flavor, &prev_bp);
         os_unfair_lock_unlock(&s_svc_exc_snapshot_lock);
         mach_port_t svc_port = atomic_load_explicit(&s_svc_exc_port, memory_order_acquire);
-        pt_svc_redact_exc_ports_array(svc_port, YES, &prev_bp, caller_capacity, masks, masksCnt,
-                                      old_handlers, old_behaviors, old_flavors);
+        if (has_out_arrays) {
+            pt_svc_publish_redacted_exc_ports(svc_port,
+                                              YES,
+                                              &prev_bp,
+                                              &local,
+                                              caller_capacity,
+                                              masks,
+                                              masksCnt,
+                                              old_handlers,
+                                              old_behaviors,
+                                              old_flavors);
+        } else {
+            pt_svc_redact_exc_ports_array(svc_port,
+                                          YES,
+                                          &prev_bp,
+                                          caller_capacity,
+                                          masks,
+                                          masksCnt,
+                                          old_handlers,
+                                          old_behaviors,
+                                          old_flavors);
+        }
         return KERN_SUCCESS;
     }
     return pt_orig_task_swap_exception_ports(task,
@@ -1938,35 +2023,60 @@ static kern_return_t pt_thread_swap_exception_ports(thread_act_t thread,
     if (atomic_load_explicit(&s_svc_interceptor_active, memory_order_acquire) &&
         (exception_mask & EXC_MASK_BREAKPOINT) != 0 &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        BOOL has_out_arrays = (masks != NULL && masksCnt != NULL &&
+                               old_handlers != NULL && old_behaviors != NULL && old_flavors != NULL);
         mach_msg_type_number_t caller_capacity = (masksCnt != NULL) ? *masksCnt : 0;
         mach_port_t retained_new = pt_svc_retain_send_right(new_port);
         if (MACH_PORT_VALID(new_port) && !MACH_PORT_VALID(retained_new)) {
             return KERN_INVALID_RIGHT;
         }
+        pt_svc_local_exc_ports_t local = {0};
+        local.count = EXC_TYPES_COUNT;
         exception_mask_t filtered = exception_mask & ~((exception_mask_t)EXC_MASK_BREAKPOINT);
         if (filtered != 0) {
-            kern_return_t kr = pt_orig_thread_swap_exception_ports(thread,
-                                                                   filtered,
-                                                                   new_port,
-                                                                   behavior,
-                                                                   new_flavor,
-                                                                   masks,
-                                                                   masksCnt,
-                                                                   old_handlers,
-                                                                   old_behaviors,
-                                                                   old_flavors);
+            kern_return_t kr = pt_orig_thread_swap_exception_ports(
+                thread,
+                filtered,
+                new_port,
+                behavior,
+                new_flavor,
+                has_out_arrays ? local.masks : masks,
+                has_out_arrays ? &local.count : masksCnt,
+                has_out_arrays ? local.handlers : old_handlers,
+                has_out_arrays ? local.behaviors : old_behaviors,
+                has_out_arrays ? local.flavors : old_flavors);
             if (kr != KERN_SUCCESS) {
                 pt_svc_release_send_right(retained_new);
                 return kr;
             }
-        } else if (masksCnt != NULL) {
-            *masksCnt = 0;
+        } else {
+            local.count = 0;
         }
         pt_svc_saved_exc_handler_t prev_bp = {0};
         pt_svc_update_thread_bp(thread, exception_mask, retained_new, behavior, new_flavor, &prev_bp);
         mach_port_t svc_port = atomic_load_explicit(&s_svc_exc_port, memory_order_acquire);
-        pt_svc_redact_exc_ports_array(svc_port, YES, &prev_bp, caller_capacity, masks, masksCnt,
-                                      old_handlers, old_behaviors, old_flavors);
+        if (has_out_arrays) {
+            pt_svc_publish_redacted_exc_ports(svc_port,
+                                              YES,
+                                              &prev_bp,
+                                              &local,
+                                              caller_capacity,
+                                              masks,
+                                              masksCnt,
+                                              old_handlers,
+                                              old_behaviors,
+                                              old_flavors);
+        } else {
+            pt_svc_redact_exc_ports_array(svc_port,
+                                          YES,
+                                          &prev_bp,
+                                          caller_capacity,
+                                          masks,
+                                          masksCnt,
+                                          old_handlers,
+                                          old_behaviors,
+                                          old_flavors);
+        }
         return KERN_SUCCESS;
     }
     return pt_orig_thread_swap_exception_ports(thread,
@@ -1988,23 +2098,44 @@ static kern_return_t pt_task_get_exception_ports(task_t task,
                                                  exception_handler_array_t old_handlers,
                                                  exception_behavior_array_t old_behaviors,
                                                  exception_flavor_array_t old_flavors) {
-    mach_msg_type_number_t caller_capacity = (masksCnt != NULL) ? *masksCnt : 0;
+    BOOL should_redact = (atomic_load_explicit(&s_svc_interceptor_active, memory_order_acquire) &&
+                          !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
+    BOOL has_out_arrays = (masks != NULL && masksCnt != NULL &&
+                           old_handlers != NULL && old_behaviors != NULL && old_flavors != NULL);
+    if (!should_redact || !has_out_arrays) {
+        return pt_orig_task_get_exception_ports(task,
+                                                exception_mask,
+                                                masks,
+                                                masksCnt,
+                                                old_handlers,
+                                                old_behaviors,
+                                                old_flavors);
+    }
+    mach_msg_type_number_t caller_capacity = *masksCnt;
+    pt_svc_local_exc_ports_t local = {0};
+    local.count = EXC_TYPES_COUNT;
     kern_return_t kr = pt_orig_task_get_exception_ports(task,
                                                         exception_mask,
-                                                        masks,
-                                                        masksCnt,
-                                                        old_handlers,
-                                                        old_behaviors,
-                                                        old_flavors);
-    if (kr == KERN_SUCCESS &&
-        atomic_load_explicit(&s_svc_interceptor_active, memory_order_acquire) &&
-        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+                                                        local.masks,
+                                                        &local.count,
+                                                        local.handlers,
+                                                        local.behaviors,
+                                                        local.flavors);
+    if (kr == KERN_SUCCESS) {
         mach_port_t svc_port = atomic_load_explicit(&s_svc_exc_port, memory_order_acquire);
         pt_svc_saved_exc_handler_t saved = pt_svc_copy_retained_task_bp();
         BOOL inject_missing = (task == mach_task_self() &&
                                (exception_mask & (exception_mask_t)EXC_MASK_BREAKPOINT) != 0);
-        pt_svc_redact_exc_ports_array(svc_port, inject_missing, &saved, caller_capacity, masks, masksCnt,
-                                      old_handlers, old_behaviors, old_flavors);
+        pt_svc_publish_redacted_exc_ports(svc_port,
+                                          inject_missing,
+                                          &saved,
+                                          &local,
+                                          caller_capacity,
+                                          masks,
+                                          masksCnt,
+                                          old_handlers,
+                                          old_behaviors,
+                                          old_flavors);
     }
     return kr;
 }
@@ -2016,22 +2147,43 @@ static kern_return_t pt_thread_get_exception_ports(thread_act_t thread,
                                                    exception_handler_array_t old_handlers,
                                                    exception_behavior_array_t old_behaviors,
                                                    exception_flavor_array_t old_flavors) {
-    mach_msg_type_number_t caller_capacity = (masksCnt != NULL) ? *masksCnt : 0;
+    BOOL should_redact = (atomic_load_explicit(&s_svc_interceptor_active, memory_order_acquire) &&
+                          !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
+    BOOL has_out_arrays = (masks != NULL && masksCnt != NULL &&
+                           old_handlers != NULL && old_behaviors != NULL && old_flavors != NULL);
+    if (!should_redact || !has_out_arrays) {
+        return pt_orig_thread_get_exception_ports(thread,
+                                                  exception_mask,
+                                                  masks,
+                                                  masksCnt,
+                                                  old_handlers,
+                                                  old_behaviors,
+                                                  old_flavors);
+    }
+    mach_msg_type_number_t caller_capacity = *masksCnt;
+    pt_svc_local_exc_ports_t local = {0};
+    local.count = EXC_TYPES_COUNT;
     kern_return_t kr = pt_orig_thread_get_exception_ports(thread,
                                                           exception_mask,
-                                                          masks,
-                                                          masksCnt,
-                                                          old_handlers,
-                                                          old_behaviors,
-                                                          old_flavors);
-    if (kr == KERN_SUCCESS &&
-        atomic_load_explicit(&s_svc_interceptor_active, memory_order_acquire) &&
-        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+                                                          local.masks,
+                                                          &local.count,
+                                                          local.handlers,
+                                                          local.behaviors,
+                                                          local.flavors);
+    if (kr == KERN_SUCCESS) {
         mach_port_t svc_port = atomic_load_explicit(&s_svc_exc_port, memory_order_acquire);
         pt_svc_saved_exc_handler_t saved = pt_svc_copy_retained_thread_bp(thread);
         BOOL inject_missing = ((exception_mask & (exception_mask_t)EXC_MASK_BREAKPOINT) != 0);
-        pt_svc_redact_exc_ports_array(svc_port, inject_missing, &saved, caller_capacity, masks, masksCnt,
-                                      old_handlers, old_behaviors, old_flavors);
+        pt_svc_publish_redacted_exc_ports(svc_port,
+                                          inject_missing,
+                                          &saved,
+                                          &local,
+                                          caller_capacity,
+                                          masks,
+                                          masksCnt,
+                                          old_handlers,
+                                          old_behaviors,
+                                          old_flavors);
     }
     return kr;
 }
