@@ -140,12 +140,12 @@
 		AB7DA47729B8A78B0034ACB2 /* PlayShadow.h in Headers */ = {isa = PBXBuildFile; fileRef = AB7DA47629B8A78B0034ACB2 /* PlayShadow.h */; };
 		ABCECEE629750BA600746595 /* PlayedApple.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCECEE529750BA600746595 /* PlayedApple.swift */; };
 		B127172528817C040025112B /* DiscordIPC.swift in Sources */ = {isa = PBXBuildFile; fileRef = B127172428817C040025112B /* DiscordIPC.swift */; };
+		B127172628817C040025112C /* DiscordIPC.swift in Sources */ = {isa = PBXBuildFile; fileRef = B127172428817C040025112B /* DiscordIPC.swift */; };
 		B1271729288284BE0025112B /* DiscordActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1271728288284BE0025112B /* DiscordActivity.swift */; };
 		B1E8CF8A28BBE2AB004340D3 /* Keymapping.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1E8CF8928BBE2AB004340D3 /* Keymapping.swift */; };
 		B444BB0D2F49C1D100ADCC5A /* ControllerFocus.m in Sources */ = {isa = PBXBuildFile; fileRef = B444BB0B2F49C1D100ADCC5A /* ControllerFocus.m */; };
 		B46C02C72C634AB5007637AB /* BatteryLevel.m in Sources */ = {isa = PBXBuildFile; fileRef = B46C02C62C634AB5007637AB /* BatteryLevel.m */; };
 		B66E65002C936EA100E48FD0 /* PlayedAppleDBConstants.swift in Sources */ = {isa = PBXBuildFile; fileRef = B66E64FF2C936E9800E48FD0 /* PlayedAppleDBConstants.swift */; };
-		B6D774FF2ACFC3D900C0D9D8 /* SwordRPC in Frameworks */ = {isa = PBXBuildFile; productRef = B6D774FE2ACFC3D900C0D9D8 /* SwordRPC */; };
 		D04B12CA2EF6F3DD008FEC14 /* MediaVolume.m in Sources */ = {isa = PBXBuildFile; fileRef = D04B12C92EF6F3DD008FEC14 /* MediaVolume.m */; };
 		EEB248592B81D074000C230A /* PlayedAppleDB.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEB248582B81D074000C230A /* PlayedAppleDB.swift */; };
 /* End PBXBuildFile section */
@@ -312,7 +312,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				B6D774FF2ACFC3D900C0D9D8 /* SwordRPC in Frameworks */,
 				6E84A14528D0F94E00BF7495 /* UIKit.framework in Frameworks */,
 				AA818CB9287ABFB1000BEE9D /* IOKit.framework in Frameworks */,
 			);
@@ -799,7 +798,6 @@
 			);
 			name = PlayTools;
 			packageProductDependencies = (
-				B6D774FE2ACFC3D900C0D9D8 /* SwordRPC */,
 			);
 			productName = PlayTools;
 			productReference = AA7196D8287A447700623C15 /* PlayTools.framework */;
@@ -857,9 +855,6 @@
 				"zh-Hans",
 			);
 			mainGroup = AA7196CE287A447700623C15;
-			packageReferences = (
-				B6D774FD2ACFC3D900C0D9D8 /* XCRemoteSwiftPackageReference "SwordRPC" */,
-			);
 			productRefGroup = AA7196D9287A447700623C15 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -1240,6 +1235,7 @@
 				AA71A1212F00000700623C15 /* PTPluginContainer.swift in Sources */,
 				AA71A1222F00000700623C15 /* PTRegistrationTests.swift in Sources */,
 				AA71A1232F00000700623C15 /* PTPluginContainerTests.swift in Sources */,
+				B127172628817C040025112C /* DiscordIPC.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1600,25 +1596,6 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
-
-/* Begin XCRemoteSwiftPackageReference section */
-		B6D774FD2ACFC3D900C0D9D8 /* XCRemoteSwiftPackageReference "SwordRPC" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/spotlightishere/SwordRPC";
-			requirement = {
-				kind = exactVersion;
-				version = 1.1.0;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
-/* Begin XCSwiftPackageProductDependency section */
-		B6D774FE2ACFC3D900C0D9D8 /* SwordRPC */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = B6D774FD2ACFC3D900C0D9D8 /* XCRemoteSwiftPackageReference "SwordRPC" */;
-			productName = SwordRPC;
-		};
-/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = AA7196CF287A447700623C15 /* Project object */;
 }

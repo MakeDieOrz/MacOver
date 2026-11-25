@@ -6,7 +6,7 @@
 //
 
 import Foundation
-import Atomics
+import os.lock
 
 // If the same key is mapped to multiple different tasks, distinguish by priority
 public enum ActionDispatchPriority: Int {
@@ -26,34 +26,17 @@ public class ActionDispatcher {
     static private let priorityCount = 3
     // You can't put more than 8 cameras or 8 joysticks in a keymap right?
     static private let mappingCountPerPriority = 8
-    static private let directionPadHandlers: [[ManagedAtomic<AtomicHandler>]] = Array(
-        (0..<priorityCount).map({_ in
-            (0..<mappingCountPerPriority).map({_ in ManagedAtomic<AtomicHandler>(.EMPTY)})
-        })
+    static private let directionPadStorage = DirectionPadStorage(
+        priorityCount: priorityCount,
+        mappingCountPerPriority: mappingCountPerPriority
     )
-    static private let activePriorityMask = ManagedAtomic<UInt8>(0)
-
-    private static func refreshPriorityMaskLocked() {
-        var mask: UInt8 = 0
-        for p in 0..<priorityCount {
-            if directionPadHandlers[p].contains(where: { !$0.load(ordering: .relaxed).key.isEmpty }) {
-                mask |= UInt8(1 << p)
-            }
-        }
-        activePriorityMask.store(mask, ordering: .releasing)
-    }
 
     static private func clear() {
         lock.lock()
         let existingActions = actions
         actions = []
         buttonHandlers.removeAll(keepingCapacity: true)
-        for handlers in directionPadHandlers {
-            for handler in handlers {
-                handler.store(.EMPTY, ordering: .relaxed)
-            }
-        }
-        activePriorityMask.store(0, ordering: .releasing)
+        directionPadStorage.clear()
         lock.unlock()
 
         for action in existingActions {
@@ -142,22 +125,14 @@ public class ActionDispatcher {
                                 priority: ActionDispatchPriority = .DEFAULT) {
         lock.lock()
         defer { lock.unlock() }
-        let row = directionPadHandlers[priority.rawValue]
-        let slot = row.first(where: { $0.load(ordering: .relaxed).key == key }) ??
-            row.first(where: { $0.load(ordering: .relaxed).key.isEmpty })
-        slot?.store(AtomicHandler(key, handler), ordering: .releasing)
-        refreshPriorityMaskLocked()
+        directionPadStorage.register(key: key, handler: handler, priority: priority)
     }
 
     static public func unregister(key: String) {
         // Only draggable can be unregistered
         lock.lock()
         defer { lock.unlock() }
-        let row = directionPadHandlers[ActionDispatchPriority.DRAGGABLE.rawValue]
-        if let slot = row.first(where: { $0.load(ordering: .relaxed).key == key }) {
-            slot.store(.EMPTY, ordering: .releasing)
-            refreshPriorityMaskLocked()
-        }
+        directionPadStorage.unregisterDraggable(key: key)
     }
 
     // Frontend interfaces
@@ -201,15 +176,8 @@ public class ActionDispatcher {
     }
 
     static public func getDispatchPriority(key: String) -> ActionDispatchPriority? {
-        let mask = activePriorityMask.load(ordering: .acquiring)
-        if mask != 0 {
-            for priority in 0..<priorityCount where (mask & UInt8(1 << priority)) != 0 {
-                for slot in directionPadHandlers[priority] {
-                    if slot.load(ordering: .acquiring).key == key {
-                        return ActionDispatchPriority(rawValue: priority)
-                    }
-                }
-            }
+        if let priority = directionPadStorage.priority(forKey: key) {
+            return priority
         }
 
         lock.lock()
@@ -248,46 +216,126 @@ public class ActionDispatcher {
                                           key: String,
                                           valueX: CGFloat,
                                           valueY: CGFloat) -> Bool {
-        let mask = activePriorityMask.load(ordering: .acquiring)
-        guard (mask & UInt8(1 << priority.rawValue)) != 0 else {
+        guard let handle = directionPadStorage.handler(atPriority: priority, key: key) else {
             return false
         }
-        for slot in directionPadHandlers[priority.rawValue] {
-            let resolved = slot.load(ordering: .acquiring)
-            if resolved.key == key {
-                PlayInput.touchQueue.async(qos: .userInteractive) {
-                    resolved.handle(valueX, valueY)
-                }
-                return true
-            }
+        PlayInput.touchQueue.async(qos: .userInteractive) {
+            handle(valueX, valueY)
         }
-        return false
+        return true
     }
 
     static public func dispatch(key: String, valueX: CGFloat, valueY: CGFloat) -> Bool {
-        let mask = activePriorityMask.load(ordering: .acquiring)
-        guard mask != 0 else { return false }
-        for priority in 0..<priorityCount where (mask & UInt8(1 << priority)) != 0 {
-            for slot in directionPadHandlers[priority] {
-                let resolved = slot.load(ordering: .acquiring)
-                if resolved.key == key {
-                    PlayInput.touchQueue.async(qos: .userInteractive) {
-                        resolved.handle(valueX, valueY)
-                    }
-                    return true
-                }
-            }
+        guard let handle = directionPadStorage.handler(forKey: key) else {
+            return false
         }
-        return false
+        PlayInput.touchQueue.async(qos: .userInteractive) {
+            handle(valueX, valueY)
+        }
+        return true
     }
 }
 
-private final class AtomicHandler: AtomicReference {
-    static fileprivate let EMPTY = AtomicHandler("", {_, _ in })
+private struct DirectionPadHandler {
+    static let empty = DirectionPadHandler(key: "", handle: { _, _ in })
     let key: String
     let handle: (CGFloat, CGFloat) -> Void
-    init(_ key: String, _ handle: @escaping (CGFloat, CGFloat) -> Void) {
-        self.key = key
-        self.handle = handle
+}
+
+private final class DirectionPadStorage {
+    private let lock: UnsafeMutablePointer<os_unfair_lock>
+    private let priorityCount: Int
+    private var handlers: [[DirectionPadHandler]]
+    private var activePriorityMask: UInt8 = 0
+
+    init(priorityCount: Int, mappingCountPerPriority: Int) {
+        self.lock = UnsafeMutablePointer<os_unfair_lock>.allocate(capacity: 1)
+        self.lock.initialize(to: os_unfair_lock())
+        self.priorityCount = priorityCount
+        self.handlers = Array(
+            repeating: Array(repeating: DirectionPadHandler.empty, count: mappingCountPerPriority),
+            count: priorityCount
+        )
+    }
+
+    deinit {
+        lock.deinitialize(count: 1)
+        lock.deallocate()
+    }
+
+    private func refreshPriorityMaskLocked() {
+        var mask: UInt8 = 0
+        for p in 0..<priorityCount {
+            if handlers[p].contains(where: { !$0.key.isEmpty }) {
+                mask |= UInt8(1 << p)
+            }
+        }
+        activePriorityMask = mask
+    }
+
+    func clear() {
+        os_unfair_lock_lock(lock)
+        defer { os_unfair_lock_unlock(lock) }
+        for p in 0..<handlers.count {
+            for idx in 0..<handlers[p].count {
+                handlers[p][idx] = .empty
+            }
+        }
+        activePriorityMask = 0
+    }
+
+    func register(key: String, handler: @escaping (CGFloat, CGFloat) -> Void, priority: ActionDispatchPriority) {
+        os_unfair_lock_lock(lock)
+        defer { os_unfair_lock_unlock(lock) }
+        let row = priority.rawValue
+        if let existingIndex = handlers[row].firstIndex(where: { $0.key == key }) {
+            handlers[row][existingIndex] = DirectionPadHandler(key: key, handle: handler)
+        } else if let emptyIndex = handlers[row].firstIndex(where: { $0.key.isEmpty }) {
+            handlers[row][emptyIndex] = DirectionPadHandler(key: key, handle: handler)
+        }
+        refreshPriorityMaskLocked()
+    }
+
+    func unregisterDraggable(key: String) {
+        os_unfair_lock_lock(lock)
+        defer { os_unfair_lock_unlock(lock) }
+        let row = ActionDispatchPriority.DRAGGABLE.rawValue
+        if let index = handlers[row].firstIndex(where: { $0.key == key }) {
+            handlers[row][index] = .empty
+            refreshPriorityMaskLocked()
+        }
+    }
+
+    func priority(forKey key: String) -> ActionDispatchPriority? {
+        os_unfair_lock_lock(lock)
+        defer { os_unfair_lock_unlock(lock) }
+        guard activePriorityMask != 0 else { return nil }
+        for priority in 0..<priorityCount where (activePriorityMask & UInt8(1 << priority)) != 0 {
+            if handlers[priority].contains(where: { $0.key == key }) {
+                return ActionDispatchPriority(rawValue: priority)
+            }
+        }
+        return nil
+    }
+
+    func handler(atPriority priority: ActionDispatchPriority, key: String) -> ((CGFloat, CGFloat) -> Void)? {
+        os_unfair_lock_lock(lock)
+        defer { os_unfair_lock_unlock(lock) }
+        guard (activePriorityMask & UInt8(1 << priority.rawValue)) != 0 else {
+            return nil
+        }
+        return handlers[priority.rawValue].first(where: { $0.key == key })?.handle
+    }
+
+    func handler(forKey key: String) -> ((CGFloat, CGFloat) -> Void)? {
+        os_unfair_lock_lock(lock)
+        defer { os_unfair_lock_unlock(lock) }
+        guard activePriorityMask != 0 else { return nil }
+        for priority in 0..<priorityCount where (activePriorityMask & UInt8(1 << priority)) != 0 {
+            if let match = handlers[priority].first(where: { $0.key == key }) {
+                return match.handle
+            }
+        }
+        return nil
     }
 }

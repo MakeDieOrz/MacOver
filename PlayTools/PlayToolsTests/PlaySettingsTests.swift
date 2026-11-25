@@ -632,4 +632,137 @@ final class PlaySettingsTests: XCTestCase {
         XCTAssertTrue(safeMode.isSafeModeActive)
         XCTAssertTrue(FileManager.default.fileExists(atPath: safeMode.lastTriggeredURL.path))
     }
+
+    func testDiscordIPCClientPOSIXHandshakeSetActivityPingPongAndClear() throws {
+        let sockPath = "/tmp/pt-ipc-\(getpid())-\(UUID().uuidString.prefix(8)).sock"
+        _ = Darwin.unlink(sockPath)
+        defer { _ = Darwin.unlink(sockPath) }
+
+        let serverFD = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(serverFD, 0)
+        defer { Darwin.close(serverFD) }
+
+        var addr = sockaddr_un()
+        let utf8 = sockPath.utf8CString
+        let maxLen = MemoryLayout.size(ofValue: addr.sun_path)
+        XCTAssertGreaterThan(utf8.count, 0)
+        XCTAssertLessThanOrEqual(utf8.count, maxLen)
+        guard utf8.count <= maxLen else { return }
+        let pathOffset = try XCTUnwrap(MemoryLayout<sockaddr_un>.offset(of: \.sun_path))
+        addr.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &addr.sun_path) { buf in
+            utf8.withUnsafeBytes { src in
+                buf.copyMemory(from: src)
+            }
+        }
+        let addrLen = socklen_t(pathOffset + utf8.count)
+        let bindRC = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(serverFD, $0, addrLen)
+            }
+        }
+        XCTAssertEqual(bindRC, 0)
+        XCTAssertEqual(Darwin.listen(serverFD, 2), 0)
+
+        let lock = NSLock()
+        var receivedFrames: [(opcode: DiscordIPCClient.Opcode, json: [String: Any])] = []
+        let pongReceived = DispatchSemaphore(value: 0)
+        let serverDone = expectation(description: "Mock Discord IPC server completes exchange")
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer { serverDone.fulfill() }
+            // Accept hasLiveDiscordSocket probe connection (closes immediately) or client connections
+            for _ in 0..<2 {
+                let connFD = Darwin.accept(serverFD, nil, nil)
+                if connFD < 0 { break }
+                defer { Darwin.close(connFD) }
+
+                var tv = timeval(tv_sec: 3, tv_usec: 0)
+                _ = Darwin.setsockopt(connFD, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+
+                guard let hs = DiscordIPCClient.readFrame(fd: connFD) else { continue }
+                let hsObj = (try? JSONSerialization.jsonObject(with: hs.payload) as? [String: Any]) ?? [:]
+                lock.lock()
+                receivedFrames.append((hs.opcode, hsObj))
+                lock.unlock()
+
+                let readyData = Data(#"{"evt":"READY","cmd":"DISPATCH"}"#.utf8)
+                XCTAssertTrue(DiscordIPCClient.writeFrame(fd: connFD, opcode: .frame, payload: readyData))
+
+                // Read SET_ACTIVITY frame
+                if let f1 = DiscordIPCClient.readFrame(fd: connFD) {
+                    let obj = (try? JSONSerialization.jsonObject(with: f1.payload) as? [String: Any]) ?? [:]
+                    lock.lock()
+                    receivedFrames.append((f1.opcode, obj))
+                    lock.unlock()
+                }
+
+                // Send PING and expect PONG back
+                let pingData = Data(#"{"ping":1}"#.utf8)
+                XCTAssertTrue(DiscordIPCClient.writeFrame(fd: connFD, opcode: .ping, payload: pingData))
+                if let pong = DiscordIPCClient.readFrame(fd: connFD) {
+                    let obj = (try? JSONSerialization.jsonObject(with: pong.payload) as? [String: Any]) ?? [:]
+                    lock.lock()
+                    receivedFrames.append((pong.opcode, obj))
+                    lock.unlock()
+                }
+                pongReceived.signal()
+
+                // Read clearPresence SET_ACTIVITY frame and CLOSE frame
+                while let next = DiscordIPCClient.readFrame(fd: connFD) {
+                    let obj = (try? JSONSerialization.jsonObject(with: next.payload) as? [String: Any]) ?? [:]
+                    lock.lock()
+                    receivedFrames.append((next.opcode, obj))
+                    lock.unlock()
+                    if next.opcode == .close {
+                        break
+                    }
+                }
+                break
+            }
+        }
+
+        XCTAssertTrue(DiscordIPCClient.hasLiveDiscordSocket(paths: [sockPath]))
+        let client = DiscordIPCClient(appId: "123456", socketPaths: [sockPath])
+        XCTAssertTrue(client.connect())
+
+        var activity = DiscordRichPresence()
+        activity.details = "Playing Harness"
+        activity.state = "Testing"
+        activity.timestamps.start = 1_700_000_000
+        activity.buttons = [DiscordRichPresence.Button(label: "MacOver", url: "https://example.test")]
+        client.setPresence(activity)
+
+        XCTAssertEqual(pongReceived.wait(timeout: .now() + 3.0), .success)
+        client.clearPresence()
+        client.disconnect()
+
+        wait(for: [serverDone], timeout: 5.0)
+
+        lock.lock()
+        let frames = receivedFrames
+        lock.unlock()
+
+        XCTAssertGreaterThanOrEqual(frames.count, 5)
+        XCTAssertEqual(frames[0].opcode, .handshake)
+        XCTAssertEqual(frames[0].json["v"] as? Int, 1)
+        XCTAssertEqual(frames[0].json["client_id"] as? String, "123456")
+
+        XCTAssertEqual(frames[1].opcode, .frame)
+        XCTAssertEqual(frames[1].json["cmd"] as? String, "SET_ACTIVITY")
+        let args = try XCTUnwrap(frames[1].json["args"] as? [String: Any])
+        let act = try XCTUnwrap(args["activity"] as? [String: Any])
+        XCTAssertEqual(act["details"] as? String, "Playing Harness")
+        XCTAssertEqual(act["state"] as? String, "Testing")
+
+        XCTAssertEqual(frames[2].opcode, .pong)
+        XCTAssertEqual(frames[2].json["ping"] as? Int, 1)
+
+        XCTAssertEqual(frames[3].opcode, .frame)
+        XCTAssertEqual(frames[3].json["cmd"] as? String, "SET_ACTIVITY")
+        let clearedArgs = try XCTUnwrap(frames[3].json["args"] as? [String: Any])
+        XCTAssertTrue(clearedArgs["activity"] is NSNull)
+
+        XCTAssertEqual(frames.last?.opcode, .close)
+    }
 }
