@@ -3574,7 +3574,12 @@ def build_mock_app(work_dir: Path, playtools_fw: Path) -> Path:
     return target_bin
 
 
-def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[ScenarioResult]:
+def run_scenarios(
+    target_bin: Path,
+    playtools_fw: Path,
+    work_dir: Path,
+    verbose: bool,
+) -> list[ScenarioResult]:
     results: list[ScenarioResult] = []
     isolated_home = work_dir / "IsolatedHome"
     isolated_home.mkdir(parents=True, exist_ok=True)
@@ -4666,6 +4671,256 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
     if verbose:
         print("  Scenario 12 payload:", {k: v for k, v in info12.items() if k.startswith("s12")})
 
+    # Scenario 13: Two-table (-Wl,-no_fixup_chains) un-stubbed non-lazy GOT restoration
+    t13 = time.monotonic()
+    tool_env13 = os.environ.copy()
+    if "DEVELOPER_DIR" not in tool_env13 and Path("/Applications/Xcode.app/Contents/Developer").is_dir():
+        tool_env13["DEVELOPER_DIR"] = "/Applications/Xcode.app/Contents/Developer"
+    sdk_path13 = run_cmd(["xcrun", "--sdk", "macosx", "--show-sdk-path"], env=tool_env13).stdout.strip()
+    fw_parent13 = str(playtools_fw.parent)
+    two_app_dir = work_dir / "MockTwoTable.app"
+    two_app_dir.mkdir(parents=True, exist_ok=True)
+    with open(two_app_dir / "Info.plist", "wb") as fp:
+        plistlib.dump({
+            "CFBundleDevelopmentRegion": "en",
+            "CFBundleExecutable": "MockTwoTable",
+            "CFBundleIdentifier": "app.makedie.harness.twotable",
+            "CFBundleInfoDictionaryVersion": "6.0",
+            "CFBundleName": "MockTwoTable",
+            "CFBundlePackageType": "APPL",
+            "CFBundleShortVersionString": "1.0",
+            "CFBundleVersion": "1",
+        }, fp)
+    two_c = work_dir / "MockTwoTable.m"
+    two_c.write_text(r'''
+@import Foundation;
+#include <dlfcn.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <mach/mach.h>
+#include <mach/task_info.h>
+#include <mach-o/dyld.h>
+#include <mach-o/dyld_images.h>
+#include <mach-o/loader.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/sysctl.h>
+#include <unistd.h>
+
+extern intptr_t pt_two_syscall(int, ...) __asm("_syscall");
+
+static BOOL find_dylib_text_range(const char *dylib_suffix, uintptr_t *out_start, uintptr_t *out_end) {
+    uint32_t count = _dyld_image_count();
+    for (uint32_t i = 0; i < count; i++) {
+        const struct mach_header_64 *mh = (const struct mach_header_64 *)_dyld_get_image_header(i);
+        if (mh == NULL || mh->magic != MH_MAGIC_64) continue;
+        const uint8_t *base = (const uint8_t *)mh;
+        size_t total = sizeof(struct mach_header_64) + (size_t)mh->sizeofcmds;
+        size_t off = sizeof(struct mach_header_64);
+        BOOL matched_id = NO;
+        uintptr_t slide = 0;
+        BOOL has_slide = NO;
+        uintptr_t tstart = 0, tend = 0;
+        for (uint32_t c = 0; c < mh->ncmds && off + sizeof(struct load_command) <= total; c++) {
+            const struct load_command *lc = (const struct load_command *)(base + off);
+            if (lc->cmdsize < sizeof(struct load_command) || off + lc->cmdsize > total) break;
+            if (lc->cmd == LC_ID_DYLIB && lc->cmdsize >= sizeof(struct dylib_command)) {
+                const struct dylib_command *dc = (const struct dylib_command *)lc;
+                uint32_t noff = dc->dylib.name.offset;
+                if (noff < lc->cmdsize) {
+                    const char *name = (const char *)lc + noff;
+                    if (strstr(name, dylib_suffix) != NULL &&
+                        (strncmp(name, "/usr/lib/", 9) == 0 || strncmp(name, "/System/Library/", 16) == 0)) {
+                        matched_id = YES;
+                    }
+                }
+            } else if (lc->cmd == LC_SEGMENT_64 && lc->cmdsize >= sizeof(struct segment_command_64)) {
+                const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+                if (strcmp(seg->segname, "__TEXT") == 0) {
+                    slide = (uintptr_t)mh - (uintptr_t)seg->vmaddr;
+                    has_slide = YES;
+                    const struct section_64 *sects = (const struct section_64 *)(seg + 1);
+                    for (uint32_t s = 0; s < seg->nsects; s++) {
+                        if (strcmp(sects[s].sectname, "__text") == 0) {
+                            tstart = (uintptr_t)sects[s].addr + slide;
+                            tend = tstart + (uintptr_t)sects[s].size;
+                            break;
+                        }
+                    }
+                }
+            }
+            off += lc->cmdsize;
+        }
+        if (matched_id && has_slide && tstart != 0 && tend > tstart) {
+            *out_start = tstart;
+            *out_end = tend;
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static BOOL check_ptr_in_dylib(const void *ptr, const char *dylib_suffix) {
+    uintptr_t s = 0, e = 0;
+    if (ptr == NULL || !find_dylib_text_range(dylib_suffix, &s, &e)) {
+        return NO;
+    }
+    uintptr_t p = (uintptr_t)ptr;
+    return (p >= s && p <= e);
+}
+
+int main(void) {
+    @autoreleasepool {
+        void *volatile p_getenv = (void *)&getenv;
+        void *volatile p_open = (void *)&open;
+        void *volatile p_sysctl = (void *)&sysctl;
+        void *volatile p_dlsym = (void *)&dlsym;
+        void *volatile p_syscall = (void *)&pt_two_syscall;
+        void *volatile p_stat = (void *)&stat;
+        void *volatile p_lstat = (void *)&lstat;
+
+        // Direct calls through __stubs -> __la_symbol_ptr must still route through PlayTools
+        errno = 0;
+        int open_rc = open("/System/Applications", O_RDONLY);
+        BOOL open_spoofed = (open_rc == -1 && errno == ENOENT);
+
+        char machine[64] = {0};
+        size_t mlen = sizeof(machine);
+        int mib[2] = {CTL_HW, HW_MACHINE};
+        BOOL sysctl_spoofed = (sysctl(mib, 2, machine, &mlen, NULL, 0) == 0 &&
+                               (strncmp(machine, "iPad", 4) == 0 || strncmp(machine, "iPhone", 6) == 0));
+
+        void *cg_sym = dlsym(RTLD_DEFAULT, "CGMainDisplayID");
+        BOOL dlsym_spoofed = (cg_sym == NULL);
+
+        const char *dyld_ins = getenv("PLAYTOOLS_SETTINGS_PLIST");
+        const char *pt_hidden_env = getenv("HARNESS_VISIBLE_ENV");
+        BOOL getenv_scrubbed = (dyld_ins == NULL && pt_hidden_env != NULL && strcmp(pt_hidden_env, "visible_ok") == 0);
+
+        BOOL uuid_ok = NO;
+        task_dyld_info_data_t dyld_info = {0};
+        mach_msg_type_number_t dyld_cnt = TASK_DYLD_INFO_COUNT;
+        if (task_info(mach_task_self(), TASK_DYLD_INFO, (task_info_t)&dyld_info, &dyld_cnt) == KERN_SUCCESS &&
+            dyld_info.all_image_info_addr != 0) {
+            const struct dyld_all_image_infos *infos =
+                (const struct dyld_all_image_infos *)(uintptr_t)dyld_info.all_image_info_addr;
+            if (infos->uuidArray != NULL && infos->uuidArrayCount > 0) {
+                uuid_ok = YES;
+            }
+        }
+
+        BOOL ptr_getenv_ok = check_ptr_in_dylib(p_getenv, "libsystem_c.dylib");
+        BOOL ptr_sysctl_ok = check_ptr_in_dylib(p_sysctl, "libsystem_c.dylib");
+        BOOL ptr_open_ok = check_ptr_in_dylib(p_open, "libsystem_kernel.dylib");
+        BOOL ptr_syscall_ok = check_ptr_in_dylib(p_syscall, "libsystem_kernel.dylib");
+        BOOL ptr_stat_ok = check_ptr_in_dylib(p_stat, "libsystem_kernel.dylib");
+        BOOL ptr_lstat_ok = check_ptr_in_dylib(p_lstat, "libsystem_kernel.dylib");
+        BOOL ptr_dlsym_ok = check_ptr_in_dylib(p_dlsym, "libdyld.dylib");
+
+        NSDictionary *out = @{
+            @"openSpoofed": @(open_spoofed),
+            @"sysctlSpoofed": @(sysctl_spoofed),
+            @"dlsymSpoofed": @(dlsym_spoofed),
+            @"getenvScrubbed": @(getenv_scrubbed),
+            @"uuidArrayOK": @(uuid_ok),
+            @"ptrGetenvOK": @(ptr_getenv_ok),
+            @"ptrSysctlOK": @(ptr_sysctl_ok),
+            @"ptrOpenOK": @(ptr_open_ok),
+            @"ptrSyscallOK": @(ptr_syscall_ok),
+            @"ptrStatOK": @(ptr_stat_ok),
+            @"ptrLstatOK": @(ptr_lstat_ok),
+            @"ptrDlsymOK": @(ptr_dlsym_ok),
+        };
+        NSData *jsonData = [NSJSONSerialization dataWithJSONObject:out options:0 error:nil];
+        NSString *jsonStr = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+        printf("HARNESS_JSON:%s\n", jsonStr.UTF8String);
+    }
+    return 0;
+}
+''', encoding="utf-8")
+    two_bin = two_app_dir / "MockTwoTable"
+    run_cmd([
+        "xcrun", "clang", "-fobjc-arc", "-fmodules", "-O2",
+        "-target", "arm64-apple-ios13.1-macabi",
+        "-Wl,-no_fixup_chains",
+        "-isysroot", sdk_path13,
+        "-F", fw_parent13,
+        "-framework", "Foundation",
+        "-framework", "PlayTools",
+        f"-Wl,-rpath,{fw_parent13}",
+        str(two_c),
+        "-o", str(two_bin),
+    ], env=tool_env13)
+    run_cmd(["codesign", "--force", "--deep", "--sign", "-", str(two_app_dir)], env=tool_env13)
+
+    otool_l = run_cmd(["xcrun", "otool", "-lv", str(two_bin)], env=tool_env13).stdout
+    has_two_table_sections = (
+        "S_NON_LAZY_SYMBOL_POINTERS" in otool_l and "S_LAZY_SYMBOL_POINTERS" in otool_l
+    )
+
+    isolated_root_13 = work_dir / "IsolatedHome13"
+    (isolated_root_13 / "Library/Containers/app.makedie.harness.twotable/Data").mkdir(parents=True, exist_ok=True)
+    plist13_dir = isolated_root_13 / "Library/Containers/app.makedie.MacOver/PlayTools"
+    plist13_dir.mkdir(parents=True, exist_ok=True)
+    plist13 = plist13_dir / "app.makedie.harness.twotable.plist"
+    with open(plist13, "wb") as fp:
+        plistlib.dump({"bypass": True}, fp)
+
+    env13 = base_env(
+        work_dir / "marker_13.txt",
+        APP_SANDBOX_CONTAINER_ID="app.makedie.harness.twotable",
+        HARNESS_VISIBLE_ENV="visible_ok",
+    )
+    env13["HOME"] = str(isolated_root_13 / "Library/Containers/app.makedie.harness.twotable/Data")
+    env13["CFFIXED_USER_HOME"] = env13["HOME"]
+    env13["PLAYTOOLS_SETTINGS_PLIST"] = str(plist13)
+    proc13 = run_cmd([str(two_bin)], env=env13, check=False)
+
+    env13_off = dict(env13)
+    env13_off["DISABLE_PLAYSHADOW_BYPASS"] = "1"
+    proc13_off = run_cmd([str(two_bin)], env=env13_off, check=False)
+
+    if proc13.returncode != 0 or proc13_off.returncode != 0:
+        results.append(ScenarioResult(
+            name="13. Two-table non-lazy GOT pointer restoration",
+            passed=False,
+            duration_sec=time.monotonic() - t13,
+            details=f"rc={proc13.returncode} rc_off={proc13_off.returncode}\nstdout={proc13.stdout}\nstderr={proc13.stderr}",
+        ))
+        return results
+
+    info13 = parse_harness_json(proc13.stdout)
+    checks13 = [
+        has_two_table_sections is True,
+        info13["openSpoofed"] is True,
+        info13["sysctlSpoofed"] is True,
+        info13["dlsymSpoofed"] is True,
+        info13["getenvScrubbed"] is True,
+        info13["uuidArrayOK"] is True,
+        info13["ptrGetenvOK"] is True,
+        info13["ptrSysctlOK"] is True,
+        info13["ptrOpenOK"] is True,
+        info13["ptrSyscallOK"] is True,
+        info13["ptrStatOK"] is True,
+        info13["ptrLstatOK"] is True,
+        info13["ptrDlsymOK"] is True,
+        proc13_off.returncode == 0,
+    ]
+    results.append(ScenarioResult(
+        name="13. Two-table non-lazy GOT pointer restoration",
+        passed=all(checks13),
+        duration_sec=time.monotonic() - t13,
+        details=json.dumps({
+            "hasTwoTableSections": has_two_table_sections,
+            "bypassOffRC": proc13_off.returncode,
+            **info13,
+        }, sort_keys=True),
+    ))
+    if verbose:
+        print("  Scenario 13 payload:", {"hasTwoTableSections": has_two_table_sections, **info13})
+
     return results
 
 
@@ -4697,7 +4952,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     try:
         target_bin = build_mock_app(work_dir, playtools_fw)
-        results = run_scenarios(target_bin, work_dir, args.verbose)
+        results = run_scenarios(target_bin, playtools_fw, work_dir, args.verbose)
     finally:
         if diag_log.exists():
             try:

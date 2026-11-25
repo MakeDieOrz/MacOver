@@ -45,6 +45,9 @@ __attribute__((visibility("hidden"))) void pt_ensure_playloader_early_init(void)
         atomic_store_explicit(&s_playchain_debug_cached, playChainDebug ? 1 : 0, memory_order_release);
         atomic_store_explicit(&s_block_sleep_spamming_cached, blockSleep ? 1 : 0, memory_order_release);
         atomic_store_explicit(&s_pt_loaded, YES, memory_order_release);
+        if (bypass && ![PTSafeMode isActive]) {
+            pt_init_nonlazy_got_cloaking();
+        }
 
         pthread_once(&s_pt_device_info_once, pt_init_device_info);
         if (rootWorkDir) {

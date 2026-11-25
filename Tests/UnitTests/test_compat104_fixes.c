@@ -1450,6 +1450,114 @@ static void test_round4_audit_regressions(void) {
     assert(strcmp(stripped_img, "/System/Library/AccessibilityBundles/AccessibilitySettingsLoader.bundle/AccessibilitySettingsLoader") == 0);
 }
 
+static uint32_t mock_encode_adrp_x16(uintptr_t stub_pc, uintptr_t target_page) {
+    int64_t delta_pages = ((int64_t)target_page - (int64_t)(stub_pc & ~(uintptr_t)0xFFFU)) / 4096LL;
+    uint32_t imm21 = (uint32_t)delta_pages & 0x1FFFFFU;
+    uint32_t immlo = imm21 & 0x3U;
+    uint32_t immhi = (imm21 >> 2) & 0x7FFFFU;
+    return 0x90000010U | (immlo << 29) | (immhi << 5);
+}
+
+static uint32_t mock_encode_ldr_x_uimm(uint32_t rt, uintptr_t byte_off) {
+    assert((byte_off & 7U) == 0U && (byte_off >> 3) < 4096U);
+    return 0xF9400200U | (rt & 0x1FU) | ((uint32_t)(byte_off >> 3) << 10);
+}
+
+static int mock_decode_arm64_stub_target_slot(uintptr_t stub_pc,
+                                              const uint32_t *words,
+                                              uint32_t stride,
+                                              uintptr_t *out_slot) {
+    if (words == NULL || out_slot == NULL || stride < 12U) return 0;
+    uint32_t w0 = words[0];
+    if ((w0 & 0x9F00001FU) != 0x90000010U) return 0;
+    uint32_t imm21 = (((w0 >> 5) & 0x7FFFFU) << 2) | ((w0 >> 29) & 0x3U);
+    int32_t simm21 = (int32_t)imm21;
+    if ((imm21 & (1U << 20)) != 0U) {
+        simm21 -= (int32_t)(1U << 21);
+    }
+    uintptr_t page = (uintptr_t)((int64_t)(stub_pc & ~(uintptr_t)0xFFFU) + ((int64_t)simm21) * 4096LL);
+    uint32_t w1 = words[1];
+    uint32_t w2 = words[2];
+    if ((w1 & 0xFFC003FFU) == 0xF9400210U && w2 == 0xD61F0200U) {
+        *out_slot = page + (((uintptr_t)((w1 >> 10) & 0xFFFU)) << 3);
+        return 1;
+    }
+    if (stride >= 16U && (w1 & 0xFFC003FFU) == 0x91000210U && (w2 & 0xFFC003FEU) == 0xF9400210U) {
+        uint32_t rt = w2 & 0x1FU;
+        uint32_t w3 = words[3];
+        int branch_ok = (rt == 16U && (w3 == 0xD61F0200U || w3 == 0xD71F0A10U)) ||
+                        (rt == 17U && (w3 == 0xD61F0220U || w3 == 0xD71F0A30U || w3 == 0xD71F0E30U));
+        if (branch_ok) {
+            uintptr_t imm12 = (uintptr_t)((w1 >> 10) & 0xFFFU);
+            uintptr_t uimm = ((uintptr_t)((w2 >> 10) & 0xFFFU)) << 3;
+            *out_slot = page + imm12 + uimm;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void test_arm64_stub_decoder_and_got_bitmap(void) {
+    /* 12-byte ARM64 stub with positive and negative ADRP page offsets */
+    uintptr_t pc_pos = 0x101451f10ULL;
+    uintptr_t target_pos = 0x10188c960ULL;
+    uint32_t stub_pos[3] = {
+        mock_encode_adrp_x16(pc_pos, target_pos & ~(uintptr_t)0xFFFU),
+        mock_encode_ldr_x_uimm(16U, target_pos & 0xFFFU),
+        0xD61F0200U, /* br x16 */
+    };
+    uintptr_t decoded = 0;
+    assert(mock_decode_arm64_stub_target_slot(pc_pos, stub_pos, 12U, &decoded) == 1);
+    assert(decoded == target_pos);
+
+    uintptr_t pc_neg = 0x102400100ULL;
+    uintptr_t target_neg = 0x102004220ULL;
+    uint32_t stub_neg[3] = {
+        mock_encode_adrp_x16(pc_neg, target_neg & ~(uintptr_t)0xFFFU),
+        mock_encode_ldr_x_uimm(16U, target_neg & 0xFFFU),
+        0xD61F0200U,
+    };
+    decoded = 0;
+    assert(mock_decode_arm64_stub_target_slot(pc_neg, stub_neg, 12U, &decoded) == 1);
+    assert(decoded == target_neg);
+
+    /* 16-byte ARM64e/PAC stub: adrp x16; add x16, x16, #imm12; ldr x17, [x16, #uimm]; braa x17, x16 */
+    uintptr_t pc_pac = 0x100500000ULL;
+    uintptr_t target_pac = 0x100801048ULL; /* page + 0x040 (ADD) + 0x008 (LDR) */
+    uint32_t stub_pac[4] = {
+        mock_encode_adrp_x16(pc_pac, target_pac & ~(uintptr_t)0xFFFU),
+        0x91000210U | (0x040U << 10),
+        mock_encode_ldr_x_uimm(17U, 0x008U),
+        0xD71F0A30U, /* braa x17, x16 */
+    };
+    decoded = 0;
+    assert(mock_decode_arm64_stub_target_slot(pc_pac, stub_pac, 16U, &decoded) == 1);
+    assert(decoded == target_pac);
+
+    /* Fail-closed rejections: short stride, NOP, wrong register, BLR instead of BR */
+    assert(mock_decode_arm64_stub_target_slot(pc_pos, stub_pos, 8U, &decoded) == 0);
+    uint32_t bad_nop[3] = { 0xD503201FU, stub_pos[1], stub_pos[2] };
+    assert(mock_decode_arm64_stub_target_slot(pc_pos, bad_nop, 12U, &decoded) == 0);
+    uint32_t bad_reg[3] = { stub_pos[0], mock_encode_ldr_x_uimm(15U, 0x960U), stub_pos[2] };
+    assert(mock_decode_arm64_stub_target_slot(pc_pos, bad_reg, 12U, &decoded) == 0);
+    uint32_t bad_blr[3] = { stub_pos[0], stub_pos[1], 0xD63F0200U };
+    assert(mock_decode_arm64_stub_target_slot(pc_pos, bad_blr, 12U, &decoded) == 0);
+
+    /* GOT bitmap: mark slot 3 & slot 67 as stubbed, leave slot 2 & slot 66 un-stubbed */
+    uint64_t bitmap[2] = {0, 0};
+    uintptr_t got_base = 0x101888000ULL;
+    size_t stub_indices[2] = {3U, 67U};
+    for (size_t i = 0; i < 2U; i++) {
+        uintptr_t slot_addr = got_base + stub_indices[i] * sizeof(void *);
+        size_t idx = (size_t)((slot_addr - got_base) / sizeof(void *));
+        bitmap[idx >> 6] |= (1ULL << (idx & 63U));
+    }
+    assert((bitmap[0] & (1ULL << 3U)) != 0ULL);
+    assert((bitmap[0] & (1ULL << 2U)) == 0ULL);
+    assert((bitmap[1] & (1ULL << 3U)) != 0ULL);
+    assert((bitmap[1] & (1ULL << 2U)) == 0ULL);
+}
+
 int main(void) {
     test_der_entitlements_encoding_and_superblob_rewrite();
     test_attr_ref_zero_fill();
@@ -1473,6 +1581,7 @@ int main(void) {
     test_round3_extended_dlsym_fw_icu_swift();
     test_round3_hidden_bundle_ids_regression();
     test_round4_audit_regressions();
+    test_arm64_stub_decoder_and_got_bitmap();
     printf("All compat104 unit tests passed.\n");
     return 0;
 }

@@ -886,6 +886,419 @@ static const void *pt_resolve_interposed_target(const void *addr) {
     return addr;
 }
 
+static const void *pt_resolve_dyld_interposed_only(const void *addr) {
+    if (addr == NULL) {
+        return NULL;
+    }
+    const void *stripped = pt_strip_code_ptr(addr);
+    if (stripped != addr) {
+        return NULL;
+    }
+    pthread_once(&s_interpose_once, pt_init_interpose_tuples);
+    for (size_t i = 0; i < s_interpose_count; i++) {
+        if (pt_strip_code_ptr(s_interpose_tuples[i].replacement) == addr &&
+            s_interpose_tuples[i].replacee != NULL &&
+            pt_strip_code_ptr(s_interpose_tuples[i].replacee) == s_interpose_tuples[i].replacee) {
+            return s_interpose_tuples[i].replacee;
+        }
+    }
+    return NULL;
+}
+
+#if defined(__arm64__) || defined(__aarch64__)
+static BOOL pt_decode_arm64_stub_target_slot(uintptr_t stub_pc,
+                                             const uint32_t *words,
+                                             uint32_t stride,
+                                             uintptr_t *out_slot) {
+    if (words == NULL || out_slot == NULL || stride < 12U) {
+        return NO;
+    }
+    uint32_t w0 = words[0];
+    if ((w0 & 0x9F00001FU) != 0x90000010U) {
+        return NO; // ADRP x16, #page
+    }
+    uint32_t imm21 = (((w0 >> 5) & 0x7FFFFU) << 2) | ((w0 >> 29) & 0x3U);
+    int32_t simm21 = (int32_t)imm21;
+    if ((imm21 & (1U << 20)) != 0U) {
+        simm21 -= (int32_t)(1U << 21);
+    }
+    int64_t page_base = (int64_t)(stub_pc & ~(uintptr_t)0xFFFU);
+    int64_t page_off = ((int64_t)simm21) * 4096LL;
+    uintptr_t page = (uintptr_t)(page_base + page_off);
+
+    uint32_t w1 = words[1];
+    uint32_t w2 = words[2];
+    if ((w1 & 0xFFC003FFU) == 0xF9400210U && w2 == 0xD61F0200U) {
+        uintptr_t uimm = ((uintptr_t)((w1 >> 10) & 0xFFFU)) << 3;
+        *out_slot = page + uimm;
+        return YES;
+    }
+
+    if (stride >= 16U &&
+        (w1 & 0xFFC003FFU) == 0x91000210U &&
+        (w2 & 0xFFC003FEU) == 0xF9400210U) {
+        uint32_t rt = w2 & 0x1FU;
+        uint32_t w3 = words[3];
+        BOOL branch_ok = (rt == 16U && (w3 == 0xD61F0200U || w3 == 0xD71F0A10U)) ||
+                         (rt == 17U && (w3 == 0xD61F0220U || w3 == 0xD71F0A30U || w3 == 0xD71F0E30U));
+        if (branch_ok) {
+            uintptr_t imm12 = (uintptr_t)((w1 >> 10) & 0xFFFU);
+            uintptr_t uimm = ((uintptr_t)((w2 >> 10) & 0xFFFU)) << 3;
+            *out_slot = page + imm12 + uimm;
+            return YES;
+        }
+    }
+
+    return NO;
+}
+
+typedef struct {
+    uintptr_t start;
+    uintptr_t size;
+} pt_got_sec_range_t;
+
+#define PT_MAX_NONLAZY_GOT_SECS 4U
+#define PT_MAX_GOT_CLOAK_MHS 512U
+
+static os_unfair_lock s_got_cloak_lock = OS_UNFAIR_LOCK_INIT;
+static const struct mach_header *s_got_cloaked_mhs[PT_MAX_GOT_CLOAK_MHS];
+static uint32_t s_got_cloaked_count = 0;
+static _Atomic bool s_got_cloak_inited = false;
+
+static BOOL pt_is_got_cloaked_mh(const struct mach_header *mh) {
+    os_unfair_lock_lock(&s_got_cloak_lock);
+    for (uint32_t i = 0; i < s_got_cloaked_count; i++) {
+        if (s_got_cloaked_mhs[i] == mh) {
+            os_unfair_lock_unlock(&s_got_cloak_lock);
+            return YES;
+        }
+    }
+    os_unfair_lock_unlock(&s_got_cloak_lock);
+    return NO;
+}
+
+static void pt_mark_got_cloaked_mh(const struct mach_header *mh) {
+    os_unfair_lock_lock(&s_got_cloak_lock);
+    for (uint32_t i = 0; i < s_got_cloaked_count; i++) {
+        if (s_got_cloaked_mhs[i] == mh) {
+            os_unfair_lock_unlock(&s_got_cloak_lock);
+            return;
+        }
+    }
+    if (s_got_cloaked_count < PT_MAX_GOT_CLOAK_MHS) {
+        s_got_cloaked_mhs[s_got_cloaked_count++] = mh;
+    }
+    os_unfair_lock_unlock(&s_got_cloak_lock);
+}
+
+static BOOL pt_collect_two_table_macho_sections(const struct mach_header_64 *mh64,
+                                                intptr_t vmaddr_slide,
+                                                uintptr_t *out_stubs_start,
+                                                uintptr_t *out_stubs_size,
+                                                uint32_t *out_stubs_stride,
+                                                pt_got_sec_range_t *out_got_secs,
+                                                uint32_t *out_got_count) {
+    *out_stubs_start = 0;
+    *out_stubs_size = 0;
+    *out_stubs_stride = 0;
+    *out_got_count = 0;
+
+    if (mh64->sizeofcmds == 0 || mh64->sizeofcmds > (1U << 20)) {
+        return NO;
+    }
+    const uint8_t *base = (const uint8_t *)mh64;
+    size_t total = sizeof(struct mach_header_64) + (size_t)mh64->sizeofcmds;
+    size_t off = sizeof(struct mach_header_64);
+    uintptr_t slide = (uintptr_t)vmaddr_slide;
+    BOOL has_lazy = NO;
+    BOOL text_slide_checked = NO;
+
+    for (uint32_t i = 0; i < mh64->ncmds && off + sizeof(struct load_command) <= total; i++) {
+        const struct load_command *lc = (const struct load_command *)(base + off);
+        if (lc->cmdsize < sizeof(struct load_command) || off + lc->cmdsize > total) {
+            break;
+        }
+        off += lc->cmdsize;
+        if (lc->cmd != LC_SEGMENT_64 || lc->cmdsize < sizeof(struct segment_command_64)) {
+            continue;
+        }
+        const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+        if (strncmp(seg->segname, "__TEXT", 16) == 0) {
+            text_slide_checked = YES;
+            if ((uintptr_t)seg->vmaddr + slide != (uintptr_t)mh64) {
+                return NO;
+            }
+        }
+        if ((size_t)seg->nsects > (lc->cmdsize - sizeof(struct segment_command_64)) / sizeof(struct section_64)) {
+            return NO;
+        }
+        const struct section_64 *sects = (const struct section_64 *)(seg + 1);
+        for (uint32_t s = 0; s < seg->nsects; s++) {
+            uint32_t stype = sects[s].flags & SECTION_TYPE;
+            uintptr_t s_addr = (uintptr_t)sects[s].addr + slide;
+            uintptr_t s_size = (uintptr_t)sects[s].size;
+            if (stype == S_LAZY_SYMBOL_POINTERS && s_size >= sizeof(void *)) {
+                has_lazy = YES;
+            } else if (stype == S_SYMBOL_STUBS &&
+                       s_size > 0 &&
+                       s_size <= UINTPTR_MAX - s_addr &&
+                       sects[s].reserved2 >= 12U &&
+                       sects[s].reserved2 <= 32U &&
+                       (sects[s].reserved2 % 4U) == 0 &&
+                       (s_size % (uintptr_t)sects[s].reserved2) == 0) {
+                *out_stubs_start = s_addr;
+                *out_stubs_size = s_size;
+                *out_stubs_stride = sects[s].reserved2;
+            } else if (stype == S_NON_LAZY_SYMBOL_POINTERS &&
+                       s_size >= sizeof(void *) &&
+                       s_size <= UINTPTR_MAX - s_addr &&
+                       (s_size % sizeof(void *)) == 0 &&
+                       strncmp(sects[s].sectname, "__auth_", 7) != 0 &&
+                       *out_got_count < PT_MAX_NONLAZY_GOT_SECS) {
+                out_got_secs[*out_got_count] = (pt_got_sec_range_t){
+                    .start = s_addr,
+                    .size = s_size,
+                };
+                (*out_got_count)++;
+            }
+        }
+    }
+
+    return (text_slide_checked && has_lazy && *out_stubs_size > 0 && *out_got_count > 0);
+}
+
+static void pt_restore_one_nonlazy_got_section(const char *img_path,
+                                               uintptr_t stubs_start,
+                                               uintptr_t stubs_size,
+                                               uint32_t stubs_stride,
+                                               uintptr_t got_start,
+                                               uintptr_t got_size) {
+    size_t got_count = (size_t)(got_size / sizeof(void *));
+    if (got_count == 0 || got_count > 262144U) {
+        return;
+    }
+
+    uint64_t stack_bits[512];
+    size_t word_count = (got_count + 63U) / 64U;
+    uint64_t *heap_bits = NULL;
+    uint64_t *stubbed_bits = stack_bits;
+    if (word_count > (sizeof(stack_bits) / sizeof(stack_bits[0]))) {
+        heap_bits = (uint64_t *)calloc(word_count, sizeof(uint64_t));
+        if (heap_bits == NULL) {
+            return;
+        }
+        stubbed_bits = heap_bits;
+    } else {
+        memset(stack_bits, 0, word_count * sizeof(uint64_t));
+    }
+
+    uintptr_t got_end = got_start + got_size;
+    uintptr_t stubs_end = stubs_start + stubs_size;
+    for (uintptr_t stub_pc = stubs_start; stub_pc < stubs_end; stub_pc += (uintptr_t)stubs_stride) {
+        uintptr_t slot_addr = 0;
+        if (!pt_decode_arm64_stub_target_slot(stub_pc, (const uint32_t *)stub_pc, stubs_stride, &slot_addr)) {
+            // Fail closed if any stub does not match recognized ARM64 stub sequences.
+            free(heap_bits);
+            return;
+        }
+        if (slot_addr >= got_start && slot_addr < got_end &&
+            ((slot_addr - got_start) % sizeof(void *)) == 0) {
+            size_t idx = (size_t)((slot_addr - got_start) / sizeof(void *));
+            stubbed_bits[idx >> 6] |= (1ULL << (idx & 63U));
+        }
+    }
+
+    void **got_slots = (void **)got_start;
+    size_t pending = 0;
+    for (size_t k = 0; k < got_count; k++) {
+        if ((stubbed_bits[k >> 6] & (1ULL << (k & 63U))) != 0ULL) {
+            continue;
+        }
+        if (pt_resolve_dyld_interposed_only(got_slots[k]) != NULL) {
+            pending++;
+        }
+    }
+    if (pending == 0) {
+        free(heap_bits);
+        return;
+    }
+
+    uintptr_t page_sz = (vm_page_size > 0) ? (uintptr_t)vm_page_size : 16384U;
+    if (got_end > UINTPTR_MAX - (page_sz - 1U)) {
+        free(heap_bits);
+        return;
+    }
+    uintptr_t page_start = got_start & ~(page_sz - 1U);
+    uintptr_t page_end = (got_end + page_sz - 1U) & ~(page_sz - 1U);
+    size_t restored_count = 0;
+
+    for (uintptr_t page_addr = page_start; page_addr < page_end; page_addr += page_sz) {
+        uintptr_t ov_start = (page_addr > got_start) ? page_addr : got_start;
+        uintptr_t page_limit = page_addr + page_sz;
+        uintptr_t ov_end = (page_limit < got_end) ? page_limit : got_end;
+        if (ov_start >= ov_end) {
+            continue;
+        }
+        size_t idx_begin = (size_t)((ov_start - got_start) / sizeof(void *));
+        size_t idx_end = (size_t)((ov_end - got_start) / sizeof(void *));
+        BOOL page_has_target = NO;
+        for (size_t k = idx_begin; k < idx_end; k++) {
+            if ((stubbed_bits[k >> 6] & (1ULL << (k & 63U))) == 0ULL &&
+                pt_resolve_dyld_interposed_only(got_slots[k]) != NULL) {
+                page_has_target = YES;
+                break;
+            }
+        }
+        if (!page_has_target) {
+            continue;
+        }
+
+        vm_address_t raddr = (vm_address_t)page_addr;
+        vm_size_t rsize = 0;
+        vm_region_basic_info_data_64_t rinfo;
+        mach_msg_type_number_t rcnt = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t obj = MACH_PORT_NULL;
+        kern_return_t rkr = vm_region_64(mach_task_self(),
+                                         &raddr,
+                                         &rsize,
+                                         VM_REGION_BASIC_INFO_64,
+                                         (vm_region_info_t)&rinfo,
+                                         &rcnt,
+                                         &obj);
+        if (MACH_PORT_VALID(obj)) {
+            mach_port_deallocate(mach_task_self(), obj);
+        }
+        if (rkr != KERN_SUCCESS ||
+            raddr > (vm_address_t)page_addr ||
+            (vm_address_t)page_addr + page_sz > raddr + rsize) {
+            continue;
+        }
+
+        vm_prot_t orig_prot = rinfo.protection;
+        BOOL changed_prot = NO;
+        if ((orig_prot & VM_PROT_WRITE) == 0) {
+            kern_return_t pkr = vm_protect(mach_task_self(),
+                                           (vm_address_t)page_addr,
+                                           (vm_size_t)page_sz,
+                                           FALSE,
+                                           orig_prot | VM_PROT_WRITE);
+            if (pkr != KERN_SUCCESS) {
+                pkr = vm_protect(mach_task_self(),
+                                 (vm_address_t)page_addr,
+                                 (vm_size_t)page_sz,
+                                 FALSE,
+                                 orig_prot | VM_PROT_WRITE | VM_PROT_COPY);
+            }
+            if (pkr != KERN_SUCCESS) {
+                continue;
+            }
+            changed_prot = YES;
+        }
+
+        for (size_t k = idx_begin; k < idx_end; k++) {
+            if ((stubbed_bits[k >> 6] & (1ULL << (k & 63U))) != 0ULL) {
+                continue;
+            }
+            const void *orig_ptr = pt_resolve_dyld_interposed_only(got_slots[k]);
+            if (orig_ptr != NULL) {
+                __atomic_store_n(&got_slots[k], (void *)orig_ptr, __ATOMIC_RELEASE);
+                restored_count++;
+            }
+        }
+
+        if (changed_prot) {
+            (void)vm_protect(mach_task_self(),
+                             (vm_address_t)page_addr,
+                             (vm_size_t)page_sz,
+                             FALSE,
+                             orig_prot);
+        }
+    }
+
+    if (restored_count > 0) {
+        PT_DEBUG_TRACE("dyld",
+                       "restored %zu un-stubbed non-lazy GOT slots in %s",
+                       restored_count,
+                       img_path);
+    }
+    free(heap_bits);
+}
+
+static void pt_restore_unstubbed_nonlazy_got_for_image(const struct mach_header *mh,
+                                                       intptr_t vmaddr_slide) {
+    if (!pt_is_bypass_enabled() || mh == NULL || !pt_is_valid_user_pointer(mh)) {
+        return;
+    }
+    const struct mach_header_64 *mh64 = (const struct mach_header_64 *)mh;
+    uint32_t cpu_sub = (uint32_t)mh64->cpusubtype & ~(uint32_t)CPU_SUBTYPE_MASK;
+    if (mh64->magic != MH_MAGIC_64 ||
+        mh64->cputype != CPU_TYPE_ARM64 ||
+        cpu_sub == CPU_SUBTYPE_ARM64E ||
+        mh64->sizeofcmds == 0 ||
+        mh64->sizeofcmds > (1U << 20)) {
+        return;
+    }
+
+    const char *img_path = dyld_image_path_containing_address((const void *)mh);
+    if (img_path == NULL) {
+        return;
+    }
+    bool cacheable = false;
+    if (pt_classify_caller_image_path(img_path, &cacheable) != PT_CALLER_APP) {
+        return;
+    }
+    if (pt_should_hide_dyld_image(img_path) ||
+        pt_is_hidden_dyld_image_header(mh) ||
+        pt_is_address_in_playtools((const void *)mh)) {
+        return;
+    }
+    if (pt_is_got_cloaked_mh(mh)) {
+        return;
+    }
+
+    uintptr_t stubs_start = 0;
+    uintptr_t stubs_size = 0;
+    uint32_t stubs_stride = 0;
+    pt_got_sec_range_t got_secs[PT_MAX_NONLAZY_GOT_SECS];
+    uint32_t got_sec_count = 0;
+    if (!pt_collect_two_table_macho_sections(mh64,
+                                             vmaddr_slide,
+                                             &stubs_start,
+                                             &stubs_size,
+                                             &stubs_stride,
+                                             got_secs,
+                                             &got_sec_count)) {
+        pt_mark_got_cloaked_mh(mh);
+        return;
+    }
+
+    for (uint32_t g = 0; g < got_sec_count; g++) {
+        pt_restore_one_nonlazy_got_section(img_path,
+                                           stubs_start,
+                                           stubs_size,
+                                           stubs_stride,
+                                           got_secs[g].start,
+                                           got_secs[g].size);
+    }
+    pt_mark_got_cloaked_mh(mh);
+}
+
+static void pt_got_cloak_on_dyld_image_added(const struct mach_header *mh, intptr_t vmaddr_slide) {
+    pt_restore_unstubbed_nonlazy_got_for_image(mh, vmaddr_slide);
+}
+#endif /* defined(__arm64__) || defined(__aarch64__) */
+
+__attribute__((visibility("hidden")))
+void pt_init_nonlazy_got_cloaking(void) {
+#if defined(__arm64__) || defined(__aarch64__)
+    if (atomic_exchange_explicit(&s_got_cloak_inited, true, memory_order_acq_rel)) {
+        return;
+    }
+    pthread_once(&s_interpose_once, pt_init_interpose_tuples);
+    _dyld_register_func_for_add_image(pt_got_cloak_on_dyld_image_added);
+#endif
+}
+
 // Define dyld platform functions for interpose
 extern int dyld_get_active_platform(void) __attribute__((weak_import));
 static int pt_dyld_get_active_platform(void) {
