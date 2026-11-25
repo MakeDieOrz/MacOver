@@ -5838,6 +5838,7 @@ static void ps_prepare_wk_configuration(id cfg) {
         id ucc = ((id (*)(id, SEL))objc_msgSend)(cfg, uccSel);
         ps_apply_playtools_scripts_to_ucc(ucc, NO);
     }
+    ps_apply_proxy_to_wk_configuration(cfg);
 }
 
 - (instancetype) pm_wk_cfg_init {
@@ -6320,6 +6321,7 @@ static void ps_finish_wkwebview_init(id initialized, id cfg) {
         NSString *defaultUA = ps_build_default_wk_user_agent(effectiveCfg);
         [initialized pm_wk_setCustomUserAgent:defaultUA];
     }
+    ps_install_default_wk_trust_delegate(initialized);
 }
 
 - (instancetype) pm_wk_initWithFrame:(CGRect)frame configuration:(id)configuration {
@@ -9419,6 +9421,7 @@ void ps_install_dynamic_system_bundle_hooks(void) {
         ps_install_uifont_hooks_if_loaded();
         pt_install_graphics_hooks_if_loaded();
         ps_install_webkit_hooks_if_loaded();
+        ps_install_webkit_network_hooks_if_loaded();
         ps_install_wk_scheme_privacy_hooks_if_loaded();
         ps_install_quicklook_hooks_if_loaded();
         ps_install_audio_session_port_hooks();

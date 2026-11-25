@@ -203,5 +203,8 @@ __attribute__((visibility("hidden"))) void pt_install_frame_rate_hooks_if_loaded
 
 // PTNetworkVirtualizer exports
 __attribute__((visibility("hidden"))) void ps_install_network_blocker_hooks(void);
+__attribute__((visibility("hidden"))) void ps_install_webkit_network_hooks_if_loaded(void);
+__attribute__((visibility("hidden"))) void ps_apply_proxy_to_wk_configuration(id cfg);
+__attribute__((visibility("hidden"))) void ps_install_default_wk_trust_delegate(id webView);
 
 #endif /* PSInternal_h */

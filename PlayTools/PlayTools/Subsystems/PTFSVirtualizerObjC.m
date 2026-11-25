@@ -3369,6 +3369,7 @@ __attribute__((visibility("hidden"))) void ps_install_webkit_hooks_if_loaded(voi
                                             @selector(pm_wk_unregisterSchemeForCustomProtocol:));
                 }
             }
+            ps_install_webkit_network_hooks_if_loaded();
         });
     }
 }

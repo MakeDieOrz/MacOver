@@ -548,6 +548,18 @@ struct AppSettingsData: Codable, Equatable {
     var enableNetworkRules = false
     var networkBlockMock200 = true
     var blockedURLPatterns: [String] = []
+    var networkProxyMode: String = "direct"
+    var externalProxyProtocol: String = "http"
+    var externalProxyHost: String = "127.0.0.1"
+    var externalProxyPort: Int = 8888
+    var mitmPort: Int = 0
+    var mitmRuntimePort: Int = 0
+    var enableCustomCertificates: Bool = false
+    var mitmAllHosts: Bool = true
+    var mitmHostPatterns: [String] = []
+    var mitmAllowPinningBypass: Bool = false
+    var hideProxyFromApp: Bool = true
+    var mitmCaptureBodies: Bool = true
     var keymappingDisabledAt: Float = 0
     var frameRateTarget: String = "adaptive"
     var reportedIOSVersion: String = "automatic"
@@ -665,6 +677,24 @@ struct AppSettingsData: Codable, Equatable {
         enableNetworkRules = (try? container.decodeIfPresent(Bool.self, forKey: .enableNetworkRules)) ?? false
         networkBlockMock200 = (try? container.decodeIfPresent(Bool.self, forKey: .networkBlockMock200)) ?? true
         blockedURLPatterns = (try? container.decodeIfPresent([String].self, forKey: .blockedURLPatterns)) ?? []
+        networkProxyMode = (try? container.decodeIfPresent(String.self, forKey: .networkProxyMode)) ?? "direct"
+        externalProxyProtocol = (try? container.decodeIfPresent(String.self, forKey: .externalProxyProtocol)) ?? "http"
+        externalProxyHost = (try? container.decodeIfPresent(String.self, forKey: .externalProxyHost)) ?? "127.0.0.1"
+        externalProxyPort = (try? container.decodeIfPresent(Int.self, forKey: .externalProxyPort)) ?? 8888
+        mitmPort = (try? container.decodeIfPresent(Int.self, forKey: .mitmPort)) ?? 0
+        mitmRuntimePort = (try? container.decodeIfPresent(Int.self, forKey: .mitmRuntimePort)) ?? 0
+        enableCustomCertificates = (try? container.decodeIfPresent(
+            Bool.self,
+            forKey: .enableCustomCertificates
+        )) ?? false
+        mitmAllHosts = (try? container.decodeIfPresent(Bool.self, forKey: .mitmAllHosts)) ?? true
+        mitmHostPatterns = (try? container.decodeIfPresent([String].self, forKey: .mitmHostPatterns)) ?? []
+        mitmAllowPinningBypass = (try? container.decodeIfPresent(
+            Bool.self,
+            forKey: .mitmAllowPinningBypass
+        )) ?? false
+        hideProxyFromApp = (try? container.decodeIfPresent(Bool.self, forKey: .hideProxyFromApp)) ?? true
+        mitmCaptureBodies = (try? container.decodeIfPresent(Bool.self, forKey: .mitmCaptureBodies)) ?? true
         keymappingDisabledAt = Self.decodeFloat(from: container, forKey: .keymappingDisabledAt, default: 0)
         frameRateTarget = (try? container.decodeIfPresent(String.self, forKey: .frameRateTarget)) ?? "adaptive"
         reportedIOSVersion = (try? container.decodeIfPresent(String.self, forKey: .reportedIOSVersion)) ?? "automatic"

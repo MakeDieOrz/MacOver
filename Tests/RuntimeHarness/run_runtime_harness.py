@@ -16,15 +16,19 @@ from __future__ import annotations
 
 import argparse
 import base64
+import concurrent.futures
 import hashlib
 import json
 import os
 import plistlib
 import shutil
+import socket
+import ssl
 import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -3951,703 +3955,48 @@ def build_mock_app(work_dir: Path, playtools_fw: Path) -> Path:
     return target_bin
 
 
-def run_scenarios(
-    target_bin: Path,
-    playtools_fw: Path,
+def parse_scenarios_spec(spec: Optional[str], max_scenario: int = 14) -> set[int]:
+    if not spec:
+        return set(range(1, max_scenario + 1))
+    selected: set[int] = set()
+    for raw_part in spec.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            bounds = part.split("-", 1)
+            try:
+                lo, hi = int(bounds[0].strip()), int(bounds[1].strip())
+            except ValueError as exc:
+                raise argparse.ArgumentTypeError(f"Invalid scenario range: {part}") from exc
+            if lo < 1 or hi > max_scenario or lo > hi:
+                raise argparse.ArgumentTypeError(f"Scenario range out of bounds (1..{max_scenario}): {part}")
+            selected.update(range(lo, hi + 1))
+        else:
+            try:
+                val = int(part)
+            except ValueError as exc:
+                raise argparse.ArgumentTypeError(f"Invalid scenario id: {part}") from exc
+            if val < 1 or val > max_scenario:
+                raise argparse.ArgumentTypeError(f"Scenario id out of bounds (1..{max_scenario}): {part}")
+            selected.add(val)
+    if not selected:
+        raise argparse.ArgumentTypeError("No scenarios selected.")
+    return selected
+
+
+def resolve_sdk_and_tool_env(playtools_fw: Path) -> tuple[dict[str, str], str, str]:
+    tool_env = os.environ.copy()
+    if "DEVELOPER_DIR" not in tool_env and Path("/Applications/Xcode.app/Contents/Developer").is_dir():
+        tool_env["DEVELOPER_DIR"] = "/Applications/Xcode.app/Contents/Developer"
+    sdk_path = run_cmd(["xcrun", "--sdk", "macosx", "--show-sdk-path"], env=tool_env).stdout.strip()
+    return tool_env, sdk_path, str(playtools_fw.parent)
+
+
+def prepare_patched_mock_app(
     work_dir: Path,
-    verbose: bool,
-) -> list[ScenarioResult]:
-    results: list[ScenarioResult] = []
-    isolated_home = work_dir / "IsolatedHome"
-    isolated_home.mkdir(parents=True, exist_ok=True)
-    settings_plist = write_test_settings_plist(isolated_home, "app.makedie.harness.mockapp")
-
-    def base_env(marker_path: Path, **extra: str) -> dict[str, str]:
-        env = os.environ.copy()
-        env["HOME"] = str(isolated_home)
-        env["CFFIXED_USER_HOME"] = str(isolated_home)
-        env["TMPDIR"] = str(work_dir / "tmp")
-        env["PLAYTOOLS_SETTINGS_PLIST"] = str(settings_plist)
-        Path(env["TMPDIR"]).mkdir(parents=True, exist_ok=True)
-        # Ensure we do not inherit Safe Mode, bypass disables, or debug trace flags from caller environment.
-        env.pop("PLAYTOOLS_SAFE_MODE", None)
-        env.pop("DISABLE_PLAYSHADOW_BYPASS", None)
-        env.pop("PLAYTOOLS_DEBUG_LOG", None)
-        env["HARNESS_PLUGIN_MARKER"] = str(marker_path)
-        env.update(extra)
-        return env
-
-    # Scenario 1: Clean launch -> plugin loads, dynamic registration succeeds, stability timer clears breadcrumb.
-    t0 = time.monotonic()
-    marker1 = work_dir / "marker_1.txt"
-    proc1 = run_cmd(
-        [
-            str(target_bin),
-            "-NSDocumentRevisionsDebugMode",
-            "YES",
-            "-ApplePersistenceIgnoreState",
-            "YES",
-            "--harness-keep",
-        ],
-        env=base_env(marker1, HARNESS_SLEEP_SECS="3.5"),
-        check=False,
-    )
-    if proc1.returncode != 0:
-        results.append(ScenarioResult(
-            name="1. Normal launch, injection & stability breadcrumb clear",
-            passed=False,
-            duration_sec=time.monotonic() - t0,
-            details=f"Exit code {proc1.returncode}\nstdout={proc1.stdout}\nstderr={proc1.stderr}",
-        ))
-        return results
-
-    info1 = parse_harness_json(proc1.stdout)
-    checks1 = [
-        info1["safeModeActive"] is False,
-        abs(float(info1["customScaler"]) - 1.75) < 1e-4,
-        marker1.exists(),
-        info1["hiddenModuleRegistered"] is True,
-        info1["hiddenIdentifierRegistered"] is True,
-        info1["hiddenClassRegistered"] is True,
-        info1["antiDetectionHidDlsym"] is True,
-        info1["antiDetectionHidSafeModeClass"] is True,
-        info1["antiDetectionHidPluginClass"] is True,
-        info1["antiDetectionHidShadowSelector"] is True,
-        info1["antiDetectionHidPluginImage"] is True,
-        info1["mh0Platform"] == 2,
-        info1["vmRegionHidPlayTools"] is True,
-        info1["mh0BaseAndSlideConsistent"] is True,
-        info1["mh0SectionLookupOK"] is True,
-        info1["argvConsistent"] is True,
-        info1["procArgCount"] == 2,
-        info1["cmAccelAvailable"] is True,
-        info1["cmGyroAvailable"] is True,
-        info1["cmDeviceMotionAvailable"] is True,
-        info1["cmSampleValid"] is True,
-        info1["cmMagImmutable"] is True,
-        info1["cmDMMagneticCalibrated"] is True,
-        info1["earlyUnameOK"] is True,
-        info1["concurrentUnameOK"] is True,
-        info1["procArgs2LeakedApple"] is False,
-        info1["procArgs2EnvClean"] is True,
-        info1["atSystemVersionInodeMatch"] is True,
-        info1["atSystemVersionProductName"] != "macOS",
-        info1["hidSystemVolumes"] is True,
-        info1["homeMountClean"] is True,
-        info1["passwdClean"] is True,
-        info1["machVmMh0Platform"] == 2,
-        int(info1["vmParsedImages"]) > 0,
-        info1["vmNonIosImages"] == 0,
-        info1["vmDirtyImports"] == 0,
-        info1["vmDladdrDiffs"] == 0,
-        info1["vmHiddenMachOCount"] == 0,
-        info1["dlsymCOwnersClean"] is True,
-        info1["ifaddrsClean"] is True,
-        int(info1["ifaddrsCount"]) > 0,
-        info1["syscallMachine"] == info1["sysctlMachine"] and len(info1["syscallMachine"]) > 0,
-        info1["syscallWideArityOK"] is True,
-        info1["syscallStatHidSysApps"] is True,
-        info1["fsHidMacRoots"] is True,
-        info1["availIOS16"] is True,
-        info1["uiColorWellLoaded"] is True,
-        info1["uiColorWellInClassList"] is True,
-        info1["hidPCInstallGen"] is True,
-        info1["swapUsageBlocked"] is True,
-        info1["csopsStringAndBlobOK"] is True,
-        0 < int(info1["l2CacheSize"]) <= (16 << 20),
-        info1["dscHidAppKit"] is True,
-        (not info1["appAttestLoaded"]) or (
-            info1["appAttestSupported"] is False and info1["appAttestGenKeyUnsupported"] is True
-        ),
-        (not info1["dcDeviceLoaded"]) or (
-            info1["dcDeviceSupported"] is False and info1["dcDeviceTokenUnsupported"] is True
-        ),
-        info1["breadcrumbExistsAtStart"] is True,
-        info1["breadcrumbExistsAfterSleep"] is False,
-    ]
-    results.append(ScenarioResult(
-        name="1. Normal launch, injection & stability breadcrumb clear",
-        passed=all(checks1),
-        duration_sec=time.monotonic() - t0,
-        details=json.dumps(info1, sort_keys=True),
-    ))
-    if verbose:
-        print("  Scenario 1 payload:", info1)
-
-    # Scenario 2: Simulated early crash (<3s) -> next launch activates Safe Mode and blocks user plugins.
-    t1 = time.monotonic()
-    marker_crash = work_dir / "marker_crash.txt"
-    proc_crash = run_cmd(
-        [str(target_bin)],
-        env=base_env(marker_crash, HARNESS_SIMULATE_CRASH="1"),
-        check=False,
-    )
-    crumb_path = Path(info1["stateDir"]) / ".launching_in_progress"
-    marker2 = work_dir / "marker_2_safemode.txt"
-    proc2 = run_cmd(
-        [str(target_bin)],
-        env=base_env(marker2),
-        check=False,
-    )
-    if proc2.returncode != 0:
-        results.append(ScenarioResult(
-            name="2. Early crash post-mortem detection -> Safe Mode activation",
-            passed=False,
-            duration_sec=time.monotonic() - t1,
-            details=f"Recovery launch failed with {proc2.returncode}\nstderr={proc2.stderr}",
-        ))
-        return results
-
-    info2 = parse_harness_json(proc2.stdout)
-    checks2 = [
-        proc_crash.returncode == 134,
-        info2["safeModeActive"] is True,
-        info2["safeModeMarkerExists"] is True,
-        info2["breadcrumbExistsAtStart"] is False,
-        info2["hiddenModuleRegistered"] is False,
-        info2["hiddenClassRegistered"] is False,
-        not crumb_path.exists(),
-        not marker2.exists(),
-        abs(float(info2["customScaler"]) - 1.0) < 1e-6,
-    ]
-    results.append(ScenarioResult(
-        name="2. Early crash post-mortem detection -> Safe Mode activation",
-        passed=all(checks2),
-        duration_sec=time.monotonic() - t1,
-        details=json.dumps({"crashCode": proc_crash.returncode, "pluginLoadedInSafeMode": marker2.exists(), **info2}, sort_keys=True),
-    ))
-    if verbose:
-        print("  Scenario 2 payload:", info2)
-
-    # Scenario 3: Subsequent launch after Safe Mode recovers to normal operation & loads plugins again.
-    t2 = time.monotonic()
-    marker3 = work_dir / "marker_3_recovered.txt"
-    proc3 = run_cmd(
-        [str(target_bin)],
-        env=base_env(marker3, HARNESS_GRACEFUL_EXIT="1"),
-        check=False,
-    )
-    if proc3.returncode != 0:
-        results.append(ScenarioResult(
-            name="3. Post-Safe-Mode recovery & plugin reload",
-            passed=False,
-            duration_sec=time.monotonic() - t2,
-            details=f"Exit code {proc3.returncode}\nstderr={proc3.stderr}",
-        ))
-        return results
-
-    info3 = parse_harness_json(proc3.stdout)
-    checks3 = [
-        info3["safeModeActive"] is False,
-        abs(float(info3["customScaler"]) - 1.75) < 1e-4,
-        marker3.exists(),
-        info3["hiddenModuleRegistered"] is True,
-        info3["hiddenClassRegistered"] is True,
-        not crumb_path.exists(),
-    ]
-    results.append(ScenarioResult(
-        name="3. Post-Safe-Mode recovery & plugin reload",
-        passed=all(checks3),
-        duration_sec=time.monotonic() - t2,
-        details=json.dumps({"pluginLoadedAfterRecovery": marker3.exists(), **info3}, sort_keys=True),
-    ))
-    if verbose:
-        print("  Scenario 3 payload:", info3)
-
-    # Scenario 4: PLAYTOOLS_DEBUG_LOG=1 emits [PlayTools] traces while anti-detection remains intact.
-    t3 = time.monotonic()
-    marker4 = work_dir / "marker_4_debuglog.txt"
-    proc4 = run_cmd(
-        [str(target_bin)],
-        env=base_env(marker4, HARNESS_GRACEFUL_EXIT="1", PLAYTOOLS_DEBUG_LOG="1"),
-        check=False,
-    )
-    if proc4.returncode != 0:
-        results.append(ScenarioResult(
-            name="4. PLAYTOOLS_DEBUG_LOG=1 C/ObjC trace output & intact anti-detection",
-            passed=False,
-            duration_sec=time.monotonic() - t3,
-            details=f"Exit code {proc4.returncode}\nstderr={proc4.stderr}",
-        ))
-        return results
-
-    info4 = parse_harness_json(proc4.stdout)
-    debug_lines = [line for line in proc4.stderr.splitlines() if line.startswith("[PlayTools] [")]
-    has_spoofer_trace = any("[PlayTools] [spoofer]" in line for line in debug_lines)
-    has_dyld_trace = any("[PlayTools] [dyld]" in line for line in debug_lines)
-    checks4 = [
-        len(debug_lines) >= 2,
-        has_spoofer_trace,
-        has_dyld_trace,
-        marker4.exists(),
-        info4["safeModeActive"] is False,
-        info4["antiDetectionHidDlsym"] is True,
-        info4["antiDetectionHidSafeModeClass"] is True,
-        info4["antiDetectionHidPluginClass"] is True,
-        info4["antiDetectionHidPluginImage"] is True,
-        not crumb_path.exists(),
-    ]
-    results.append(ScenarioResult(
-        name="4. PLAYTOOLS_DEBUG_LOG=1 C/ObjC trace output & intact anti-detection",
-        passed=all(checks4),
-        duration_sec=time.monotonic() - t3,
-        details=json.dumps({
-            "debugTraceCount": len(debug_lines),
-            "sampleTraceLines": debug_lines[:5],
-            **info4,
-        }, sort_keys=True),
-    ))
-    if verbose:
-        print("  Scenario 4 payload:", {"debugTraceCount": len(debug_lines), **info4})
-
-    # Scenario 5: runtime settings (reportedIOSVersion compat18_3, fixed30, inverseScreenValues, windowFixMethod)
-    # + one-shot Safe Mode revert without mutating plist on disk.
-    t4 = time.monotonic()
-    isolated_home_5 = work_dir / "IsolatedHome5"
-    isolated_home_5.mkdir(parents=True, exist_ok=True)
-    target_dir_5 = isolated_home_5 / "Library/Containers/app.makedie.MacOver/PlayTools"
-    target_dir_5.mkdir(parents=True, exist_ok=True)
-    plist5 = target_dir_5 / "app.makedie.harness.mockapp.plist"
-    with open(plist5, "wb") as fp:
-        plistlib.dump(
-            {
-                "customScaler": 1.75,
-                "inverseScreenValues": True,
-                "windowFixMethod": 1,
-                "frameRateTarget": "fixed30",
-                "reportedIOSVersion": "compat18_3",
-            },
-            fp,
-        )
-    plist5_bytes_before = plist5.read_bytes()
-
-    def env5(marker_path: Path, **extra: str) -> dict[str, str]:
-        env = base_env(marker_path, **extra)
-        env["HOME"] = str(isolated_home_5)
-        env["CFFIXED_USER_HOME"] = str(isolated_home_5)
-        env["PLAYTOOLS_SETTINGS_PLIST"] = str(plist5)
-        return env
-
-    marker5a = work_dir / "marker_5a.txt"
-    proc5a = run_cmd([str(target_bin)], env=env5(marker5a, HARNESS_GRACEFUL_EXIT="1"), check=False)
-    marker5b = work_dir / "marker_5b.txt"
-    proc5b = run_cmd(
-        [str(target_bin)],
-        env=env5(marker5b, PLAYTOOLS_SAFE_MODE="1", HARNESS_GRACEFUL_EXIT="1"),
-        check=False,
-    )
-    if proc5a.returncode != 0 or proc5b.returncode != 0:
-        results.append(ScenarioResult(
-            name="5. compat18_3 / fixed30 clamping & one-shot Safe Mode revert",
-            passed=False,
-            duration_sec=time.monotonic() - t4,
-            details=(
-                f"Sub-run rc=({proc5a.returncode}, {proc5b.returncode})\n"
-                f"5a stdout={proc5a.stdout}\n5a stderr={proc5a.stderr}\n"
-                f"5b stdout={proc5b.stdout}\n5b stderr={proc5b.stderr}"
-            ),
-        ))
-        return results
-
-    info5a = parse_harness_json(proc5a.stdout)
-    info5b = parse_harness_json(proc5b.stdout)
-    plist5_bytes_after = plist5.read_bytes()
-    checks5 = [
-        info5a["safeModeActive"] is False,
-        info5a["reportedIOSVersion"] == "compat18_3",
-        info5a["osVersionMajor"] == 18,
-        info5a["osVersionMinor"] == 3,
-        info5a["uiDeviceSystemVersion"] == "18.3",
-        info5a["sysctlOSProductVersion"] == "18.3",
-        info5a["sysctlOSVersion"] == "22D63",
-        info5a["targetFrameRateHz"] == 30,
-        0.0 < float(info5a["displayLinkClampedMaxHz"]) <= 30.0,
-        info5a["displayLinkClampedLegacyFPS"] == 30,
-        info5a["inverseScreenValues"] is True,
-        info5a["windowFixMethod"] == 1,
-        abs(float(info5a["customScaler"]) - 1.75) < 1e-4,
-        marker5a.exists(),
-        info5b["safeModeActive"] is True,
-        info5b["targetFrameRateHz"] == 0,
-        info5b["inverseScreenValues"] is False,
-        info5b["windowFixMethod"] == 0,
-        abs(float(info5b["customScaler"]) - 1.0) < 1e-4,
-        info5b["reportedIOSVersion"] == "automatic",
-        info5b["osVersionMajor"] != 18,
-        float(info5b["displayLinkClampedMaxHz"]) >= 119.0,
-        info5b["displayLinkClampedLegacyFPS"] == 120,
-        not marker5b.exists(),
-        plist5_bytes_after == plist5_bytes_before,
-    ]
-    results.append(ScenarioResult(
-        name="5. compat18_3 / fixed30 clamping & one-shot Safe Mode revert",
-        passed=all(checks5),
-        duration_sec=time.monotonic() - t4,
-        details=json.dumps(
-            {
-                "normal": info5a,
-                "safeMode": info5b,
-                "plistUnchanged": plist5_bytes_after == plist5_bytes_before,
-            },
-            sort_keys=True,
-        ),
-    ))
-    if verbose:
-        print("  Scenario 5 normal:", info5a)
-        print("  Scenario 5 safeMode:", info5b)
-
-    # Scenario 6: compat13_7 + iPhone12,5 + aligned Darwin 19.6.0 / xnu-6153 + App Attest isSupported=NO
-    t5 = time.monotonic()
-    isolated_home_6 = work_dir / "IsolatedHome6"
-    isolated_home_6.mkdir(parents=True, exist_ok=True)
-    target_dir_6 = isolated_home_6 / "Library/Containers/app.makedie.MacOver/PlayTools"
-    target_dir_6.mkdir(parents=True, exist_ok=True)
-    plist6 = target_dir_6 / "app.makedie.harness.mockapp.plist"
-    with open(plist6, "wb") as fp:
-        plistlib.dump(
-            {
-                "reportedIOSVersion": "compat13_7",
-                "iosDeviceModel": "iPhone12,5",
-            },
-            fp,
-        )
-    plist6_bytes_before = plist6.read_bytes()
-
-    def env6(marker_path: Path, **extra: str) -> dict[str, str]:
-        env = base_env(marker_path, **extra)
-        env["HOME"] = str(isolated_home_6)
-        env["CFFIXED_USER_HOME"] = str(isolated_home_6)
-        env["PLAYTOOLS_SETTINGS_PLIST"] = str(plist6)
-        return env
-
-    marker6a = work_dir / "marker_6a.txt"
-    proc6a = run_cmd([str(target_bin)], env=env6(marker6a, HARNESS_GRACEFUL_EXIT="1"), check=False)
-    marker6b = work_dir / "marker_6b.txt"
-    proc6b = run_cmd(
-        [str(target_bin)],
-        env=env6(marker6b, PLAYTOOLS_SAFE_MODE="1", HARNESS_GRACEFUL_EXIT="1"),
-        check=False,
-    )
-    if proc6a.returncode != 0 or proc6b.returncode != 0:
-        results.append(ScenarioResult(
-            name="6. compat13_7 / iPhone12,5 / 19.6.0 / App Attest & Safe Mode revert",
-            passed=False,
-            duration_sec=time.monotonic() - t5,
-            details=(
-                f"Sub-run rc=({proc6a.returncode}, {proc6b.returncode})\n"
-                f"6a stdout={proc6a.stdout}\n6a stderr={proc6a.stderr}\n"
-                f"6b stdout={proc6b.stdout}\n6b stderr={proc6b.stderr}"
-            ),
-        ))
-        return results
-
-    info6a = parse_harness_json(proc6a.stdout)
-    info6b = parse_harness_json(proc6b.stdout)
-    plist6_bytes_after = plist6.read_bytes()
-    checks6 = [
-        info6a["safeModeActive"] is False,
-        info6a["reportedIOSVersion"] == "compat13_7",
-        info6a["osVersionMajor"] == 13,
-        info6a["osVersionMinor"] == 7,
-        info6a["uiDeviceSystemVersion"] == "13.7",
-        info6a["sysctlOSProductVersion"] == "13.7",
-        info6a["sysctlOSVersion"] == "17H35",
-        info6a["sysctlOSRelease"] == "19.6.0",
-        info6a["unameRelease"] == "19.6.0",
-        "xnu-6153" in info6a["sysctlVersion"],
-        "xnu-6153" in info6a["unameVersion"],
-        info6a["sysctlMachine"] == "iPhone12,5",
-        info6a["sysctlMibMachine"] == "iPhone12,5",
-        info6a["syscallMachine"] == "iPhone12,5",
-        info6a["syscallWideArityOK"] is True,
-        info6a["syscallStatHidSysApps"] is True,
-        info6a["fsHidMacRoots"] is True,
-        info6a["unameMachine"] == "iPhone12,5",
-        0.0 < float(info6a["displayLinkClampedMaxHz"]) <= 60.0,
-        info6a["displayLinkClampedLegacyFPS"] == 60,
-        (not info6a["appAttestLoaded"]) or (info6a["appAttestSupported"] is False),
-        info6a["appAttestLoaded"] is False,
-        info6a["availIOS16"] is False,
-        info6a["uiColorWellLoaded"] is False,
-        info6a["uiColorWellInClassList"] is False,
-        marker6a.exists(),
-        info6b["safeModeActive"] is True,
-        info6b["reportedIOSVersion"] == "automatic",
-        info6b["osVersionMajor"] != 13,
-        info6b["availIOS16"] is True,
-        info6b["uiColorWellLoaded"] is True,
-        info6b["uiColorWellInClassList"] is True,
-        info6b["sysctlOSRelease"] != "19.6.0",
-        info6b["unameRelease"] != "19.6.0",
-        not marker6b.exists(),
-        plist6_bytes_after == plist6_bytes_before,
-    ]
-    results.append(ScenarioResult(
-        name="6. compat13_7 / iPhone12,5 / 19.6.0 / App Attest & Safe Mode revert",
-        passed=all(checks6),
-        duration_sec=time.monotonic() - t5,
-        details=json.dumps(
-            {
-                "normal": info6a,
-                "safeMode": info6b,
-                "plistUnchanged": plist6_bytes_after == plist6_bytes_before,
-            },
-            sort_keys=True,
-        ),
-    ))
-    if verbose:
-        print("  Scenario 6 normal:", info6a)
-        print("  Scenario 6 safeMode:", info6b)
-
-    # Scenario 7: AppBackups read-only virtualization, direct-probe hiding, Safe Mode bypass, absent backup safety
-    t6 = time.monotonic()
-    isolated_home_7 = work_dir / "IsolatedHome7"
-    backup_dir_7 = isolated_home_7 / "Library/Containers/app.makedie.MacOver/AppBackups/app.makedie.harness.mockapp"
-    backup_dir_7.mkdir(parents=True, exist_ok=True)
-    backup_prov_7 = backup_dir_7 / "embedded.mobileprovision"
-    backup_exec_7 = backup_dir_7 / "executable"
-    backup_prov_bytes = b"MOCK_BACKUP_MOBILEPROVISION_101"
-    backup_exec_bytes = b"BACKUP_EXEC_PAYLOAD_101"
-    backup_prov_7.write_bytes(backup_prov_bytes)
-    backup_exec_7.write_bytes(backup_exec_bytes)
-    os.chmod(backup_exec_7, 0o755)
-    with open(backup_dir_7 / "Info.plist", "wb") as fp:
-        plistlib.dump(
-            {
-                "CFBundleDevelopmentRegion": "en",
-                "CFBundleExecutable": "MockTarget",
-                "CFBundleIdentifier": "app.makedie.harness.mockapp",
-                "CFBundleInfoDictionaryVersion": "6.0",
-                "CFBundleName": "MockTarget",
-                "CFBundlePackageType": "APPL",
-                "CFBundleShortVersionString": "1.0",
-                "CFBundleVersion": "1",
-            },
-            fp,
-        )
-    with open(backup_dir_7 / "manifest.plist", "wb") as fp:
-        plistlib.dump(
-            {
-                "CFBundleIdentifier": "app.makedie.harness.mockapp",
-                "CFBundleShortVersionString": "1.0",
-                "CFBundleVersion": "1",
-                "PCInstallGeneration": "HARNESS-GEN-101",
-            },
-            fp,
-        )
-    unmanifested_dir_7 = isolated_home_7 / "UnmanifestedBackups"
-    unmanifested_dir_7.mkdir(parents=True, exist_ok=True)
-    (unmanifested_dir_7 / "embedded.mobileprovision").write_bytes(backup_prov_bytes)
-    (unmanifested_dir_7 / "executable").write_bytes(backup_exec_bytes)
-    plist7 = write_test_settings_plist(isolated_home_7, "app.makedie.harness.mockapp")
-
-    def env7(marker_path: Path, backup_override: Path, **extra: str) -> dict[str, str]:
-        env = base_env(marker_path, **extra)
-        env["HOME"] = str(isolated_home_7)
-        env["CFFIXED_USER_HOME"] = str(isolated_home_7)
-        env["PLAYTOOLS_SETTINGS_PLIST"] = str(plist7)
-        env["PLAYTOOLS_TEST_APP_BACKUPS_DIR"] = str(backup_override)
-        return env
-
-    marker7a = work_dir / "marker_7a.txt"
-    direct_probe_b64 = base64.b64encode(str(backup_prov_7).encode("utf-8")).decode("ascii")
-    proc7a = run_cmd(
-        [str(target_bin)],
-        env=env7(
-            marker7a,
-            backup_dir_7,
-            HARNESS_DIRECT_PROBE_B64=direct_probe_b64,
-            HARNESS_GRACEFUL_EXIT="1",
-        ),
-        check=False,
-    )
-    marker7b = work_dir / "marker_7b.txt"
-    proc7b = run_cmd(
-        [str(target_bin)],
-        env=env7(
-            marker7b,
-            backup_dir_7,
-            PLAYTOOLS_SAFE_MODE="1",
-            HARNESS_GRACEFUL_EXIT="1",
-        ),
-        check=False,
-    )
-    marker7c = work_dir / "marker_7c.txt"
-    proc7c = run_cmd(
-        [str(target_bin)],
-        env=env7(
-            marker7c,
-            isolated_home_7 / "NonExistentBackups",
-            HARNESS_GRACEFUL_EXIT="1",
-        ),
-        check=False,
-    )
-    marker7d = work_dir / "marker_7d.txt"
-    proc7d = run_cmd(
-        [str(target_bin)],
-        env=env7(
-            marker7d,
-            unmanifested_dir_7,
-            HARNESS_GRACEFUL_EXIT="1",
-        ),
-        check=False,
-    )
-    if (
-        proc7a.returncode != 0
-        or proc7b.returncode != 0
-        or proc7c.returncode != 0
-        or proc7d.returncode != 0
-    ):
-        results.append(ScenarioResult(
-            name="7. AppBackups read-only virtualization & direct-probe hiding",
-            passed=False,
-            duration_sec=time.monotonic() - t6,
-            details=(
-                f"Sub-run rc=({proc7a.returncode}, {proc7b.returncode}, "
-                f"{proc7c.returncode}, {proc7d.returncode})\n"
-                f"7a stdout={proc7a.stdout}\n7a stderr={proc7a.stderr}\n"
-                f"7b stdout={proc7b.stdout}\n7b stderr={proc7b.stderr}\n"
-                f"7c stdout={proc7c.stdout}\n7c stderr={proc7c.stderr}\n"
-                f"7d stdout={proc7d.stdout}\n7d stderr={proc7d.stderr}"
-            ),
-        ))
-        return results
-
-    info7a = parse_harness_json(proc7a.stdout)
-    info7b = parse_harness_json(proc7b.stdout)
-    info7c = parse_harness_json(proc7c.stdout)
-    info7d = parse_harness_json(proc7d.stdout)
-    checks7 = [
-        info7a["safeModeActive"] is False,
-        info7a["provPath"].endswith("/embedded.mobileprovision"),
-        "/var/containers/Bundle/Application/" in info7a["provPath"],
-        info7a["provURLPath"] == info7a["provPath"],
-        info7a["cfProvURLPath"] == info7a["provPath"],
-        info7a["provFMExists"] is True,
-        info7a["provNSDataText"] == "MOCK_BACKUP_MOBILEPROVISION_101",
-        info7a["provNSStringText"] == "MOCK_BACKUP_MOBILEPROVISION_101",
-        info7a["provPosixText"] == "MOCK_BACKUP_MOBILEPROVISION_101",
-        info7a["provGetPath"] == info7a["provPath"],
-        info7a["provRealpath"] == info7a["provPath"],
-        info7a["provWriteAccessAllowed"] is False,
-        info7a["execPosixPrefix"] == "BACKUP_EXEC_PAYLOAD_101",
-        info7a["execGetPath"] == info7a["bundleExecutablePath"],
-        "/var/containers/Bundle/Application/" in info7a["bundleExecutablePath"],
-        info7a["directBackupStatBlocked"] is True,
-        info7a["directBackupOpenBlocked"] is True,
-        info7a["directBackupFMBlocked"] is True,
-        backup_prov_7.read_bytes() == backup_prov_bytes,
-        backup_exec_7.read_bytes() == backup_exec_bytes,
-        info7b["safeModeActive"] is True,
-        info7b["provPath"] == "",
-        info7b["cfProvURLPath"] == "",
-        info7b["provFMExists"] is False,
-        info7b["provPosixText"] == "",
-        info7b["execPosixPrefix"] != "BACKUP_EXEC_PAYLOAD_101",
-        info7c["safeModeActive"] is False,
-        info7c["provPath"] == "",
-        info7c["provURLPath"] == "",
-        info7c["cfProvURLPath"] == "",
-        info7c["provFMExists"] is False,
-        info7c["provPosixText"] == "",
-        info7c["execPosixPrefix"] != "BACKUP_EXEC_PAYLOAD_101",
-        info7d["safeModeActive"] is False,
-        info7d["provPath"] == "",
-        info7d["provFMExists"] is False,
-        info7d["provPosixText"] == "",
-        info7d["execPosixPrefix"] != "BACKUP_EXEC_PAYLOAD_101",
-    ]
-    results.append(ScenarioResult(
-        name="7. AppBackups read-only virtualization & direct-probe hiding",
-        passed=all(checks7),
-        duration_sec=time.monotonic() - t6,
-        details=json.dumps(
-            {
-                "withBackups": info7a,
-                "safeMode": info7b,
-                "absentBackups": info7c,
-                "unmanifestedBackups": info7d,
-            },
-            sort_keys=True,
-        ),
-    ))
-    if verbose:
-        print("  Scenario 7 withBackups:", info7a)
-        print("  Scenario 7 safeMode:", info7b)
-        print("  Scenario 7 absentBackups:", info7c)
-
-    # Scenario 8: Original iOS Mach-O executable in AppBackups -> vm_read_overwrite(mh0) matches DiskHeader byte-for-byte.
-    t7 = time.monotonic()
-    isolated_home_8 = work_dir / "IsolatedHome8"
-    backup_dir_8 = isolated_home_8 / "Library/Containers/app.makedie.MacOver/AppBackups/app.makedie.harness.mockapp"
-    backup_dir_8.mkdir(parents=True, exist_ok=True)
-    raw_exec_bytes = bytearray(target_bin.read_bytes())
-    # Patch first LC_BUILD_VERSION platform=6 (Catalyst) -> 2 (iOS) in the synthetic backup binary so it differs from Catalyst disk/mem.
-    lc_pos = 32
-    import struct as _st
-    magic_val, _, _, _, ncmds, sizeofcmds, _, _ = _st.unpack_from("<IIIIIIII", raw_exec_bytes, 0)
-    assert magic_val == 0xFEEDFACF
-    patched_backup_plat = False
-    for _ in range(ncmds):
-        if lc_pos + 8 > 32 + sizeofcmds:
-            break
-        cmd, cmdsize = _st.unpack_from("<II", raw_exec_bytes, lc_pos)
-        if cmd == 0x32 and cmdsize >= 24:  # LC_BUILD_VERSION
-            _st.pack_into("<I", raw_exec_bytes, lc_pos + 8, 2)  # PLATFORM_IOS
-            patched_backup_plat = True
-            break
-        lc_pos += cmdsize
-    assert patched_backup_plat
-    backup_exec_8 = backup_dir_8 / "executable"
-    backup_exec_8.write_bytes(bytes(raw_exec_bytes))
-    os.chmod(backup_exec_8, 0o755)
-    with open(backup_dir_8 / "manifest.plist", "wb") as fp:
-        plistlib.dump(
-            {
-                "CFBundleIdentifier": "app.makedie.harness.mockapp",
-                "CFBundleShortVersionString": "1.0",
-                "CFBundleVersion": "1",
-                "PCInstallGeneration": "HARNESS-GEN-101",
-            },
-            fp,
-        )
-    plist8 = write_test_settings_plist(isolated_home_8, "app.makedie.harness.mockapp")
-    marker8a = work_dir / "marker_8a.txt"
-    env8 = base_env(
-        marker8a,
-        HOME=str(isolated_home_8),
-        CFFIXED_USER_HOME=str(isolated_home_8),
-        PLAYTOOLS_SETTINGS_PLIST=str(plist8),
-        PLAYTOOLS_TEST_APP_BACKUPS_DIR=str(backup_dir_8),
-        HARNESS_GRACEFUL_EXIT="1",
-    )
-    proc8a = run_cmd([str(target_bin)], env=env8, check=False)
-    if proc8a.returncode != 0:
-        results.append(ScenarioResult(
-            name="8. AppBackups Mach-O MemoryHeader vs DiskHeader byte parity",
-            passed=False,
-            duration_sec=time.monotonic() - t7,
-            details=f"Exit code {proc8a.returncode}\nstdout={proc8a.stdout}\nstderr={proc8a.stderr}",
-        ))
-        return results
-    info8a = parse_harness_json(proc8a.stdout)
-    checks8 = [
-        info8a["safeModeActive"] is False,
-        info8a["diskHeaderPlatform"] == 2,
-        info8a["machVmMh0Platform"] == 2,
-        info8a["diskHeaderMatchesMemory"] is True,
-    ]
-    results.append(ScenarioResult(
-        name="8. AppBackups Mach-O MemoryHeader vs DiskHeader byte parity",
-        passed=all(checks8),
-        duration_sec=time.monotonic() - t7,
-        details=json.dumps(info8a, sort_keys=True),
-    ))
-    if verbose:
-        print("  Scenario 8 payload:", info8a)
-
-    # Scenario 9: Opt-in inline ARM64 svc #0x80 brk patching + EXC_BREAKPOINT dispatch + Safe Mode passthrough.
-    t8 = time.monotonic()
+    target_bin: Path,
+) -> tuple[Path, str, str, list[dict[str, int]], Path]:
     patched_app_dir = work_dir / "MockTargetPatched.app"
     shutil.copytree(target_bin.parent, patched_app_dir, symlinks=True)
     patched_bin = patched_app_dir / "MockTarget"
@@ -4724,13 +4073,10 @@ def run_scenarios(
         tool_env["DEVELOPER_DIR"] = "/Applications/Xcode.app/Contents/Developer"
     run_cmd(["codesign", "--force", "--deep", "--sign", "-", str(patched_app_dir)], env=tool_env)
 
-    isolated_home_9 = work_dir / "IsolatedHome9"
-    isolated_home_9.mkdir(parents=True, exist_ok=True)
-    plist9 = write_test_settings_plist(isolated_home_9, "app.makedie.harness.mockapp")
-    manifest_dir_9 = isolated_home_9 / "Library/Containers/app.makedie.MacOver/SVCPatches"
-    manifest_dir_9.mkdir(parents=True, exist_ok=True)
-    manifest_path_9 = manifest_dir_9 / "app.makedie.harness.mockapp.json"
-    manifest_path_9.write_text(
+    shared_manifest_dir = work_dir / "SharedSVCPatch"
+    shared_manifest_dir.mkdir(parents=True, exist_ok=True)
+    shared_manifest_path = shared_manifest_dir / "app.makedie.harness.mockapp.json"
+    shared_manifest_path.write_text(
         json.dumps(
             {
                 "schemaVersion": 1,
@@ -4750,328 +4096,1096 @@ def run_scenarios(
         ) + "\n",
         encoding="utf-8",
     )
+    return patched_bin, orig_sha, patched_sha, svc_sites, shared_manifest_path
 
-    def env9(marker_path: Path, **extra: str) -> dict[str, str]:
-        env = base_env(marker_path, **extra)
-        env["HOME"] = str(isolated_home_9)
-        env["CFFIXED_USER_HOME"] = str(isolated_home_9)
-        env["PLAYTOOLS_SETTINGS_PLIST"] = str(plist9)
-        env["PLAYTOOLS_TEST_SVC_MANIFEST"] = str(manifest_path_9)
+
+def run_scenarios(
+    target_bin: Optional[Path],
+    playtools_fw: Path,
+    work_dir: Path,
+    verbose: bool,
+    selected_scenarios: Optional[set[int]] = None,
+    jobs: int = 1,
+) -> list[ScenarioResult]:
+    selected = selected_scenarios if selected_scenarios is not None else set(range(1, 15))
+    results: list[ScenarioResult] = []
+    isolated_home = work_dir / "IsolatedHome"
+    isolated_home.mkdir(parents=True, exist_ok=True)
+    settings_plist = write_test_settings_plist(isolated_home, "app.makedie.harness.mockapp")
+
+    def make_env(
+        home_dir: Path,
+        plist_path: Path,
+        tmp_dir: Path,
+        marker_path: Path,
+        **extra: str,
+    ) -> dict[str, str]:
+        env = os.environ.copy()
+        env["HOME"] = str(home_dir)
+        env["CFFIXED_USER_HOME"] = str(home_dir)
+        env["TMPDIR"] = str(tmp_dir)
+        env["PLAYTOOLS_SETTINGS_PLIST"] = str(plist_path)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        # Ensure we do not inherit Safe Mode, bypass disables, or debug trace flags from caller environment.
+        env.pop("PLAYTOOLS_SAFE_MODE", None)
+        env.pop("DISABLE_PLAYSHADOW_BYPASS", None)
+        env.pop("PLAYTOOLS_DEBUG_LOG", None)
+        env["HARNESS_PLUGIN_MARKER"] = str(marker_path)
+        env.update(extra)
         return env
 
-    marker9a = work_dir / "marker_9a.txt"
-    svc_probe_b64 = base64.b64encode(str(manifest_path_9).encode("utf-8")).decode("ascii")
-    proc9a = run_cmd(
-        [str(patched_bin)],
-        env=env9(
-            marker9a,
-            HARNESS_TEST_INLINE_SVC="1",
-            HARNESS_DIRECT_PROBE_B64=svc_probe_b64,
-            HARNESS_GRACEFUL_EXIT="1",
-        ),
-        check=False,
-    )
-    marker9b = work_dir / "marker_9b.txt"
-    proc9b = run_cmd(
-        [str(patched_bin)],
-        env=env9(
-            marker9b,
-            HARNESS_TEST_INLINE_SVC="1",
-            PLAYTOOLS_SAFE_MODE="1",
-            HARNESS_GRACEFUL_EXIT="1",
-        ),
-        check=False,
-    )
-    if proc9a.returncode != 0 or proc9b.returncode != 0:
-        results.append(ScenarioResult(
-            name="9. Opt-in inline svc #0x80 interception & Safe Mode passthrough",
-            passed=False,
-            duration_sec=time.monotonic() - t8,
-            details=(
-                f"Sub-run rc=({proc9a.returncode}, {proc9b.returncode})\n"
-                f"9a stdout={proc9a.stdout}\n9a stderr={proc9a.stderr}\n"
-                f"9b stdout={proc9b.stdout}\n9b stderr={proc9b.stderr}"
-            ),
-        ))
-        return results
+    def base_env(marker_path: Path, **extra: str) -> dict[str, str]:
+        return make_env(isolated_home, settings_plist, work_dir / "tmp_chain", marker_path, **extra)
 
-    info9a = parse_harness_json(proc9a.stdout)
-    info9b = parse_harness_json(proc9b.stdout)
-    checks9 = [
-        info9a["safeModeActive"] is False,
-        info9a["inlineSvcMachine"] == info9a["sysctlMachine"] and len(info9a["inlineSvcMachine"]) > 0,
-        info9a["inlineSvcStatHidSysApps"] is True,
-        info9a["inlineSvcSysVerIsIOS"] is True,
-        info9a["inlineSvcCodeReadRestored"] is True,
-        info9a["directBackupStatBlocked"] is True,
-        info9a["directBackupOpenBlocked"] is True,
-        info9a["directBackupFMBlocked"] is True,
-        info9b["safeModeActive"] is True,
-        info9b["inlineSvcStatHidSysApps"] is False,
-        len(info9b["inlineSvcMachine"]) > 0 and info9b["inlineSvcMachine"] != info9a["sysctlMachine"],
-    ]
-    results.append(ScenarioResult(
-        name="9. Opt-in inline svc #0x80 interception & Safe Mode passthrough",
-        passed=all(checks9),
-        duration_sec=time.monotonic() - t8,
-        details=json.dumps({"siteCount": len(svc_sites), "normal": info9a, "safeMode": info9b}, sort_keys=True),
-    ))
-    if verbose:
-        print("  Scenario 9 normal:", info9a)
-        print("  Scenario 9 safeMode:", info9b)
+    patched_info: Optional[tuple[Path, str, str, list[dict[str, int]], Path]] = None
+    if selected & {9, 10, 11, 12}:
+        assert target_bin is not None
+        patched_info = prepare_patched_mock_app(work_dir, target_bin)
+
+    def run_chain_1_to_3() -> list[tuple[int, ScenarioResult, list[str]]]:
+        assert target_bin is not None
+        chain_items: list[tuple[int, ScenarioResult, list[str]]] = []
+        max_needed = max(selected & {1, 2, 3})
+
+        # Scenario 1: Clean launch -> plugin loads, dynamic registration succeeds, stability timer clears breadcrumb.
+        t0 = time.monotonic()
+        marker1 = work_dir / "marker_1.txt"
+        proc1 = run_cmd(
+            [
+                str(target_bin),
+                "-NSDocumentRevisionsDebugMode",
+                "YES",
+                "-ApplePersistenceIgnoreState",
+                "YES",
+                "--harness-keep",
+            ],
+            env=base_env(marker1, HARNESS_SLEEP_SECS="3.5"),
+            check=False,
+        )
+        if proc1.returncode != 0:
+            res1 = ScenarioResult(
+                name="1. Normal launch, injection & stability breadcrumb clear",
+                passed=False,
+                duration_sec=time.monotonic() - t0,
+                details=f"Exit code {proc1.returncode}\nstdout={proc1.stdout}\nstderr={proc1.stderr}",
+            )
+            chain_items.append((1, res1, []))
+            return chain_items
+
+        info1 = parse_harness_json(proc1.stdout)
+        checks1 = [
+            info1["safeModeActive"] is False,
+            abs(float(info1["customScaler"]) - 1.75) < 1e-4,
+            marker1.exists(),
+            info1["hiddenModuleRegistered"] is True,
+            info1["hiddenIdentifierRegistered"] is True,
+            info1["hiddenClassRegistered"] is True,
+            info1["antiDetectionHidDlsym"] is True,
+            info1["antiDetectionHidSafeModeClass"] is True,
+            info1["antiDetectionHidPluginClass"] is True,
+            info1["antiDetectionHidShadowSelector"] is True,
+            info1["antiDetectionHidPluginImage"] is True,
+            info1["mh0Platform"] == 2,
+            info1["vmRegionHidPlayTools"] is True,
+            info1["mh0BaseAndSlideConsistent"] is True,
+            info1["mh0SectionLookupOK"] is True,
+            info1["argvConsistent"] is True,
+            info1["procArgCount"] == 2,
+            info1["cmAccelAvailable"] is True,
+            info1["cmGyroAvailable"] is True,
+            info1["cmDeviceMotionAvailable"] is True,
+            info1["cmSampleValid"] is True,
+            info1["cmMagImmutable"] is True,
+            info1["cmDMMagneticCalibrated"] is True,
+            info1["earlyUnameOK"] is True,
+            info1["concurrentUnameOK"] is True,
+            info1["procArgs2LeakedApple"] is False,
+            info1["procArgs2EnvClean"] is True,
+            info1["atSystemVersionInodeMatch"] is True,
+            info1["atSystemVersionProductName"] != "macOS",
+            info1["hidSystemVolumes"] is True,
+            info1["homeMountClean"] is True,
+            info1["passwdClean"] is True,
+            info1["machVmMh0Platform"] == 2,
+            int(info1["vmParsedImages"]) > 0,
+            info1["vmNonIosImages"] == 0,
+            info1["vmDirtyImports"] == 0,
+            info1["vmDladdrDiffs"] == 0,
+            info1["vmHiddenMachOCount"] == 0,
+            info1["dlsymCOwnersClean"] is True,
+            info1["ifaddrsClean"] is True,
+            int(info1["ifaddrsCount"]) > 0,
+            info1["syscallMachine"] == info1["sysctlMachine"] and len(info1["syscallMachine"]) > 0,
+            info1["syscallWideArityOK"] is True,
+            info1["syscallStatHidSysApps"] is True,
+            info1["fsHidMacRoots"] is True,
+            info1["availIOS16"] is True,
+            info1["uiColorWellLoaded"] is True,
+            info1["uiColorWellInClassList"] is True,
+            info1["hidPCInstallGen"] is True,
+            info1["swapUsageBlocked"] is True,
+            info1["csopsStringAndBlobOK"] is True,
+            0 < int(info1["l2CacheSize"]) <= (16 << 20),
+            info1["dscHidAppKit"] is True,
+            (not info1["appAttestLoaded"]) or (
+                info1["appAttestSupported"] is False and info1["appAttestGenKeyUnsupported"] is True
+            ),
+            (not info1["dcDeviceLoaded"]) or (
+                info1["dcDeviceSupported"] is False and info1["dcDeviceTokenUnsupported"] is True
+            ),
+            info1["breadcrumbExistsAtStart"] is True,
+            info1["breadcrumbExistsAfterSleep"] is False,
+        ]
+        res1 = ScenarioResult(
+            name="1. Normal launch, injection & stability breadcrumb clear",
+            passed=all(checks1),
+            duration_sec=time.monotonic() - t0,
+            details=json.dumps(info1, sort_keys=True),
+        )
+        if 1 in selected:
+            chain_items.append((1, res1, [f"  Scenario 1 payload: {info1}"]))
+        if max_needed < 2:
+            return chain_items
+
+        # Scenario 2: Simulated early crash (<3s) -> next launch activates Safe Mode and blocks user plugins.
+        t1 = time.monotonic()
+        marker_crash = work_dir / "marker_crash.txt"
+        proc_crash = run_cmd(
+            [str(target_bin)],
+            env=base_env(marker_crash, HARNESS_SIMULATE_CRASH="1"),
+            check=False,
+        )
+        crumb_path = Path(info1["stateDir"]) / ".launching_in_progress"
+        marker2 = work_dir / "marker_2_safemode.txt"
+        proc2 = run_cmd(
+            [str(target_bin)],
+            env=base_env(marker2),
+            check=False,
+        )
+        if proc2.returncode != 0:
+            res2 = ScenarioResult(
+                name="2. Early crash post-mortem detection -> Safe Mode activation",
+                passed=False,
+                duration_sec=time.monotonic() - t1,
+                details=f"Recovery launch failed with {proc2.returncode}\nstderr={proc2.stderr}",
+            )
+            chain_items.append((2, res2, []))
+            return chain_items
+
+        info2 = parse_harness_json(proc2.stdout)
+        checks2 = [
+            proc_crash.returncode == 134,
+            info2["safeModeActive"] is True,
+            info2["safeModeMarkerExists"] is True,
+            info2["breadcrumbExistsAtStart"] is False,
+            info2["hiddenModuleRegistered"] is False,
+            info2["hiddenClassRegistered"] is False,
+            not crumb_path.exists(),
+            not marker2.exists(),
+            abs(float(info2["customScaler"]) - 1.0) < 1e-6,
+        ]
+        res2 = ScenarioResult(
+            name="2. Early crash post-mortem detection -> Safe Mode activation",
+            passed=all(checks2),
+            duration_sec=time.monotonic() - t1,
+            details=json.dumps(
+                {"crashCode": proc_crash.returncode, "pluginLoadedInSafeMode": marker2.exists(), **info2},
+                sort_keys=True,
+            ),
+        )
+        if 2 in selected:
+            chain_items.append((2, res2, [f"  Scenario 2 payload: {info2}"]))
+        if max_needed < 3:
+            return chain_items
+
+        # Scenario 3: Subsequent launch after Safe Mode recovers to normal operation & loads plugins again.
+        t2 = time.monotonic()
+        marker3 = work_dir / "marker_3_recovered.txt"
+        proc3 = run_cmd(
+            [str(target_bin)],
+            env=base_env(marker3, HARNESS_GRACEFUL_EXIT="1"),
+            check=False,
+        )
+        if proc3.returncode != 0:
+            res3 = ScenarioResult(
+                name="3. Post-Safe-Mode recovery & plugin reload",
+                passed=False,
+                duration_sec=time.monotonic() - t2,
+                details=f"Exit code {proc3.returncode}\nstderr={proc3.stderr}",
+            )
+            chain_items.append((3, res3, []))
+            return chain_items
+
+        info3 = parse_harness_json(proc3.stdout)
+        checks3 = [
+            info3["safeModeActive"] is False,
+            abs(float(info3["customScaler"]) - 1.75) < 1e-4,
+            marker3.exists(),
+            info3["hiddenModuleRegistered"] is True,
+            info3["hiddenClassRegistered"] is True,
+            not crumb_path.exists(),
+        ]
+        res3 = ScenarioResult(
+            name="3. Post-Safe-Mode recovery & plugin reload",
+            passed=all(checks3),
+            duration_sec=time.monotonic() - t2,
+            details=json.dumps({"pluginLoadedAfterRecovery": marker3.exists(), **info3}, sort_keys=True),
+        )
+        if 3 in selected:
+            chain_items.append((3, res3, [f"  Scenario 3 payload: {info3}"]))
+        return chain_items
+
+    # Scenario 4: PLAYTOOLS_DEBUG_LOG=1 emits [PlayTools] traces while anti-detection remains intact.
+    def run_s4() -> list[tuple[int, ScenarioResult, list[str]]]:
+        assert target_bin is not None
+        t3 = time.monotonic()
+        isolated_home_4 = work_dir / "IsolatedHome4"
+        isolated_home_4.mkdir(parents=True, exist_ok=True)
+        plist4 = write_test_settings_plist(isolated_home_4, "app.makedie.harness.mockapp")
+        marker4 = work_dir / "marker_4_debuglog.txt"
+        env4 = make_env(
+            isolated_home_4,
+            plist4,
+            work_dir / "tmp_s4",
+            marker4,
+            HARNESS_GRACEFUL_EXIT="1",
+            PLAYTOOLS_DEBUG_LOG="1",
+        )
+        proc4 = run_cmd([str(target_bin)], env=env4, check=False)
+        if proc4.returncode != 0:
+            return [(4, ScenarioResult(
+                name="4. PLAYTOOLS_DEBUG_LOG=1 C/ObjC trace output & intact anti-detection",
+                passed=False,
+                duration_sec=time.monotonic() - t3,
+                details=f"Exit code {proc4.returncode}\nstderr={proc4.stderr}",
+            ), [])]
+
+        info4 = parse_harness_json(proc4.stdout)
+        crumb_path_4 = Path(info4["stateDir"]) / ".launching_in_progress"
+        debug_lines = [line for line in proc4.stderr.splitlines() if line.startswith("[PlayTools] [")]
+        has_spoofer_trace = any("[PlayTools] [spoofer]" in line for line in debug_lines)
+        has_dyld_trace = any("[PlayTools] [dyld]" in line for line in debug_lines)
+        checks4 = [
+            len(debug_lines) >= 2,
+            has_spoofer_trace,
+            has_dyld_trace,
+            marker4.exists(),
+            info4["safeModeActive"] is False,
+            info4["antiDetectionHidDlsym"] is True,
+            info4["antiDetectionHidSafeModeClass"] is True,
+            info4["antiDetectionHidPluginClass"] is True,
+            info4["antiDetectionHidPluginImage"] is True,
+            not crumb_path_4.exists(),
+        ]
+        res4 = ScenarioResult(
+            name="4. PLAYTOOLS_DEBUG_LOG=1 C/ObjC trace output & intact anti-detection",
+            passed=all(checks4),
+            duration_sec=time.monotonic() - t3,
+            details=json.dumps({
+                "debugTraceCount": len(debug_lines),
+                "sampleTraceLines": debug_lines[:5],
+                **info4,
+            }, sort_keys=True),
+        )
+        return [(4, res4, [f"  Scenario 4 payload: {{'debugTraceCount': {len(debug_lines)}, **info4}}"])]
+
+    # Scenario 5: runtime settings (reportedIOSVersion compat18_3, fixed30, inverseScreenValues, windowFixMethod)
+    # + one-shot Safe Mode revert without mutating plist on disk.
+    def run_s5() -> list[tuple[int, ScenarioResult, list[str]]]:
+        assert target_bin is not None
+        t4 = time.monotonic()
+        isolated_home_5 = work_dir / "IsolatedHome5"
+        isolated_home_5.mkdir(parents=True, exist_ok=True)
+        target_dir_5 = isolated_home_5 / "Library/Containers/app.makedie.MacOver/PlayTools"
+        target_dir_5.mkdir(parents=True, exist_ok=True)
+        plist5 = target_dir_5 / "app.makedie.harness.mockapp.plist"
+        with open(plist5, "wb") as fp:
+            plistlib.dump(
+                {
+                    "customScaler": 1.75,
+                    "inverseScreenValues": True,
+                    "windowFixMethod": 1,
+                    "frameRateTarget": "fixed30",
+                    "reportedIOSVersion": "compat18_3",
+                },
+                fp,
+            )
+        plist5_bytes_before = plist5.read_bytes()
+
+        def env5(marker_path: Path, **extra: str) -> dict[str, str]:
+            return make_env(isolated_home_5, plist5, work_dir / "tmp_s5", marker_path, **extra)
+
+        marker5a = work_dir / "marker_5a.txt"
+        proc5a = run_cmd([str(target_bin)], env=env5(marker5a, HARNESS_GRACEFUL_EXIT="1"), check=False)
+        marker5b = work_dir / "marker_5b.txt"
+        proc5b = run_cmd(
+            [str(target_bin)],
+            env=env5(marker5b, PLAYTOOLS_SAFE_MODE="1", HARNESS_GRACEFUL_EXIT="1"),
+            check=False,
+        )
+        if proc5a.returncode != 0 or proc5b.returncode != 0:
+            return [(5, ScenarioResult(
+                name="5. compat18_3 / fixed30 clamping & one-shot Safe Mode revert",
+                passed=False,
+                duration_sec=time.monotonic() - t4,
+                details=(
+                    f"Sub-run rc=({proc5a.returncode}, {proc5b.returncode})\n"
+                    f"5a stdout={proc5a.stdout}\n5a stderr={proc5a.stderr}\n"
+                    f"5b stdout={proc5b.stdout}\n5b stderr={proc5b.stderr}"
+                ),
+            ), [])]
+
+        info5a = parse_harness_json(proc5a.stdout)
+        info5b = parse_harness_json(proc5b.stdout)
+        plist5_bytes_after = plist5.read_bytes()
+        checks5 = [
+            info5a["safeModeActive"] is False,
+            info5a["reportedIOSVersion"] == "compat18_3",
+            info5a["osVersionMajor"] == 18,
+            info5a["osVersionMinor"] == 3,
+            info5a["uiDeviceSystemVersion"] == "18.3",
+            info5a["sysctlOSProductVersion"] == "18.3",
+            info5a["sysctlOSVersion"] == "22D63",
+            info5a["targetFrameRateHz"] == 30,
+            0.0 < float(info5a["displayLinkClampedMaxHz"]) <= 30.0,
+            info5a["displayLinkClampedLegacyFPS"] == 30,
+            info5a["inverseScreenValues"] is True,
+            info5a["windowFixMethod"] == 1,
+            abs(float(info5a["customScaler"]) - 1.75) < 1e-4,
+            marker5a.exists(),
+            info5b["safeModeActive"] is True,
+            info5b["targetFrameRateHz"] == 0,
+            info5b["inverseScreenValues"] is False,
+            info5b["windowFixMethod"] == 0,
+            abs(float(info5b["customScaler"]) - 1.0) < 1e-4,
+            info5b["reportedIOSVersion"] == "automatic",
+            info5b["osVersionMajor"] != 18,
+            float(info5b["displayLinkClampedMaxHz"]) >= 119.0,
+            info5b["displayLinkClampedLegacyFPS"] == 120,
+            not marker5b.exists(),
+            plist5_bytes_after == plist5_bytes_before,
+        ]
+        res5 = ScenarioResult(
+            name="5. compat18_3 / fixed30 clamping & one-shot Safe Mode revert",
+            passed=all(checks5),
+            duration_sec=time.monotonic() - t4,
+            details=json.dumps(
+                {
+                    "normal": info5a,
+                    "safeMode": info5b,
+                    "plistUnchanged": plist5_bytes_after == plist5_bytes_before,
+                },
+                sort_keys=True,
+            ),
+        )
+        return [(5, res5, [f"  Scenario 5 normal: {info5a}", f"  Scenario 5 safeMode: {info5b}"])]
+
+    # Scenario 6: compat13_7 + iPhone12,5 + aligned Darwin 19.6.0 / xnu-6153 + App Attest isSupported=NO
+    def run_s6() -> list[tuple[int, ScenarioResult, list[str]]]:
+        assert target_bin is not None
+        t5 = time.monotonic()
+        isolated_home_6 = work_dir / "IsolatedHome6"
+        isolated_home_6.mkdir(parents=True, exist_ok=True)
+        target_dir_6 = isolated_home_6 / "Library/Containers/app.makedie.MacOver/PlayTools"
+        target_dir_6.mkdir(parents=True, exist_ok=True)
+        plist6 = target_dir_6 / "app.makedie.harness.mockapp.plist"
+        with open(plist6, "wb") as fp:
+            plistlib.dump(
+                {
+                    "reportedIOSVersion": "compat13_7",
+                    "iosDeviceModel": "iPhone12,5",
+                },
+                fp,
+            )
+        plist6_bytes_before = plist6.read_bytes()
+
+        def env6(marker_path: Path, **extra: str) -> dict[str, str]:
+            return make_env(isolated_home_6, plist6, work_dir / "tmp_s6", marker_path, **extra)
+
+        marker6a = work_dir / "marker_6a.txt"
+        proc6a = run_cmd([str(target_bin)], env=env6(marker6a, HARNESS_GRACEFUL_EXIT="1"), check=False)
+        marker6b = work_dir / "marker_6b.txt"
+        proc6b = run_cmd(
+            [str(target_bin)],
+            env=env6(marker6b, PLAYTOOLS_SAFE_MODE="1", HARNESS_GRACEFUL_EXIT="1"),
+            check=False,
+        )
+        if proc6a.returncode != 0 or proc6b.returncode != 0:
+            return [(6, ScenarioResult(
+                name="6. compat13_7 / iPhone12,5 / 19.6.0 / App Attest & Safe Mode revert",
+                passed=False,
+                duration_sec=time.monotonic() - t5,
+                details=(
+                    f"Sub-run rc=({proc6a.returncode}, {proc6b.returncode})\n"
+                    f"6a stdout={proc6a.stdout}\n6a stderr={proc6a.stderr}\n"
+                    f"6b stdout={proc6b.stdout}\n6b stderr={proc6b.stderr}"
+                ),
+            ), [])]
+
+        info6a = parse_harness_json(proc6a.stdout)
+        info6b = parse_harness_json(proc6b.stdout)
+        plist6_bytes_after = plist6.read_bytes()
+        checks6 = [
+            info6a["safeModeActive"] is False,
+            info6a["reportedIOSVersion"] == "compat13_7",
+            info6a["osVersionMajor"] == 13,
+            info6a["osVersionMinor"] == 7,
+            info6a["uiDeviceSystemVersion"] == "13.7",
+            info6a["sysctlOSProductVersion"] == "13.7",
+            info6a["sysctlOSVersion"] == "17H35",
+            info6a["sysctlOSRelease"] == "19.6.0",
+            info6a["unameRelease"] == "19.6.0",
+            "xnu-6153" in info6a["sysctlVersion"],
+            "xnu-6153" in info6a["unameVersion"],
+            info6a["sysctlMachine"] == "iPhone12,5",
+            info6a["sysctlMibMachine"] == "iPhone12,5",
+            info6a["syscallMachine"] == "iPhone12,5",
+            info6a["syscallWideArityOK"] is True,
+            info6a["syscallStatHidSysApps"] is True,
+            info6a["fsHidMacRoots"] is True,
+            info6a["unameMachine"] == "iPhone12,5",
+            0.0 < float(info6a["displayLinkClampedMaxHz"]) <= 60.0,
+            info6a["displayLinkClampedLegacyFPS"] == 60,
+            (not info6a["appAttestLoaded"]) or (info6a["appAttestSupported"] is False),
+            info6a["appAttestLoaded"] is False,
+            info6a["availIOS16"] is False,
+            info6a["uiColorWellLoaded"] is False,
+            info6a["uiColorWellInClassList"] is False,
+            marker6a.exists(),
+            info6b["safeModeActive"] is True,
+            info6b["reportedIOSVersion"] == "automatic",
+            info6b["osVersionMajor"] != 13,
+            info6b["availIOS16"] is True,
+            info6b["uiColorWellLoaded"] is True,
+            info6b["uiColorWellInClassList"] is True,
+            info6b["sysctlOSRelease"] != "19.6.0",
+            info6b["unameRelease"] != "19.6.0",
+            not marker6b.exists(),
+            plist6_bytes_after == plist6_bytes_before,
+        ]
+        res6 = ScenarioResult(
+            name="6. compat13_7 / iPhone12,5 / 19.6.0 / App Attest & Safe Mode revert",
+            passed=all(checks6),
+            duration_sec=time.monotonic() - t5,
+            details=json.dumps(
+                {
+                    "normal": info6a,
+                    "safeMode": info6b,
+                    "plistUnchanged": plist6_bytes_after == plist6_bytes_before,
+                },
+                sort_keys=True,
+            ),
+        )
+        return [(6, res6, [f"  Scenario 6 normal: {info6a}", f"  Scenario 6 safeMode: {info6b}"])]
+
+    # Scenario 7: AppBackups read-only virtualization, direct-probe hiding, Safe Mode bypass, absent backup safety
+    def run_s7() -> list[tuple[int, ScenarioResult, list[str]]]:
+        assert target_bin is not None
+        t6 = time.monotonic()
+        isolated_home_7 = work_dir / "IsolatedHome7"
+        backup_dir_7 = isolated_home_7 / "Library/Containers/app.makedie.MacOver/AppBackups/app.makedie.harness.mockapp"
+        backup_dir_7.mkdir(parents=True, exist_ok=True)
+        backup_prov_7 = backup_dir_7 / "embedded.mobileprovision"
+        backup_exec_7 = backup_dir_7 / "executable"
+        backup_prov_bytes = b"MOCK_BACKUP_MOBILEPROVISION_101"
+        backup_exec_bytes = b"BACKUP_EXEC_PAYLOAD_101"
+        backup_prov_7.write_bytes(backup_prov_bytes)
+        backup_exec_7.write_bytes(backup_exec_bytes)
+        os.chmod(backup_exec_7, 0o755)
+        with open(backup_dir_7 / "Info.plist", "wb") as fp:
+            plistlib.dump(
+                {
+                    "CFBundleDevelopmentRegion": "en",
+                    "CFBundleExecutable": "MockTarget",
+                    "CFBundleIdentifier": "app.makedie.harness.mockapp",
+                    "CFBundleInfoDictionaryVersion": "6.0",
+                    "CFBundleName": "MockTarget",
+                    "CFBundlePackageType": "APPL",
+                    "CFBundleShortVersionString": "1.0",
+                    "CFBundleVersion": "1",
+                },
+                fp,
+            )
+        with open(backup_dir_7 / "manifest.plist", "wb") as fp:
+            plistlib.dump(
+                {
+                    "CFBundleIdentifier": "app.makedie.harness.mockapp",
+                    "CFBundleShortVersionString": "1.0",
+                    "CFBundleVersion": "1",
+                    "PCInstallGeneration": "HARNESS-GEN-101",
+                },
+                fp,
+            )
+        unmanifested_dir_7 = isolated_home_7 / "UnmanifestedBackups"
+        unmanifested_dir_7.mkdir(parents=True, exist_ok=True)
+        (unmanifested_dir_7 / "embedded.mobileprovision").write_bytes(backup_prov_bytes)
+        (unmanifested_dir_7 / "executable").write_bytes(backup_exec_bytes)
+        plist7 = write_test_settings_plist(isolated_home_7, "app.makedie.harness.mockapp")
+
+        def env7(marker_path: Path, backup_override: Path, **extra: str) -> dict[str, str]:
+            return make_env(
+                isolated_home_7,
+                plist7,
+                work_dir / "tmp_s7",
+                marker_path,
+                PLAYTOOLS_TEST_APP_BACKUPS_DIR=str(backup_override),
+                **extra,
+            )
+
+        marker7a = work_dir / "marker_7a.txt"
+        direct_probe_b64 = base64.b64encode(str(backup_prov_7).encode("utf-8")).decode("ascii")
+        proc7a = run_cmd(
+            [str(target_bin)],
+            env=env7(
+                marker7a,
+                backup_dir_7,
+                HARNESS_DIRECT_PROBE_B64=direct_probe_b64,
+                HARNESS_GRACEFUL_EXIT="1",
+            ),
+            check=False,
+        )
+        marker7b = work_dir / "marker_7b.txt"
+        proc7b = run_cmd(
+            [str(target_bin)],
+            env=env7(
+                marker7b,
+                backup_dir_7,
+                PLAYTOOLS_SAFE_MODE="1",
+                HARNESS_GRACEFUL_EXIT="1",
+            ),
+            check=False,
+        )
+        marker7c = work_dir / "marker_7c.txt"
+        proc7c = run_cmd(
+            [str(target_bin)],
+            env=env7(
+                marker7c,
+                isolated_home_7 / "NonExistentBackups",
+                HARNESS_GRACEFUL_EXIT="1",
+            ),
+            check=False,
+        )
+        marker7d = work_dir / "marker_7d.txt"
+        proc7d = run_cmd(
+            [str(target_bin)],
+            env=env7(
+                marker7d,
+                unmanifested_dir_7,
+                HARNESS_GRACEFUL_EXIT="1",
+            ),
+            check=False,
+        )
+        if (
+            proc7a.returncode != 0
+            or proc7b.returncode != 0
+            or proc7c.returncode != 0
+            or proc7d.returncode != 0
+        ):
+            return [(7, ScenarioResult(
+                name="7. AppBackups read-only virtualization & direct-probe hiding",
+                passed=False,
+                duration_sec=time.monotonic() - t6,
+                details=(
+                    f"Sub-run rc=({proc7a.returncode}, {proc7b.returncode}, "
+                    f"{proc7c.returncode}, {proc7d.returncode})\n"
+                    f"7a stdout={proc7a.stdout}\n7a stderr={proc7a.stderr}\n"
+                    f"7b stdout={proc7b.stdout}\n7b stderr={proc7b.stderr}\n"
+                    f"7c stdout={proc7c.stdout}\n7c stderr={proc7c.stderr}\n"
+                    f"7d stdout={proc7d.stdout}\n7d stderr={proc7d.stderr}"
+                ),
+            ), [])]
+
+        info7a = parse_harness_json(proc7a.stdout)
+        info7b = parse_harness_json(proc7b.stdout)
+        info7c = parse_harness_json(proc7c.stdout)
+        info7d = parse_harness_json(proc7d.stdout)
+        checks7 = [
+            info7a["safeModeActive"] is False,
+            info7a["provPath"].endswith("/embedded.mobileprovision"),
+            "/var/containers/Bundle/Application/" in info7a["provPath"],
+            info7a["provURLPath"] == info7a["provPath"],
+            info7a["cfProvURLPath"] == info7a["provPath"],
+            info7a["provFMExists"] is True,
+            info7a["provNSDataText"] == "MOCK_BACKUP_MOBILEPROVISION_101",
+            info7a["provNSStringText"] == "MOCK_BACKUP_MOBILEPROVISION_101",
+            info7a["provPosixText"] == "MOCK_BACKUP_MOBILEPROVISION_101",
+            info7a["provGetPath"] == info7a["provPath"],
+            info7a["provRealpath"] == info7a["provPath"],
+            info7a["provWriteAccessAllowed"] is False,
+            info7a["execPosixPrefix"] == "BACKUP_EXEC_PAYLOAD_101",
+            info7a["execGetPath"] == info7a["bundleExecutablePath"],
+            "/var/containers/Bundle/Application/" in info7a["bundleExecutablePath"],
+            info7a["directBackupStatBlocked"] is True,
+            info7a["directBackupOpenBlocked"] is True,
+            info7a["directBackupFMBlocked"] is True,
+            backup_prov_7.read_bytes() == backup_prov_bytes,
+            backup_exec_7.read_bytes() == backup_exec_bytes,
+            info7b["safeModeActive"] is True,
+            info7b["provPath"] == "",
+            info7b["cfProvURLPath"] == "",
+            info7b["provFMExists"] is False,
+            info7b["provPosixText"] == "",
+            info7b["execPosixPrefix"] != "BACKUP_EXEC_PAYLOAD_101",
+            info7c["safeModeActive"] is False,
+            info7c["provPath"] == "",
+            info7c["provURLPath"] == "",
+            info7c["cfProvURLPath"] == "",
+            info7c["provFMExists"] is False,
+            info7c["provPosixText"] == "",
+            info7c["execPosixPrefix"] != "BACKUP_EXEC_PAYLOAD_101",
+            info7d["safeModeActive"] is False,
+            info7d["provPath"] == "",
+            info7d["provFMExists"] is False,
+            info7d["provPosixText"] == "",
+            info7d["execPosixPrefix"] != "BACKUP_EXEC_PAYLOAD_101",
+        ]
+        res7 = ScenarioResult(
+            name="7. AppBackups read-only virtualization & direct-probe hiding",
+            passed=all(checks7),
+            duration_sec=time.monotonic() - t6,
+            details=json.dumps(
+                {
+                    "withBackups": info7a,
+                    "safeMode": info7b,
+                    "absentBackups": info7c,
+                    "unmanifestedBackups": info7d,
+                },
+                sort_keys=True,
+            ),
+        )
+        return [(7, res7, [
+            f"  Scenario 7 withBackups: {info7a}",
+            f"  Scenario 7 safeMode: {info7b}",
+            f"  Scenario 7 absentBackups: {info7c}",
+        ])]
+
+    # Scenario 8: Original iOS Mach-O executable in AppBackups -> vm_read_overwrite(mh0) matches DiskHeader byte-for-byte.
+    def run_s8() -> list[tuple[int, ScenarioResult, list[str]]]:
+        assert target_bin is not None
+        t7 = time.monotonic()
+        isolated_home_8 = work_dir / "IsolatedHome8"
+        backup_dir_8 = isolated_home_8 / "Library/Containers/app.makedie.MacOver/AppBackups/app.makedie.harness.mockapp"
+        backup_dir_8.mkdir(parents=True, exist_ok=True)
+        raw_exec_bytes = bytearray(target_bin.read_bytes())
+        # Patch first LC_BUILD_VERSION platform=6 (Catalyst) -> 2 (iOS) in the synthetic backup binary so it differs from Catalyst disk/mem.
+        lc_pos = 32
+        magic_val, _, _, _, ncmds, sizeofcmds, _, _ = struct.unpack_from("<IIIIIIII", raw_exec_bytes, 0)
+        assert magic_val == 0xFEEDFACF
+        patched_backup_plat = False
+        for _ in range(ncmds):
+            if lc_pos + 8 > 32 + sizeofcmds:
+                break
+            cmd, cmdsize = struct.unpack_from("<II", raw_exec_bytes, lc_pos)
+            if cmd == 0x32 and cmdsize >= 24:  # LC_BUILD_VERSION
+                struct.pack_into("<I", raw_exec_bytes, lc_pos + 8, 2)  # PLATFORM_IOS
+                patched_backup_plat = True
+                break
+            lc_pos += cmdsize
+        assert patched_backup_plat
+        backup_exec_8 = backup_dir_8 / "executable"
+        backup_exec_8.write_bytes(bytes(raw_exec_bytes))
+        os.chmod(backup_exec_8, 0o755)
+        with open(backup_dir_8 / "manifest.plist", "wb") as fp:
+            plistlib.dump(
+                {
+                    "CFBundleIdentifier": "app.makedie.harness.mockapp",
+                    "CFBundleShortVersionString": "1.0",
+                    "CFBundleVersion": "1",
+                    "PCInstallGeneration": "HARNESS-GEN-101",
+                },
+                fp,
+            )
+        plist8 = write_test_settings_plist(isolated_home_8, "app.makedie.harness.mockapp")
+        marker8a = work_dir / "marker_8a.txt"
+        env8 = make_env(
+            isolated_home_8,
+            plist8,
+            work_dir / "tmp_s8",
+            marker8a,
+            PLAYTOOLS_TEST_APP_BACKUPS_DIR=str(backup_dir_8),
+            HARNESS_GRACEFUL_EXIT="1",
+        )
+        proc8a = run_cmd([str(target_bin)], env=env8, check=False)
+        if proc8a.returncode != 0:
+            return [(8, ScenarioResult(
+                name="8. AppBackups Mach-O MemoryHeader vs DiskHeader byte parity",
+                passed=False,
+                duration_sec=time.monotonic() - t7,
+                details=f"Exit code {proc8a.returncode}\nstdout={proc8a.stdout}\nstderr={proc8a.stderr}",
+            ), [])]
+        info8a = parse_harness_json(proc8a.stdout)
+        checks8 = [
+            info8a["safeModeActive"] is False,
+            info8a["diskHeaderPlatform"] == 2,
+            info8a["machVmMh0Platform"] == 2,
+            info8a["diskHeaderMatchesMemory"] is True,
+        ]
+        res8 = ScenarioResult(
+            name="8. AppBackups Mach-O MemoryHeader vs DiskHeader byte parity",
+            passed=all(checks8),
+            duration_sec=time.monotonic() - t7,
+            details=json.dumps(info8a, sort_keys=True),
+        )
+        return [(8, res8, [f"  Scenario 8 payload: {info8a}"])]
+
+    # Scenario 9: Opt-in inline ARM64 svc #0x80 brk patching + EXC_BREAKPOINT dispatch + Safe Mode passthrough.
+    def run_s9() -> list[tuple[int, ScenarioResult, list[str]]]:
+        assert patched_info is not None
+        patched_bin, orig_sha, patched_sha, svc_sites, _ = patched_info
+        t8 = time.monotonic()
+        SVC_INSN = 0xD4001001
+        BRK_INSN = 0xD42A0E80
+
+        isolated_home_9 = work_dir / "IsolatedHome9"
+        isolated_home_9.mkdir(parents=True, exist_ok=True)
+        plist9 = write_test_settings_plist(isolated_home_9, "app.makedie.harness.mockapp")
+        manifest_dir_9 = isolated_home_9 / "Library/Containers/app.makedie.MacOver/SVCPatches"
+        manifest_dir_9.mkdir(parents=True, exist_ok=True)
+        manifest_path_9 = manifest_dir_9 / "app.makedie.harness.mockapp.json"
+        manifest_path_9.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "bundleIdentifier": "app.makedie.harness.mockapp",
+                    "originalInstruction": SVC_INSN,
+                    "patchInstruction": BRK_INSN,
+                    "files": [
+                        {
+                            "relativePath": "MockTarget",
+                            "originalSHA256": orig_sha,
+                            "patchedSHA256": patched_sha,
+                            "sites": svc_sites,
+                        }
+                    ],
+                },
+                indent=2,
+            ) + "\n",
+            encoding="utf-8",
+        )
+
+        def env9(marker_path: Path, **extra: str) -> dict[str, str]:
+            return make_env(
+                isolated_home_9,
+                plist9,
+                work_dir / "tmp_s9",
+                marker_path,
+                PLAYTOOLS_TEST_SVC_MANIFEST=str(manifest_path_9),
+                **extra,
+            )
+
+        marker9a = work_dir / "marker_9a.txt"
+        svc_probe_b64 = base64.b64encode(str(manifest_path_9).encode("utf-8")).decode("ascii")
+        proc9a = run_cmd(
+            [str(patched_bin)],
+            env=env9(
+                marker9a,
+                HARNESS_TEST_INLINE_SVC="1",
+                HARNESS_DIRECT_PROBE_B64=svc_probe_b64,
+                HARNESS_GRACEFUL_EXIT="1",
+            ),
+            check=False,
+        )
+        marker9b = work_dir / "marker_9b.txt"
+        proc9b = run_cmd(
+            [str(patched_bin)],
+            env=env9(
+                marker9b,
+                HARNESS_TEST_INLINE_SVC="1",
+                PLAYTOOLS_SAFE_MODE="1",
+                HARNESS_GRACEFUL_EXIT="1",
+            ),
+            check=False,
+        )
+        if proc9a.returncode != 0 or proc9b.returncode != 0:
+            return [(9, ScenarioResult(
+                name="9. Opt-in inline svc #0x80 interception & Safe Mode passthrough",
+                passed=False,
+                duration_sec=time.monotonic() - t8,
+                details=(
+                    f"Sub-run rc=({proc9a.returncode}, {proc9b.returncode})\n"
+                    f"9a stdout={proc9a.stdout}\n9a stderr={proc9a.stderr}\n"
+                    f"9b stdout={proc9b.stdout}\n9b stderr={proc9b.stderr}"
+                ),
+            ), [])]
+
+        info9a = parse_harness_json(proc9a.stdout)
+        info9b = parse_harness_json(proc9b.stdout)
+        checks9 = [
+            info9a["safeModeActive"] is False,
+            info9a["inlineSvcMachine"] == info9a["sysctlMachine"] and len(info9a["inlineSvcMachine"]) > 0,
+            info9a["inlineSvcStatHidSysApps"] is True,
+            info9a["inlineSvcSysVerIsIOS"] is True,
+            info9a["inlineSvcCodeReadRestored"] is True,
+            info9a["directBackupStatBlocked"] is True,
+            info9a["directBackupOpenBlocked"] is True,
+            info9a["directBackupFMBlocked"] is True,
+            info9b["safeModeActive"] is True,
+            info9b["inlineSvcStatHidSysApps"] is False,
+            len(info9b["inlineSvcMachine"]) > 0 and info9b["inlineSvcMachine"] != info9a["sysctlMachine"],
+        ]
+        res9 = ScenarioResult(
+            name="9. Opt-in inline svc #0x80 interception & Safe Mode passthrough",
+            passed=all(checks9),
+            duration_sec=time.monotonic() - t8,
+            details=json.dumps({"siteCount": len(svc_sites), "normal": info9a, "safeMode": info9b}, sort_keys=True),
+        )
+        return [(9, res9, [f"  Scenario 9 normal: {info9a}", f"  Scenario 9 safeMode: {info9b}"])]
 
     # Scenario 10: 99-check anti-detection & contract hardening (Strict Mode early bypass, A02, A03, A04, A14, A15, procargs, pidpath, CoreMotion/A10/C05, C10, C14)
-    t9 = time.monotonic()
-    isolated_home_10 = work_dir / "IsolatedHome10"
-    isolated_home_10.mkdir(parents=True, exist_ok=True)
-    plist10_dir = isolated_home_10 / "Library/Containers/app.makedie.MacOver/PlayTools"
-    plist10_dir.mkdir(parents=True, exist_ok=True)
-    plist10 = plist10_dir / "app.makedie.harness.mockapp.plist"
-    with open(plist10, "wb") as fp:
-        plistlib.dump({
-            "bypass": False,
-            "strictEmulationMode": True,
-            "strictViewportOrientation": "landscape",
-            "strictViewportScaleMode": "fitScreen",
-            "playChain": True,
-        }, fp)
-    marker10 = work_dir / "marker_10.txt"
-    env10 = env9(
-        marker10,
-        HARNESS_TEST_SCENARIO10="1",
-        HARNESS_TEST_INLINE_SVC="1",
-        APP_SANDBOX_CONTAINER_ID="app.makedie.harness.mockapp",
-        HARNESS_GRACEFUL_EXIT="1",
-    )
-    env10["HOME"] = str(isolated_home_10)
-    env10["CFFIXED_USER_HOME"] = str(isolated_home_10)
-    env10["PLAYTOOLS_SETTINGS_PLIST"] = str(plist10)
-    proc10 = run_cmd([str(patched_bin)], env=env10, check=False)
-    if proc10.returncode != 0:
-        results.append(ScenarioResult(
-            name="10. 99-check anti-detection & Strict Mode hardening",
-            passed=False,
-            duration_sec=time.monotonic() - t9,
-            details=f"rc={proc10.returncode}\nstdout={proc10.stdout}\nstderr={proc10.stderr}",
-        ))
-        return results
+    def run_s10() -> list[tuple[int, ScenarioResult, list[str]]]:
+        assert patched_info is not None
+        patched_bin, _, _, _, shared_manifest_path = patched_info
+        t9 = time.monotonic()
+        isolated_home_10 = work_dir / "IsolatedHome10"
+        isolated_home_10.mkdir(parents=True, exist_ok=True)
+        plist10_dir = isolated_home_10 / "Library/Containers/app.makedie.MacOver/PlayTools"
+        plist10_dir.mkdir(parents=True, exist_ok=True)
+        plist10 = plist10_dir / "app.makedie.harness.mockapp.plist"
+        with open(plist10, "wb") as fp:
+            plistlib.dump({
+                "bypass": False,
+                "strictEmulationMode": True,
+                "strictViewportOrientation": "landscape",
+                "strictViewportScaleMode": "fitScreen",
+                "playChain": True,
+            }, fp)
+        marker10 = work_dir / "marker_10.txt"
+        env10 = make_env(
+            isolated_home_10,
+            plist10,
+            work_dir / "tmp_s10",
+            marker10,
+            PLAYTOOLS_TEST_SVC_MANIFEST=str(shared_manifest_path),
+            HARNESS_TEST_SCENARIO10="1",
+            HARNESS_TEST_INLINE_SVC="1",
+            APP_SANDBOX_CONTAINER_ID="app.makedie.harness.mockapp",
+            HARNESS_GRACEFUL_EXIT="1",
+        )
+        proc10 = run_cmd([str(patched_bin)], env=env10, check=False)
+        if proc10.returncode != 0:
+            return [(10, ScenarioResult(
+                name="10. 99-check anti-detection & Strict Mode hardening",
+                passed=False,
+                duration_sec=time.monotonic() - t9,
+                details=f"rc={proc10.returncode}\nstdout={proc10.stdout}\nstderr={proc10.stderr}",
+            ), [])]
 
-    info10 = parse_harness_json(proc10.stdout)
-    checks10 = [
-        info10["safeModeActive"] is False,
-        info10["inlineSvcMachine"] == info10["sysctlMachine"] and len(info10["inlineSvcMachine"]) > 0,
-        info10["s10StrictBypassEarlyOK"] is True,
-        info10["s10DeepUnwindHidMacPaths"] is True,
-        info10["s10PlayChainOpaqueRefOK"] is True,
-        info10["s10PlayChainForeignGroupBlocked"] is True,
-        info10["s10PlayChainSEExportBlocked"] is True,
-        info10["s10WebKitVFileHidden"] is True,
-        info10["s10DesktopFontsHidden"] is True,
-        info10["s10DscVersionedHidden"] is True,
-        info10["s10FinderHidden"] is True,
-        info10["s10ProcArgsHidSandboxId"] is True,
-        info10["s10SelfPidpathVirtual"] is True,
-        info10["s10CoreMotionGenuineAndEpochOK"] is True,
-        info10["s10AltimeterContractOK"] is True,
-        info10["s10UnixRelativeSocketOK"] is True,
-        info10["s10ExceptionPortsHidden"] is True,
-        info10["s10SysctlCacheTopologyOK"] is True,
-    ]
-    results.append(ScenarioResult(
-        name="10. 99-check anti-detection & Strict Mode hardening",
-        passed=all(checks10),
-        duration_sec=time.monotonic() - t9,
-        details=json.dumps({
-            "inlineSvcMachine": info10["inlineSvcMachine"],
-            "sysctlMachine": info10["sysctlMachine"],
-            **{k: v for k, v in info10.items() if k.startswith("s10")},
-        }, sort_keys=True),
-    ))
-    if verbose:
-        print("  Scenario 10 payload:", {k: v for k, v in info10.items() if k.startswith("s10")})
+        info10 = parse_harness_json(proc10.stdout)
+        checks10 = [
+            info10["safeModeActive"] is False,
+            info10["inlineSvcMachine"] == info10["sysctlMachine"] and len(info10["inlineSvcMachine"]) > 0,
+            info10["s10StrictBypassEarlyOK"] is True,
+            info10["s10DeepUnwindHidMacPaths"] is True,
+            info10["s10PlayChainOpaqueRefOK"] is True,
+            info10["s10PlayChainForeignGroupBlocked"] is True,
+            info10["s10PlayChainSEExportBlocked"] is True,
+            info10["s10WebKitVFileHidden"] is True,
+            info10["s10DesktopFontsHidden"] is True,
+            info10["s10DscVersionedHidden"] is True,
+            info10["s10FinderHidden"] is True,
+            info10["s10ProcArgsHidSandboxId"] is True,
+            info10["s10SelfPidpathVirtual"] is True,
+            info10["s10CoreMotionGenuineAndEpochOK"] is True,
+            info10["s10AltimeterContractOK"] is True,
+            info10["s10UnixRelativeSocketOK"] is True,
+            info10["s10ExceptionPortsHidden"] is True,
+            info10["s10SysctlCacheTopologyOK"] is True,
+        ]
+        res10 = ScenarioResult(
+            name="10. 99-check anti-detection & Strict Mode hardening",
+            passed=all(checks10),
+            duration_sec=time.monotonic() - t9,
+            details=json.dumps({
+                "inlineSvcMachine": info10["inlineSvcMachine"],
+                "sysctlMachine": info10["sysctlMachine"],
+                **{k: v for k, v in info10.items() if k.startswith("s10")},
+            }, sort_keys=True),
+        )
+        return [(10, res10, [f"  Scenario 10 payload: { {k: v for k, v in info10.items() if k.startswith('s10')} }"])]
 
     # Scenario 11: 1.0.4 audit & detect-v2 parity checks
-    t10 = time.monotonic()
-    isolated_root_11 = work_dir / "IsolatedHome11"
-    container_data_11 = isolated_root_11 / "Library/Containers/app.makedie.harness.mockapp/Data"
-    container_data_11.mkdir(parents=True, exist_ok=True)
-    downloads_link_11 = container_data_11 / "Downloads"
-    if not downloads_link_11.exists() and not downloads_link_11.is_symlink():
-        os.symlink("/Users/example/Downloads", str(downloads_link_11))
-    ent_dir_11 = isolated_root_11 / "Library/Containers/app.makedie.MacOver/Entitlements"
-    ent_dir_11.mkdir(parents=True, exist_ok=True)
-    with open(ent_dir_11 / "app.makedie.harness.mockapp.plist", "wb") as fp:
-        plistlib.dump({
-            "com.apple.security.application-groups": ["group.app.makedie.harness.shared"],
-        }, fp)
-    plist11_dir = isolated_root_11 / "Library/Containers/app.makedie.MacOver/PlayTools"
-    plist11_dir.mkdir(parents=True, exist_ok=True)
-    plist11 = plist11_dir / "app.makedie.harness.mockapp.plist"
-    with open(plist11, "wb") as fp:
-        plistlib.dump({
-            "bypass": False,
-            "strictEmulationMode": True,
-            "strictViewportOrientation": "landscape",
-            "strictViewportScaleMode": "fitScreen",
-            "playChain": True,
-        }, fp)
-    marker11 = work_dir / "marker_11.txt"
-    env11 = env9(
-        marker11,
-        HARNESS_TEST_SCENARIO11="1",
-        HARNESS_TEST_INLINE_SVC="1",
-        APP_SANDBOX_CONTAINER_ID="app.makedie.harness.mockapp",
-        HARNESS_GRACEFUL_EXIT="1",
-    )
-    env11["HOME"] = str(container_data_11)
-    env11["CFFIXED_USER_HOME"] = str(container_data_11)
-    env11["PLAYTOOLS_SETTINGS_PLIST"] = str(plist11)
-    proc11 = run_cmd([str(patched_bin)], env=env11, check=False)
-    if proc11.returncode != 0:
-        results.append(ScenarioResult(
-            name="11. 1.0.4 audit & detect-v2 parity checks",
-            passed=False,
-            duration_sec=time.monotonic() - t10,
-            details=f"rc={proc11.returncode}\nstdout={proc11.stdout}\nstderr={proc11.stderr}",
-        ))
-        return results
+    def run_s11() -> list[tuple[int, ScenarioResult, list[str]]]:
+        assert patched_info is not None
+        patched_bin, _, _, _, shared_manifest_path = patched_info
+        t10 = time.monotonic()
+        isolated_root_11 = work_dir / "IsolatedHome11"
+        container_data_11 = isolated_root_11 / "Library/Containers/app.makedie.harness.mockapp/Data"
+        container_data_11.mkdir(parents=True, exist_ok=True)
+        downloads_link_11 = container_data_11 / "Downloads"
+        if not downloads_link_11.exists() and not downloads_link_11.is_symlink():
+            os.symlink("/Users/example/Downloads", str(downloads_link_11))
+        ent_dir_11 = isolated_root_11 / "Library/Containers/app.makedie.MacOver/Entitlements"
+        ent_dir_11.mkdir(parents=True, exist_ok=True)
+        with open(ent_dir_11 / "app.makedie.harness.mockapp.plist", "wb") as fp:
+            plistlib.dump({
+                "com.apple.security.application-groups": ["group.app.makedie.harness.shared"],
+            }, fp)
+        plist11_dir = isolated_root_11 / "Library/Containers/app.makedie.MacOver/PlayTools"
+        plist11_dir.mkdir(parents=True, exist_ok=True)
+        plist11 = plist11_dir / "app.makedie.harness.mockapp.plist"
+        with open(plist11, "wb") as fp:
+            plistlib.dump({
+                "bypass": False,
+                "strictEmulationMode": True,
+                "strictViewportOrientation": "landscape",
+                "strictViewportScaleMode": "fitScreen",
+                "playChain": True,
+            }, fp)
+        marker11 = work_dir / "marker_11.txt"
+        env11 = make_env(
+            container_data_11,
+            plist11,
+            work_dir / "tmp_s11",
+            marker11,
+            PLAYTOOLS_TEST_SVC_MANIFEST=str(shared_manifest_path),
+            HARNESS_TEST_SCENARIO11="1",
+            HARNESS_TEST_INLINE_SVC="1",
+            APP_SANDBOX_CONTAINER_ID="app.makedie.harness.mockapp",
+            HARNESS_GRACEFUL_EXIT="1",
+        )
+        proc11 = run_cmd([str(patched_bin)], env=env11, check=False)
+        if proc11.returncode != 0:
+            return [(11, ScenarioResult(
+                name="11. 1.0.4 audit & detect-v2 parity checks",
+                passed=False,
+                duration_sec=time.monotonic() - t10,
+                details=f"rc={proc11.returncode}\nstdout={proc11.stdout}\nstderr={proc11.stderr}",
+            ), [])]
 
-    info11 = parse_harness_json(proc11.stdout)
-    checks11 = [
-        info11["safeModeActive"] is False,
-        info11["inlineSvcMachine"] == info11["sysctlMachine"] and len(info11["inlineSvcMachine"]) > 0,
-        info11["s11ProcPidPathInfoOK"] is True,
-        info11["s11SmallCapExcPortsOK"] is True,
-        info11["s11CoreMotionCrossCompareOK"] is True,
-        info11["s11PlayChainAppGroupAndSEOK"] is True,
-        info11["s11CatalystImpUnwrapOK"] is True,
-        info11["s11SwiftMangledHiddenOK"] is True,
-        info11["s11NetIfListHiddenOK"] is True,
-        info11["s11CacheL2AlignedOK"] is True,
-        info11["s11GidNotStaffOK"] is True,
-        info11["s11MonacoFontHiddenOK"] is True,
-        info11["s11FileRefAndFsgetpathOK"] is True,
-        info11["s11MGCopyAnswerWithErrorOK"] is True,
-        info11["s11AudioAndUTTypeHiddenOK"] is True,
-        info11["s11SwapZeroOK"] is True,
-        info11["s11SandboxDlsymOK"] is True,
-        info11["s11CoreMotionPullCacheOK"] is True,
-        info11["s11MigHostAndTaskOK"] is True,
-        info11["s11BootstrapBlockedOK"] is True,
-        info11["s11SysctlSwapAndTreeOK"] is True,
-        info11["s11ResponsibilitySelfOK"] is True,
-        info11["s11LsAsnHiddenOK"] is True,
-        info11["s11ObjcMetaAndReqHiddenOK"] is True,
-        info11["s11Round1DlsymAndProcOK"] is True,
-        info11["s11Round1VolumeAndCodeResOK"] is True,
-        info11["s11Round1AppKitAndSuperBlobOK"] is True,
-        info11["s11Round2CGAndHIDBlockedOK"] is True,
-        info11["s11Round2FontsAndDlopenOK"] is True,
-        info11["s11Round2MigThreadNetIopsOK"] is True,
-        info11["s11Round3SignKernelCsrOK"] is True,
-        info11["s11Round3DyldHandleUnwindOK"] is True,
-        info11["s11Round3FsCasePathsAndIORegOK"] is True,
-        info11["s11V105Batch2OK"] is True,
-    ]
-    results.append(ScenarioResult(
-        name="11. 1.0.4 audit & detect-v2 parity checks",
-        passed=all(checks11),
-        duration_sec=time.monotonic() - t10,
-        details=json.dumps({
-            "inlineSvcMachine": info11["inlineSvcMachine"],
-            "sysctlMachine": info11["sysctlMachine"],
-            **{k: v for k, v in info11.items() if k.startswith("s11")},
-            "s11B2Detail": info11.get("s11B2Detail", ""),
-        }, sort_keys=True),
-    ))
-    if verbose:
-        print("  Scenario 11 payload:", {k: v for k, v in info11.items() if k.startswith("s11")})
+        info11 = parse_harness_json(proc11.stdout)
+        checks11 = [
+            info11["safeModeActive"] is False,
+            info11["inlineSvcMachine"] == info11["sysctlMachine"] and len(info11["inlineSvcMachine"]) > 0,
+            info11["s11ProcPidPathInfoOK"] is True,
+            info11["s11SmallCapExcPortsOK"] is True,
+            info11["s11CoreMotionCrossCompareOK"] is True,
+            info11["s11PlayChainAppGroupAndSEOK"] is True,
+            info11["s11CatalystImpUnwrapOK"] is True,
+            info11["s11SwiftMangledHiddenOK"] is True,
+            info11["s11NetIfListHiddenOK"] is True,
+            info11["s11CacheL2AlignedOK"] is True,
+            info11["s11GidNotStaffOK"] is True,
+            info11["s11MonacoFontHiddenOK"] is True,
+            info11["s11FileRefAndFsgetpathOK"] is True,
+            info11["s11MGCopyAnswerWithErrorOK"] is True,
+            info11["s11AudioAndUTTypeHiddenOK"] is True,
+            info11["s11SwapZeroOK"] is True,
+            info11["s11SandboxDlsymOK"] is True,
+            info11["s11CoreMotionPullCacheOK"] is True,
+            info11["s11MigHostAndTaskOK"] is True,
+            info11["s11BootstrapBlockedOK"] is True,
+            info11["s11SysctlSwapAndTreeOK"] is True,
+            info11["s11ResponsibilitySelfOK"] is True,
+            info11["s11LsAsnHiddenOK"] is True,
+            info11["s11ObjcMetaAndReqHiddenOK"] is True,
+            info11["s11Round1DlsymAndProcOK"] is True,
+            info11["s11Round1VolumeAndCodeResOK"] is True,
+            info11["s11Round1AppKitAndSuperBlobOK"] is True,
+            info11["s11Round2CGAndHIDBlockedOK"] is True,
+            info11["s11Round2FontsAndDlopenOK"] is True,
+            info11["s11Round2MigThreadNetIopsOK"] is True,
+            info11["s11Round3SignKernelCsrOK"] is True,
+            info11["s11Round3DyldHandleUnwindOK"] is True,
+            info11["s11Round3FsCasePathsAndIORegOK"] is True,
+            info11["s11V105Batch2OK"] is True,
+        ]
+        res11 = ScenarioResult(
+            name="11. 1.0.4 audit & detect-v2 parity checks",
+            passed=all(checks11),
+            duration_sec=time.monotonic() - t10,
+            details=json.dumps({
+                "inlineSvcMachine": info11["inlineSvcMachine"],
+                "sysctlMachine": info11["sysctlMachine"],
+                **{k: v for k, v in info11.items() if k.startswith("s11")},
+                "s11B2Detail": info11.get("s11B2Detail", ""),
+            }, sort_keys=True),
+        )
+        return [(11, res11, [f"  Scenario 11 payload: { {k: v for k, v in info11.items() if k.startswith('s11')} }"])]
 
     # Scenario 12: compat13_7 parity (freadlink, ExtensionKit, Metal 2.3 gate, AGX IORegistry)
-    t12 = time.monotonic()
-    isolated_root_12 = work_dir / "IsolatedHome12"
-    container_data_12 = isolated_root_12 / "Library/Containers/app.makedie.harness.mockapp/Data"
-    container_data_12.mkdir(parents=True, exist_ok=True)
-    plist12_dir = isolated_root_12 / "Library/Containers/app.makedie.MacOver/PlayTools"
-    plist12_dir.mkdir(parents=True, exist_ok=True)
-    plist12 = plist12_dir / "app.makedie.harness.mockapp.plist"
-    with open(plist12, "wb") as fp:
-        plistlib.dump({
-            "bypass": False,
-            "strictEmulationMode": True,
-            "strictViewportOrientation": "landscape",
-            "strictViewportScaleMode": "fitScreen",
-            "reportedIOSVersion": "compat13_7",
-            "playChain": True,
-        }, fp)
-    marker12 = work_dir / "marker_12.txt"
-    env12 = env9(
-        marker12,
-        HARNESS_TEST_SCENARIO12="1",
-        APP_SANDBOX_CONTAINER_ID="app.makedie.harness.mockapp",
-        HARNESS_GRACEFUL_EXIT="1",
-    )
-    env12["HOME"] = str(container_data_12)
-    env12["CFFIXED_USER_HOME"] = str(container_data_12)
-    env12["PLAYTOOLS_SETTINGS_PLIST"] = str(plist12)
-    proc12 = run_cmd([str(patched_bin)], env=env12, check=False)
-    if proc12.returncode != 0:
-        results.append(ScenarioResult(
-            name="12. compat13_7 parity (freadlink, ExtensionKit, Metal 2.3 gate, AGX IORegistry)",
-            passed=False,
-            duration_sec=time.monotonic() - t12,
-            details=f"rc={proc12.returncode}\nstdout={proc12.stdout}\nstderr={proc12.stderr}",
-        ))
-        return results
+    def run_s12() -> list[tuple[int, ScenarioResult, list[str]]]:
+        assert patched_info is not None
+        patched_bin, _, _, _, shared_manifest_path = patched_info
+        t12 = time.monotonic()
+        isolated_root_12 = work_dir / "IsolatedHome12"
+        container_data_12 = isolated_root_12 / "Library/Containers/app.makedie.harness.mockapp/Data"
+        container_data_12.mkdir(parents=True, exist_ok=True)
+        plist12_dir = isolated_root_12 / "Library/Containers/app.makedie.MacOver/PlayTools"
+        plist12_dir.mkdir(parents=True, exist_ok=True)
+        plist12 = plist12_dir / "app.makedie.harness.mockapp.plist"
+        with open(plist12, "wb") as fp:
+            plistlib.dump({
+                "bypass": False,
+                "strictEmulationMode": True,
+                "strictViewportOrientation": "landscape",
+                "strictViewportScaleMode": "fitScreen",
+                "reportedIOSVersion": "compat13_7",
+                "playChain": True,
+            }, fp)
+        marker12 = work_dir / "marker_12.txt"
+        env12 = make_env(
+            container_data_12,
+            plist12,
+            work_dir / "tmp_s12",
+            marker12,
+            PLAYTOOLS_TEST_SVC_MANIFEST=str(shared_manifest_path),
+            HARNESS_TEST_SCENARIO12="1",
+            APP_SANDBOX_CONTAINER_ID="app.makedie.harness.mockapp",
+            HARNESS_GRACEFUL_EXIT="1",
+        )
+        proc12 = run_cmd([str(patched_bin)], env=env12, check=False)
+        if proc12.returncode != 0:
+            return [(12, ScenarioResult(
+                name="12. compat13_7 parity (freadlink, ExtensionKit, Metal 2.3 gate, AGX IORegistry)",
+                passed=False,
+                duration_sec=time.monotonic() - t12,
+                details=f"rc={proc12.returncode}\nstdout={proc12.stdout}\nstderr={proc12.stderr}",
+            ), [])]
 
-    info12 = parse_harness_json(proc12.stdout)
-    checks12 = [
-        info12["safeModeActive"] is False,
-        info12["reportedIOSVersion"] == "compat13_7",
-        info12["s12FreadlinkHiddenOK"] is True,
-        info12["s12ExtensionKitHiddenOK"] is True,
-        info12["s12MetalCompat13GateOK"] is True,
-        info12["s12IORegGpuSanitizedOK"] is True,
-        info12["s12Post13EpochCleanOK"] is True,
-        info12["s12Round1JscCAPICleanOK"] is True,
-        info12["s12Round1ReflectionParityOK"] is True,
-        info12["s12Round2Compat13EpochOK"] is True,
-        info12["s12Round3IcuSwiftAvailOK"] is True,
-    ]
-    results.append(ScenarioResult(
-        name="12. compat13_7 parity (freadlink, ExtensionKit, Metal 2.3 gate, AGX IORegistry)",
-        passed=all(checks12),
-        duration_sec=time.monotonic() - t12,
-        details=json.dumps({
-            "reportedIOSVersion": info12["reportedIOSVersion"],
-            **{k: v for k, v in info12.items() if k.startswith("s12")},
-        }, sort_keys=True),
-    ))
-    if verbose:
-        print("  Scenario 12 payload:", {k: v for k, v in info12.items() if k.startswith("s12")})
+        info12 = parse_harness_json(proc12.stdout)
+        checks12 = [
+            info12["safeModeActive"] is False,
+            info12["reportedIOSVersion"] == "compat13_7",
+            info12["s12FreadlinkHiddenOK"] is True,
+            info12["s12ExtensionKitHiddenOK"] is True,
+            info12["s12MetalCompat13GateOK"] is True,
+            info12["s12IORegGpuSanitizedOK"] is True,
+            info12["s12Post13EpochCleanOK"] is True,
+            info12["s12Round1JscCAPICleanOK"] is True,
+            info12["s12Round1ReflectionParityOK"] is True,
+            info12["s12Round2Compat13EpochOK"] is True,
+            info12["s12Round3IcuSwiftAvailOK"] is True,
+        ]
+        res12 = ScenarioResult(
+            name="12. compat13_7 parity (freadlink, ExtensionKit, Metal 2.3 gate, AGX IORegistry)",
+            passed=all(checks12),
+            duration_sec=time.monotonic() - t12,
+            details=json.dumps({
+                "reportedIOSVersion": info12["reportedIOSVersion"],
+                **{k: v for k, v in info12.items() if k.startswith("s12")},
+            }, sort_keys=True),
+        )
+        return [(12, res12, [f"  Scenario 12 payload: { {k: v for k, v in info12.items() if k.startswith('s12')} }"])]
 
     # Scenario 13: Two-table (-Wl,-no_fixup_chains) un-stubbed non-lazy GOT restoration
-    t13 = time.monotonic()
-    tool_env13 = os.environ.copy()
-    if "DEVELOPER_DIR" not in tool_env13 and Path("/Applications/Xcode.app/Contents/Developer").is_dir():
-        tool_env13["DEVELOPER_DIR"] = "/Applications/Xcode.app/Contents/Developer"
-    sdk_path13 = run_cmd(["xcrun", "--sdk", "macosx", "--show-sdk-path"], env=tool_env13).stdout.strip()
-    fw_parent13 = str(playtools_fw.parent)
-    two_app_dir = work_dir / "MockTwoTable.app"
-    two_app_dir.mkdir(parents=True, exist_ok=True)
-    with open(two_app_dir / "Info.plist", "wb") as fp:
-        plistlib.dump({
-            "CFBundleDevelopmentRegion": "en",
-            "CFBundleExecutable": "MockTwoTable",
-            "CFBundleIdentifier": "app.makedie.harness.twotable",
-            "CFBundleInfoDictionaryVersion": "6.0",
-            "CFBundleName": "MockTwoTable",
-            "CFBundlePackageType": "APPL",
-            "CFBundleShortVersionString": "1.0",
-            "CFBundleVersion": "1",
-        }, fp)
-    two_c = work_dir / "MockTwoTable.m"
-    two_c.write_text(r'''
+    def run_s13() -> list[tuple[int, ScenarioResult, list[str]]]:
+        t13 = time.monotonic()
+        tool_env13, sdk_path13, fw_parent13 = resolve_sdk_and_tool_env(playtools_fw)
+        two_app_dir = work_dir / "MockTwoTable.app"
+        two_app_dir.mkdir(parents=True, exist_ok=True)
+        with open(two_app_dir / "Info.plist", "wb") as fp:
+            plistlib.dump({
+                "CFBundleDevelopmentRegion": "en",
+                "CFBundleExecutable": "MockTwoTable",
+                "CFBundleIdentifier": "app.makedie.harness.twotable",
+                "CFBundleInfoDictionaryVersion": "6.0",
+                "CFBundleName": "MockTwoTable",
+                "CFBundlePackageType": "APPL",
+                "CFBundleShortVersionString": "1.0",
+                "CFBundleVersion": "1",
+            }, fp)
+        two_c = work_dir / "MockTwoTable.m"
+        two_c.write_text(r'''
 @import Foundation;
 #include <dlfcn.h>
 #include <errno.h>
@@ -5266,97 +5380,685 @@ int main(void) {
     return 0;
 }
 ''', encoding="utf-8")
-    two_bin = two_app_dir / "MockTwoTable"
-    run_cmd([
-        "xcrun", "clang", "-fobjc-arc", "-fmodules", "-O2",
-        "-target", "arm64-apple-ios13.1-macabi",
-        "-Wl,-no_fixup_chains",
-        "-isysroot", sdk_path13,
-        "-F", fw_parent13,
-        "-framework", "Foundation",
-        "-framework", "PlayTools",
-        f"-Wl,-rpath,{fw_parent13}",
-        str(two_c),
-        "-o", str(two_bin),
-    ], env=tool_env13)
-    run_cmd(["codesign", "--force", "--deep", "--sign", "-", str(two_app_dir)], env=tool_env13)
+        two_bin = two_app_dir / "MockTwoTable"
+        run_cmd([
+            "xcrun", "clang", "-fobjc-arc", "-fmodules", "-O2",
+            "-target", "arm64-apple-ios13.1-macabi",
+            "-Wl,-no_fixup_chains",
+            "-isysroot", sdk_path13,
+            "-F", fw_parent13,
+            "-framework", "Foundation",
+            "-framework", "PlayTools",
+            f"-Wl,-rpath,{fw_parent13}",
+            str(two_c),
+            "-o", str(two_bin),
+        ], env=tool_env13)
+        run_cmd(["codesign", "--force", "--deep", "--sign", "-", str(two_app_dir)], env=tool_env13)
 
-    otool_l = run_cmd(["xcrun", "otool", "-lv", str(two_bin)], env=tool_env13).stdout
-    has_two_table_sections = (
-        "S_NON_LAZY_SYMBOL_POINTERS" in otool_l and "S_LAZY_SYMBOL_POINTERS" in otool_l
-    )
+        otool_l = run_cmd(["xcrun", "otool", "-lv", str(two_bin)], env=tool_env13).stdout
+        has_two_table_sections = (
+            "S_NON_LAZY_SYMBOL_POINTERS" in otool_l and "S_LAZY_SYMBOL_POINTERS" in otool_l
+        )
 
-    isolated_root_13 = work_dir / "IsolatedHome13"
-    (isolated_root_13 / "Library/Containers/app.makedie.harness.twotable/Data").mkdir(parents=True, exist_ok=True)
-    plist13_dir = isolated_root_13 / "Library/Containers/app.makedie.MacOver/PlayTools"
-    plist13_dir.mkdir(parents=True, exist_ok=True)
-    plist13 = plist13_dir / "app.makedie.harness.twotable.plist"
-    with open(plist13, "wb") as fp:
-        plistlib.dump({"bypass": True}, fp)
+        isolated_root_13 = work_dir / "IsolatedHome13"
+        data_home_13 = isolated_root_13 / "Library/Containers/app.makedie.harness.twotable/Data"
+        data_home_13.mkdir(parents=True, exist_ok=True)
+        plist13_dir = isolated_root_13 / "Library/Containers/app.makedie.MacOver/PlayTools"
+        plist13_dir.mkdir(parents=True, exist_ok=True)
+        plist13 = plist13_dir / "app.makedie.harness.twotable.plist"
+        with open(plist13, "wb") as fp:
+            plistlib.dump({"bypass": True}, fp)
 
-    env13 = base_env(
-        work_dir / "marker_13.txt",
-        APP_SANDBOX_CONTAINER_ID="app.makedie.harness.twotable",
-        HARNESS_VISIBLE_ENV="visible_ok",
-    )
-    env13["HOME"] = str(isolated_root_13 / "Library/Containers/app.makedie.harness.twotable/Data")
-    env13["CFFIXED_USER_HOME"] = env13["HOME"]
-    env13["PLAYTOOLS_SETTINGS_PLIST"] = str(plist13)
-    proc13 = run_cmd([str(two_bin)], env=env13, check=False)
+        env13 = make_env(
+            data_home_13,
+            plist13,
+            work_dir / "tmp_s13",
+            work_dir / "marker_13.txt",
+            APP_SANDBOX_CONTAINER_ID="app.makedie.harness.twotable",
+            HARNESS_VISIBLE_ENV="visible_ok",
+        )
+        proc13 = run_cmd([str(two_bin)], env=env13, check=False)
 
-    env13_off = dict(env13)
-    env13_off["DISABLE_PLAYSHADOW_BYPASS"] = "1"
-    proc13_off = run_cmd([str(two_bin)], env=env13_off, check=False)
+        env13_off = dict(env13)
+        env13_off["DISABLE_PLAYSHADOW_BYPASS"] = "1"
+        proc13_off = run_cmd([str(two_bin)], env=env13_off, check=False)
 
-    if proc13.returncode != 0 or proc13_off.returncode != 0:
-        results.append(ScenarioResult(
+        if proc13.returncode != 0 or proc13_off.returncode != 0:
+            return [(13, ScenarioResult(
+                name="13. Two-table non-lazy GOT pointer restoration",
+                passed=False,
+                duration_sec=time.monotonic() - t13,
+                details=f"rc={proc13.returncode} rc_off={proc13_off.returncode}\nstdout={proc13.stdout}\nstderr={proc13.stderr}",
+            ), [])]
+
+        info13 = parse_harness_json(proc13.stdout)
+        checks13 = [
+            has_two_table_sections is True,
+            info13["openSpoofed"] is True,
+            info13["sysctlSpoofed"] is True,
+            info13["dlsymSpoofed"] is True,
+            info13["getenvScrubbed"] is True,
+            info13["uuidArrayOK"] is True,
+            info13["ptrGetenvOK"] is True,
+            info13["ptrSysctlOK"] is True,
+            info13["ptrOpenOK"] is True,
+            info13["ptrSyscallOK"] is True,
+            info13["ptrStatOK"] is True,
+            info13["ptrLstatOK"] is True,
+            info13["ptrDlsymOK"] is True,
+            info13["vmReadLazySanitizedOK"] is True,
+            proc13_off.returncode == 0,
+        ]
+        res13 = ScenarioResult(
             name="13. Two-table non-lazy GOT pointer restoration",
-            passed=False,
+            passed=all(checks13),
             duration_sec=time.monotonic() - t13,
-            details=f"rc={proc13.returncode} rc_off={proc13_off.returncode}\nstdout={proc13.stdout}\nstderr={proc13.stderr}",
-        ))
-        return results
+            details=json.dumps({
+                "hasTwoTableSections": has_two_table_sections,
+                "bypassOffRC": proc13_off.returncode,
+                **info13,
+            }, sort_keys=True),
+        )
+        return [(13, res13, [f"  Scenario 13 payload: { {'hasTwoTableSections': has_two_table_sections, **info13} }"])]
 
-    info13 = parse_harness_json(proc13.stdout)
-    checks13 = [
-        has_two_table_sections is True,
-        info13["openSpoofed"] is True,
-        info13["sysctlSpoofed"] is True,
-        info13["dlsymSpoofed"] is True,
-        info13["getenvScrubbed"] is True,
-        info13["uuidArrayOK"] is True,
-        info13["ptrGetenvOK"] is True,
-        info13["ptrSysctlOK"] is True,
-        info13["ptrOpenOK"] is True,
-        info13["ptrSyscallOK"] is True,
-        info13["ptrStatOK"] is True,
-        info13["ptrLstatOK"] is True,
-        info13["ptrDlsymOK"] is True,
-        info13["vmReadLazySanitizedOK"] is True,
-        proc13_off.returncode == 0,
-    ]
-    results.append(ScenarioResult(
-        name="13. Two-table non-lazy GOT pointer restoration",
-        passed=all(checks13),
-        duration_sec=time.monotonic() - t13,
-        details=json.dumps({
-            "hasTwoTableSections": has_two_table_sections,
-            "bypassOffRC": proc13_off.returncode,
-            **info13,
-        }, sort_keys=True),
-    ))
-    if verbose:
-        print("  Scenario 13 payload:", {"hasTwoTableSections": has_two_table_sections, **info13})
+    # Scenario 14: Per-app isolated custom CA SecTrust injection, host scoping, proxy cloaking & Safe Mode.
+    def run_s14() -> list[tuple[int, ScenarioResult, list[str]]]:
+        t14 = time.monotonic()
+        tool_env14, sdk_path14, fw_parent14 = resolve_sdk_and_tool_env(playtools_fw)
+        mitm_dir = work_dir / "Scenario14MITM"
+        mitm_app_dir = mitm_dir / "MockMITM.app"
+        mitm_app_dir.mkdir(parents=True, exist_ok=True)
+        mitm_info_plist = mitm_app_dir / "Info.plist"
+        with open(mitm_info_plist, "wb") as fp:
+            plistlib.dump({
+                "CFBundleIdentifier": "app.makedie.harness.mitm",
+                "CFBundleExecutable": "MockMITM",
+                "CFBundleName": "MockMITM",
+                "CFBundlePackageType": "APPL",
+                "CFBundleShortVersionString": "1.0",
+                "CFBundleVersion": "1",
+            }, fp)
+
+        ca_key = mitm_dir / "ca.key"
+        ca_pem = mitm_dir / "ca.pem"
+        ca_der = mitm_dir / "ca.der"
+        rogue_key = mitm_dir / "rogue.key"
+        rogue_pem = mitm_dir / "rogue.pem"
+
+        def gen_ca(key_path: Path, pem_path: Path, cn: str) -> None:
+            run_cmd(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(key_path)])
+            run_cmd([
+                "openssl", "req", "-x509", "-new", "-nodes", "-key", str(key_path),
+                "-sha256", "-days", "30", "-subj", f"/CN={cn}", "-out", str(pem_path),
+                "-addext", "basicConstraints=critical,CA:TRUE",
+                "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+            ])
+
+        def gen_leaf(ca_k: Path, ca_c: Path, name: str, dns_name: str) -> Path:
+            l_key = mitm_dir / f"{name}.key"
+            l_csr = mitm_dir / f"{name}.csr"
+            l_ext = mitm_dir / f"{name}.ext"
+            l_pem = mitm_dir / f"{name}.pem"
+            l_der = mitm_dir / f"{name}.der"
+            l_ext.write_text(
+                "basicConstraints=CA:FALSE\n"
+                "keyUsage=critical,digitalSignature\n"
+                "extendedKeyUsage=serverAuth\n"
+                f"subjectAltName=DNS:{dns_name}\n",
+                encoding="utf-8",
+            )
+            run_cmd(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(l_key)])
+            run_cmd(["openssl", "req", "-new", "-key", str(l_key), "-subj", f"/CN={dns_name}", "-out", str(l_csr)])
+            run_cmd([
+                "openssl", "x509", "-req", "-in", str(l_csr), "-CA", str(ca_c), "-CAkey", str(ca_k),
+                "-CAcreateserial", "-out", str(l_pem), "-days", "30", "-sha256", "-extfile", str(l_ext),
+            ])
+            run_cmd(["openssl", "x509", "-in", str(l_pem), "-outform", "DER", "-out", str(l_der)])
+            return l_der
+
+        gen_ca(ca_key, ca_pem, "Harness Custom CA")
+        run_cmd(["openssl", "x509", "-in", str(ca_pem), "-outform", "DER", "-out", str(ca_der)])
+        gen_ca(rogue_key, rogue_pem, "Rogue Untrusted CA")
+        api_leaf_der = gen_leaf(ca_key, ca_pem, "api_leaf", "api.harness.test")
+        other_leaf_der = gen_leaf(ca_key, ca_pem, "other_leaf", "other.harness.test")
+        rogue_leaf_der = gen_leaf(rogue_key, rogue_pem, "rogue_leaf", "api.harness.test")
+        _ = gen_leaf(rogue_key, rogue_pem, "rogue_host_leaf", "rogue.harness.test")
+
+        api_chain_pem = mitm_dir / "api_chain.pem"
+        api_chain_pem.write_text(
+            (mitm_dir / "api_leaf.pem").read_text(encoding="utf-8") + ca_pem.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        rogue_chain_pem = mitm_dir / "rogue_chain.pem"
+        rogue_chain_pem.write_text(
+            (mitm_dir / "rogue_host_leaf.pem").read_text(encoding="utf-8") + rogue_pem.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+
+        ctx_api = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx_api.load_cert_chain(str(api_chain_pem), str(mitm_dir / "api_leaf.key"))
+        ctx_rogue = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx_rogue.load_cert_chain(str(rogue_chain_pem), str(mitm_dir / "rogue_host_leaf.key"))
+
+        mitm_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        mitm_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        mitm_sock.bind(("127.0.0.1", 0))
+        mitm_port = mitm_sock.getsockname()[1]
+        mitm_sock.listen(16)
+        mitm_stop = threading.Event()
+
+        def handle_mitm_conn(conn: socket.socket) -> None:
+            tls_conn = None
+            try:
+                conn.settimeout(5.0)
+                req_buf = b""
+                while b"\r\n\r\n" not in req_buf:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        return
+                    req_buf += chunk
+                first_line = req_buf.split(b"\r\n", 1)[0].decode("ascii", "ignore")
+                parts = first_line.split()
+                if len(parts) < 2 or parts[0].upper() != "CONNECT":
+                    return
+                host_only = parts[1].split(":", 1)[0].lower()
+                conn.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                ssl_ctx = ctx_rogue if host_only == "rogue.harness.test" else ctx_api
+                tls_conn = ssl_ctx.wrap_socket(conn, server_side=True)
+                tls_req = tls_conn.recv(4096)
+                if tls_req:
+                    tls_conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+            except Exception:
+                pass
+            finally:
+                try:
+                    if tls_conn is not None:
+                        tls_conn.close()
+                    else:
+                        conn.close()
+                except Exception:
+                    pass
+
+        def serve_mitm() -> None:
+            while not mitm_stop.is_set():
+                try:
+                    mitm_sock.settimeout(0.25)
+                    c, _ = mitm_sock.accept()
+                    threading.Thread(target=handle_mitm_conn, args=(c,), daemon=True).start()
+                except TimeoutError:
+                    continue
+                except OSError:
+                    break
+
+        mitm_thread = threading.Thread(target=serve_mitm, daemon=True)
+        mitm_thread.start()
+
+        mitm_m = mitm_dir / "mock_mitm.m"
+        mitm_m.write_text(r'''
+#import <Foundation/Foundation.h>
+#import <CFNetwork/CFNetwork.h>
+#import <Network/Network.h>
+#import <Security/Security.h>
+#import <objc/message.h>
+#import <objc/runtime.h>
+#include <dlfcn.h>
+#include <stdlib.h>
+
+@interface HarnessPerformDefaultDelegate : NSObject <NSURLSessionDelegate, NSURLSessionTaskDelegate>
+@end
+@implementation HarnessPerformDefaultDelegate
+- (void)URLSession:(NSURLSession *)session
+didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
+ completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential *))completionHandler {
+    completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
+}
+@end
+
+@interface HarnessPinCancelDelegate : NSObject <NSURLSessionDelegate, NSURLSessionTaskDelegate>
+@end
+@implementation HarnessPinCancelDelegate
+- (void)URLSession:(NSURLSession *)session
+didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
+ completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential *))completionHandler {
+    completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
+}
+@end
+
+static BOOL eval_leaf(NSString *path, NSString *hostname) {
+    NSData *der = [NSData dataWithContentsOfFile:path];
+    if (der.length == 0) return NO;
+    SecCertificateRef cert = SecCertificateCreateWithData(NULL, (__bridge CFDataRef)der);
+    if (cert == NULL) return NO;
+    SecPolicyRef policy = SecPolicyCreateSSL(true, (__bridge CFStringRef)hostname);
+    SecTrustRef trust = NULL;
+    OSStatus st = SecTrustCreateWithCertificates(cert, policy, &trust);
+    CFRelease(cert);
+    CFRelease(policy);
+    if (st != errSecSuccess || trust == NULL) return NO;
+    CFErrorRef err = NULL;
+    bool ok = SecTrustEvaluateWithError(trust, &err);
+    if (err != NULL) CFRelease(err);
+    CFRelease(trust);
+    return ok ? YES : NO;
+}
+
+static BOOL sync_https_200(NSURLSession *session, NSString *urlStr) {
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    __block BOOL ok = NO;
+    NSURLSessionDataTask *task = [session dataTaskWithURL:[NSURL URLWithString:urlStr]
+                                        completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        NSHTTPURLResponse *http = [resp isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)resp : nil;
+        NSString *body = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
+        if (err == nil && http.statusCode == 200 && [body isEqualToString:@"OK"]) {
+            ok = YES;
+        }
+        dispatch_semaphore_signal(sem);
+    }];
+    [task resume];
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 6 * NSEC_PER_SEC));
+    return ok;
+}
+
+int main(int argc, char **argv) {
+    @autoreleasepool {
+        const char *apiPath = (argc > 1) ? argv[1] : NULL;
+        const char *otherPath = (argc > 2) ? argv[2] : NULL;
+        const char *roguePath = (argc > 3) ? argv[3] : NULL;
+        const BOOL runHTTP = (argc > 4 && strcmp(argv[4], "--http") == 0);
+        BOOL apiTrusted = apiPath ? eval_leaf([NSString stringWithUTF8String:apiPath], @"api.harness.test") : NO;
+        BOOL otherTrusted = otherPath ? eval_leaf([NSString stringWithUTF8String:otherPath], @"other.harness.test") : NO;
+        BOOL rogueTrusted = roguePath ? eval_leaf([NSString stringWithUTF8String:roguePath], @"api.harness.test") : NO;
+
+        CFDictionaryRef sysProxy = CFNetworkCopySystemProxySettings();
+        NSString *cfProxyHost = @"";
+        NSInteger cfProxyPort = 0;
+        if (sysProxy != NULL) {
+            NSDictionary *d = (__bridge NSDictionary *)sysProxy;
+            if ([d[@"HTTPProxy"] isKindOfClass:[NSString class]]) {
+                cfProxyHost = d[@"HTTPProxy"];
+            }
+            if ([d[@"HTTPPort"] respondsToSelector:@selector(integerValue)]) {
+                cfProxyPort = [d[@"HTTPPort"] integerValue];
+            }
+        }
+
+        CFArrayRef proxies = CFNetworkCopyProxiesForURL((__bridge CFURLRef)[NSURL URLWithString:@"https://api.harness.test/"], sysProxy);
+        if (sysProxy != NULL) {
+            CFRelease(sysProxy);
+        }
+        NSString *proxiesURLHost = @"";
+        NSInteger proxiesURLPort = 0;
+        if (proxies != NULL) {
+            NSArray *arr = (__bridge NSArray *)proxies;
+            NSDictionary *first = ([arr.firstObject isKindOfClass:[NSDictionary class]]) ? arr.firstObject : nil;
+            if ([first[(__bridge NSString *)kCFProxyHostNameKey] isKindOfClass:[NSString class]]) {
+                proxiesURLHost = first[(__bridge NSString *)kCFProxyHostNameKey];
+            }
+            if ([first[(__bridge NSString *)kCFProxyPortNumberKey] respondsToSelector:@selector(integerValue)]) {
+                proxiesURLPort = [first[(__bridge NSString *)kCFProxyPortNumberKey] integerValue];
+            }
+            CFRelease(proxies);
+        }
+
+        NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+        NSDictionary *cfgProxy = cfg.connectionProxyDictionary;
+        NSString *cfgProxyHost = [cfgProxy[@"HTTPProxy"] isKindOfClass:[NSString class]] ? cfgProxy[@"HTTPProxy"] : @"";
+        NSInteger cfgProxyPort = [cfgProxy[@"HTTPPort"] respondsToSelector:@selector(integerValue)]
+            ? [cfgProxy[@"HTTPPort"] integerValue] : 0;
+
+        NSURLSessionConfiguration *antiProxyCfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+        antiProxyCfg.connectionProxyDictionary = @{ @"HTTPEnable": @NO, @"HTTPSEnable": @NO };
+        BOOL antiProxyHidden = (antiProxyCfg.connectionProxyDictionary.count == 0);
+        BOOL antiProxyOK = NO;
+        BOOL nwConnOK = NO;
+
+        NSInteger wkProxyCount = -1;
+        NSInteger wkAntiProxyCount = -1;
+        dlopen("/System/Library/Frameworks/WebKit.framework/WebKit", RTLD_NOW);
+        Class dsCls = objc_getClass("WKWebsiteDataStore");
+        SEL defDsSel = NSSelectorFromString(@"defaultDataStore");
+        SEL getProxyCfgSel = NSSelectorFromString(@"proxyConfigurations");
+        SEL setProxyCfgSel = NSSelectorFromString(@"setProxyConfigurations:");
+        if (dsCls != Nil && [dsCls respondsToSelector:defDsSel]) {
+            id store = ((id (*)(id, SEL))objc_msgSend)(dsCls, defDsSel);
+            if (store != nil && [store respondsToSelector:getProxyCfgSel] && [store respondsToSelector:setProxyCfgSel]) {
+                NSArray *cfgsBefore = ((id (*)(id, SEL))objc_msgSend)(store, getProxyCfgSel);
+                wkProxyCount = (NSInteger)cfgsBefore.count;
+                ((void (*)(id, SEL, NSArray *))objc_msgSend)(store, setProxyCfgSel, @[]);
+                NSArray *cfgsAfter = ((id (*)(id, SEL))objc_msgSend)(store, getProxyCfgSel);
+                wkAntiProxyCount = (NSInteger)cfgsAfter.count;
+            }
+        }
+
+        BOOL sharedOK = NO;
+        BOOL defaultOK = NO;
+        BOOL defaultDelegateHidden = NO;
+        BOOL sessionCfgProxyHidden = NO;
+        BOOL performDefaultOK = NO;
+        BOOL pinCancelOK = NO;
+        BOOL rogueHTTPError = NO;
+
+        if (runHTTP) {
+            sharedOK = sync_https_200([NSURLSession sharedSession], @"https://api.harness.test/shared");
+
+            NSURLSession *antiSess = [NSURLSession sessionWithConfiguration:antiProxyCfg];
+            antiProxyOK = sync_https_200(antiSess, @"https://api.harness.test/anti-proxy");
+            [antiSess invalidateAndCancel];
+
+            // Network.framework direct nw_parameters_create_secure_tcp + nw_connection_create route
+            nw_parameters_t nwParams = nw_parameters_create_secure_tcp(
+                NW_PARAMETERS_DEFAULT_CONFIGURATION,
+                NW_PARAMETERS_DEFAULT_CONFIGURATION
+            );
+            nw_endpoint_t nwEndpoint = nw_endpoint_create_host("api.harness.test", "443");
+            if (nwParams != nil && nwEndpoint != nil) {
+                nw_connection_t nwConn = nw_connection_create(nwEndpoint, nwParams);
+                dispatch_queue_t nwQ = dispatch_queue_create("harness.nw.q", DISPATCH_QUEUE_SERIAL);
+                dispatch_semaphore_t nwSem = dispatch_semaphore_create(0);
+                __block BOOL nwGot200 = NO;
+                nw_connection_set_state_changed_handler(nwConn, ^(nw_connection_state_t st, nw_error_t err) {
+                    (void)err;
+                    if (st == nw_connection_state_ready) {
+                        NSData *reqData = [@"GET /nw HTTP/1.1\r\nHost: api.harness.test\r\nConnection: close\r\n\r\n" dataUsingEncoding:NSUTF8StringEncoding];
+                        dispatch_data_t ddata = dispatch_data_create(reqData.bytes, reqData.length, nwQ, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+                        nw_connection_send(nwConn, ddata, NW_CONNECTION_DEFAULT_MESSAGE_CONTEXT, true, ^(nw_error_t sendErr) {
+                            if (sendErr != nil) {
+                                dispatch_semaphore_signal(nwSem);
+                                return;
+                            }
+                            nw_connection_receive(nwConn, 1, 4096, ^(dispatch_data_t content, nw_content_context_t ctx, bool isComplete, nw_error_t recvErr) {
+                                (void)ctx; (void)isComplete; (void)recvErr;
+                                if (content != nil) {
+                                    NSData *ns = (NSData *)content;
+                                    NSString *txt = [[NSString alloc] initWithData:ns encoding:NSUTF8StringEncoding];
+                                    if ([txt containsString:@"200 OK"]) {
+                                        nwGot200 = YES;
+                                    }
+                                }
+                                dispatch_semaphore_signal(nwSem);
+                            });
+                        });
+                    } else if (st == nw_connection_state_failed || st == nw_connection_state_cancelled) {
+                        dispatch_semaphore_signal(nwSem);
+                    }
+                });
+                nw_connection_set_queue(nwConn, nwQ);
+                nw_connection_start(nwConn);
+                dispatch_semaphore_wait(nwSem, dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC));
+                nw_connection_cancel(nwConn);
+                nwConnOK = nwGot200;
+            }
+
+            NSURLSession *defSess = [NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration defaultSessionConfiguration]];
+            defaultDelegateHidden = (defSess.delegate == nil);
+            sessionCfgProxyHidden = (defSess.configuration.connectionProxyDictionary.count == 0);
+            defaultOK = sync_https_200(defSess, @"https://api.harness.test/default");
+            [defSess invalidateAndCancel];
+
+            HarnessPerformDefaultDelegate *pdDel = [[HarnessPerformDefaultDelegate alloc] init];
+            NSURLSession *pdSess = [NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration ephemeralSessionConfiguration]
+                                                                 delegate:pdDel
+                                                            delegateQueue:nil];
+            performDefaultOK = (pdSess.delegate == pdDel) &&
+                sync_https_200(pdSess, @"https://api.harness.test/perform-default");
+            [pdSess invalidateAndCancel];
+
+            HarnessPinCancelDelegate *pinDel = [[HarnessPinCancelDelegate alloc] init];
+            NSURLSession *pinSess = [NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration ephemeralSessionConfiguration]
+                                                                  delegate:pinDel
+                                                             delegateQueue:nil];
+            pinCancelOK = (pinSess.delegate == pinDel) &&
+                sync_https_200(pinSess, @"https://api.harness.test/pin");
+            BOOL rogueSucceeded = sync_https_200(pinSess, @"https://rogue.harness.test/rogue");
+            rogueHTTPError = !rogueSucceeded;
+            [pinSess invalidateAndCancel];
+        }
+
+        NSDictionary *out = @{
+            @"apiTrusted": @(apiTrusted),
+            @"otherTrusted": @(otherTrusted),
+            @"rogueTrusted": @(rogueTrusted),
+            @"cfProxyHost": cfProxyHost,
+            @"cfProxyPort": @(cfProxyPort),
+            @"proxiesURLHost": proxiesURLHost,
+            @"proxiesURLPort": @(proxiesURLPort),
+            @"cfgProxyHost": cfgProxyHost,
+            @"cfgProxyPort": @(cfgProxyPort),
+            @"antiProxyHidden": @(antiProxyHidden),
+            @"antiProxyOK": @(antiProxyOK),
+            @"nwConnOK": @(nwConnOK),
+            @"wkProxyCount": @(wkProxyCount),
+            @"wkAntiProxyCount": @(wkAntiProxyCount),
+            @"sharedOK": @(sharedOK),
+            @"defaultOK": @(defaultOK),
+            @"defaultDelegateHidden": @(defaultDelegateHidden),
+            @"sessionCfgProxyHidden": @(sessionCfgProxyHidden),
+            @"performDefaultOK": @(performDefaultOK),
+            @"pinCancelOK": @(pinCancelOK),
+            @"rogueHTTPError": @(rogueHTTPError),
+        };
+        NSData *jsonData = [NSJSONSerialization dataWithJSONObject:out options:0 error:nil];
+        NSString *jsonStr = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+        printf("HARNESS_JSON:%s\n", jsonStr.UTF8String);
+    }
+    return 0;
+}
+''', encoding="utf-8")
+        mitm_bin = mitm_app_dir / "MockMITM"
+        run_cmd([
+            "xcrun", "clang", "-fobjc-arc", "-fmodules", "-O2",
+            "-target", "arm64-apple-ios26.0-macabi",
+            "-isysroot", sdk_path14,
+            "-F", fw_parent14,
+            "-framework", "Foundation",
+            "-framework", "Security",
+            "-framework", "CFNetwork",
+            "-framework", "Network",
+            "-Wl,-needed_framework,PlayTools",
+            f"-Wl,-rpath,{fw_parent14}",
+            str(mitm_m),
+            "-o", str(mitm_bin),
+        ], env=tool_env14)
+        run_cmd(["codesign", "--force", "--deep", "--sign", "-", str(mitm_app_dir)], env=tool_env14)
+
+        isolated_root_14 = work_dir / "IsolatedHome14"
+        data_home_14 = isolated_root_14 / "Library/Containers/app.makedie.harness.mitm/Data"
+        data_home_14.mkdir(parents=True, exist_ok=True)
+        plist14_dir = isolated_root_14 / "Library/Containers/app.makedie.MacOver/PlayTools"
+        plist14_dir.mkdir(parents=True, exist_ok=True)
+        plist14 = plist14_dir / "app.makedie.harness.mitm.plist"
+        certs14 = plist14_dir / "app.makedie.harness.mitm.plist.certs"
+        ca_der_bytes = ca_der.read_bytes()
+
+        def run_s14_sub(
+            settings_dict: dict,
+            include_certs: bool,
+            safe_mode: bool = False,
+            run_http: bool = False,
+        ) -> tuple[int, dict]:
+            caches_dir = data_home_14 / "Library/Caches"
+            if caches_dir.exists():
+                shutil.rmtree(caches_dir, ignore_errors=True)
+            with open(plist14, "wb") as fp:
+                plistlib.dump(settings_dict, fp)
+            if include_certs:
+                with open(certs14, "wb") as fp:
+                    plistlib.dump({"certificates": [ca_der_bytes]}, fp, fmt=plistlib.FMT_BINARY)
+            elif certs14.exists():
+                certs14.unlink()
+            env14 = make_env(
+                data_home_14,
+                plist14,
+                work_dir / "tmp_s14",
+                work_dir / "marker_14.txt",
+                APP_SANDBOX_CONTAINER_ID="app.makedie.harness.mitm",
+            )
+            if safe_mode:
+                env14["PLAYTOOLS_SAFE_MODE"] = "1"
+            cmd14 = [str(mitm_bin), str(api_leaf_der), str(other_leaf_der), str(rogue_leaf_der)]
+            if run_http:
+                cmd14.append("--http")
+            proc = run_cmd(cmd14, env=env14, check=False)
+            parsed = parse_harness_json(proc.stdout) if proc.returncode == 0 else {}
+            return proc.returncode, parsed
+
+        try:
+            rc14_a, info14_a = run_s14_sub({"bypass": True, "enableCustomCertificates": False}, include_certs=False)
+            rc14_b, info14_b = run_s14_sub({
+                "bypass": True,
+                "enableCustomCertificates": True,
+                "mitmAllHosts": False,
+                "mitmHostPatterns": ["api.harness.test"],
+                "networkProxyMode": "builtInMITM",
+                "mitmPort": 0,
+                "mitmRuntimePort": mitm_port,
+                "mitmAllowPinningBypass": False,
+                "hideProxyFromApp": True,
+            }, include_certs=True, run_http=True)
+            rc14_c, info14_c = run_s14_sub({
+                "bypass": True,
+                "enableCustomCertificates": True,
+                "mitmAllHosts": True,
+                "networkProxyMode": "builtInMITM",
+                "mitmPort": 0,
+                "mitmRuntimePort": mitm_port,
+                "mitmAllowPinningBypass": True,
+                "hideProxyFromApp": False,
+            }, include_certs=True, run_http=True)
+            rc14_d, info14_d = run_s14_sub({
+                "bypass": True,
+                "enableCustomCertificates": True,
+                "mitmAllHosts": True,
+                "networkProxyMode": "builtInMITM",
+                "mitmPort": 0,
+                "mitmRuntimePort": mitm_port,
+            }, include_certs=True, safe_mode=True, run_http=True)
+        finally:
+            mitm_stop.set()
+            try:
+                mitm_sock.close()
+            except OSError:
+                pass
+            mitm_thread.join(timeout=2.0)
+
+        checks14 = [
+            rc14_a == 0 and rc14_b == 0 and rc14_c == 0 and rc14_d == 0,
+            info14_a.get("apiTrusted") is False,
+            info14_a.get("otherTrusted") is False,
+            info14_a.get("rogueTrusted") is False,
+            info14_b.get("apiTrusted") is True,
+            info14_b.get("otherTrusted") is False,
+            info14_b.get("rogueTrusted") is False,
+            info14_b.get("cfProxyHost") == "",
+            info14_b.get("proxiesURLHost") == "",
+            info14_b.get("cfgProxyHost") == "",
+            info14_b.get("antiProxyHidden") is True,
+            info14_b.get("antiProxyOK") is True,
+            info14_b.get("nwConnOK") is True,
+            info14_b.get("wkProxyCount") == 0,
+            info14_b.get("wkAntiProxyCount") == 0,
+            info14_b.get("sharedOK") is True,
+            info14_b.get("defaultOK") is True,
+            info14_b.get("defaultDelegateHidden") is True,
+            info14_b.get("sessionCfgProxyHidden") is True,
+            info14_b.get("performDefaultOK") is True,
+            info14_b.get("pinCancelOK") is False,
+            info14_b.get("rogueHTTPError") is True,
+            info14_c.get("apiTrusted") is True,
+            info14_c.get("cfProxyHost") == "127.0.0.1",
+            info14_c.get("cfProxyPort") == mitm_port,
+            info14_c.get("proxiesURLHost") == "127.0.0.1",
+            info14_c.get("proxiesURLPort") == mitm_port,
+            info14_c.get("cfgProxyHost") == "127.0.0.1",
+            info14_c.get("cfgProxyPort") == mitm_port,
+            info14_c.get("antiProxyHidden") is False,
+            info14_c.get("antiProxyOK") is True,
+            info14_c.get("nwConnOK") is True,
+            info14_c.get("wkProxyCount") == 1,
+            info14_c.get("wkAntiProxyCount") == 1,
+            info14_c.get("sharedOK") is True,
+            info14_c.get("defaultOK") is True,
+            info14_c.get("performDefaultOK") is True,
+            info14_c.get("pinCancelOK") is True,
+            info14_c.get("rogueHTTPError") is True,
+            info14_d.get("apiTrusted") is False,
+            info14_d.get("cfgProxyHost") == "",
+            info14_d.get("sharedOK") is False,
+        ]
+        res14 = ScenarioResult(
+            name="14. Per-app custom CA SecTrust injection, proxy cloaking & Safe Mode",
+            passed=all(checks14),
+            duration_sec=time.monotonic() - t14,
+            details=json.dumps({
+                "runA_disabled": info14_a,
+                "runB_injectedHidden": info14_b,
+                "runC_proxyVisible": info14_c,
+                "runD_safeMode": info14_d,
+            }, sort_keys=True),
+        )
+        payload14 = {"runA": info14_a, "runB": info14_b, "runC": info14_c, "runD": info14_d}
+        return [(14, res14, [f"  Scenario 14 payload: {payload14}"])]
+
+    tasks = []
+    if selected & {1, 2, 3}:
+        tasks.append(run_chain_1_to_3)
+    runners = {
+        4: run_s4,
+        5: run_s5,
+        6: run_s6,
+        7: run_s7,
+        8: run_s8,
+        9: run_s9,
+        10: run_s10,
+        11: run_s11,
+        12: run_s12,
+        13: run_s13,
+        14: run_s14,
+    }
+    for sid in sorted(selected):
+        if sid in runners:
+            tasks.append(runners[sid])
+
+    collected: list[tuple[int, ScenarioResult, list[str]]] = []
+    max_workers = max(1, min(jobs, len(tasks))) if tasks else 1
+    if max_workers == 1:
+        for fn in tasks:
+            collected.extend(fn())
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(fn) for fn in tasks]
+            for fut in concurrent.futures.as_completed(futures):
+                collected.extend(fut.result())
+
+    collected.sort(key=lambda item: item[0])
+    for _, res, vlines in collected:
+        results.append(res)
+        if verbose:
+            for line in vlines:
+                print(line)
 
     return results
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    default_jobs = min(6, max(2, os.cpu_count() or 4))
     parser = argparse.ArgumentParser(description="PlayTools headless runtime test harness.")
     parser.add_argument(
         "--playtools-framework",
         default=None,
         help="Path to PlayTools.framework (or PlayTools.xcframework).",
+    )
+    parser.add_argument(
+        "--scenarios",
+        default=None,
+        help="Comma-separated scenario IDs or ranges to run (e.g. '14' or '1,2,9-14').",
+    )
+    parser.add_argument(
+        "-j",
+        "--jobs",
+        type=int,
+        default=default_jobs,
+        help=f"Maximum parallel scenario workers (default: {default_jobs}; use 1 for serial).",
     )
     parser.add_argument(
         "--json",
@@ -5367,6 +6069,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--keep-temp", action="store_true", help="Keep temporary work directory.")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output.")
     args = parser.parse_args(argv)
+    selected_scenarios = parse_scenarios_spec(args.scenarios)
 
     repo_root = Path(__file__).resolve().parent.parent.parent
     playtools_fw = resolve_playtools_framework(repo_root, args.playtools_framework)
@@ -5378,8 +6081,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     start_ts = time.monotonic()
 
     try:
-        target_bin = build_mock_app(work_dir, playtools_fw)
-        results = run_scenarios(target_bin, playtools_fw, work_dir, args.verbose)
+        needs_mock_app = bool(selected_scenarios & set(range(1, 13)))
+        target_bin = build_mock_app(work_dir, playtools_fw) if needs_mock_app else None
+        results = run_scenarios(
+            target_bin,
+            playtools_fw,
+            work_dir,
+            args.verbose,
+            selected_scenarios=selected_scenarios,
+            jobs=max(1, args.jobs),
+        )
     finally:
         if diag_log.exists():
             try:
