@@ -1922,8 +1922,87 @@ static id ps_virtual_ancestor_resource_value_for_key(NSString *origPath, NSURLRe
         }
         return [NSURL fileURLWithPath:parent isDirectory:YES];
     }
+    if ([key isEqualToString:NSURLVolumeSupportsCaseSensitiveNamesKey]) {
+        return @YES;
+    }
+    if ([key isEqualToString:NSURLVolumeNameKey] ||
+        [key isEqualToString:NSURLVolumeLocalizedNameKey]) {
+        return @"Data";
+    }
+    if ([key isEqualToString:NSURLVolumeURLKey]) {
+        return [NSURL fileURLWithPath:@"/private/var" isDirectory:YES];
+    }
     *outHandled = NO;
     return nil;
+}
+
+static BOOL ps_url_path_is_system_root_volume(NSString *path) {
+    if (path.length == 0) {
+        return NO;
+    }
+    if ([path isEqualToString:@"/"] ||
+        [path hasPrefix:@"/System/Library/"] ||
+        [path isEqualToString:@"/System/Library"] ||
+        [path hasPrefix:@"/usr/"] ||
+        [path isEqualToString:@"/usr"] ||
+        [path hasPrefix:@"/bin/"] ||
+        [path hasPrefix:@"/sbin/"]) {
+        return YES;
+    }
+    return NO;
+}
+
+static id ps_sanitize_url_resource_value(NSURL *origURL,
+                                         NSURLResourceKey key,
+                                         id val,
+                                         BOOL usePrivatePrefix,
+                                         const void *caller) {
+    if (val == nil || key == nil ||
+        !pt_is_bypass_enabled() ||
+        ps_is_effective_system_or_playtools_caller(caller)) {
+        return val;
+    }
+    if ([key isEqualToString:NSURLVolumeSupportsCaseSensitiveNamesKey]) {
+        return @YES;
+    }
+    if ([key isEqualToString:NSURLVolumeNameKey] ||
+        [key isEqualToString:NSURLVolumeLocalizedNameKey]) {
+        if ([val isKindOfClass:[NSString class]]) {
+            NSString *origPath = [origURL isFileURL] ? origURL.path : nil;
+            return ps_url_path_is_system_root_volume(origPath) ? @"System" : @"Data";
+        }
+        return val;
+    }
+    if ([key isEqualToString:NSURLVolumeURLKey]) {
+        if ([val isKindOfClass:[NSURL class]] && [(NSURL *)val isFileURL]) {
+            NSString *vp = [(NSURL *)val path];
+            if ([vp isEqualToString:@"/System/Volumes/Data"] ||
+                [vp isEqualToString:@"/System/Volumes/Data/"] ||
+                [vp hasPrefix:@"/Volumes/"] ||
+                [vp hasPrefix:@"/Users/"]) {
+                return [NSURL fileURLWithPath:@"/private/var" isDirectory:YES];
+            }
+            if ([vp isEqualToString:@"/"]) {
+                NSString *origPath = [origURL isFileURL] ? origURL.path : nil;
+                if (origPath.length > 0 && !ps_url_path_is_system_root_volume(origPath)) {
+                    return [NSURL fileURLWithPath:@"/private/var" isDirectory:YES];
+                }
+            }
+            return ps_virtualize_nsurl_for_app((NSURL *)val, YES);
+        }
+        return val;
+    }
+    if ([val isKindOfClass:[NSString class]]) {
+        if ([key isEqualToString:NSURLCanonicalPathKey]) {
+            return ps_virtualize_nsstring_path_for_app((NSString *)val, YES);
+        }
+        if ([key isEqualToString:NSURLPathKey]) {
+            return ps_virtualize_nsstring_path_for_app((NSString *)val, usePrivatePrefix);
+        }
+    } else if ([val isKindOfClass:[NSURL class]]) {
+        return ps_virtualize_nsurl_for_app((NSURL *)val, usePrivatePrefix);
+    }
+    return val;
 }
 
 - (BOOL) pm_checkResourceIsReachableAndReturnError:(NSError **)error {
@@ -1999,7 +2078,12 @@ static id ps_virtual_ancestor_resource_value_for_key(NSString *origPath, NSURLRe
                 NSURL *backingURL = [NSURL fileURLWithPath:@"/private/var" isDirectory:YES];
                 NSDictionary<NSURLResourceKey, id> *backingVals = [(id)backingURL pm_resourceValuesForKeys:fallbackKeys error:nil];
                 if (backingVals != nil) {
-                    [synth addEntriesFromDictionary:backingVals];
+                    for (NSURLResourceKey bk in backingVals) {
+                        id bval = ps_sanitize_url_resource_value(selfURL, bk, backingVals[bk], usePrivatePrefix, caller);
+                        if (bval != nil) {
+                            synth[bk] = bval;
+                        }
+                    }
                 }
             }
             return [synth copy];
@@ -2012,21 +2096,12 @@ static id ps_virtual_ancestor_resource_value_for_key(NSString *origPath, NSURLRe
     if (res == nil) {
         ps_assign_virtualized_nserror(error, localErr, usePrivatePrefix, wasVirtual, caller);
     }
-    if (res != nil && wasVirtual) {
+    if (res != nil) {
         NSMutableDictionary<NSURLResourceKey, id> *mapped = nil;
         for (NSURLResourceKey k in res) {
             id val = res[k];
-            id newVal = val;
-            if ([val isKindOfClass:[NSString class]]) {
-                if ([k isEqualToString:NSURLCanonicalPathKey]) {
-                    newVal = ps_virtualize_nsstring_path_for_app((NSString *)val, YES);
-                } else if ([k isEqualToString:NSURLPathKey]) {
-                    newVal = ps_virtualize_nsstring_path_for_app((NSString *)val, usePrivatePrefix);
-                }
-            } else if ([val isKindOfClass:[NSURL class]]) {
-                newVal = ps_virtualize_nsurl_for_app((NSURL *)val, usePrivatePrefix);
-            }
-            if (newVal != val) {
+            id newVal = ps_sanitize_url_resource_value(selfURL, k, val, usePrivatePrefix, caller);
+            if (newVal != val && ![newVal isEqual:val]) {
                 if (mapped == nil) {
                     mapped = [res mutableCopy];
                 }
@@ -2066,7 +2141,11 @@ static id ps_virtual_ancestor_resource_value_for_key(NSString *origPath, NSURLRe
                 return YES;
             }
             NSURL *backingURL = [NSURL fileURLWithPath:@"/private/var" isDirectory:YES];
-            return [(id)backingURL pm_getResourceValue:value forKey:key error:error];
+            BOOL okAnc = [(id)backingURL pm_getResourceValue:value forKey:key error:error];
+            if (okAnc && value != NULL && *value != nil) {
+                *value = ps_sanitize_url_resource_value(selfURL, key, *value, usePrivatePrefix, caller);
+            }
+            return okAnc;
         }
     }
     NSError *localErr = nil;
@@ -2076,18 +2155,57 @@ static id ps_virtual_ancestor_resource_value_for_key(NSString *origPath, NSURLRe
     if (!ok) {
         ps_assign_virtualized_nserror(error, localErr, usePrivatePrefix, wasVirtual, caller);
     }
-    if (ok && wasVirtual && value != NULL && *value != nil) {
-        if ([*value isKindOfClass:[NSString class]]) {
-            if ([key isEqualToString:NSURLCanonicalPathKey]) {
-                *value = ps_virtualize_nsstring_path_for_app((NSString *)*value, YES);
-            } else if ([key isEqualToString:NSURLPathKey]) {
-                *value = ps_virtualize_nsstring_path_for_app((NSString *)*value, usePrivatePrefix);
-            }
-        } else if ([*value isKindOfClass:[NSURL class]]) {
-            *value = ps_virtualize_nsurl_for_app((NSURL *)*value, usePrivatePrefix);
-        }
+    if (ok && value != NULL && *value != nil) {
+        *value = ps_sanitize_url_resource_value(selfURL, key, *value, usePrivatePrefix, caller);
     }
     return ok;
+}
+
+- (NSArray<NSURL *> *) pm_mountedVolumeURLsIncludingResourceValuesForKeys:(NSArray<NSURLResourceKey> *)propertyKeys
+                                                                  options:(NSVolumeEnumerationOptions)options {
+    const void *caller = __builtin_return_address(0);
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(caller)) {
+        // Per Apple Foundation docs, mountedVolumeURLsIncludingResourceValuesForKeys:options:
+        // always returns nil on non-macOS platforms (including iOS).
+        return nil;
+    }
+    return [self pm_mountedVolumeURLsIncludingResourceValuesForKeys:propertyKeys options:options];
+}
+
+- (NSDictionary<NSFileAttributeKey, id> *) pm_attributesOfFileSystemForPath:(NSString *)path
+                                                                      error:(NSError * _Nullable __autoreleasing *)error {
+    const void *caller = __builtin_return_address(0);
+    if (!pt_is_bypass_enabled() || ps_is_effective_system_or_playtools_caller(caller)) {
+        return [self pm_attributesOfFileSystemForPath:path error:error];
+    }
+    BOOL hidden = NO, ancestor = NO, usedBackup = NO;
+    BOOL usePrivatePrefix = [path isKindOfClass:[NSString class]] && [path hasPrefix:@"/private/"];
+    BOOL wasVirtual = [path isKindOfClass:[NSString class]] && ps_is_virtual_container_nsstring(path);
+    NSString *resolved = path;
+    ps_prepare_fm_path_mode(path, caller, YES, &resolved, &hidden, &ancestor, &usedBackup);
+    if (hidden) {
+        if (error != NULL) {
+            *error = [NSError errorWithDomain:NSCocoaErrorDomain
+                                         code:NSFileReadNoSuchFileError
+                                     userInfo:(path != nil ? @{NSFilePathErrorKey: path} : nil)];
+        }
+        return nil;
+    }
+    if (ancestor) {
+        pt_ensure_data_container_map();
+        if (s_real_data_container_len > 0) {
+            resolved = [NSString stringWithUTF8String:s_real_data_container_dir];
+        } else {
+            resolved = @"/private/var";
+        }
+    }
+    NSError *localErr = nil;
+    NSDictionary<NSFileAttributeKey, id> *attrs =
+        [self pm_attributesOfFileSystemForPath:resolved error:(error != NULL ? &localErr : NULL)];
+    if (attrs == nil) {
+        ps_assign_virtualized_nserror(error, localErr, usePrivatePrefix, wasVirtual, caller);
+    }
+    return attrs;
 }
 
 - (BOOL) pm_fileExistsAtPath:(NSString *)path {
@@ -2219,6 +2337,43 @@ static inline void ps_detect_path_virtual_flags(NSString *p1, NSString *p2, BOOL
     }
     if (attrs == nil) {
         ps_assign_virtualized_nserror(error, localErr, usePrivatePrefix, wasVirtual, caller);
+        return nil;
+    }
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(caller)) {
+        NSMutableDictionary<NSFileAttributeKey, id> *san = nil;
+        id grpId = attrs[NSFileGroupOwnerAccountID];
+        if ([grpId isKindOfClass:[NSNumber class]] && [(NSNumber *)grpId unsignedIntValue] == 20U) {
+            san = [attrs mutableCopy];
+            san[NSFileGroupOwnerAccountID] = @(501);
+        }
+        id grpName = attrs[NSFileGroupOwnerAccountName];
+        if ([grpName isKindOfClass:[NSString class]] && [(NSString *)grpName isEqualToString:@"staff"]) {
+            if (san == nil) {
+                san = [attrs mutableCopy];
+            }
+            san[NSFileGroupOwnerAccountName] = @"mobile";
+        }
+        id ownerName = attrs[NSFileOwnerAccountName];
+        if ([ownerName isKindOfClass:[NSString class]]) {
+            const char *hr = pt_get_host_user_root_cstr();
+            const char *hostUser = (hr != NULL && strncmp(hr, "/Users/", 7) == 0) ? (hr + 7) : NULL;
+            if (hostUser != NULL && hostUser[0] != '\0' &&
+                strcmp([(NSString *)ownerName UTF8String] ?: "", hostUser) == 0) {
+                if (san == nil) {
+                    san = [attrs mutableCopy];
+                }
+                san[NSFileOwnerAccountName] = @"mobile";
+            }
+        }
+        if (attrs[NSFileProtectionKey] == nil) {
+            if (san == nil) {
+                san = [attrs mutableCopy];
+            }
+            san[NSFileProtectionKey] = NSFileProtectionCompleteUntilFirstUserAuthentication;
+        }
+        if (san != nil) {
+            return [san copy];
+        }
     }
     return attrs;
 }
@@ -2508,26 +2663,45 @@ static void ps_prepare_file_url_for_io(NSURL *url,
     const void *caller = __builtin_return_address(0);
     NSArray<NSURL *> *orig = [self pm_URLsForDirectory:directory inDomains:domainMask];
     if (orig.count > 0) {
-        NSMutableArray<NSURL *> *mapped = nil;
+        BOOL bypass = pt_is_bypass_enabled();
+        NSMutableArray<NSURL *> *filtered = nil;
         int isSysCaller = -1;
         for (NSUInteger i = 0; i < orig.count; i++) {
             NSURL *u = orig[i];
             NSURL *vu = ps_virtualize_nsurl_for_app(u, NO);
-            if (vu != u) {
+            BOOL changed = (vu != u);
+            BOOL hide = NO;
+            if (bypass && [vu isFileURL]) {
                 if (isSysCaller < 0) {
                     isSysCaller = ps_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
                 }
                 if (isSysCaller != 0) {
                     return orig;
                 }
-                if (mapped == nil) {
-                    mapped = [orig mutableCopy];
+                NSString *vpath = vu.path;
+                if (vpath.length > 0 && ps_is_hidden_path(vpath, caller)) {
+                    hide = YES;
                 }
-                mapped[i] = vu;
+            } else if (changed) {
+                if (isSysCaller < 0) {
+                    isSysCaller = ps_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
+                }
+                if (isSysCaller != 0) {
+                    return orig;
+                }
+            }
+            if ((changed || hide) && filtered == nil) {
+                filtered = [NSMutableArray arrayWithCapacity:orig.count];
+                for (NSUInteger j = 0; j < i; j++) {
+                    [filtered addObject:orig[j]];
+                }
+            }
+            if (filtered != nil && !hide) {
+                [filtered addObject:vu];
             }
         }
-        if (mapped != nil) {
-            return [mapped copy];
+        if (filtered != nil) {
+            return [filtered copy];
         }
     }
     return orig;
@@ -2608,6 +2782,13 @@ static void ps_prepare_file_url_for_io(NSURL *url,
         }
         NSURL *orig = [self pm_ps_homeDirectoryForUser:userName];
         if (orig != nil) {
+            NSString *origPath = [orig isFileURL] ? orig.path : nil;
+            if (pt_is_bypass_enabled() && origPath.length > 0 &&
+                ([origPath hasPrefix:@"/Users/"] ||
+                 [origPath hasPrefix:@"/System/Volumes/Data/Users/"] ||
+                 ps_is_hidden_path(origPath, caller))) {
+                return nil;
+            }
             return ps_virtualize_nsurl_for_app(orig, NO);
         }
         return nil;
@@ -3226,3 +3407,216 @@ __attribute__((visibility("hidden"))) void ps_install_quicklook_hooks_if_loaded(
         });
     }
 }
+
+__attribute__((constructor))
+static void pt_fs_objc_install_volume_hooks(void) {
+    static dispatch_once_t volOnce;
+    dispatch_once(&volOnce, ^{
+        Class fmCls = objc_getClass("NSFileManager");
+        if (fmCls != Nil &&
+            class_getInstanceMethod(fmCls, @selector(mountedVolumeURLsIncludingResourceValuesForKeys:options:)) != NULL) {
+            ps_swizzle_instance_method(fmCls,
+                                       @selector(mountedVolumeURLsIncludingResourceValuesForKeys:options:),
+                                       @selector(pm_mountedVolumeURLsIncludingResourceValuesForKeys:options:));
+        }
+        if (fmCls != Nil &&
+            class_getInstanceMethod(fmCls, @selector(attributesOfFileSystemForPath:error:)) != NULL) {
+            ps_swizzle_instance_method(fmCls,
+                                       @selector(attributesOfFileSystemForPath:error:),
+                                       @selector(pm_attributesOfFileSystemForPath:error:));
+        }
+    });
+}
+
+static BOOL ps_assign_virtualized_cferror(CFErrorRef *outError,
+                                          CFErrorRef CF_CONSUMED rawError,
+                                          BOOL usePrivatePrefix,
+                                          BOOL forceVirtualize,
+                                          const void *caller) {
+    if (rawError == NULL) {
+        return NO;
+    }
+    if (outError == NULL) {
+        CFRelease(rawError);
+        return YES;
+    }
+    NSError *nsErr = (__bridge_transfer NSError *)rawError;
+    NSError *virtErr = nil;
+    ps_assign_virtualized_nserror(&virtErr, nsErr, usePrivatePrefix, forceVirtualize, caller);
+    *outError = (virtErr != nil) ? (__bridge_retained CFErrorRef)virtErr : NULL;
+    return (*outError != NULL);
+}
+
+__attribute__((visibility("hidden")))
+Boolean pt_CFURLCopyResourcePropertyForKey(CFURLRef url,
+                                           CFStringRef key,
+                                           void *propertyValueTypeRefPtr,
+                                           CFErrorRef *error) {
+    const void *caller = __builtin_return_address(0);
+    if (url == NULL || key == NULL ||
+        !pt_is_bypass_enabled() ||
+        ps_is_effective_system_or_playtools_caller(caller)) {
+        return CFURLCopyResourcePropertyForKey(url, key, propertyValueTypeRefPtr, error);
+    }
+    NSURL *origURL = (__bridge NSURL *)url;
+    NSString *origPath = [origURL isFileURL] ? [origURL path] : nil;
+    BOOL wasVirtual = (origPath != nil && ps_is_virtual_container_nsstring(origPath));
+    BOOL usePrivatePrefix = (origPath != nil && [origPath hasPrefix:@"/private/"]);
+    NSURL *resolvedURL = ps_resolve_virtual_nsurl(origURL);
+    NSString *resolvedPath = [resolvedURL isFileURL] ? [resolvedURL path] : nil;
+    if (resolvedPath != nil && ps_is_hidden_path(resolvedPath, caller)) {
+        if (propertyValueTypeRefPtr != NULL) {
+            *(CFTypeRef *)propertyValueTypeRefPtr = NULL;
+        }
+        if (error != NULL) {
+            *error = CFErrorCreate(kCFAllocatorDefault, kCFErrorDomainCocoa, NSFileReadNoSuchFileError, NULL);
+        }
+        return false;
+    }
+    if (!wasVirtual && [origURL isFileURL] &&
+        (ps_is_virtual_ancestor_nsstring(resolvedPath) || ps_is_virtual_ancestor_nsstring(origPath))) {
+        BOOL handled = NO;
+        id v = ps_virtual_ancestor_resource_value_for_key(origPath ?: resolvedPath,
+                                                          (__bridge NSURLResourceKey)key,
+                                                          &handled);
+        if (handled) {
+            if (propertyValueTypeRefPtr != NULL) {
+                *(CFTypeRef *)propertyValueTypeRefPtr = (v != nil) ? CFBridgingRetain(v) : NULL;
+            }
+            return true;
+        }
+        NSURL *backingURL = [NSURL fileURLWithPath:@"/private/var" isDirectory:YES];
+        CFErrorRef localErr = NULL;
+        Boolean okAnc = CFURLCopyResourcePropertyForKey((__bridge CFURLRef)backingURL,
+                                                        key,
+                                                        propertyValueTypeRefPtr,
+                                                        (error != NULL) ? &localErr : NULL);
+        if (!okAnc) {
+            ps_assign_virtualized_cferror(error, localErr, usePrivatePrefix, YES, caller);
+            return false;
+        }
+        if (propertyValueTypeRefPtr != NULL) {
+            CFTypeRef rawVal = *(CFTypeRef *)propertyValueTypeRefPtr;
+            if (rawVal != NULL) {
+                id objVal = (__bridge id)rawVal;
+                id cleanVal = ps_sanitize_url_resource_value(origURL, (__bridge NSURLResourceKey)key, objVal, usePrivatePrefix, caller);
+                if (cleanVal != objVal && ![cleanVal isEqual:objVal]) {
+                    CFRelease(rawVal);
+                    *(CFTypeRef *)propertyValueTypeRefPtr = (cleanVal != nil) ? CFBridgingRetain(cleanVal) : NULL;
+                }
+            }
+        }
+        return true;
+    }
+    CFURLRef queryURL = (resolvedURL != nil) ? (__bridge CFURLRef)resolvedURL : url;
+    CFErrorRef localErr = NULL;
+    Boolean ok = CFURLCopyResourcePropertyForKey(queryURL,
+                                                 key,
+                                                 propertyValueTypeRefPtr,
+                                                 (error != NULL) ? &localErr : NULL);
+    if (!ok) {
+        ps_assign_virtualized_cferror(error, localErr, usePrivatePrefix, wasVirtual, caller);
+        return false;
+    }
+    if (propertyValueTypeRefPtr != NULL) {
+        CFTypeRef rawVal = *(CFTypeRef *)propertyValueTypeRefPtr;
+        if (rawVal != NULL) {
+            id objVal = (__bridge id)rawVal;
+            id cleanVal = ps_sanitize_url_resource_value(origURL, (__bridge NSURLResourceKey)key, objVal, usePrivatePrefix, caller);
+            if (cleanVal != objVal && ![cleanVal isEqual:objVal]) {
+                CFRelease(rawVal);
+                *(CFTypeRef *)propertyValueTypeRefPtr = (cleanVal != nil) ? CFBridgingRetain(cleanVal) : NULL;
+            }
+        }
+    }
+    return ok;
+}
+
+__attribute__((visibility("hidden")))
+CFDictionaryRef pt_CFURLCopyResourcePropertiesForKeys(CFURLRef url,
+                                                      CFArrayRef keys,
+                                                      CFErrorRef *error) {
+    const void *caller = __builtin_return_address(0);
+    if (url == NULL ||
+        !pt_is_bypass_enabled() ||
+        ps_is_effective_system_or_playtools_caller(caller)) {
+        return CFURLCopyResourcePropertiesForKeys(url, keys, error);
+    }
+    NSURL *origURL = (__bridge NSURL *)url;
+    NSString *origPath = [origURL isFileURL] ? [origURL path] : nil;
+    BOOL wasVirtual = (origPath != nil && ps_is_virtual_container_nsstring(origPath));
+    BOOL usePrivatePrefix = (origPath != nil && [origPath hasPrefix:@"/private/"]);
+    NSURL *resolvedURL = ps_resolve_virtual_nsurl(origURL);
+    NSString *resolvedPath = [resolvedURL isFileURL] ? [resolvedURL path] : nil;
+    if (resolvedPath != nil && ps_is_hidden_path(resolvedPath, caller)) {
+        if (error != NULL) {
+            *error = CFErrorCreate(kCFAllocatorDefault, kCFErrorDomainCocoa, NSFileReadNoSuchFileError, NULL);
+        }
+        return NULL;
+    }
+    if (!wasVirtual && [origURL isFileURL] &&
+        (ps_is_virtual_ancestor_nsstring(resolvedPath) || ps_is_virtual_ancestor_nsstring(origPath))) {
+        NSArray<NSURLResourceKey> *nsKeys = (__bridge NSArray<NSURLResourceKey> *)keys;
+        NSMutableDictionary<NSURLResourceKey, id> *synth = [NSMutableDictionary dictionaryWithCapacity:nsKeys.count];
+        NSMutableArray<NSURLResourceKey> *fallbackKeys = nil;
+        for (NSURLResourceKey k in nsKeys) {
+            BOOL handled = NO;
+            id v = ps_virtual_ancestor_resource_value_for_key(origPath ?: resolvedPath, k, &handled);
+            if (handled) {
+                if (v != nil) {
+                    synth[k] = v;
+                }
+            } else {
+                if (fallbackKeys == nil) {
+                    fallbackKeys = [NSMutableArray array];
+                }
+                [fallbackKeys addObject:k];
+            }
+        }
+        if (fallbackKeys.count > 0) {
+            NSURL *backingURL = [NSURL fileURLWithPath:@"/private/var" isDirectory:YES];
+            CFDictionaryRef backingRef = CFURLCopyResourcePropertiesForKeys((__bridge CFURLRef)backingURL,
+                                                                            (__bridge CFArrayRef)fallbackKeys,
+                                                                            NULL);
+            if (backingRef != NULL) {
+                NSDictionary<NSURLResourceKey, id> *backingVals = (__bridge_transfer NSDictionary<NSURLResourceKey, id> *)backingRef;
+                for (NSURLResourceKey bk in backingVals) {
+                    id bval = ps_sanitize_url_resource_value(origURL, bk, backingVals[bk], usePrivatePrefix, caller);
+                    if (bval != nil) {
+                        synth[bk] = bval;
+                    }
+                }
+            }
+        }
+        return (__bridge_retained CFDictionaryRef)[synth copy];
+    }
+    CFURLRef queryURL = (resolvedURL != nil) ? (__bridge CFURLRef)resolvedURL : url;
+    CFErrorRef localErr = NULL;
+    CFDictionaryRef dictRef = CFURLCopyResourcePropertiesForKeys(queryURL,
+                                                                 keys,
+                                                                 (error != NULL) ? &localErr : NULL);
+    if (dictRef == NULL) {
+        ps_assign_virtualized_cferror(error, localErr, usePrivatePrefix, wasVirtual, caller);
+        return NULL;
+    }
+    NSDictionary *dict = (__bridge NSDictionary *)dictRef;
+    NSMutableDictionary *mapped = nil;
+    for (NSURLResourceKey k in dict) {
+        id val = dict[k];
+        id cleanVal = ps_sanitize_url_resource_value(origURL, k, val, usePrivatePrefix, caller);
+        if (cleanVal != val && ![cleanVal isEqual:val]) {
+            if (mapped == nil) {
+                mapped = [dict mutableCopy];
+            }
+            mapped[k] = cleanVal;
+        }
+    }
+    if (mapped != nil) {
+        CFRelease(dictRef);
+        return (__bridge_retained CFDictionaryRef)[mapped copy];
+    }
+    return dictRef;
+}
+
+DYLD_INTERPOSE(pt_CFURLCopyResourcePropertyForKey, CFURLCopyResourcePropertyForKey)
+DYLD_INTERPOSE(pt_CFURLCopyResourcePropertiesForKeys, CFURLCopyResourcePropertiesForKeys)

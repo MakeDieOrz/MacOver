@@ -340,6 +340,16 @@ static size_t s_backup_info_plist_len = 0;
 static dev_t s_backup_info_plist_dev = 0;
 static ino_t s_backup_info_plist_ino = 0;
 static BOOL s_has_backup_info_plist = NO;
+static char s_backup_code_resources_path[PATH_MAX];
+static size_t s_backup_code_resources_len = 0;
+static dev_t s_backup_code_resources_dev = 0;
+static ino_t s_backup_code_resources_ino = 0;
+static BOOL s_has_backup_code_resources = NO;
+static os_unfair_lock s_synth_code_res_lock = OS_UNFAIR_LOCK_INIT;
+static _Atomic bool s_has_synth_code_res = false;
+static char s_synth_code_res_path[PATH_MAX];
+static dev_t s_synth_code_res_dev = 0;
+static ino_t s_synth_code_res_ino = 0;
 static char s_backup_executable_path[PATH_MAX];
 static size_t s_backup_executable_len = 0;
 static dev_t s_backup_executable_dev = 0;
@@ -725,7 +735,19 @@ static BOOL pt_is_hidden_normalized_path_cached_caller(const char *norm, const v
                     ((strncmp(norm, "/Library/Application Support", 28) == 0 &&
                       (norm[28] == '\0' || norm[28] == '/')) ||
                      (strncmp(norm, "/Library/Desktop Pictures", 25) == 0 &&
-                      (norm[25] == '\0' || norm[25] == '/')))) {
+                      (norm[25] == '\0' || norm[25] == '/')) ||
+                     (strncmp(norm, "/Library/LaunchDaemons", 22) == 0 &&
+                      (norm[22] == '\0' || norm[22] == '/')) ||
+                     (strncmp(norm, "/Library/LaunchAgents", 21) == 0 &&
+                      (norm[21] == '\0' || norm[21] == '/')) ||
+                     (strncmp(norm, "/Library/Frameworks", 19) == 0 &&
+                      (norm[19] == '\0' || norm[19] == '/')) ||
+                     (strncmp(norm, "/Library/Extensions", 19) == 0 &&
+                      (norm[19] == '\0' || norm[19] == '/')) ||
+                     strcmp(norm, "/Library/Preferences/SystemConfiguration/preferences.plist") == 0 ||
+                     strcmp(norm, "/Library/Preferences/com.apple.TimeMachine.plist") == 0 ||
+                     strncmp(norm, "/Library/Preferences/com.apple.windowserver", 43) == 0 ||
+                     strcmp(norm, "/Library/Preferences/com.apple.loginwindow.plist") == 0)) {
                     is_candidate = YES;
                 }
                 break;
@@ -736,10 +758,45 @@ static BOOL pt_is_hidden_normalized_path_cached_caller(const char *norm, const v
                     (check_bypass_artifacts &&
                      ((strncmp(norm, "/System/Applications", 20) == 0 &&
                        (norm[20] == '\0' || norm[20] == '/')) ||
+                      (strncmp(norm, "/System/Library/Extensions", 26) == 0 &&
+                       (norm[26] == '\0' || norm[26] == '/')) ||
                       (strncasecmp(norm, "/System/Library/CoreServices/Finder.app", 39) == 0 &&
                        (norm[39] == '\0' || norm[39] == '/')) ||
+                      (strncasecmp(norm, "/System/Library/CoreServices/Dock.app", 37) == 0 &&
+                       (norm[37] == '\0' || norm[37] == '/')) ||
+                      (strncasecmp(norm, "/System/Library/CoreServices/SystemUIServer.app", 47) == 0 &&
+                       (norm[47] == '\0' || norm[47] == '/')) ||
+                      (strncasecmp(norm, "/System/Library/CoreServices/ControlCenter.app", 46) == 0 &&
+                       (norm[46] == '\0' || norm[46] == '/')) ||
+                      (strncasecmp(norm, "/System/Library/CoreServices/WindowManager.app", 46) == 0 &&
+                       (norm[46] == '\0' || norm[46] == '/')) ||
+                      (strncasecmp(norm, "/System/Library/CoreServices/NotificationCenter.app", 51) == 0 &&
+                       (norm[51] == '\0' || norm[51] == '/')) ||
+                      strcasecmp(norm, "/System/Library/CoreServices/iOSSystemVersion.plist") == 0 ||
                       strcmp(norm, "/System/Volumes") == 0 ||
-                      strcmp(norm, "/System/Volumes/Data") == 0))) {
+                      strcmp(norm, "/System/Volumes/Data") == 0 ||
+                      (strncmp(norm, "/System/Volumes/VM", 18) == 0 &&
+                       (norm[18] == '\0' || norm[18] == '/')) ||
+                      (strncmp(norm, "/System/Volumes/Preboot", 23) == 0 &&
+                       (norm[23] == '\0' || norm[23] == '/')) ||
+                      (strncmp(norm, "/System/Volumes/Update", 22) == 0 &&
+                       (norm[22] == '\0' || norm[22] == '/')) ||
+                      (strncmp(norm, "/System/Volumes/Hardware", 24) == 0 &&
+                       (norm[24] == '\0' || norm[24] == '/'))))) {
+                    is_candidate = YES;
+                }
+                break;
+            case 'e':
+                if (check_bypass_artifacts &&
+                    (strcmp(norm, "/etc/resolv.conf") == 0 ||
+                     strcmp(norm, "/etc/synthetic.conf") == 0)) {
+                    is_candidate = YES;
+                }
+                break;
+            case 'V':
+                if (check_bypass_artifacts &&
+                    strncmp(norm, "/Volumes", 8) == 0 &&
+                    (norm[8] == '\0' || norm[8] == '/')) {
                     is_candidate = YES;
                 }
                 break;
@@ -762,7 +819,18 @@ static BOOL pt_is_hidden_normalized_path_cached_caller(const char *norm, const v
             case 'u':
                 if (strcmp(norm, "/usr/bin/sudo") == 0 ||
                     strncmp(norm, "/usr/local/Homebrew", 19) == 0 ||
-                    strncmp(norm, "/usr/local/bin/brew", 19) == 0) {
+                    strncmp(norm, "/usr/local/bin/brew", 19) == 0 ||
+                    (check_bypass_artifacts &&
+                     ((strncmp(norm, "/usr/local", 10) == 0 &&
+                       (norm[10] == '\0' || norm[10] == '/')) ||
+                      strcmp(norm, "/usr/share/firmlinks") == 0 ||
+                      strcmp(norm, "/usr/bin/osascript") == 0 ||
+                      strcmp(norm, "/usr/bin/sw_vers") == 0 ||
+                      strcmp(norm, "/usr/bin/open") == 0 ||
+                      strcmp(norm, "/usr/bin/mdls") == 0 ||
+                      strcmp(norm, "/usr/bin/xcrun") == 0 ||
+                      strcmp(norm, "/usr/bin/xcode-select") == 0 ||
+                      strcmp(norm, "/usr/sbin/screencapture") == 0))) {
                     is_candidate = YES;
                 }
                 break;
@@ -776,16 +844,26 @@ static BOOL pt_is_hidden_normalized_path_cached_caller(const char *norm, const v
             case 'v':
                 if (strcmp(norm, "/var/select/sh") == 0 ||
                     (check_bypass_artifacts &&
-                     strncmp(norm, "/var/vm", 7) == 0 &&
-                     (norm[7] == '\0' || norm[7] == '/'))) {
+                     ((strncmp(norm, "/var/vm", 7) == 0 &&
+                       (norm[7] == '\0' || norm[7] == '/')) ||
+                      strcmp(norm, "/var/run/utmpx") == 0 ||
+                      strcmp(norm, "/var/run/resolv.conf") == 0 ||
+                      (strncmp(norm, "/var/db/dslocal", 15) == 0 &&
+                       (norm[15] == '\0' || norm[15] == '/'))))) {
                     is_candidate = YES;
                 }
                 break;
             case 'p':
                 if (strcmp(norm, "/private/var/select/sh") == 0 ||
                     (check_bypass_artifacts &&
-                     strncmp(norm, "/private/var/vm", 15) == 0 &&
-                     (norm[15] == '\0' || norm[15] == '/'))) {
+                     ((strncmp(norm, "/private/var/vm", 15) == 0 &&
+                       (norm[15] == '\0' || norm[15] == '/')) ||
+                      strcmp(norm, "/private/var/run/utmpx") == 0 ||
+                      strcmp(norm, "/private/var/run/resolv.conf") == 0 ||
+                      strcmp(norm, "/private/etc/resolv.conf") == 0 ||
+                      strcmp(norm, "/private/etc/synthetic.conf") == 0 ||
+                      (strncmp(norm, "/private/var/db/dslocal", 23) == 0 &&
+                       (norm[23] == '\0' || norm[23] == '/'))))) {
                     is_candidate = YES;
                 }
                 break;
@@ -1294,6 +1372,15 @@ static void pt_init_app_backup_map(void) {
             s_has_backup_info_plist = YES;
         }
 
+        int crn = snprintf(cand, sizeof(cand), "%s/CodeResources", s_app_backup_dir);
+        if (crn > 0 && (size_t)crn < sizeof(cand) && lstat(cand, &st) == 0 && S_ISREG(st.st_mode)) {
+            strlcpy(s_backup_code_resources_path, cand, sizeof(s_backup_code_resources_path));
+            s_backup_code_resources_len = (size_t)crn;
+            s_backup_code_resources_dev = st.st_dev;
+            s_backup_code_resources_ino = st.st_ino;
+            s_has_backup_code_resources = YES;
+        }
+
         int en = snprintf(cand, sizeof(cand), "%s/executable", s_app_backup_dir);
         if (en > 0 && (size_t)en < sizeof(cand) && lstat(cand, &st) == 0 && S_ISREG(st.st_mode)) {
             dev_t exec_dev = st.st_dev;
@@ -1395,7 +1482,224 @@ const char *pt_copy_virtual_mobileprovision_path(char *buf, size_t bufsize) {
                              "/embedded.mobileprovision");
 }
 
-static const char *pt_lookup_app_backup_redirect_unlocked(const char *p, const char *bundle_rel) {
+static NSMutableDictionary *pt_clean_code_resources_subdict(NSDictionary *sub) {
+    NSMutableDictionary *clean = nil;
+    for (id key in sub) {
+        if ([key isKindOfClass:[NSString class]]) {
+            NSString *k = (NSString *)key;
+            if ([k localizedCaseInsensitiveContainsString:@"PlayTools"] ||
+                [k localizedCaseInsensitiveContainsString:@"PlayCover"] ||
+                [k localizedCaseInsensitiveContainsString:@"MacOver"] ||
+                [k localizedCaseInsensitiveContainsString:@"AKInterface"] ||
+                [k localizedCaseInsensitiveContainsString:@"SVCPatches"] ||
+                [k localizedCaseInsensitiveContainsString:@"Playtools.strings"] ||
+                [k localizedCaseInsensitiveContainsString:@"UserPlugins"]) {
+                if (clean == nil) {
+                    clean = [sub mutableCopy];
+                }
+                [clean removeObjectForKey:key];
+            }
+        }
+    }
+    return clean;
+}
+
+static BOOL pt_is_synth_code_resources_path(const char *p) {
+    if (p == NULL || !atomic_load_explicit(&s_has_synth_code_res, memory_order_acquire) ||
+        strstr(p, ".pt_coderes_") == NULL) {
+        return NO;
+    }
+    BOOL match = NO;
+    os_unfair_lock_lock(&s_synth_code_res_lock);
+    if (s_synth_code_res_path[0] != '\0') {
+        const char *rem = pt_match_prefix_modulo_private(p, s_synth_code_res_path, strlen(s_synth_code_res_path));
+        match = (rem != NULL && rem[0] == '\0');
+    }
+    os_unfair_lock_unlock(&s_synth_code_res_lock);
+    return match;
+}
+
+static const char *pt_get_or_build_sanitized_code_resources_path(char *out_buf, size_t out_size) {
+    if (s_real_app_bundle_len == 0 || out_buf == NULL || out_size == 0) {
+        return NULL;
+    }
+    int saved_errno = errno;
+    char cached_path[PATH_MAX];
+    cached_path[0] = '\0';
+    dev_t cached_dev = 0;
+    ino_t cached_ino = 0;
+    os_unfair_lock_lock(&s_synth_code_res_lock);
+    if (s_synth_code_res_path[0] != '\0') {
+        strlcpy(cached_path, s_synth_code_res_path, sizeof(cached_path));
+        cached_dev = s_synth_code_res_dev;
+        cached_ino = s_synth_code_res_ino;
+    }
+    os_unfair_lock_unlock(&s_synth_code_res_lock);
+
+    if (cached_path[0] != '\0') {
+        pt_enter_internal_scope();
+        struct stat st;
+        BOOL alive = (stat(cached_path, &st) == 0 &&
+                      st.st_dev == cached_dev &&
+                      st.st_ino == cached_ino);
+        pt_leave_internal_scope();
+        if (alive) {
+            size_t n = strlcpy(out_buf, cached_path, out_size);
+            errno = saved_errno;
+            return (n < out_size) ? out_buf : NULL;
+        }
+    }
+
+    pt_ensure_data_container_map();
+    pt_enter_internal_scope();
+    NSData *xmlOut = nil;
+    @autoreleasepool {
+        char src_path[PATH_MAX];
+        int sn = snprintf(src_path, sizeof(src_path), "%s/_CodeSignature/CodeResources", s_real_app_bundle_dir);
+        int rfd = (sn > 0 && (size_t)sn < sizeof(src_path)) ? pt_orig_open_nocancel(src_path, O_RDONLY) : -1;
+        if (rfd < 0) {
+            sn = snprintf(src_path, sizeof(src_path), "%s/Contents/_CodeSignature/CodeResources", s_real_app_bundle_dir);
+            if (sn > 0 && (size_t)sn < sizeof(src_path)) {
+                rfd = pt_orig_open_nocancel(src_path, O_RDONLY);
+            }
+        }
+        if (rfd >= 0) {
+            size_t raw_len = 0;
+            size_t map_size = 0;
+            uint8_t *raw_bytes = pt_read_fd_plist_bytes(rfd, &raw_len, &map_size);
+            close(rfd);
+            if (raw_bytes != NULL && raw_len > 0) {
+                NSData *rawData = [NSData dataWithBytes:raw_bytes length:raw_len];
+                munmap(raw_bytes, map_size);
+                id plist = [NSPropertyListSerialization propertyListWithData:rawData
+                                                                     options:NSPropertyListImmutable
+                                                                      format:nil
+                                                                       error:nil];
+                if ([plist isKindOfClass:[NSDictionary class]]) {
+                    NSDictionary *dict = (NSDictionary *)plist;
+                    NSArray<NSString *> *subkeys = @[@"files", @"files2", @"rules", @"rules2"];
+                    NSMutableDictionary *cleanDict = nil;
+                    for (NSString *sk in subkeys) {
+                        id sub = dict[sk];
+                        if ([sub isKindOfClass:[NSDictionary class]]) {
+                            NSMutableDictionary *csub = pt_clean_code_resources_subdict((NSDictionary *)sub);
+                            if (csub != nil) {
+                                if (cleanDict == nil) {
+                                    cleanDict = [dict mutableCopy];
+                                }
+                                cleanDict[sk] = [csub copy];
+                            }
+                        }
+                    }
+                    if (cleanDict != nil) {
+                        xmlOut = [NSPropertyListSerialization dataWithPropertyList:cleanDict
+                                                                            format:NSPropertyListXMLFormat_v1_0
+                                                                           options:0
+                                                                             error:nil];
+                    }
+                }
+            } else if (raw_bytes != NULL) {
+                munmap(raw_bytes, map_size);
+            }
+        }
+    }
+    if (xmlOut == nil || xmlOut.length == 0) {
+        pt_leave_internal_scope();
+        errno = saved_errno;
+        return NULL;
+    }
+
+    char container_tmp[PATH_MAX];
+    const char *dirs[3] = { NULL, NULL, "/tmp" };
+    if (s_real_data_container_len > 0) {
+        int dn = snprintf(container_tmp, sizeof(container_tmp), "%s/tmp", s_real_data_container_dir);
+        if (dn > 0 && (size_t)dn < sizeof(container_tmp)) {
+            dirs[0] = container_tmp;
+        }
+    }
+    const char *env_tmp = pt_raw_getenv("TMPDIR");
+    char env_tmp_buf[PATH_MAX];
+    if (env_tmp != NULL && env_tmp[0] == '/') {
+        strlcpy(env_tmp_buf, env_tmp, sizeof(env_tmp_buf));
+        size_t el = strlen(env_tmp_buf);
+        while (el > 1 && env_tmp_buf[el - 1] == '/') {
+            env_tmp_buf[--el] = '\0';
+        }
+        dirs[1] = env_tmp_buf;
+    }
+
+    char created_path[PATH_MAX];
+    created_path[0] = '\0';
+    dev_t created_dev = 0;
+    ino_t created_ino = 0;
+    for (size_t i = 0; i < 3 && created_path[0] == '\0'; i++) {
+        if (dirs[i] == NULL || dirs[i][0] != '/') {
+            continue;
+        }
+        char tmpl[PATH_MAX];
+        int tn = snprintf(tmpl, sizeof(tmpl), "%s/.pt_coderes_XXXXXX", dirs[i]);
+        if (tn <= 0 || (size_t)tn >= sizeof(tmpl)) {
+            continue;
+        }
+        int fd = mkstemp(tmpl);
+        if (fd < 0) {
+            continue;
+        }
+        (void)fchmod(fd, 0444);
+        const uint8_t *wptr = (const uint8_t *)xmlOut.bytes;
+        size_t rem = xmlOut.length;
+        BOOL wrote = YES;
+        while (rem > 0) {
+            ssize_t w = write(fd, wptr, rem);
+            if (w <= 0) {
+                wrote = NO;
+                break;
+            }
+            wptr += (size_t)w;
+            rem -= (size_t)w;
+        }
+        struct stat st;
+        if (wrote && fstat(fd, &st) == 0) {
+            close(fd);
+            strlcpy(created_path, tmpl, sizeof(created_path));
+            created_dev = st.st_dev;
+            created_ino = st.st_ino;
+            break;
+        }
+        close(fd);
+        unlink(tmpl);
+    }
+    if (created_path[0] == '\0') {
+        pt_leave_internal_scope();
+        errno = saved_errno;
+        return NULL;
+    }
+
+    BOOL discard_created = NO;
+    size_t copied_len = out_size;
+    os_unfair_lock_lock(&s_synth_code_res_lock);
+    if (s_synth_code_res_path[0] != '\0' &&
+        (s_synth_code_res_dev != cached_dev || s_synth_code_res_ino != cached_ino)) {
+        copied_len = strlcpy(out_buf, s_synth_code_res_path, out_size);
+        discard_created = YES;
+    }
+    if (!discard_created) {
+        strlcpy(s_synth_code_res_path, created_path, sizeof(s_synth_code_res_path));
+        s_synth_code_res_dev = created_dev;
+        s_synth_code_res_ino = created_ino;
+        atomic_store_explicit(&s_has_synth_code_res, true, memory_order_release);
+        copied_len = strlcpy(out_buf, created_path, out_size);
+    }
+    os_unfair_lock_unlock(&s_synth_code_res_lock);
+    if (discard_created) {
+        unlink(created_path);
+    }
+    pt_leave_internal_scope();
+    errno = saved_errno;
+    return (copied_len < out_size && out_buf[0] != '\0') ? out_buf : NULL;
+}
+
+static const char *pt_lookup_app_backup_redirect_unlocked(const char *p, const char *bundle_rel, char *vbuf, size_t vbuf_size) {
     if (s_has_backup_mobileprovision && bundle_rel != NULL &&
         (strcmp(bundle_rel, "/embedded.mobileprovision") == 0 ||
          strcmp(bundle_rel, "/Contents/embedded.mobileprovision") == 0)) {
@@ -1411,6 +1715,20 @@ static const char *pt_lookup_app_backup_redirect_unlocked(const char *p, const c
             s_backup_info_plist_path, s_backup_info_plist_dev, s_backup_info_plist_ino)
             ? s_backup_info_plist_path
             : NULL;
+    }
+    if (bundle_rel != NULL &&
+        (strcmp(bundle_rel, "/_CodeSignature/CodeResources") == 0 ||
+         strcmp(bundle_rel, "/Contents/_CodeSignature/CodeResources") == 0)) {
+        if (s_has_backup_code_resources) {
+            const char *pinned = pt_verify_pinned_backup_file(
+                s_backup_code_resources_path, s_backup_code_resources_dev, s_backup_code_resources_ino)
+                ? s_backup_code_resources_path
+                : NULL;
+            if (pinned != NULL) {
+                return pinned;
+            }
+        }
+        return pt_get_or_build_sanitized_code_resources_path(vbuf, vbuf_size);
     }
     if (s_has_backup_executable && s_real_main_exec_len > 0 && p != NULL) {
         const char *erel = pt_match_prefix_modulo_private(p, s_real_main_exec_path, s_real_main_exec_len);
@@ -1447,14 +1765,6 @@ const char *pt_lookup_app_backup_redirect_for_caller(const char *raw_path,
     if (rel == NULL || rel[0] != '/') {
         return NULL;
     }
-    pt_ensure_app_backup_map();
-    if (!atomic_load_explicit(&s_app_backup_ready, memory_order_acquire)) {
-        return NULL;
-    }
-    const char *target = pt_lookup_app_backup_redirect_unlocked(p, rel);
-    if (target == NULL) {
-        return NULL;
-    }
     int local_sys = (inout_is_sys_caller != NULL) ? *inout_is_sys_caller : -1;
     if (local_sys < 0) {
         local_sys = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
@@ -1464,6 +1774,17 @@ const char *pt_lookup_app_backup_redirect_for_caller(const char *raw_path,
     }
     if (local_sys == 1) {
         return NULL;
+    }
+    pt_ensure_app_backup_map();
+    if (!atomic_load_explicit(&s_app_backup_ready, memory_order_acquire)) {
+        return NULL;
+    }
+    const char *target = pt_lookup_app_backup_redirect_unlocked(p, rel, vbuf, vbuf_size);
+    if (target == NULL) {
+        return NULL;
+    }
+    if (target == vbuf) {
+        return vbuf;
     }
     size_t n = strlcpy(vbuf, target, vbuf_size);
     return (n < vbuf_size) ? vbuf : NULL;
@@ -1595,6 +1916,15 @@ static BOOL pt_is_active_app_backup_file_path(const char *p) {
             return YES;
         }
     }
+    if (s_has_backup_code_resources && s_backup_code_resources_len > 0) {
+        const char *rel = pt_match_prefix_modulo_private(p, s_backup_code_resources_path, s_backup_code_resources_len);
+        if (rel != NULL && rel[0] == '\0') {
+            return YES;
+        }
+    }
+    if (pt_is_synth_code_resources_path(p)) {
+        return YES;
+    }
     if (s_has_backup_executable && s_backup_executable_len > 0) {
         const char *rel = pt_match_prefix_modulo_private(p, s_backup_executable_path, s_backup_executable_len);
         if (rel != NULL && rel[0] == '\0') {
@@ -1627,6 +1957,15 @@ static const char *pt_virtualize_app_backup_path(const char *p, char *buf, size_
         if (rel != NULL && rel[0] == '\0') {
             return pt_join_path_fast(buf, bufsize, prefix, plen, "/Info.plist");
         }
+    }
+    if (s_has_backup_code_resources && s_backup_code_resources_len > 0) {
+        const char *rel = pt_match_prefix_modulo_private(p, s_backup_code_resources_path, s_backup_code_resources_len);
+        if (rel != NULL && rel[0] == '\0') {
+            return pt_join_path_fast(buf, bufsize, prefix, plen, "/_CodeSignature/CodeResources");
+        }
+    }
+    if (pt_is_synth_code_resources_path(p)) {
+        return pt_join_path_fast(buf, bufsize, prefix, plen, "/_CodeSignature/CodeResources");
     }
     if (s_has_backup_executable && s_backup_executable_len > 0 && s_real_main_exec_rel_path[0] == '/') {
         const char *rel = pt_match_prefix_modulo_private(p, s_backup_executable_path, s_backup_executable_len);
@@ -2099,6 +2438,16 @@ const char *pt_virtualize_path_for_app(const char *path, char *buf, size_t bufsi
         size_t n = strlcpy(buf, "/System/Library/CoreServices/SystemVersion.plist", bufsize);
         return (n < bufsize) ? buf : path;
     }
+    if (pt_is_synth_code_resources_path(p)) {
+        const char *bprefix = use_private_prefix ? s_virtual_private_bundle_dir : s_virtual_var_bundle_dir;
+        size_t bplen = use_private_prefix ? s_virtual_private_bundle_len : s_virtual_var_bundle_len;
+        if (bplen > 0) {
+            const char *joined = pt_join_path_fast(buf, bufsize, bprefix, bplen, "/_CodeSignature/CodeResources");
+            if (joined != NULL) {
+                return joined;
+            }
+        }
+    }
     if (s_real_data_container_len > 0) {
         const char *suffix = pt_match_prefix_modulo_private(p, s_real_data_container_dir, s_real_data_container_len);
         if (suffix != NULL) {
@@ -2144,7 +2493,10 @@ static BOOL pt_is_sensitive_host_fd_path(const char *path, const void *caller) {
     if (strncmp(p, "/System/Volumes/Data/", 21) == 0) {
         p += 20;
     }
-    if (pt_is_active_app_backup_file_path(p) || pt_is_synth_system_version_path(p)) {
+    if (pt_is_active_app_backup_file_path(p) ||
+        pt_is_synth_system_version_path(p) ||
+        pt_is_synth_code_resources_path(p) ||
+        strcasecmp(p, "/System/Library/CoreServices/iOSSystemVersion.plist") == 0) {
         return NO;
     }
     int is_sys_caller = -1;
@@ -2259,18 +2611,52 @@ static const char *pt_sanitize_image_path_internal(const char *raw_path, BOOL al
             candidate = transformed;
         }
     } else if ((strncmp(p, "/System/", 8) == 0 || strncmp(p, "/Library/", 9) == 0)) {
-        const char *fw_ver = strstr(p, ".framework/Versions/");
-        if (fw_ver != NULL) {
-            const char *ver_dir = fw_ver + 10; // points to "/Versions/..."
-            const char *after_versions = ver_dir + 10; // past "/Versions/"
-            const char *next_slash = strchr(after_versions, '/');
-            if (next_slash != NULL) {
-                size_t prefix_len = (size_t)(ver_dir - p);
-                if (prefix_len + strlen(next_slash) + 1 < sizeof(transformed)) {
-                    memcpy(transformed, p, prefix_len);
-                    strcpy(transformed + prefix_len, next_slash);
-                    candidate = transformed;
+        size_t plen = strlen(p);
+        if (plen < sizeof(transformed)) {
+            char work[PATH_MAX];
+            memcpy(work, p, plen + 1U);
+            BOOL changed = NO;
+            for (int iter = 0; iter < 8; iter++) {
+                const char *fw_ver = strstr(work, ".framework/Versions/");
+                const char *bdl_ver = strstr(work, ".bundle/Versions/");
+                const char *bdl_mac = strstr(work, ".bundle/Contents/MacOS/");
+                const char *hit = fw_ver;
+                size_t keep_ext_len = 10U;
+                size_t skip_prefix_len = 20U;
+                if (bdl_ver != NULL && (hit == NULL || bdl_ver < hit)) {
+                    hit = bdl_ver;
+                    keep_ext_len = 7U;
+                    skip_prefix_len = 17U;
                 }
+                if (bdl_mac != NULL && (hit == NULL || bdl_mac < hit)) {
+                    hit = bdl_mac;
+                    keep_ext_len = 7U;
+                    skip_prefix_len = 22U;
+                }
+                if (hit == NULL) {
+                    break;
+                }
+                const char *rest = NULL;
+                if (hit == bdl_mac) {
+                    rest = hit + skip_prefix_len;
+                } else {
+                    const char *after_versions = hit + skip_prefix_len;
+                    rest = strchr(after_versions, '/');
+                }
+                if (rest == NULL) {
+                    break;
+                }
+                size_t prefix_len = (size_t)(hit - work) + keep_ext_len;
+                size_t rest_len = strlen(rest);
+                if (prefix_len + rest_len >= sizeof(work)) {
+                    break;
+                }
+                memmove(work + prefix_len, rest, rest_len + 1U);
+                changed = YES;
+            }
+            if (changed) {
+                memcpy(transformed, work, strlen(work) + 1U);
+                candidate = transformed;
             }
         }
     } else {
@@ -2422,7 +2808,7 @@ __attribute__((visibility("hidden"))) BOOL pt_is_reverse_mapped_iossupport(const
     if (orig_path == NULL || resolved_path == NULL || orig_path == resolved_path) {
         return NO;
     }
-    return (strncmp(resolved_path, "/System/iOSSupport/System/Library/", 36) == 0 &&
+    return (strncmp(resolved_path, "/System/iOSSupport/System/Library/", 34) == 0 &&
             strncmp(orig_path, "/System/iOSSupport", 18) != 0);
 }
 
@@ -2498,11 +2884,15 @@ __attribute__((visibility("hidden"))) BOOL pt_fd_is_sensitive(int fd, const void
     if (pt_is_effective_system_or_playtools_caller(caller)) {
         return NO;
     }
+    int saved_errno = errno;
     char fd_path[PATH_MAX];
     if (fcntl(fd, F_GETPATH, fd_path) == -1) {
+        errno = saved_errno;
         return NO;
     }
-    return pt_is_sensitive_host_fd_path(fd_path, caller);
+    BOOL sens = pt_is_sensitive_host_fd_path(fd_path, caller);
+    errno = saved_errno;
+    return sens;
 }
 
 static size_t pt_count_path_components(const char *p) {
@@ -2630,6 +3020,7 @@ static BOOL pt_ensure_synthesized_system_version_plist(const char *ver,
         }
     }
 
+    const char *copyright = pt_is_compat13_7_active() ? "1983-2020 Apple Inc." : "1983-2025 Apple Inc.";
     char xml[1024];
     int xml_len = snprintf(xml, sizeof(xml),
                            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
@@ -2640,7 +3031,7 @@ static BOOL pt_ensure_synthesized_system_version_plist(const char *ver,
                            "\t<key>ProductBuildVersion</key>\n"
                            "\t<string>%s</string>\n"
                            "\t<key>ProductCopyright</key>\n"
-                           "\t<string>1983-2025 Apple Inc.</string>\n"
+                           "\t<string>%s</string>\n"
                            "\t<key>ProductName</key>\n"
                            "\t<string>iPhone OS</string>\n"
                            "\t<key>ProductUserVisibleVersion</key>\n"
@@ -2649,7 +3040,7 @@ static BOOL pt_ensure_synthesized_system_version_plist(const char *ver,
                            "\t<string>%s</string>\n"
                            "</dict>\n"
                            "</plist>\n",
-                           build, ver, ver);
+                           build, copyright, ver, ver);
     if (xml_len <= 0 || (size_t)xml_len >= sizeof(xml)) {
         os_unfair_lock_unlock(&s_synth_sysver_lock);
         return NO;
@@ -2838,8 +3229,7 @@ static pt_fs_path_disposition_t pt_prepare_fs_path_abs_cached_caller(const char 
         if (strncasecmp(sv_norm, "/System/Volumes/Data/", 21) == 0) {
             sv_norm += 20;
         }
-        if (strcasecmp(sv_norm, "/System/Library/CoreServices/SystemVersion.plist") == 0 ||
-            strcasecmp(sv_norm, "/System/Library/CoreServices/iOSSystemVersion.plist") == 0) {
+        if (strcasecmp(sv_norm, "/System/Library/CoreServices/SystemVersion.plist") == 0) {
             if (*inout_is_sys_caller < 0) {
                 *inout_is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
             }
@@ -3070,7 +3460,8 @@ static inline BOOL pt_is_hidden_dirent_name(const char *d_name) {
         return NO;
     }
     if (strncmp(d_name, "discord-ipc-", 12) == 0 ||
-        strncmp(d_name, ".pt_sysver_", 11) == 0) {
+        strncmp(d_name, ".pt_sysver_", 11) == 0 ||
+        strncmp(d_name, ".pt_coderes_", 12) == 0) {
         return YES;
     }
     if (strstr(d_name, "Play") != NULL &&
@@ -3271,10 +3662,18 @@ static int pt_creat_nocancel(const char *path, mode_t mode) {
     return pt_orig_creat_nocancel(path, mode);
 }
 
-static int pt_open_dprotected_np(const char *path, int flags, int dpclass, int dpflags, ...) {
+static void pt_record_fd_dpclass(int fd, int dpclass);
+
+__attribute__((visibility("hidden")))
+int pt_fs_open_dprotected_np_with_caller(const char *path,
+                                         int flags,
+                                         int dpclass,
+                                         int dpflags,
+                                         mode_t mode,
+                                         const void *caller) {
     char vbuf[PATH_MAX];
     pt_fs_path_disposition_t disp = pt_prepare_fs_path_mode(path,
-                                                            __builtin_return_address(0),
+                                                            caller,
                                                             vbuf,
                                                             sizeof(vbuf),
                                                             &path,
@@ -3287,21 +3686,39 @@ static int pt_open_dprotected_np(const char *path, int flags, int dpclass, int d
         errno = (flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC)) ? EACCES : EPERM;
         return -1;
     }
+    int ret = (flags & O_CREAT)
+        ? open_dprotected_np(path, flags, dpclass, dpflags, (int)mode)
+        : open_dprotected_np(path, flags, dpclass, dpflags);
+    if (ret >= 0 && dpclass >= 1 && dpclass <= 7 &&
+        pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller)) {
+        pt_record_fd_dpclass(ret, dpclass);
+    }
+    return ret;
+}
+
+static int pt_open_dprotected_np(const char *path, int flags, int dpclass, int dpflags, ...) {
+    mode_t mode = 0;
     if (flags & O_CREAT) {
         va_list ap;
         va_start(ap, dpflags);
-        int mode = va_arg(ap, int);
+        mode = (mode_t)va_arg(ap, int);
         va_end(ap);
-        return open_dprotected_np(path, flags, dpclass, dpflags, mode);
     }
-    return open_dprotected_np(path, flags, dpclass, dpflags);
+    return pt_fs_open_dprotected_np_with_caller(path, flags, dpclass, dpflags, mode, __builtin_return_address(0));
 }
 
-static int pt_openat_dprotected_np(int fd, const char *path, int flags, int dpclass, int dpflags, ...) {
+__attribute__((visibility("hidden")))
+int pt_fs_openat_dprotected_np_with_caller(int fd,
+                                           const char *path,
+                                           int flags,
+                                           int dpclass,
+                                           int dpflags,
+                                           mode_t mode,
+                                           const void *caller) {
     char vbuf[PATH_MAX];
     pt_fs_path_disposition_t disp = pt_prepare_fs_path_at_mode(fd,
                                                                path,
-                                                               __builtin_return_address(0),
+                                                               caller,
                                                                vbuf,
                                                                sizeof(vbuf),
                                                                &path,
@@ -3314,14 +3731,25 @@ static int pt_openat_dprotected_np(int fd, const char *path, int flags, int dpcl
         errno = (flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC)) ? EACCES : EPERM;
         return -1;
     }
+    int ret = (flags & O_CREAT)
+        ? openat_dprotected_np(fd, path, flags, dpclass, dpflags, (int)mode)
+        : openat_dprotected_np(fd, path, flags, dpclass, dpflags);
+    if (ret >= 0 && dpclass >= 1 && dpclass <= 7 &&
+        pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller)) {
+        pt_record_fd_dpclass(ret, dpclass);
+    }
+    return ret;
+}
+
+static int pt_openat_dprotected_np(int fd, const char *path, int flags, int dpclass, int dpflags, ...) {
+    mode_t mode = 0;
     if (flags & O_CREAT) {
         va_list ap;
         va_start(ap, dpflags);
-        int mode = va_arg(ap, int);
+        mode = (mode_t)va_arg(ap, int);
         va_end(ap);
-        return openat_dprotected_np(fd, path, flags, dpclass, dpflags, mode);
     }
-    return openat_dprotected_np(fd, path, flags, dpclass, dpflags);
+    return pt_fs_openat_dprotected_np_with_caller(fd, path, flags, dpclass, dpflags, mode, __builtin_return_address(0));
 }
 
 typedef uint64_t pt_guardid_t;
@@ -3441,6 +3869,14 @@ static FILE *pt_freopen(const char *filename, const char *mode, FILE *stream) {
     return freopen(filename, mode, stream);
 }
 
+static inline void pt_sanitize_stat_buf(struct stat *buf, const void *caller) {
+    if (buf != NULL && buf->st_gid == 20 &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(caller)) {
+        buf->st_gid = 501;
+    }
+}
+
 __attribute__((visibility("hidden")))
 int pt_fs_stat_with_caller(const char *path, struct stat *buf, BOOL follow_symlinks, const void *caller) {
     char vbuf[PATH_MAX];
@@ -3462,7 +3898,11 @@ int pt_fs_stat_with_caller(const char *path, struct stat *buf, BOOL follow_symli
     if (path != NULL && resolved != path) {
         PT_DEBUG_TRACE("fs", "redirected %s %s -> %s", follow_symlinks ? "stat" : "lstat", path, resolved);
     }
-    return follow_symlinks ? stat(resolved, buf) : lstat(resolved, buf);
+    int ret = follow_symlinks ? stat(resolved, buf) : lstat(resolved, buf);
+    if (ret == 0) {
+        pt_sanitize_stat_buf(buf, caller);
+    }
+    return ret;
 }
 
 static int pt_stat(char const* restrict path, struct stat* restrict buf) {
@@ -3471,6 +3911,70 @@ static int pt_stat(char const* restrict path, struct stat* restrict buf) {
 
 static int pt_lstat(char const* restrict path, struct stat* restrict buf) {
     return pt_fs_stat_with_caller(path, buf, NO, __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
+int pt_fs_fstat_with_caller(int fd, struct stat *buf, const void *caller) {
+    if (fd < 0) {
+        errno = EBADF;
+        return -1;
+    }
+    BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
+    if (!is_sys && pt_fd_is_sensitive(fd, caller)) {
+        errno = EBADF;
+        return -1;
+    }
+    int ret = fstat(fd, buf);
+    if (ret == 0 && !is_sys && buf != NULL && buf->st_gid == 20 && pt_is_bypass_enabled()) {
+        buf->st_gid = 501;
+    }
+    return ret;
+}
+
+static int pt_fstat(int fd, struct stat *buf) {
+    return pt_fs_fstat_with_caller(fd, buf, __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
+int pt_fs_prepare_legacy_stat_path_with_caller(int dirfd,
+                                               BOOL is_at,
+                                               const char *path,
+                                               const void *caller,
+                                               char *vbuf,
+                                               size_t vbuf_size,
+                                               const char **out_resolved,
+                                               BOOL *out_virtual_ancestor) {
+    if (out_virtual_ancestor != NULL) {
+        *out_virtual_ancestor = NO;
+    }
+    if (is_at && dirfd != AT_FDCWD && (path == NULL || path[0] != '/') &&
+        !pt_is_effective_system_or_playtools_caller(caller) &&
+        pt_fd_is_sensitive(dirfd, caller)) {
+        errno = EBADF;
+        return -1;
+    }
+    const char *resolved = NULL;
+    pt_fs_path_disposition_t disp = is_at
+        ? pt_prepare_fs_path_at_ro(dirfd, path, caller, vbuf, vbuf_size, &resolved)
+        : pt_prepare_fs_path_ro(path, caller, vbuf, vbuf_size, &resolved);
+    if (disp == PT_FS_PATH_HIDDEN) {
+        errno = ENOENT;
+        return -1;
+    }
+    if (disp == PT_FS_PATH_VIRTUAL_ANCESTOR) {
+        if (out_virtual_ancestor != NULL) {
+            *out_virtual_ancestor = YES;
+        }
+        return 0;
+    }
+    if (resolved == NULL) {
+        errno = EFAULT;
+        return -1;
+    }
+    if (out_resolved != NULL) {
+        *out_resolved = resolved;
+    }
+    return 0;
 }
 
 __attribute__((visibility("hidden")))
@@ -3484,7 +3988,11 @@ int pt_fs_fstatat_with_caller(int fd, const char *path, struct stat *buf, int fl
     if (disp == PT_FS_PATH_VIRTUAL_ANCESTOR) {
         return pt_stat_virtual_ancestor(buf);
     }
-    return fstatat(fd, path, buf, flag);
+    int ret = fstatat(fd, path, buf, flag);
+    if (ret == 0) {
+        pt_sanitize_stat_buf(buf, caller);
+    }
+    return ret;
 }
 
 static int pt_fstatat(int fd, const char *path, struct stat *buf, int flag) {
@@ -3492,8 +4000,9 @@ static int pt_fstatat(int fd, const char *path, struct stat *buf, int flag) {
 }
 
 static int pt_statx_np(const char *path, struct stat *buf, filesec_t fsec) {
+    const void *caller = __builtin_return_address(0);
     char vbuf[PATH_MAX];
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path_ro(path, __builtin_return_address(0), vbuf, sizeof(vbuf), &path);
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_ro(path, caller, vbuf, sizeof(vbuf), &path);
     if (disp == PT_FS_PATH_HIDDEN) {
         errno = ENOENT;
         return -1;
@@ -3501,12 +4010,17 @@ static int pt_statx_np(const char *path, struct stat *buf, filesec_t fsec) {
     if (disp == PT_FS_PATH_VIRTUAL_ANCESTOR) {
         return pt_stat_virtual_ancestor(buf);
     }
-    return statx_np(path, buf, fsec);
+    int ret = statx_np(path, buf, fsec);
+    if (ret == 0) {
+        pt_sanitize_stat_buf(buf, caller);
+    }
+    return ret;
 }
 
 static int pt_lstatx_np(const char *path, struct stat *buf, filesec_t fsec) {
+    const void *caller = __builtin_return_address(0);
     char vbuf[PATH_MAX];
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path_ro(path, __builtin_return_address(0), vbuf, sizeof(vbuf), &path);
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_ro(path, caller, vbuf, sizeof(vbuf), &path);
     if (disp == PT_FS_PATH_HIDDEN) {
         errno = ENOENT;
         return -1;
@@ -3514,7 +4028,11 @@ static int pt_lstatx_np(const char *path, struct stat *buf, filesec_t fsec) {
     if (disp == PT_FS_PATH_VIRTUAL_ANCESTOR) {
         return pt_stat_virtual_ancestor(buf);
     }
-    return lstatx_np(path, buf, fsec);
+    int ret = lstatx_np(path, buf, fsec);
+    if (ret == 0) {
+        pt_sanitize_stat_buf(buf, caller);
+    }
+    return ret;
 }
 
 __attribute__((visibility("hidden")))
@@ -3821,9 +4339,129 @@ static int pt_handle_fcntl_getpath(int ret, int cmd, void *parg, const void *cal
     return ret;
 }
 
+#define PT_DPCLASS_CACHE_CAP 128U
+
+typedef struct {
+    dev_t dev;
+    ino_t ino;
+    int dpclass;
+    BOOL valid;
+} pt_dpclass_entry_t;
+
+static os_unfair_lock s_dpclass_lock = OS_UNFAIR_LOCK_INIT;
+static pt_dpclass_entry_t s_dpclass_cache[PT_DPCLASS_CACHE_CAP];
+static size_t s_dpclass_next = 0;
+
+static void pt_record_fd_dpclass(int fd, int dpclass) {
+    if (fd < 0 || dpclass <= 0) {
+        return;
+    }
+    int saved_errno = errno;
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+        errno = saved_errno;
+        return;
+    }
+    errno = saved_errno;
+    os_unfair_lock_lock(&s_dpclass_lock);
+    for (size_t i = 0; i < PT_DPCLASS_CACHE_CAP; i++) {
+        if (s_dpclass_cache[i].valid &&
+            s_dpclass_cache[i].dev == st.st_dev &&
+            s_dpclass_cache[i].ino == st.st_ino) {
+            s_dpclass_cache[i].dpclass = dpclass;
+            os_unfair_lock_unlock(&s_dpclass_lock);
+            return;
+        }
+    }
+    size_t slot = s_dpclass_next % PT_DPCLASS_CACHE_CAP;
+    s_dpclass_next = (s_dpclass_next + 1U) % PT_DPCLASS_CACHE_CAP;
+    s_dpclass_cache[slot].dev = st.st_dev;
+    s_dpclass_cache[slot].ino = st.st_ino;
+    s_dpclass_cache[slot].dpclass = dpclass;
+    s_dpclass_cache[slot].valid = YES;
+    os_unfair_lock_unlock(&s_dpclass_lock);
+}
+
+static int pt_lookup_fd_dpclass(int fd) {
+    if (fd < 0) {
+        return 0;
+    }
+    int saved_errno = errno;
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+        errno = saved_errno;
+        return 0;
+    }
+    errno = saved_errno;
+    int found = 0;
+    os_unfair_lock_lock(&s_dpclass_lock);
+    for (size_t i = 0; i < PT_DPCLASS_CACHE_CAP; i++) {
+        if (s_dpclass_cache[i].valid &&
+            s_dpclass_cache[i].dev == st.st_dev &&
+            s_dpclass_cache[i].ino == st.st_ino) {
+            found = s_dpclass_cache[i].dpclass;
+            break;
+        }
+    }
+    os_unfair_lock_unlock(&s_dpclass_lock);
+    return found;
+}
+
+static int pt_handle_fcntl_get_dpclass(int fd, int ret, int saved_errno, const void *caller) {
+    if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller)) {
+        BOOL can_spoof = (ret >= 0 || (ret < 0 && (errno == ENOTSUP || errno == EOPNOTSUPP)));
+        if (!can_spoof) {
+            return ret;
+        }
+        int recorded = pt_lookup_fd_dpclass(fd);
+        if (recorded > 0) {
+            errno = saved_errno;
+            return recorded;
+        }
+        if (ret == 0 || (ret < 0 && (errno == ENOTSUP || errno == EOPNOTSUPP))) {
+            errno = saved_errno;
+            return 3;
+        }
+    }
+    return ret;
+}
+
+static int pt_handle_fcntl_set_dpclass(int fd, int dpclass, int ret, int saved_errno, const void *caller) {
+    if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller)) {
+        if (dpclass >= 1 && dpclass <= 7) {
+            if (ret == 0) {
+                pt_record_fd_dpclass(fd, dpclass);
+                return 0;
+            }
+            if (ret < 0 && (errno == ENOTSUP || errno == EOPNOTSUPP || errno == EINVAL)) {
+                int call_errno = errno;
+                struct stat st;
+                if (fstat(fd, &st) == 0 && (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode))) {
+                    pt_record_fd_dpclass(fd, dpclass);
+                    errno = saved_errno;
+                    return 0;
+                }
+                errno = call_errno;
+            }
+        }
+    }
+    return ret;
+}
+
 __attribute__((visibility("hidden")))
 int pt_fs_fcntl_with_caller(int fd, int cmd, uintptr_t arg, const void *caller) {
     switch (cmd) {
+        case F_GETPROTECTIONCLASS: {
+            int saved_errno = errno;
+            int ret = fcntl(fd, cmd);
+            return pt_handle_fcntl_get_dpclass(fd, ret, saved_errno, caller);
+        }
+        case F_SETPROTECTIONCLASS: {
+            int saved_errno = errno;
+            int dpclass = (int)arg;
+            int ret = fcntl(fd, cmd, dpclass);
+            return pt_handle_fcntl_set_dpclass(fd, dpclass, ret, saved_errno, caller);
+        }
         case F_GETFD:
         case F_GETFL:
         case F_GETOWN:
@@ -3832,7 +4470,6 @@ int pt_fs_fcntl_with_caller(int fd, int cmd, uintptr_t arg, const void *caller) 
         case F_FULLFSYNC:
         case F_FREEZE_FS:
         case F_THAW_FS:
-        case F_GETPROTECTIONCLASS:
         case F_GETNOSIGPIPE:
         case F_GETPROTECTIONLEVEL:
         case F_BARRIERFSYNC:
@@ -3860,7 +4497,6 @@ int pt_fs_fcntl_with_caller(int fd, int cmd, uintptr_t arg, const void *caller) 
         case F_NOCACHE:
         case F_GLOBAL_NOCACHE:
         case F_NODIRECT:
-        case F_SETPROTECTIONCLASS:
         case F_SETBACKINGSTORE:
         case F_SETNOSIGPIPE:
         case F_SINGLE_WRITER:
@@ -3885,6 +4521,20 @@ int pt_fs_fcntl_with_caller(int fd, int cmd, uintptr_t arg, const void *caller) 
 
 static int pt_fcntl(int fd, int cmd, ...) {
     switch (cmd) {
+        case F_GETPROTECTIONCLASS: {
+            int saved_errno = errno;
+            int ret = fcntl(fd, cmd);
+            return pt_handle_fcntl_get_dpclass(fd, ret, saved_errno, __builtin_return_address(0));
+        }
+        case F_SETPROTECTIONCLASS: {
+            int saved_errno = errno;
+            va_list ap;
+            va_start(ap, cmd);
+            int dpclass = va_arg(ap, int);
+            va_end(ap);
+            int ret = fcntl(fd, cmd, dpclass);
+            return pt_handle_fcntl_set_dpclass(fd, dpclass, ret, saved_errno, __builtin_return_address(0));
+        }
         case F_GETFD:
         case F_GETFL:
         case F_GETOWN:
@@ -3893,7 +4543,6 @@ static int pt_fcntl(int fd, int cmd, ...) {
         case F_FULLFSYNC:
         case F_FREEZE_FS:
         case F_THAW_FS:
-        case F_GETPROTECTIONCLASS:
         case F_GETNOSIGPIPE:
         case F_GETPROTECTIONLEVEL:
         case F_BARRIERFSYNC:
@@ -3925,7 +4574,6 @@ static int pt_fcntl(int fd, int cmd, ...) {
         case F_NOCACHE:
         case F_GLOBAL_NOCACHE:
         case F_NODIRECT:
-        case F_SETPROTECTIONCLASS:
         case F_SETBACKINGSTORE:
         case F_SETNOSIGPIPE:
         case F_SINGLE_WRITER:
@@ -3968,6 +4616,20 @@ extern int pt_orig_fcntl_nocancel(int, int, ...) __asm("_fcntl$NOCANCEL");
 
 static int pt_fcntl_nocancel(int fd, int cmd, ...) {
     switch (cmd) {
+        case F_GETPROTECTIONCLASS: {
+            int saved_errno = errno;
+            int ret = pt_orig_fcntl_nocancel(fd, cmd);
+            return pt_handle_fcntl_get_dpclass(fd, ret, saved_errno, __builtin_return_address(0));
+        }
+        case F_SETPROTECTIONCLASS: {
+            int saved_errno = errno;
+            va_list ap;
+            va_start(ap, cmd);
+            int dpclass = va_arg(ap, int);
+            va_end(ap);
+            int ret = pt_orig_fcntl_nocancel(fd, cmd, dpclass);
+            return pt_handle_fcntl_set_dpclass(fd, dpclass, ret, saved_errno, __builtin_return_address(0));
+        }
         case F_GETFD:
         case F_GETFL:
         case F_GETOWN:
@@ -3976,7 +4638,6 @@ static int pt_fcntl_nocancel(int fd, int cmd, ...) {
         case F_FULLFSYNC:
         case F_FREEZE_FS:
         case F_THAW_FS:
-        case F_GETPROTECTIONCLASS:
         case F_GETNOSIGPIPE:
         case F_GETPROTECTIONLEVEL:
         case F_BARRIERFSYNC:
@@ -4008,7 +4669,6 @@ static int pt_fcntl_nocancel(int fd, int cmd, ...) {
         case F_NOCACHE:
         case F_GLOBAL_NOCACHE:
         case F_NODIRECT:
-        case F_SETPROTECTIONCLASS:
         case F_SETBACKINGSTORE:
         case F_SETNOSIGPIPE:
         case F_SINGLE_WRITER:
@@ -4079,31 +4739,137 @@ static int pt_proc_pidpath(int pid, void *buffer, uint32_t buffersize) {
     return ret;
 }
 
-static int pt_proc_pidfdinfo(int pid, int fd, int flavor, void *buffer, int buffersize) {
-    const void *caller = __builtin_return_address(0);
+static BOOL pt_is_sensitive_unix_socket_path(const char *sun_path, const void *caller) {
+    if (sun_path == NULL || sun_path[0] == '\0') {
+        return NO;
+    }
+    if (strstr(sun_path, "/var/folders/") != NULL ||
+        strstr(sun_path, "com.apple.launchd") != NULL ||
+        strstr(sun_path, "discord-ipc") != NULL ||
+        strcasestr(sun_path, "PlayCover") != NULL ||
+        strcasestr(sun_path, "PlayTools") != NULL ||
+        strcasestr(sun_path, "MacOver") != NULL ||
+        strcasestr(sun_path, "app.makedie") != NULL) {
+        return YES;
+    }
+    char vout[PATH_MAX];
+    const char *virt = pt_virtualize_path_for_app(sun_path, vout, sizeof(vout), YES);
+    const char *eff = (virt != NULL) ? virt : sun_path;
+    if (strstr(eff, "/Users/") != NULL || pt_is_sensitive_host_fd_path(eff, caller)) {
+        return YES;
+    }
+    return NO;
+}
+
+static BOOL pt_sanitize_sockaddr_un_in_place(pt_sockaddr_un_t *sa, const void *caller) {
+    if (sa == NULL || sa->sun_path[0] == '\0') {
+        return NO;
+    }
+    char pathbuf[sizeof(sa->sun_path) + 1];
+    size_t plen = strnlen(sa->sun_path, sizeof(sa->sun_path));
+    memcpy(pathbuf, sa->sun_path, plen);
+    pathbuf[plen] = '\0';
+    if (pt_is_sensitive_unix_socket_path(pathbuf, caller)) {
+        return YES;
+    }
+    char vout[PATH_MAX];
+    const char *virt = pt_virtualize_path_for_app(pathbuf, vout, sizeof(vout), YES);
+    if (virt != NULL && virt != pathbuf && strcmp(virt, pathbuf) != 0) {
+        size_t vlen = strlcpy(sa->sun_path, virt, sizeof(sa->sun_path));
+        if (vlen >= sizeof(sa->sun_path)) {
+            vlen = sizeof(sa->sun_path) - 1U;
+        }
+        size_t total = offsetof(pt_sockaddr_un_t, sun_path) + vlen + 1U;
+        sa->sun_len = (uint8_t)((total < 255U) ? total : 255U);
+    }
+    return NO;
+}
+
+static int pt_count_hidden_threads_for_self(void) {
+    int self_pid = getpid();
+    uint64_t stack_tids[512];
+    int nbytes = proc_pidinfo(self_pid, PROC_PIDLISTTHREADS, 0, stack_tids, (int)sizeof(stack_tids));
+    if (nbytes <= 0) {
+        return 0;
+    }
+    int count = nbytes / (int)sizeof(uint64_t);
+    int hidden = 0;
+    for (int i = 0; i < count; i++) {
+        struct proc_threadinfo ti;
+        int tr = proc_pidinfo(self_pid, PROC_PIDTHREADINFO, stack_tids[i], &ti, (int)sizeof(ti));
+        if (tr > 0 && (size_t)tr >= sizeof(ti) && pt_is_hidden_thread_name(ti.pth_name)) {
+            hidden++;
+        }
+    }
+    return hidden;
+}
+
+static int pt_fs_proc_pidfdinfo_ex(int pid,
+                                     int fd,
+                                     int flavor,
+                                     void *buffer,
+                                     int buffersize,
+                                     const void *caller,
+                                     BOOL raw_syscall_abi) {
     BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
     if (!is_sys && pid != 0 && pid != getpid()) {
         errno = ESRCH;
+        return raw_syscall_abi ? -1 : 0;
+    }
+    int saved_errno = errno;
+    errno = 0;
+    int ret = proc_pidfdinfo(pid, fd, flavor, buffer, buffersize);
+    int call_errno = errno;
+    if (ret < 0 || call_errno != 0) {
+        errno = (call_errno != 0) ? call_errno : ESRCH;
+        return raw_syscall_abi ? -1 : 0;
+    }
+    if (ret == 0) {
+        errno = saved_errno;
         return 0;
     }
-    int ret = proc_pidfdinfo(pid, fd, flavor, buffer, buffersize);
-    if (ret > 0 && buffer != NULL &&
-        flavor == PROC_PIDFDVNODEPATHINFO &&
-        (size_t)ret >= sizeof(struct vnode_fdinfowithpath) &&
-        !is_sys) {
-        struct vnode_fdinfowithpath *info = (struct vnode_fdinfowithpath *)buffer;
-        if (pt_is_sensitive_host_fd_path(info->pvip.vip_path, caller)) {
-            memset(info, 0, sizeof(struct vnode_fdinfowithpath));
-            errno = EBADF;
-            return 0;
-        }
-        char vout[PATH_MAX];
-        const char *virt = pt_virtualize_path_for_app(info->pvip.vip_path, vout, sizeof(vout), YES);
-        if (virt != info->pvip.vip_path) {
-            strlcpy(info->pvip.vip_path, virt, sizeof(info->pvip.vip_path));
+    if (!is_sys && buffer != NULL) {
+        if (flavor == PROC_PIDFDVNODEPATHINFO &&
+            (size_t)ret >= sizeof(struct vnode_fdinfowithpath)) {
+            struct vnode_fdinfowithpath *info = (struct vnode_fdinfowithpath *)buffer;
+            if (pt_is_sensitive_host_fd_path(info->pvip.vip_path, caller)) {
+                memset(info, 0, sizeof(struct vnode_fdinfowithpath));
+                errno = EBADF;
+                return raw_syscall_abi ? -1 : 0;
+            }
+            char vout[PATH_MAX];
+            const char *virt = pt_virtualize_path_for_app(info->pvip.vip_path, vout, sizeof(vout), YES);
+            if (virt != info->pvip.vip_path) {
+                strlcpy(info->pvip.vip_path, virt, sizeof(info->pvip.vip_path));
+            }
+        } else if (flavor == PROC_PIDFDSOCKETINFO &&
+                   pt_is_bypass_enabled() &&
+                   (size_t)ret >= sizeof(pt_socket_fdinfo_t)) {
+            pt_socket_fdinfo_t sfi;
+            memcpy(&sfi, buffer, sizeof(sfi));
+            if (sfi.psi.soi_family == AF_UNIX || sfi.psi.soi_kind == SOCKINFO_UN) {
+                BOOL drop_a = pt_sanitize_sockaddr_un_in_place(&sfi.psi.soi_proto.pri_un.unsi_addr.ua_sun, caller);
+                BOOL drop_c = pt_sanitize_sockaddr_un_in_place(&sfi.psi.soi_proto.pri_un.unsi_caddr.ua_sun, caller);
+                if (drop_a || drop_c) {
+                    memset(buffer, 0, sizeof(pt_socket_fdinfo_t));
+                    errno = EBADF;
+                    return raw_syscall_abi ? -1 : 0;
+                }
+                memcpy(buffer, &sfi, sizeof(sfi));
+            }
         }
     }
+    errno = saved_errno;
     return ret;
+}
+
+__attribute__((visibility("hidden")))
+int pt_fs_proc_pidfdinfo_syscall_with_caller(int pid, int fd, int flavor, void *buffer, int buffersize, const void *caller) {
+    return pt_fs_proc_pidfdinfo_ex(pid, fd, flavor, buffer, buffersize, caller, YES);
+}
+
+static int pt_proc_pidfdinfo(int pid, int fd, int flavor, void *buffer, int buffersize) {
+    return pt_fs_proc_pidfdinfo_ex(pid, fd, flavor, buffer, buffersize, __builtin_return_address(0), NO);
 }
 
 static void pt_sanitize_vnode_vip_path(char *vip_path, size_t cap, const void *caller, const char *fallback) {
@@ -4155,6 +4921,24 @@ static int pt_proc_regionfilename(int pid, uint64_t address, void *buffer, uint3
     return ret;
 }
 
+__attribute__((visibility("hidden")))
+BOOL pt_fs_probe_hidden_region_path(uintptr_t addr, const void *caller) {
+    if (addr == 0) {
+        return NO;
+    }
+    int saved_errno = errno;
+    struct proc_regionwithpathinfo probe_rp;
+    memset(&probe_rp, 0, sizeof(probe_rp));
+    int pr = proc_pidinfo(getpid(), PROC_PIDREGIONPATHINFO, (uint64_t)addr, &probe_rp, (int)sizeof(probe_rp));
+    errno = saved_errno;
+    if (pr >= (int)sizeof(probe_rp) && probe_rp.prp_vip.vip_path[0] != '\0' &&
+        (pt_is_hidden_dyld_image_name(probe_rp.prp_vip.vip_path) ||
+         pt_is_sensitive_host_fd_path(probe_rp.prp_vip.vip_path, caller))) {
+        return YES;
+    }
+    return NO;
+}
+
 static int pt_fs_proc_pidinfo_ex(int pid,
                                      int flavor,
                                      uint64_t arg,
@@ -4170,8 +4954,78 @@ static int pt_fs_proc_pidinfo_ex(int pid,
     }
     int saved_errno = errno;
     errno = 0;
-    int ret = proc_pidinfo(pid, flavor, arg, buffer, buffersize);
-    int call_errno = errno;
+    int ret = -1;
+    int call_errno = 0;
+    BOOL bypass_active = pt_is_bypass_enabled();
+    if (!is_sys && bypass_active &&
+        (flavor == PROC_PIDREGIONINFO ||
+         flavor == PROC_PIDREGIONPATHINFO ||
+         flavor == PROC_PIDREGIONPATHINFO2 ||
+         flavor == PROC_PIDREGIONPATHINFO3)) {
+        uint64_t query_arg = arg;
+        BOOL exhausted = YES;
+        for (int skip = 0; skip < 4096; skip++) {
+            errno = 0;
+            ret = proc_pidinfo(pid, flavor, query_arg, buffer, buffersize);
+            call_errno = errno;
+            if (ret <= 0 || call_errno != 0 || buffer == NULL) {
+                exhausted = NO;
+                break;
+            }
+            uint64_t raddr = 0;
+            uint64_t rsize = 0;
+            uint32_t rprot = 0;
+            BOOL path_hidden = NO;
+            if (flavor == PROC_PIDREGIONINFO && (size_t)ret >= sizeof(struct proc_regioninfo)) {
+                struct proc_regioninfo rinfo;
+                memcpy(&rinfo, buffer, sizeof(rinfo));
+                raddr = rinfo.pri_address;
+                rsize = rinfo.pri_size;
+                rprot = rinfo.pri_protection;
+                if (rsize >= sizeof(struct mach_header_64) &&
+                    (rprot & VM_PROT_READ) != 0 &&
+                    dyld_image_header_containing_address((const void *)(uintptr_t)raddr) == NULL) {
+                    if (pt_fs_probe_hidden_region_path((uintptr_t)raddr, caller)) {
+                        path_hidden = YES;
+                    }
+                }
+            } else if (flavor != PROC_PIDREGIONINFO && (size_t)ret >= sizeof(struct proc_regionwithpathinfo)) {
+                struct proc_regionwithpathinfo rpinfo;
+                memcpy(&rpinfo, buffer, sizeof(rpinfo));
+                raddr = rpinfo.prp_prinfo.pri_address;
+                rsize = rpinfo.prp_prinfo.pri_size;
+                rprot = rpinfo.prp_prinfo.pri_protection;
+                if (rpinfo.prp_vip.vip_path[0] != '\0' &&
+                    (pt_is_hidden_dyld_image_name(rpinfo.prp_vip.vip_path) ||
+                     pt_is_sensitive_host_fd_path(rpinfo.prp_vip.vip_path, caller))) {
+                    path_hidden = YES;
+                }
+            } else {
+                exhausted = NO;
+                break;
+            }
+            BOOL hide_region = (rsize > 0) &&
+                (path_hidden ||
+                 pt_is_hidden_vm_region_range((uintptr_t)raddr, (uintptr_t)rsize) ||
+                 pt_is_hidden_unregistered_macho_region((uintptr_t)raddr, (uintptr_t)rsize, (vm_prot_t)rprot));
+            if (!hide_region) {
+                exhausted = NO;
+                break;
+            }
+            if (raddr > UINT64_MAX - rsize || raddr + rsize <= query_arg) {
+                errno = ESRCH;
+                return raw_syscall_abi ? -1 : 0;
+            }
+            query_arg = raddr + rsize;
+        }
+        if (exhausted) {
+            errno = ESRCH;
+            return raw_syscall_abi ? -1 : 0;
+        }
+    } else {
+        ret = proc_pidinfo(pid, flavor, arg, buffer, buffersize);
+        call_errno = errno;
+    }
     BOOL failed = (ret < 0 || call_errno != 0);
     if (failed) {
         errno = call_errno;
@@ -4185,7 +5039,6 @@ static int pt_fs_proc_pidinfo_ex(int pid,
         errno = saved_errno;
         return ret;
     }
-    BOOL bypass_active = pt_is_bypass_enabled();
     switch (flavor) {
         case PROC_PIDVNODEPATHINFO:
             if ((size_t)ret >= sizeof(struct proc_vnodepathinfo)) {
@@ -4211,6 +5064,25 @@ static int pt_fs_proc_pidinfo_ex(int pid,
                         if (vret > 0 && (size_t)vret >= sizeof(vfi) &&
                             pt_is_sensitive_host_fd_path(vfi.pvip.vip_path, caller)) {
                             continue;
+                        }
+                    } else if (bypass_active && fds[i].proc_fdtype == PROX_FDTYPE_SOCKET) {
+                        pt_socket_fdinfo_t sfi;
+                        memset(&sfi, 0, sizeof(sfi));
+                        int sret = proc_pidfdinfo(self_pid, fds[i].proc_fd, PROC_PIDFDSOCKETINFO, &sfi, (int)sizeof(sfi));
+                        if (sret > 0 && (size_t)sret >= sizeof(sfi) &&
+                            (sfi.psi.soi_family == AF_UNIX || sfi.psi.soi_kind == SOCKINFO_UN)) {
+                            char pa[sizeof(sfi.psi.soi_proto.pri_un.unsi_addr.ua_sun.sun_path) + 1];
+                            char pc[sizeof(sfi.psi.soi_proto.pri_un.unsi_caddr.ua_sun.sun_path) + 1];
+                            size_t la = strnlen(sfi.psi.soi_proto.pri_un.unsi_addr.ua_sun.sun_path, sizeof(pa) - 1U);
+                            size_t lc = strnlen(sfi.psi.soi_proto.pri_un.unsi_caddr.ua_sun.sun_path, sizeof(pc) - 1U);
+                            memcpy(pa, sfi.psi.soi_proto.pri_un.unsi_addr.ua_sun.sun_path, la);
+                            pa[la] = '\0';
+                            memcpy(pc, sfi.psi.soi_proto.pri_un.unsi_caddr.ua_sun.sun_path, lc);
+                            pc[lc] = '\0';
+                            if (pt_is_sensitive_unix_socket_path(pa, caller) ||
+                                pt_is_sensitive_unix_socket_path(pc, caller)) {
+                                continue;
+                            }
                         }
                     }
                     if (kept != i) {
@@ -4286,6 +5158,17 @@ static int pt_fs_proc_pidinfo_ex(int pid,
             }
             break;
 
+        case PROC_PIDTASKINFO:
+            if (bypass_active && (size_t)ret >= sizeof(struct proc_taskinfo)) {
+                struct proc_taskinfo *pti = (struct proc_taskinfo *)buffer;
+                int hidden = pt_count_hidden_threads_for_self();
+                if (hidden > 0 && pti->pti_threadnum > 1) {
+                    int adj = pti->pti_threadnum - hidden;
+                    pti->pti_threadnum = (adj >= 1) ? adj : 1;
+                }
+            }
+            break;
+
         case PROC_PIDTASKALLINFO:
             if ((size_t)ret >= sizeof(struct proc_taskallinfo)) {
                 struct proc_taskallinfo *tinfo = (struct proc_taskallinfo *)buffer;
@@ -4300,6 +5183,11 @@ static int pt_fs_proc_pidinfo_ex(int pid,
                     }
                     if (tinfo->pbsd.pbi_svgid == 20U) {
                         tinfo->pbsd.pbi_svgid = 501U;
+                    }
+                    int hidden = pt_count_hidden_threads_for_self();
+                    if (hidden > 0 && tinfo->ptinfo.pti_threadnum > 1) {
+                        int adj = tinfo->ptinfo.pti_threadnum - hidden;
+                        tinfo->ptinfo.pti_threadnum = (adj >= 1) ? adj : 1;
                     }
                 }
             }
@@ -4335,6 +5223,13 @@ static int pt_fs_proc_pidinfo_ex(int pid,
                                            caller,
                                            pt_fallback_system_image_path());
                 memcpy(buffer, &rinfo, sizeof(rinfo));
+            }
+            break;
+
+        case PROC_PIDUNIQIDENTIFIERINFO:
+            if (bypass_active && (size_t)ret >= sizeof(struct proc_uniqidentifierinfo)) {
+                struct proc_uniqidentifierinfo *uinfo = (struct proc_uniqidentifierinfo *)buffer;
+                uinfo->p_puniqueid = 1ULL;
             }
             break;
 
@@ -4378,8 +5273,13 @@ static int pt_proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer, int 
     return pt_fs_proc_pidinfo_with_caller(pid, flavor, arg, buffer, buffersize, __builtin_return_address(0));
 }
 
-static int pt_proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize) {
-    if (!pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+static int pt_fs_proc_listpids_ex(uint32_t type,
+                                  uint32_t typeinfo,
+                                  void *buffer,
+                                  int buffersize,
+                                  const void *caller,
+                                  BOOL raw_syscall_abi) {
+    if (!pt_is_effective_system_or_playtools_caller(caller)) {
         if (type == PROC_ALL_PIDS || typeinfo == 0 || (uid_t)typeinfo == getuid() || typeinfo == 501U) {
             if (buffer == NULL || buffersize <= 0) {
                 return (int)sizeof(int);
@@ -4392,7 +5292,25 @@ static int pt_proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int 
         }
         return 0;
     }
-    return proc_listpids(type, typeinfo, buffer, buffersize);
+    int saved_errno = errno;
+    errno = 0;
+    int ret = proc_listpids(type, typeinfo, buffer, buffersize);
+    int call_errno = errno;
+    if (ret < 0 || call_errno != 0) {
+        errno = call_errno;
+        return raw_syscall_abi ? -1 : ret;
+    }
+    errno = saved_errno;
+    return ret;
+}
+
+__attribute__((visibility("hidden")))
+int pt_fs_proc_listpids_syscall_with_caller(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize, const void *caller) {
+    return pt_fs_proc_listpids_ex(type, typeinfo, buffer, buffersize, caller, YES);
+}
+
+static int pt_proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize) {
+    return pt_fs_proc_listpids_ex(type, typeinfo, buffer, buffersize, __builtin_return_address(0), NO);
 }
 
 static int pt_proc_listallpids(void *buffer, int buffersize) {
@@ -4416,6 +5334,89 @@ static int pt_proc_name(int pid, void *buffer, uint32_t buffersize) {
         return 0;
     }
     return proc_name(pid, buffer, buffersize);
+}
+
+static int pt_proc_pidoriginatorinfo(int flavor, void *buffer, int buffersize) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        errno = ESRCH;
+        return 0;
+    }
+    typedef int (*ProcOriginatorFn)(int, void *, int);
+    static ProcOriginatorFn s_orig = NULL;
+    static dispatch_once_t s_once;
+    dispatch_once(&s_once, ^{
+        s_orig = (ProcOriginatorFn)dlsym(RTLD_NEXT, "proc_pidoriginatorinfo");
+    });
+    if (s_orig != NULL) {
+        return s_orig(flavor, buffer, buffersize);
+    }
+    errno = ENOSYS;
+    return 0;
+}
+
+static int pt_proc_listchildpids(pid_t ppid, void *buffer, int buffersize) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return 0;
+    }
+    typedef int (*ProcListChildFn)(pid_t, void *, int);
+    static ProcListChildFn s_orig = NULL;
+    static dispatch_once_t s_once;
+    dispatch_once(&s_once, ^{
+        s_orig = (ProcListChildFn)dlsym(RTLD_NEXT, "proc_listchildpids");
+    });
+    if (s_orig != NULL) {
+        return s_orig(ppid, buffer, buffersize);
+    }
+    return 0;
+}
+
+static int pt_proc_listpgrppids(pid_t pgrpid, void *buffer, int buffersize) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (pgrpid == getpgrp()) {
+            if (buffer == NULL || buffersize <= 0) {
+                return (int)sizeof(int);
+            }
+            if (buffersize < (int)sizeof(int)) {
+                return 0;
+            }
+            *(int *)buffer = getpid();
+            return (int)sizeof(int);
+        }
+        return 0;
+    }
+    typedef int (*ProcListPgrpFn)(pid_t, void *, int);
+    static ProcListPgrpFn s_orig = NULL;
+    static dispatch_once_t s_once;
+    dispatch_once(&s_once, ^{
+        s_orig = (ProcListPgrpFn)dlsym(RTLD_NEXT, "proc_listpgrppids");
+    });
+    if (s_orig != NULL) {
+        return s_orig(pgrpid, buffer, buffersize);
+    }
+    return 0;
+}
+
+static int pt_proc_pid_rusage(int pid, int flavor, void *buffer) {
+    if (pid != 0 && pid != getpid() &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        errno = ESRCH;
+        return -1;
+    }
+    typedef int (*ProcPidRusageFn)(int, int, void *);
+    static ProcPidRusageFn s_orig = NULL;
+    static dispatch_once_t s_once;
+    dispatch_once(&s_once, ^{
+        s_orig = (ProcPidRusageFn)dlsym(RTLD_NEXT, "proc_pid_rusage");
+    });
+    if (s_orig != NULL) {
+        return s_orig(pid, flavor, buffer);
+    }
+    errno = ENOSYS;
+    return -1;
 }
 
 extern DIR *__opendir2(const char *name, int flags);
@@ -4538,20 +5539,95 @@ static BOOL pt_should_hide_dirent(const char *d_name,
         return NO;
     }
     BOOL hide_candidate = pt_is_hidden_dirent_name(d_name);
-    if (!hide_candidate && strcasecmp(d_name, "Finder.app") == 0) {
+    if (!hide_candidate &&
+        (strcasecmp(d_name, "Finder.app") == 0 ||
+         strcasecmp(d_name, "Dock.app") == 0 ||
+         strcasecmp(d_name, "SystemUIServer.app") == 0 ||
+         strcasecmp(d_name, "ControlCenter.app") == 0 ||
+         strcasecmp(d_name, "WindowManager.app") == 0 ||
+         strcasecmp(d_name, "NotificationCenter.app") == 0 ||
+         strcasecmp(d_name, "iOSSystemVersion.plist") == 0 ||
+         strcmp(d_name, "resolv.conf") == 0 ||
+         strcmp(d_name, "synthetic.conf") == 0 ||
+         strcmp(d_name, "firmlinks") == 0 ||
+         strcmp(d_name, "local") == 0 ||
+         strcmp(d_name, "utmpx") == 0 ||
+         strcmp(d_name, "dslocal") == 0 ||
+         strcmp(d_name, "osascript") == 0 ||
+         strcmp(d_name, "sw_vers") == 0 ||
+         strcmp(d_name, "open") == 0 ||
+         strcmp(d_name, "mdls") == 0 ||
+         strcmp(d_name, "xcrun") == 0 ||
+         strcmp(d_name, "xcode-select") == 0 ||
+         strcmp(d_name, "screencapture") == 0 ||
+         strcmp(d_name, "LaunchDaemons") == 0 ||
+         strcmp(d_name, "LaunchAgents") == 0 ||
+         strcmp(d_name, "Frameworks") == 0 ||
+         strcmp(d_name, "Extensions") == 0 ||
+         strcmp(d_name, "VM") == 0 ||
+         strcmp(d_name, "Preboot") == 0 ||
+         strcmp(d_name, "Update") == 0 ||
+         strcmp(d_name, "Hardware") == 0)) {
         char dp[PATH_MAX];
         const char *dir_path = dirname_for_lazy_check;
         if (dir_path == NULL) {
+            int saved_err = errno;
             int dfd = (dirp_for_lazy_check != NULL) ? dirfd(dirp_for_lazy_check) : dirfd_for_check;
             if (dfd >= 0 && fcntl(dfd, F_GETPATH, dp) != -1) {
                 dir_path = dp;
             }
+            errno = saved_err;
         }
         if (dir_path != NULL) {
             if (strncasecmp(dir_path, "/System/Volumes/Data/", 21) == 0) {
                 dir_path += 20;
             }
             if (strcasecmp(dir_path, "/System/Library/CoreServices") == 0) {
+                if (strcasecmp(d_name, "Finder.app") == 0 ||
+                    strcasecmp(d_name, "Dock.app") == 0 ||
+                    strcasecmp(d_name, "SystemUIServer.app") == 0 ||
+                    strcasecmp(d_name, "ControlCenter.app") == 0 ||
+                    strcasecmp(d_name, "WindowManager.app") == 0 ||
+                    strcasecmp(d_name, "NotificationCenter.app") == 0 ||
+                    strcasecmp(d_name, "iOSSystemVersion.plist") == 0) {
+                    hide_candidate = YES;
+                }
+            } else if ((strcmp(dir_path, "/etc") == 0 || strcmp(dir_path, "/private/etc") == 0) &&
+                       (strcmp(d_name, "resolv.conf") == 0 || strcmp(d_name, "synthetic.conf") == 0)) {
+                hide_candidate = YES;
+            } else if ((strcmp(dir_path, "/var/run") == 0 || strcmp(dir_path, "/private/var/run") == 0) &&
+                       (strcmp(d_name, "resolv.conf") == 0 || strcmp(d_name, "utmpx") == 0)) {
+                hide_candidate = YES;
+            } else if ((strcmp(dir_path, "/var/db") == 0 || strcmp(dir_path, "/private/var/db") == 0) &&
+                       strcmp(d_name, "dslocal") == 0) {
+                hide_candidate = YES;
+            } else if (strcmp(dir_path, "/usr/share") == 0 && strcmp(d_name, "firmlinks") == 0) {
+                hide_candidate = YES;
+            } else if (strcmp(dir_path, "/usr") == 0 && strcmp(d_name, "local") == 0) {
+                hide_candidate = YES;
+            } else if (strcmp(dir_path, "/usr/bin") == 0 &&
+                       (strcmp(d_name, "osascript") == 0 ||
+                        strcmp(d_name, "sw_vers") == 0 ||
+                        strcmp(d_name, "open") == 0 ||
+                        strcmp(d_name, "mdls") == 0 ||
+                        strcmp(d_name, "xcrun") == 0 ||
+                        strcmp(d_name, "xcode-select") == 0)) {
+                hide_candidate = YES;
+            } else if (strcmp(dir_path, "/usr/sbin") == 0 && strcmp(d_name, "screencapture") == 0) {
+                hide_candidate = YES;
+            } else if (strcmp(dir_path, "/Library") == 0 &&
+                       (strcmp(d_name, "LaunchDaemons") == 0 ||
+                        strcmp(d_name, "LaunchAgents") == 0 ||
+                        strcmp(d_name, "Frameworks") == 0 ||
+                        strcmp(d_name, "Extensions") == 0)) {
+                hide_candidate = YES;
+            } else if (strcmp(dir_path, "/System/Library") == 0 && strcmp(d_name, "Extensions") == 0) {
+                hide_candidate = YES;
+            } else if (strcmp(dir_path, "/System/Volumes") == 0 &&
+                       (strcmp(d_name, "VM") == 0 ||
+                        strcmp(d_name, "Preboot") == 0 ||
+                        strcmp(d_name, "Update") == 0 ||
+                        strcmp(d_name, "Hardware") == 0)) {
                 hide_candidate = YES;
             }
         }
@@ -4595,6 +5671,72 @@ static BOOL pt_should_hide_dirent(const char *d_name,
         *inout_is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
     }
     return (*inout_is_sys_caller == 0);
+}
+
+extern ssize_t pt_orig_getdirentries64(int fd, void *buf, size_t bufsize, off_t *position) __asm("___getdirentries64");
+
+__attribute__((visibility("hidden")))
+ssize_t pt_fs_getdirentries64_syscall_with_caller(int fd, void *buf, size_t bufsize, off_t *position, const void *caller) {
+    BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
+    if (is_sys || !pt_is_bypass_enabled()) {
+        return pt_orig_getdirentries64(fd, buf, bufsize, position);
+    }
+    char dirpath[PATH_MAX];
+    dirpath[0] = '\0';
+    int saved_errno = errno;
+    if (fd >= 0 && fcntl(fd, F_GETPATH, dirpath) != -1 && pt_is_sensitive_host_fd_path(dirpath, caller)) {
+        errno = EBADF;
+        return -1;
+    }
+    errno = saved_errno;
+    int is_sys_int = 0;
+    int in_data_root = (dirpath[0] != '\0') ? (pt_path_equals_real_data_root(dirpath) ? 1 : 0) : -1;
+    for (int guard = 0; guard < 256; guard++) {
+        ssize_t nbytes = pt_orig_getdirentries64(fd, buf, bufsize, position);
+        if (nbytes <= 0 || buf == NULL) {
+            return nbytes;
+        }
+        uint8_t *base = (uint8_t *)buf;
+        size_t total = (size_t)nbytes;
+        size_t read_off = 0;
+        size_t write_off = 0;
+        while (read_off + offsetof(struct dirent, d_name) < total) {
+            const struct dirent *ent = (const struct dirent *)(base + read_off);
+            uint16_t reclen = ent->d_reclen;
+            if (reclen < offsetof(struct dirent, d_name) || read_off + reclen > total) {
+                size_t rem = total - read_off;
+                if (write_off != read_off) {
+                    memmove(base + write_off, base + read_off, rem);
+                }
+                write_off += rem;
+                break;
+            }
+            char namebuf[NAME_MAX + 1];
+            size_t max_name = (size_t)reclen - offsetof(struct dirent, d_name);
+            size_t nlen = (ent->d_namlen < max_name) ? (size_t)ent->d_namlen : max_name;
+            if (nlen >= sizeof(namebuf)) {
+                nlen = sizeof(namebuf) - 1U;
+            }
+            memcpy(namebuf, ent->d_name, nlen);
+            namebuf[nlen] = '\0';
+            if (!pt_should_hide_dirent(namebuf, ent->d_type, caller, &is_sys_int, &in_data_root,
+                                       NULL, fd, (dirpath[0] != '\0') ? dirpath : NULL)) {
+                if (write_off != read_off) {
+                    memmove(base + write_off, base + read_off, reclen);
+                }
+                write_off += reclen;
+            }
+            read_off += reclen;
+        }
+        if (write_off > 0) {
+            return (ssize_t)write_off;
+        }
+    }
+    return 0;
+}
+
+static ssize_t pt_getdirentries64(int fd, void *buf, size_t bufsize, off_t *position) {
+    return pt_fs_getdirentries64_syscall_with_caller(fd, buf, bufsize, position, __builtin_return_address(0));
 }
 
 static struct dirent *pt_readdir(DIR *dirp) {
@@ -4998,6 +6140,69 @@ static size_t pt_attr_cmn_offset_in_record(const struct attrlist *req,
                                     PT_ATTR_GROUP_COMMON, target_bit, out_present);
 }
 
+static const char *pt_host_root_mntfromname(void) {
+    static char s_root_dev[MFSTYPENAMELEN + MAXPATHLEN];
+    static dispatch_once_t s_once;
+    dispatch_once(&s_once, ^{
+        struct statfs st;
+        if (statfs("/", &st) == 0) {
+            strlcpy(s_root_dev, st.f_mntfromname, sizeof(s_root_dev));
+        }
+    });
+    return s_root_dev;
+}
+
+static const char *pt_host_root_vol_name(void) {
+    static char s_root_vol[NAME_MAX + 1];
+    static dispatch_once_t s_once;
+    dispatch_once(&s_once, ^{
+        struct attrlist al;
+        memset(&al, 0, sizeof(al));
+        al.bitmapcount = ATTR_BIT_MAP_COUNT;
+        al.volattr = ATTR_VOL_INFO | ATTR_VOL_NAME;
+        struct {
+            uint32_t length;
+            attrreference_t name_ref;
+            char name_buf[NAME_MAX + 1];
+        } __attribute__((packed)) vbuf;
+        memset(&vbuf, 0, sizeof(vbuf));
+        if (getattrlist("/", &al, &vbuf, sizeof(vbuf), 0) == 0 &&
+            vbuf.name_ref.attr_dataoffset > 0 &&
+            vbuf.name_ref.attr_length > 0) {
+            uintptr_t start = (uintptr_t)&vbuf.name_ref + (uintptr_t)vbuf.name_ref.attr_dataoffset;
+            uintptr_t end = (uintptr_t)&vbuf + sizeof(vbuf);
+            if (start >= (uintptr_t)&vbuf && start < end) {
+                size_t avail = (size_t)(end - start);
+                size_t n = (vbuf.name_ref.attr_length < avail) ? (size_t)vbuf.name_ref.attr_length : avail;
+                if (n >= sizeof(s_root_vol)) {
+                    n = sizeof(s_root_vol) - 1U;
+                }
+                memcpy(s_root_vol, (const void *)start, n);
+                s_root_vol[n] = '\0';
+            }
+        }
+    });
+    return s_root_vol;
+}
+
+static BOOL pt_dev_matches_root_volume(const char *dev, const char *root_dev) {
+    if (dev == NULL || dev[0] == '\0' || root_dev == NULL || root_dev[0] == '\0') {
+        return NO;
+    }
+    if (strcmp(dev, root_dev) == 0) {
+        return YES;
+    }
+    const char *at = strchr(root_dev, '@');
+    if (at != NULL) {
+        size_t base_len = (size_t)(at - root_dev);
+        if (base_len > 0 && strncmp(dev, root_dev, base_len) == 0 &&
+            (dev[base_len] == '\0' || dev[base_len] == '@')) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
 static void pt_write_attr_ref_replacement(char *rec_ptr,
                                           size_t max_rec_cap,
                                           attrreference_t *ref,
@@ -5010,15 +6215,25 @@ static void pt_write_attr_ref_replacement(char *rec_ptr,
         return;
     }
     uint32_t rec_len = *(uint32_t *)rec_ptr;
+    size_t old_len = (size_t)ref->attr_length;
+    if (old_len > avail_str) {
+        old_len = avail_str;
+    }
     size_t vlen = strlen(replacement) + 1U;
     if (vlen <= (size_t)ref->attr_length && vlen <= avail_str) {
         memcpy((void *)str_start, replacement, vlen);
+        if (old_len > vlen) {
+            memset((uint8_t *)str_start + vlen, 0, old_len - vlen);
+        }
         ref->attr_length = (uint32_t)vlen;
         return;
     }
     if (can_grow_record) {
         size_t padded = (vlen + 3U) & ~3U;
         if ((size_t)rec_len + padded <= max_rec_cap) {
+            if (old_len > 0) {
+                memset((void *)str_start, 0, old_len);
+            }
             char *dst = rec_ptr + rec_len;
             memset(dst, 0, padded);
             memcpy(dst, replacement, vlen);
@@ -5033,17 +6248,39 @@ static void pt_write_attr_ref_replacement(char *rec_ptr,
         size_t slen = strlen(short_virt) + 1U;
         if (slen <= (size_t)ref->attr_length && slen <= avail_str) {
             memcpy((void *)str_start, short_virt, slen);
+            if (old_len > slen) {
+                memset((uint8_t *)str_start + slen, 0, old_len - slen);
+            }
             ref->attr_length = (uint32_t)slen;
             return;
         }
     }
     if (is_mountpoint && avail_str >= 2 && ref->attr_length >= 2) {
         memcpy((void *)str_start, "/", 2);
+        if (old_len > 2) {
+            memset((uint8_t *)str_start + 2, 0, old_len - 2);
+        }
         ref->attr_length = 2;
         return;
     }
+    if (strncmp(replacement, "/dev/disk0s1", 12) == 0) {
+        static const char kShortDev[] = "/dev/disk0s1";
+        size_t dlen = sizeof(kShortDev);
+        if (dlen <= (size_t)ref->attr_length && dlen <= avail_str) {
+            memcpy((void *)str_start, kShortDev, dlen);
+            if (old_len > dlen) {
+                memset((uint8_t *)str_start + dlen, 0, old_len - dlen);
+            }
+            ref->attr_length = (uint32_t)dlen;
+            return;
+        }
+    }
     if (avail_str > 0) {
-        *(char *)str_start = '\0';
+        if (old_len > 0) {
+            memset((void *)str_start, 0, old_len);
+        } else {
+            *(char *)str_start = '\0';
+        }
         ref->attr_length = 1;
     }
 }
@@ -5090,6 +6327,45 @@ static void pt_sanitize_attr_path_ref(const struct attrlist *alist,
     memcpy(orig_copy, (const void *)str_start, copy_n);
     orig_copy[copy_n] = '\0';
 
+    if (group == PT_ATTR_GROUP_VOL && bit == ATTR_VOL_NAME) {
+        const char *root_vol = pt_host_root_vol_name();
+        BOOL is_root_vol = (strcmp(orig_copy, "System") == 0 ||
+                            (root_vol[0] != '\0' && strcmp(orig_copy, root_vol) == 0));
+        if (!is_root_vol && (alist->volattr & ATTR_VOL_MOUNTPOINT) != 0) {
+            BOOL has_mp = NO;
+            size_t mp_off = pt_attr_offset_in_record(alist, rec_ptr, rec_len, options,
+                                                     PT_ATTR_GROUP_VOL, ATTR_VOL_MOUNTPOINT, &has_mp);
+            if (has_mp && mp_off + sizeof(attrreference_t) <= rec_len) {
+                const attrreference_t *mpref = (const attrreference_t *)(rec_ptr + mp_off);
+                uintptr_t mp_start = (uintptr_t)mpref + (uintptr_t)mpref->attr_dataoffset;
+                if (mpref->attr_dataoffset > 0 && mp_start >= (uintptr_t)rec_ptr && mp_start + 2U <= rec_end) {
+                    const char *mp_s = (const char *)mp_start;
+                    if (mp_s[0] == '/' && mp_s[1] == '\0') {
+                        is_root_vol = YES;
+                    }
+                }
+            }
+        }
+        const char *vol_name = is_root_vol ? "System" : "Data";
+        if (strcmp(orig_copy, vol_name) != 0) {
+            pt_write_attr_ref_replacement(rec_ptr, max_rec_cap, ref, str_start, avail_str,
+                                          can_grow_record, vol_name, NO);
+        }
+        return;
+    }
+
+    if (group == PT_ATTR_GROUP_VOL && bit == ATTR_VOL_MOUNTEDDEVICE) {
+        const char *root_dev = pt_host_root_mntfromname();
+        const char *dev_name = pt_dev_matches_root_volume(orig_copy, root_dev)
+            ? "/dev/disk0s1s1"
+            : "/dev/disk0s1s2";
+        if (strcmp(orig_copy, dev_name) != 0) {
+            pt_write_attr_ref_replacement(rec_ptr, max_rec_cap, ref, str_start, avail_str,
+                                          can_grow_record, dev_name, NO);
+        }
+        return;
+    }
+
     if (is_mountpoint) {
         if (strcmp(orig_copy, "/System/Volumes/Data") == 0 ||
             strncmp(orig_copy, "/Volumes/", 9) == 0 ||
@@ -5116,7 +6392,15 @@ static void pt_sanitize_attr_path_ref(const struct attrlist *alist,
 
     if (pt_is_sensitive_host_fd_path(orig_copy, caller)) {
         if (avail_str > 0) {
-            *(char *)str_start = '\0';
+            size_t old_len = (size_t)ref->attr_length;
+            if (old_len > avail_str) {
+                old_len = avail_str;
+            }
+            if (old_len > 0) {
+                memset((void *)str_start, 0, old_len);
+            } else {
+                *(char *)str_start = '\0';
+            }
             ref->attr_length = 1;
         }
         return;
@@ -5129,6 +6413,67 @@ static void pt_sanitize_attr_path_ref(const struct attrlist *alist,
     }
 }
 
+static void pt_sanitize_attr_scalars_in_record(const struct attrlist *alist,
+                                               char *rec_ptr,
+                                               size_t max_rec_cap,
+                                               uint64_t options) {
+    if (alist == NULL || rec_ptr == NULL || max_rec_cap < sizeof(uint32_t) || !pt_is_bypass_enabled()) {
+        return;
+    }
+    uint32_t rec_len = *(uint32_t *)rec_ptr;
+    if (rec_len < sizeof(uint32_t) || (size_t)rec_len > max_rec_cap) {
+        return;
+    }
+    if ((alist->commonattr & ATTR_CMN_GRPID) != 0) {
+        BOOL present = NO;
+        size_t off = pt_attr_offset_in_record(alist, rec_ptr, rec_len, options,
+                                              PT_ATTR_GROUP_COMMON, ATTR_CMN_GRPID, &present);
+        if (present && off + sizeof(gid_t) <= rec_len) {
+            gid_t g = 0;
+            memcpy(&g, rec_ptr + off, sizeof(g));
+            if (g == 20) {
+                g = 501;
+                memcpy(rec_ptr + off, &g, sizeof(g));
+            }
+        }
+    }
+    if ((alist->commonattr & ATTR_CMN_FNDRINFO) != 0) {
+        BOOL present = NO;
+        size_t off = pt_attr_offset_in_record(alist, rec_ptr, rec_len, options,
+                                              PT_ATTR_GROUP_COMMON, ATTR_CMN_FNDRINFO, &present);
+        if (present && off + 32U <= rec_len) {
+            memset(rec_ptr + off, 0, 32U);
+        }
+    }
+    if ((alist->commonattr & ATTR_CMN_DATA_PROTECT_FLAGS) != 0) {
+        BOOL present = NO;
+        size_t off = pt_attr_offset_in_record(alist, rec_ptr, rec_len, options,
+                                              PT_ATTR_GROUP_COMMON, ATTR_CMN_DATA_PROTECT_FLAGS, &present);
+        if (present && off + sizeof(uint32_t) <= rec_len) {
+            uint32_t dp = 0;
+            memcpy(&dp, rec_ptr + off, sizeof(dp));
+            if (dp == 0U) {
+                dp = 3U;
+                memcpy(rec_ptr + off, &dp, sizeof(dp));
+            }
+        }
+    }
+#ifdef VOL_CAP_FMT_CASE_SENSITIVE
+    if ((alist->volattr & ATTR_VOL_CAPABILITIES) != 0) {
+        BOOL present = NO;
+        size_t off = pt_attr_offset_in_record(alist, rec_ptr, rec_len, options,
+                                              PT_ATTR_GROUP_VOL, ATTR_VOL_CAPABILITIES, &present);
+        if (present && off + sizeof(vol_capabilities_attr_t) <= rec_len) {
+            vol_capabilities_attr_t caps;
+            memcpy(&caps, rec_ptr + off, sizeof(caps));
+            caps.capabilities[VOL_CAPABILITIES_FORMAT] |= VOL_CAP_FMT_CASE_SENSITIVE;
+            caps.valid[VOL_CAPABILITIES_FORMAT] |= VOL_CAP_FMT_CASE_SENSITIVE;
+            memcpy(rec_ptr + off, &caps, sizeof(caps));
+        }
+    }
+#endif
+}
+
 static void pt_sanitize_attr_fullpath_in_record(const struct attrlist *alist,
                                                 char *rec_ptr,
                                                 size_t max_rec_cap,
@@ -5138,6 +6483,7 @@ static void pt_sanitize_attr_fullpath_in_record(const struct attrlist *alist,
     if (alist == NULL || rec_ptr == NULL || max_rec_cap < sizeof(uint32_t)) {
         return;
     }
+    pt_sanitize_attr_scalars_in_record(alist, rec_ptr, max_rec_cap, options);
     if ((alist->commonattr & ATTR_CMN_NAME) != 0) {
         pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
                                   PT_ATTR_GROUP_COMMON, ATTR_CMN_NAME, NO, NULL, caller);
@@ -5149,6 +6495,14 @@ static void pt_sanitize_attr_fullpath_in_record(const struct attrlist *alist,
     if ((alist->volattr & ATTR_VOL_MOUNTPOINT) != 0) {
         pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
                                   PT_ATTR_GROUP_VOL, ATTR_VOL_MOUNTPOINT, YES, NULL, caller);
+    }
+    if ((alist->volattr & ATTR_VOL_NAME) != 0) {
+        pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
+                                  PT_ATTR_GROUP_VOL, ATTR_VOL_NAME, NO, NULL, caller);
+    }
+    if ((alist->volattr & ATTR_VOL_MOUNTEDDEVICE) != 0) {
+        pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
+                                  PT_ATTR_GROUP_VOL, ATTR_VOL_MOUNTEDDEVICE, NO, NULL, caller);
     }
     if ((alist->forkattr & ATTR_CMNEXT_NOFIRMLINKPATH) != 0) {
         pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
@@ -5166,6 +6520,7 @@ static void pt_sanitize_attr_virtual_ancestor_record(const struct attrlist *alis
     if (alist == NULL || rec_ptr == NULL || max_rec_cap < sizeof(uint32_t) || ancestor_path == NULL) {
         return;
     }
+    pt_sanitize_attr_scalars_in_record(alist, rec_ptr, max_rec_cap, options);
     const char *base = strrchr(ancestor_path, '/');
     const char *name_override = (base != NULL && base[1] != '\0') ? (base + 1) : "/";
     if ((alist->commonattr & ATTR_CMN_NAME) != 0) {
@@ -5180,14 +6535,27 @@ static void pt_sanitize_attr_virtual_ancestor_record(const struct attrlist *alis
         pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
                                   PT_ATTR_GROUP_VOL, ATTR_VOL_MOUNTPOINT, YES, "/private/var", caller);
     }
+    if ((alist->volattr & ATTR_VOL_NAME) != 0) {
+        pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
+                                  PT_ATTR_GROUP_VOL, ATTR_VOL_NAME, NO, "Data", caller);
+    }
+    if ((alist->volattr & ATTR_VOL_MOUNTEDDEVICE) != 0) {
+        pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
+                                  PT_ATTR_GROUP_VOL, ATTR_VOL_MOUNTEDDEVICE, NO, "/dev/disk0s1s2", caller);
+    }
     if ((alist->forkattr & ATTR_CMNEXT_NOFIRMLINKPATH) != 0) {
         pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
                                   PT_ATTR_GROUP_FORK, ATTR_CMNEXT_NOFIRMLINKPATH, NO, ancestor_path, caller);
     }
 }
 
-static int pt_getattrlist(const char *path, void *attrList, void *attrBuf, size_t attrBufSize, unsigned int options) {
-    const void *caller = __builtin_return_address(0);
+__attribute__((visibility("hidden")))
+int pt_fs_getattrlist_with_caller(const char *path,
+                                  void *attrList,
+                                  void *attrBuf,
+                                  size_t attrBufSize,
+                                  unsigned int options,
+                                  const void *caller) {
     char vbuf[PATH_MAX];
     const char *resolved = NULL;
     pt_fs_path_disposition_t disp = pt_prepare_fs_path(path, caller, vbuf, sizeof(vbuf), &resolved);
@@ -5225,8 +6593,17 @@ static int pt_getattrlist(const char *path, void *attrList, void *attrBuf, size_
     return ret;
 }
 
-static int pt_fgetattrlist(int fd, void *attrList, void *attrBuf, size_t attrBufSize, unsigned int options) {
-    const void *caller = __builtin_return_address(0);
+static int pt_getattrlist(const char *path, void *attrList, void *attrBuf, size_t attrBufSize, unsigned int options) {
+    return pt_fs_getattrlist_with_caller(path, attrList, attrBuf, attrBufSize, options, __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
+int pt_fs_fgetattrlist_with_caller(int fd,
+                                   void *attrList,
+                                   void *attrBuf,
+                                   size_t attrBufSize,
+                                   unsigned int options,
+                                   const void *caller) {
     BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
     if (!is_sys && pt_fd_is_sensitive(fd, caller)) {
         errno = EBADF;
@@ -5244,8 +6621,18 @@ static int pt_fgetattrlist(int fd, void *attrList, void *attrBuf, size_t attrBuf
     return ret;
 }
 
-static int pt_getattrlistat(int fd, const char *path, void *attrList, void *attrBuf, size_t attrBufSize, unsigned long options) {
-    const void *caller = __builtin_return_address(0);
+static int pt_fgetattrlist(int fd, void *attrList, void *attrBuf, size_t attrBufSize, unsigned int options) {
+    return pt_fs_fgetattrlist_with_caller(fd, attrList, attrBuf, attrBufSize, options, __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
+int pt_fs_getattrlistat_with_caller(int fd,
+                                    const char *path,
+                                    void *attrList,
+                                    void *attrBuf,
+                                    size_t attrBufSize,
+                                    unsigned long options,
+                                    const void *caller) {
     if (pt_fd_is_sensitive(fd, caller)) {
         errno = EBADF;
         return -1;
@@ -5289,8 +6676,17 @@ static int pt_getattrlistat(int fd, const char *path, void *attrList, void *attr
     return ret;
 }
 
-static int pt_getattrlistbulk(int dirfd, void *attrList, void *attrBuf, size_t attrBufSize, uint64_t options) {
-    const void *caller = __builtin_return_address(0);
+static int pt_getattrlistat(int fd, const char *path, void *attrList, void *attrBuf, size_t attrBufSize, unsigned long options) {
+    return pt_fs_getattrlistat_with_caller(fd, path, attrList, attrBuf, attrBufSize, options, __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
+int pt_fs_getattrlistbulk_with_caller(int dirfd,
+                                      void *attrList,
+                                      void *attrBuf,
+                                      size_t attrBufSize,
+                                      uint64_t options,
+                                      const void *caller) {
     BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
     if (is_sys) {
         return getattrlistbulk(dirfd, attrList, attrBuf, attrBufSize, options);
@@ -5355,6 +6751,10 @@ static int pt_getattrlistbulk(int dirfd, void *attrList, void *attrBuf, size_t a
     }
 }
 
+static int pt_getattrlistbulk(int dirfd, void *attrList, void *attrBuf, size_t attrBufSize, uint64_t options) {
+    return pt_fs_getattrlistbulk_with_caller(dirfd, attrList, attrBuf, attrBufSize, options, __builtin_return_address(0));
+}
+
 static int pt_setattrlist(const char *path, void *attrList, void *attrBuf, size_t attrBufSize, unsigned int options) {
     char vbuf[PATH_MAX];
     if (!pt_prepare_fs_path_for_modify(AT_FDCWD, path, __builtin_return_address(0), vbuf, sizeof(vbuf), &path, EACCES)) {
@@ -5371,8 +6771,8 @@ static int pt_fsetattrlist(int fd, void *attrList, void *attrBuf, size_t attrBuf
     return fsetattrlist(fd, attrList, attrBuf, attrBufSize, options);
 }
 
-static long pt_pathconf(const char *path, int name) {
-    const void *caller = __builtin_return_address(0);
+__attribute__((visibility("hidden")))
+long pt_fs_pathconf_with_caller(const char *path, int name, const void *caller) {
     char vbuf[PATH_MAX];
     const char *resolved = NULL;
     pt_fs_path_disposition_t disp = pt_prepare_fs_path(path, caller, vbuf, sizeof(vbuf), &resolved);
@@ -5384,19 +6784,43 @@ static long pt_pathconf(const char *path, int name) {
         pt_ensure_data_container_map();
         resolved = (s_real_data_container_len > 0) ? s_real_data_container_dir : "/private/var";
     }
-    return pathconf(resolved, name);
+    long ret = pathconf(resolved, name);
+#ifdef _PC_CASE_SENSITIVE
+    if (ret >= 0 && name == _PC_CASE_SENSITIVE &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(caller)) {
+        return 1L;
+    }
+#endif
+    return ret;
 }
 
-static long pt_fpathconf(int fd, int name) {
+static long pt_pathconf(const char *path, int name) {
+    return pt_fs_pathconf_with_caller(path, name, __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
+long pt_fs_fpathconf_with_caller(int fd, int name, const void *caller) {
     if (fd < 0) {
         errno = EBADF;
         return -1;
     }
-    if (pt_fd_is_sensitive(fd, __builtin_return_address(0))) {
+    BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
+    if (!is_sys && pt_fd_is_sensitive(fd, caller)) {
         errno = EBADF;
         return -1;
     }
-    return fpathconf(fd, name);
+    long ret = fpathconf(fd, name);
+#ifdef _PC_CASE_SENSITIVE
+    if (ret >= 0 && name == _PC_CASE_SENSITIVE && !is_sys && pt_is_bypass_enabled()) {
+        return 1L;
+    }
+#endif
+    return ret;
+}
+
+static long pt_fpathconf(int fd, int name) {
+    return pt_fs_fpathconf_with_caller(fd, name, __builtin_return_address(0));
 }
 
 static void pt_sanitize_statfs_entry(struct statfs *buf, const void *caller, int *inout_is_sys) {
@@ -5459,8 +6883,8 @@ static int pt_filter_statfs_array(struct statfs *buf, int count, const void *cal
     return kept;
 }
 
-static int pt_statfs(const char *path, struct statfs *buf) {
-    const void *caller = __builtin_return_address(0);
+__attribute__((visibility("hidden")))
+int pt_fs_statfs_with_caller(const char *path, struct statfs *buf, const void *caller) {
     int is_sys_caller = -1;
     char vbuf[PATH_MAX];
     pt_fs_path_disposition_t disp = pt_prepare_fs_path_cached_caller(path, caller, vbuf, sizeof(vbuf), &path, &is_sys_caller);
@@ -5479,8 +6903,12 @@ static int pt_statfs(const char *path, struct statfs *buf) {
     return ret;
 }
 
-static int pt_fstatfs(int fd, struct statfs *buf) {
-    const void *caller = __builtin_return_address(0);
+static int pt_statfs(const char *path, struct statfs *buf) {
+    return pt_fs_statfs_with_caller(path, buf, __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
+int pt_fs_fstatfs_with_caller(int fd, struct statfs *buf, const void *caller) {
     if (pt_fd_is_sensitive(fd, caller)) {
         errno = EBADF;
         return -1;
@@ -5493,13 +6921,103 @@ static int pt_fstatfs(int fd, struct statfs *buf) {
     return ret;
 }
 
-static int pt_getfsstat(struct statfs *buf, int bufsize, int mode) {
-    const void *caller = __builtin_return_address(0);
+static int pt_fstatfs(int fd, struct statfs *buf) {
+    return pt_fs_fstatfs_with_caller(fd, buf, __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
+int pt_fs_prepare_statfs_path_with_caller(const char *path,
+                                          const void *caller,
+                                          char *vbuf,
+                                          size_t vbuf_size,
+                                          const char **out_resolved) {
+    int is_sys_caller = -1;
+    const char *resolved = path;
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_cached_caller(path, caller, vbuf, vbuf_size, &resolved, &is_sys_caller);
+    if (disp == PT_FS_PATH_HIDDEN) {
+        errno = ENOENT;
+        return -1;
+    }
+    if (disp == PT_FS_PATH_VIRTUAL_ANCESTOR) {
+        pt_ensure_data_container_map();
+        resolved = (s_real_data_container_len > 0) ? s_real_data_container_dir : "/private/var";
+    }
+    if (out_resolved != NULL) {
+        *out_resolved = resolved;
+    }
+    return 0;
+}
+
+__attribute__((visibility("hidden")))
+BOOL pt_fs_legacy_statfs_entry_is_hidden(const char *mnton, const char *mntfrom, const void *caller) {
+    (void)mntfrom;
+    if (mnton == NULL || !pt_is_bypass_enabled() || pt_is_effective_system_or_playtools_caller(caller)) {
+        return NO;
+    }
+    return (strcmp(mnton, "/") != 0 &&
+            strcmp(mnton, "/System/Volumes/Data") != 0 &&
+            strcmp(mnton, "/private/var") != 0 &&
+            strcmp(mnton, "/private/var/mobile") != 0);
+}
+
+__attribute__((visibility("hidden")))
+void pt_fs_sanitize_legacy_statfs_strings(char *mnton,
+                                          size_t mnton_cap,
+                                          char *mntfrom,
+                                          size_t mntfrom_cap,
+                                          const void *caller) {
+    if (mnton == NULL || mntfrom == NULL || mnton_cap == 0 || mntfrom_cap == 0 ||
+        !pt_is_bypass_enabled() || pt_is_effective_system_or_playtools_caller(caller)) {
+        return;
+    }
+    mnton[mnton_cap - 1U] = '\0';
+    mntfrom[mntfrom_cap - 1U] = '\0';
+    if (strcmp(mnton, "/System/Volumes/Data") == 0 ||
+        strncmp(mnton, "/Volumes/", 9) == 0 ||
+        strncmp(mnton, "/Users/", 7) == 0 ||
+        strncmp(mnton, "/System/Volumes/Data/Users/", 27) == 0) {
+        strlcpy(mnton, "/private/var", mnton_cap);
+        strlcpy(mntfrom, "/dev/disk0s1s2", mntfrom_cap);
+    } else if (strncmp(mnton, "/System/Volumes/Data/", 21) == 0) {
+        char stripped[MFSTYPENAMELEN + MAXPATHLEN];
+        strlcpy(stripped, mnton + 20, sizeof(stripped));
+        strlcpy(mnton, stripped, mnton_cap);
+    }
+    if (strcmp(mnton, "/") == 0) {
+        strlcpy(mntfrom, "/dev/disk0s1s1", mntfrom_cap);
+    } else if (strcmp(mnton, "/private/var") == 0) {
+        strlcpy(mntfrom, "/dev/disk0s1s2", mntfrom_cap);
+    }
+}
+
+__attribute__((visibility("hidden")))
+int pt_fs_getfsstat_with_caller(struct statfs *buf, int bufsize, int mode, const void *caller) {
+    if ((buf == NULL || bufsize == 0) &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(caller)) {
+        int raw_cnt = getfsstat(NULL, 0, mode);
+        if (raw_cnt <= 0) {
+            return raw_cnt;
+        }
+        int cap = (raw_cnt < 512) ? raw_cnt : 512;
+        struct statfs *tmp = (struct statfs *)calloc((size_t)cap, sizeof(struct statfs));
+        if (tmp != NULL) {
+            int got = getfsstat(tmp, (int)((size_t)cap * sizeof(struct statfs)), mode);
+            int kept = (got > 0) ? pt_filter_statfs_array(tmp, got, caller) : got;
+            free(tmp);
+            return kept;
+        }
+        return raw_cnt;
+    }
     int count = getfsstat(buf, bufsize, mode);
     if (count > 0 && buf != NULL && bufsize > 0) {
         return pt_filter_statfs_array(buf, count, caller);
     }
     return count;
+}
+
+static int pt_getfsstat(struct statfs *buf, int bufsize, int mode) {
+    return pt_fs_getfsstat_with_caller(buf, bufsize, mode, __builtin_return_address(0));
 }
 
 static int pt_getmntinfo(struct statfs **mntbufp, int mode) {
@@ -5520,10 +7038,34 @@ static int pt_getmntinfo_r_np(struct statfs **mntbufp, int mode) {
     return count;
 }
 
+static void pt_align_statvfs_with_statfs(struct statvfs *vbuf, const struct statfs *sbuf) {
+    if (vbuf == NULL || sbuf == NULL) {
+        return;
+    }
+    vbuf->f_bsize = (unsigned long)sbuf->f_iosize;
+    vbuf->f_frsize = (unsigned long)sbuf->f_bsize;
+    vbuf->f_blocks = (fsblkcnt_t)sbuf->f_blocks;
+    vbuf->f_bfree = (fsblkcnt_t)sbuf->f_bfree;
+    vbuf->f_bavail = (fsblkcnt_t)sbuf->f_bavail;
+    vbuf->f_files = (fsfilcnt_t)sbuf->f_files;
+    vbuf->f_ffree = (fsfilcnt_t)sbuf->f_ffree;
+    vbuf->f_favail = (fsfilcnt_t)sbuf->f_ffree;
+    unsigned long flags = 0;
+    if ((sbuf->f_flags & MNT_RDONLY) != 0) {
+        flags |= ST_RDONLY;
+    }
+    if ((sbuf->f_flags & MNT_NOSUID) != 0) {
+        flags |= ST_NOSUID;
+    }
+    vbuf->f_flag = flags;
+}
+
 static int pt_statvfs(const char * restrict path, struct statvfs * restrict buf) {
+    const void *caller = __builtin_return_address(0);
+    int is_sys_caller = -1;
     char vbuf[PATH_MAX];
     const char *resolved = NULL;
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path(path, __builtin_return_address(0), vbuf, sizeof(vbuf), &resolved);
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_cached_caller(path, caller, vbuf, sizeof(vbuf), &resolved, &is_sys_caller);
     if (disp == PT_FS_PATH_HIDDEN) {
         errno = ENOENT;
         return -1;
@@ -5532,15 +7074,39 @@ static int pt_statvfs(const char * restrict path, struct statvfs * restrict buf)
         pt_ensure_data_container_map();
         resolved = (s_real_data_container_len > 0) ? s_real_data_container_dir : "/private/var";
     }
-    return statvfs(resolved, buf);
+    int ret = statvfs(resolved, buf);
+    if (ret == 0 && buf != NULL && pt_is_bypass_enabled()) {
+        if (is_sys_caller < 0) {
+            is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
+        }
+        if (is_sys_caller == 0) {
+            struct statfs sf;
+            if (statfs(resolved, &sf) == 0) {
+                pt_sanitize_statfs_entry(&sf, caller, &is_sys_caller);
+                pt_align_statvfs_with_statfs(buf, &sf);
+            }
+        }
+    }
+    return ret;
 }
 
 static int pt_fstatvfs(int fd, struct statvfs *buf) {
-    if (pt_fd_is_sensitive(fd, __builtin_return_address(0))) {
+    const void *caller = __builtin_return_address(0);
+    if (pt_fd_is_sensitive(fd, caller)) {
         errno = EBADF;
         return -1;
     }
-    return fstatvfs(fd, buf);
+    int ret = fstatvfs(fd, buf);
+    if (ret == 0 && buf != NULL && pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(caller)) {
+        struct statfs sf;
+        if (fstatfs(fd, &sf) == 0) {
+            int is_sys = 0;
+            pt_sanitize_statfs_entry(&sf, caller, &is_sys);
+            pt_align_statvfs_with_statfs(buf, &sf);
+        }
+    }
+    return ret;
 }
 
 
@@ -6453,9 +8019,17 @@ static inline BOOL pt_is_hidden_xattr_name(const char *name) {
     if (name == NULL || name[0] == '\0') {
         return NO;
     }
+    if (strncmp(name, "com.apple.metadata:", 19) == 0) {
+        return YES;
+    }
     return (strcmp(name, "com.apple.quarantine") == 0 ||
             strcmp(name, "com.apple.provenance") == 0 ||
-            strcmp(name, "com.apple.macl") == 0);
+            strcmp(name, "com.apple.macl") == 0 ||
+            strcmp(name, "com.apple.FinderInfo") == 0 ||
+            strcmp(name, "com.apple.ResourceFork") == 0 ||
+            strcmp(name, "com.apple.TextEncoding") == 0 ||
+            strcmp(name, "com.apple.lastuseddate#PS") == 0 ||
+            strcmp(name, "com.apple.LaunchServices.OpenWith") == 0);
 }
 
 static ssize_t pt_filter_xattr_list_buffer(char *buf, ssize_t raw_len) {
@@ -6535,8 +8109,8 @@ static ssize_t pt_listxattr_filtered(BOOL is_fd,
     return filtered_len;
 }
 
-static ssize_t pt_getxattr(const char *path, const char *name, void *value, size_t size, u_int32_t position, int options) {
-    const void *caller = __builtin_return_address(0);
+__attribute__((visibility("hidden")))
+ssize_t pt_fs_getxattr_with_caller(const char *path, const char *name, void *value, size_t size, u_int32_t position, int options, const void *caller) {
     int is_sys = -1;
     char vbuf[PATH_MAX];
     pt_fs_path_disposition_t disp = pt_prepare_fs_path_cached_caller(path, caller, vbuf, sizeof(vbuf), &path, &is_sys);
@@ -6558,8 +8132,12 @@ static ssize_t pt_getxattr(const char *path, const char *name, void *value, size
     return getxattr(path, name, value, size, position, options);
 }
 
-static ssize_t pt_fgetxattr(int fd, const char *name, void *value, size_t size, u_int32_t position, int options) {
-    const void *caller = __builtin_return_address(0);
+static ssize_t pt_getxattr(const char *path, const char *name, void *value, size_t size, u_int32_t position, int options) {
+    return pt_fs_getxattr_with_caller(path, name, value, size, position, options, __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
+ssize_t pt_fs_fgetxattr_with_caller(int fd, const char *name, void *value, size_t size, u_int32_t position, int options, const void *caller) {
     BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
     if (!is_sys) {
         if (pt_fd_is_sensitive(fd, caller)) {
@@ -6572,6 +8150,10 @@ static ssize_t pt_fgetxattr(int fd, const char *name, void *value, size_t size, 
         }
     }
     return fgetxattr(fd, name, value, size, position, options);
+}
+
+static ssize_t pt_fgetxattr(int fd, const char *name, void *value, size_t size, u_int32_t position, int options) {
+    return pt_fs_fgetxattr_with_caller(fd, name, value, size, position, options, __builtin_return_address(0));
 }
 
 static int pt_setxattr(const char *path, const char *name, const void *value, size_t size, u_int32_t position, int options) {
@@ -6604,8 +8186,8 @@ static int pt_fsetxattr(int fd, const char *name, const void *value, size_t size
     return fsetxattr(fd, name, value, size, position, options);
 }
 
-static ssize_t pt_listxattr(const char *path, char *namebuff, size_t size, int options) {
-    const void *caller = __builtin_return_address(0);
+__attribute__((visibility("hidden")))
+ssize_t pt_fs_listxattr_with_caller(const char *path, char *namebuff, size_t size, int options, const void *caller) {
     int is_sys = -1;
     char vbuf[PATH_MAX];
     pt_fs_path_disposition_t disp = pt_prepare_fs_path_cached_caller(path, caller, vbuf, sizeof(vbuf), &path, &is_sys);
@@ -6633,8 +8215,12 @@ static ssize_t pt_listxattr(const char *path, char *namebuff, size_t size, int o
     return pt_filter_xattr_list_buffer(namebuff, ret);
 }
 
-static ssize_t pt_flistxattr(int fd, char *namebuff, size_t size, int options) {
-    const void *caller = __builtin_return_address(0);
+static ssize_t pt_listxattr(const char *path, char *namebuff, size_t size, int options) {
+    return pt_fs_listxattr_with_caller(path, namebuff, size, options, __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
+ssize_t pt_fs_flistxattr_with_caller(int fd, char *namebuff, size_t size, int options, const void *caller) {
     BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
     if (!is_sys && pt_fd_is_sensitive(fd, caller)) {
         errno = EBADF;
@@ -6651,6 +8237,10 @@ static ssize_t pt_flistxattr(int fd, char *namebuff, size_t size, int options) {
         return pt_listxattr_filtered(YES, fd, NULL, namebuff, size, options);
     }
     return pt_filter_xattr_list_buffer(namebuff, ret);
+}
+
+static ssize_t pt_flistxattr(int fd, char *namebuff, size_t size, int options) {
+    return pt_fs_flistxattr_with_caller(fd, namebuff, size, options, __builtin_return_address(0));
 }
 
 static int pt_removexattr(const char *path, const char *name, int options) {
@@ -6710,8 +8300,13 @@ static int pt_clonefile(const char *src, const char *dst, uint32_t flags) {
     return clonefile(src, dst, flags);
 }
 
-static int pt_clonefileat(int src_dirfd, const char *src, int dst_dirfd, const char *dst, uint32_t flags) {
-    const void *caller = __builtin_return_address(0);
+__attribute__((visibility("hidden")))
+int pt_fs_clonefileat_with_caller(int src_dirfd,
+                                  const char *src,
+                                  int dst_dirfd,
+                                  const char *dst,
+                                  uint32_t flags,
+                                  const void *caller) {
     if (pt_fd_is_sensitive(src_dirfd, caller)) {
         errno = ENOENT;
         return -1;
@@ -6735,6 +8330,10 @@ static int pt_clonefileat(int src_dirfd, const char *src, int dst_dirfd, const c
         return -1;
     }
     return clonefileat(src_dirfd, src, dst_dirfd, dst, flags);
+}
+
+static int pt_clonefileat(int src_dirfd, const char *src, int dst_dirfd, const char *dst, uint32_t flags) {
+    return pt_fs_clonefileat_with_caller(src_dirfd, src, dst_dirfd, dst, flags, __builtin_return_address(0));
 }
 
 static size_t pt_count_template_xs(const char *tmpl, int slen) {
@@ -7098,7 +8697,9 @@ DYLD_INTERPOSE(pt_mkdtemp, mkdtemp)
 DYLD_INTERPOSE(pt_amkrtemp, _amkrtemp)
 static ssize_t pt_fs_fsgetpath_impl(char *buf, size_t bufsize, fsid_t *fsid, uint64_t objid, const void *caller) {
     ssize_t ret = fsgetpath(buf, bufsize, fsid, objid);
-    if (ret <= 0 || buf == NULL || bufsize == 0 || pt_is_effective_system_or_playtools_caller(caller)) {
+    if (ret <= 0 || buf == NULL || bufsize == 0 ||
+        !pt_is_bypass_enabled() ||
+        pt_is_effective_system_or_playtools_caller(caller)) {
         return ret;
     }
     buf[bufsize - 1] = '\0';
@@ -7130,6 +8731,87 @@ static ssize_t pt_fsgetpath(char *buf, size_t bufsize, fsid_t *fsid, uint64_t ob
 }
 
 __attribute__((visibility("hidden")))
+ssize_t pt_fs_fsgetpath_ext_with_caller(char *buf,
+                                        size_t bufsize,
+                                        fsid_t *fsid,
+                                        uint64_t objid,
+                                        uint64_t flags,
+                                        const void *caller) {
+    typedef ssize_t (*FsGetPathExtFn)(char *, size_t, fsid_t *, uint64_t, uint64_t);
+    static FsGetPathExtFn s_orig = NULL;
+    static dispatch_once_t s_once;
+    dispatch_once(&s_once, ^{
+        s_orig = (FsGetPathExtFn)dlsym(RTLD_NEXT, "fsgetpath_ext");
+    });
+    if (s_orig == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    ssize_t ret = s_orig(buf, bufsize, fsid, objid, flags);
+    if (ret <= 0 || buf == NULL || bufsize == 0 ||
+        !pt_is_bypass_enabled() ||
+        pt_is_effective_system_or_playtools_caller(caller)) {
+        return ret;
+    }
+    buf[bufsize - 1] = '\0';
+    char vout[PATH_MAX];
+    const char *virt = pt_virtualize_path_for_app(buf, vout, sizeof(vout), YES);
+    if (virt != buf) {
+        size_t n = strlcpy(buf, virt, bufsize);
+        if (n >= bufsize) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        ret = (ssize_t)(n + 1);
+    }
+    if (pt_is_sensitive_host_fd_path(buf, caller)) {
+        buf[0] = '\0';
+        errno = ENOENT;
+        return -1;
+    }
+    return ret;
+}
+
+static ssize_t pt_fsgetpath_ext(char *buf, size_t bufsize, fsid_t *fsid, uint64_t objid, uint64_t flags) {
+    return pt_fs_fsgetpath_ext_with_caller(buf, bufsize, fsid, objid, flags, __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
+int pt_fs_searchfs_with_caller(const char *path,
+                               void *searchblock,
+                               unsigned long *nummatches,
+                               unsigned int scriptcode,
+                               unsigned int options,
+                               void *state,
+                               const void *caller) {
+    if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller)) {
+        errno = ENOTSUP;
+        return -1;
+    }
+    typedef int (*SearchFsFn)(const char *, void *, unsigned long *, unsigned int, unsigned int, void *);
+    static SearchFsFn s_orig = NULL;
+    static dispatch_once_t s_once;
+    dispatch_once(&s_once, ^{
+        s_orig = (SearchFsFn)dlsym(RTLD_NEXT, "searchfs");
+    });
+    if (s_orig != NULL) {
+        return s_orig(path, searchblock, nummatches, scriptcode, options, state);
+    }
+    errno = ENOSYS;
+    return -1;
+}
+
+static int pt_searchfs(const char *path,
+                       void *searchblock,
+                       unsigned long *nummatches,
+                       unsigned int scriptcode,
+                       unsigned int options,
+                       void *state) {
+    return pt_fs_searchfs_with_caller(path, searchblock, nummatches, scriptcode, options, state,
+                                      __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
 void *pt_fs_dlsym_route(const char *symbol) {
     if (symbol == NULL) {
         return NULL;
@@ -7137,8 +8819,170 @@ void *pt_fs_dlsym_route(const char *symbol) {
     if (strcmp(symbol, "fsgetpath") == 0) {
         return (void *)&pt_fsgetpath;
     }
+    if (strcmp(symbol, "fsgetpath_ext") == 0) {
+        return (void *)&pt_fsgetpath_ext;
+    }
+    if (strcmp(symbol, "searchfs") == 0) {
+        return (void *)&pt_searchfs;
+    }
     if (strcmp(symbol, "proc_pidinfo") == 0) {
         return (void *)&pt_proc_pidinfo;
+    }
+    if (strcmp(symbol, "proc_pidfdinfo") == 0) {
+        return (void *)&pt_proc_pidfdinfo;
+    }
+    if (strcmp(symbol, "proc_regionfilename") == 0) {
+        return (void *)&pt_proc_regionfilename;
+    }
+    if (strcmp(symbol, "proc_pidpath") == 0) {
+        return (void *)&pt_proc_pidpath;
+    }
+    if (strcmp(symbol, "proc_listpids") == 0) {
+        return (void *)&pt_proc_listpids;
+    }
+    if (strcmp(symbol, "proc_listallpids") == 0) {
+        return (void *)&pt_proc_listallpids;
+    }
+    if (strcmp(symbol, "proc_name") == 0) {
+        return (void *)&pt_proc_name;
+    }
+    if (strcmp(symbol, "proc_pidoriginatorinfo") == 0) {
+        return (void *)&pt_proc_pidoriginatorinfo;
+    }
+    if (strcmp(symbol, "proc_listchildpids") == 0) {
+        return (void *)&pt_proc_listchildpids;
+    }
+    if (strcmp(symbol, "proc_listpgrppids") == 0) {
+        return (void *)&pt_proc_listpgrppids;
+    }
+    if (strcmp(symbol, "proc_pid_rusage") == 0) {
+        return (void *)&pt_proc_pid_rusage;
+    }
+    if (strcmp(symbol, "getattrlist") == 0) {
+        return (void *)&pt_getattrlist;
+    }
+    if (strcmp(symbol, "fgetattrlist") == 0) {
+        return (void *)&pt_fgetattrlist;
+    }
+    if (strcmp(symbol, "getattrlistat") == 0) {
+        return (void *)&pt_getattrlistat;
+    }
+    if (strcmp(symbol, "getattrlistbulk") == 0) {
+        return (void *)&pt_getattrlistbulk;
+    }
+    if (strcmp(symbol, "statfs") == 0 || strcmp(symbol, "statfs64") == 0) {
+        return (void *)&pt_statfs;
+    }
+    if (strcmp(symbol, "fstatfs") == 0 || strcmp(symbol, "fstatfs64") == 0) {
+        return (void *)&pt_fstatfs;
+    }
+    if (strcmp(symbol, "getfsstat") == 0 || strcmp(symbol, "getfsstat64") == 0) {
+        return (void *)&pt_getfsstat;
+    }
+    if (strcmp(symbol, "__getdirentries64") == 0) {
+        return (void *)&pt_getdirentries64;
+    }
+    if (strcmp(symbol, "getmntinfo") == 0) {
+        return (void *)&pt_getmntinfo;
+    }
+    if (strcmp(symbol, "getmntinfo_r_np") == 0) {
+        return (void *)&pt_getmntinfo_r_np;
+    }
+    if (strcmp(symbol, "statvfs") == 0) {
+        return (void *)&pt_statvfs;
+    }
+    if (strcmp(symbol, "fstatvfs") == 0) {
+        return (void *)&pt_fstatvfs;
+    }
+    if (strcmp(symbol, "open") == 0) {
+        return (void *)&pt_open;
+    }
+    if (strcmp(symbol, "openat") == 0) {
+        return (void *)&pt_openat;
+    }
+    if (strcmp(symbol, "open_dprotected_np") == 0) {
+        return (void *)&pt_open_dprotected_np;
+    }
+    if (strcmp(symbol, "openat_dprotected_np") == 0) {
+        return (void *)&pt_openat_dprotected_np;
+    }
+    if (strcmp(symbol, "clonefile") == 0) {
+        return (void *)&pt_clonefile;
+    }
+    if (strcmp(symbol, "clonefileat") == 0) {
+        return (void *)&pt_clonefileat;
+    }
+    if (strcmp(symbol, "fopen") == 0) {
+        return (void *)&pt_fopen;
+    }
+    if (strcmp(symbol, "stat") == 0) {
+        return (void *)&pt_stat;
+    }
+    if (strcmp(symbol, "lstat") == 0) {
+        return (void *)&pt_lstat;
+    }
+    if (strcmp(symbol, "fstat") == 0) {
+        return (void *)&pt_fstat;
+    }
+    if (strcmp(symbol, "fstatat") == 0) {
+        return (void *)&pt_fstatat;
+    }
+    if (strcmp(symbol, "pathconf") == 0) {
+        return (void *)&pt_pathconf;
+    }
+    if (strcmp(symbol, "fpathconf") == 0) {
+        return (void *)&pt_fpathconf;
+    }
+    if (strcmp(symbol, "access") == 0) {
+        return (void *)&pt_access;
+    }
+    if (strcmp(symbol, "faccessat") == 0) {
+        return (void *)&pt_faccessat;
+    }
+    if (strcmp(symbol, "readlink") == 0) {
+        return (void *)&pt_readlink;
+    }
+    if (strcmp(symbol, "readlinkat") == 0) {
+        return (void *)&pt_readlinkat;
+    }
+    if (strcmp(symbol, "realpath") == 0) {
+        return (void *)&pt_realpath;
+    }
+    if (strcmp(symbol, "getcwd") == 0) {
+        return (void *)&pt_getcwd;
+    }
+    if (strcmp(symbol, "fcntl") == 0) {
+        return (void *)&pt_fcntl;
+    }
+    if (strcmp(symbol, "opendir") == 0) {
+        return (void *)&pt_opendir;
+    }
+    if (strcmp(symbol, "fdopendir") == 0) {
+        return (void *)&pt_fdopendir;
+    }
+    if (strcmp(symbol, "readdir") == 0) {
+        return (void *)&pt_readdir;
+    }
+    if (strcmp(symbol, "scandir") == 0) {
+        return (void *)&pt_scandir;
+    }
+    if (strcmp(symbol, "getxattr") == 0) {
+        return (void *)&pt_getxattr;
+    }
+    if (strcmp(symbol, "fgetxattr") == 0) {
+        return (void *)&pt_fgetxattr;
+    }
+    if (strcmp(symbol, "listxattr") == 0) {
+        return (void *)&pt_listxattr;
+    }
+    if (strcmp(symbol, "flistxattr") == 0) {
+        return (void *)&pt_flistxattr;
+    }
+    if (strcmp(symbol, "CFURLCopyResourcePropertyForKey") == 0) {
+        return (void *)&pt_CFURLCopyResourcePropertyForKey;
+    }
+    if (strcmp(symbol, "CFURLCopyResourcePropertiesForKeys") == 0) {
+        return (void *)&pt_CFURLCopyResourcePropertiesForKeys;
     }
     return NULL;
 }
@@ -7146,3 +8990,4 @@ void *pt_fs_dlsym_route(const char *symbol) {
 DYLD_INTERPOSE(pt_sqlite3_open, sqlite3_open)
 DYLD_INTERPOSE(pt_sqlite3_open_v2, sqlite3_open_v2)
 DYLD_INTERPOSE(pt_fsgetpath, fsgetpath)
+DYLD_INTERPOSE(pt_fstat, fstat)

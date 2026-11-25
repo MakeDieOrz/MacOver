@@ -66,6 +66,7 @@ MOCK_TARGET_M = r"""
 @import WebKit;
 @import PlayTools;
 #include <arpa/inet.h>
+#include <CommonCrypto/CommonDigest.h>
 #include <dlfcn.h>
 #include <crt_externs.h>
 #include <errno.h>
@@ -93,8 +94,11 @@ MOCK_TARGET_M = r"""
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/attr.h>
+#include <sys/ioctl.h>
 #include <sys/mount.h>
 #include <sys/socket.h>
+#include <sys/sockio.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <sys/un.h>
@@ -1652,6 +1656,22 @@ int main(int argc, const char *argv[]) {
         BOOL s11SandboxDlsymOK = NO;
         BOOL s11CoreMotionPullCacheOK = NO;
         BOOL s11MigHostAndTaskOK = NO;
+        BOOL s11BootstrapBlockedOK = NO;
+        BOOL s11SysctlSwapAndTreeOK = NO;
+        BOOL s11ResponsibilitySelfOK = NO;
+        BOOL s11LsAsnHiddenOK = NO;
+        BOOL s11ObjcMetaAndReqHiddenOK = NO;
+        BOOL s11Round1DlsymAndProcOK = NO;
+        BOOL s11Round1VolumeAndCodeResOK = NO;
+        BOOL s11Round1AppKitAndSuperBlobOK = NO;
+        BOOL s11Round2CGAndHIDBlockedOK = NO;
+        BOOL s11Round2FontsAndDlopenOK = NO;
+        BOOL s11Round2MigThreadNetIopsOK = NO;
+        BOOL s11R2ThreadsClean = NO, s11R2Mig219OK = NO, s11R2Mig3414OK = NO, s11R2SiocgifconfClean = NO, s11R2IopsOK = NO, s11R2AmfiOK = NO, s11R2HdrImgOK = NO;
+        BOOL s11Round3SignKernelCsrOK = NO;
+        BOOL s11Round3DyldHandleUnwindOK = NO;
+        BOOL s11R3ExplicitHandleOK = NO, s11R3CfBundleOK = NO, s11R3DlopenFromOK = NO, s11R3UnwindOK = NO;
+        BOOL s11Round3FsCasePathsAndIORegOK = NO;
         const char *testS11Env = getenv("HARNESS_TEST_SCENARIO11");
         if (testS11Env != NULL && strcmp(testS11Env, "1") == 0) {
             // 1. PROC_PIDPATHINFO (libproc + SYS_proc_info) returns 0 and virtualized iOS bundle path
@@ -1867,7 +1887,8 @@ int main(int argc, const char *argv[]) {
                         sawAny = YES;
                         if (strncmp(p->if_name, "bridge", 6) == 0 ||
                             strncmp(p->if_name, "vmenet", 6) == 0 ||
-                            strncmp(p->if_name, "vmnet", 5) == 0) {
+                            strncmp(p->if_name, "vmnet", 5) == 0 ||
+                            strncmp(p->if_name, "anpi", 4) == 0) {
                             leaked = YES;
                         }
                     }
@@ -2233,6 +2254,624 @@ int main(int argc, const char *argv[]) {
                 }
                 s11MigHostAndTaskOK = (hostMigOK && taskMigOK);
             }
+
+            // 17. bootstrap_look_up/2 return 1102, vm.swapfileprefix, CTL_SYSCTL tree hides proc_translated, responsibility/LS hidden
+            {
+                typedef kern_return_t (*BootFn)(mach_port_t, const char *, mach_port_t *);
+                BootFn fnBoot = (BootFn)dlsym(RTLD_DEFAULT, "bootstrap_look_up");
+                mach_port_t sp1 = 123, sp2 = 123;
+                kern_return_t br1 = (fnBoot != NULL) ? fnBoot(bootstrap_port, "com.apple.dock.server", &sp1) : -1;
+                kern_return_t br2 = (fnBoot != NULL) ? fnBoot(bootstrap_port, "com.apple.windowserver.active", &sp2) : -1;
+                s11BootstrapBlockedOK = (br1 == 1102 && br2 == 1102 && sp1 == MACH_PORT_NULL && sp2 == MACH_PORT_NULL);
+
+                char swapPfx[128] = {0};
+                size_t swapPfxLen = sizeof(swapPfx);
+                int swapRC = sysctlbyname("vm.swapfileprefix", swapPfx, &swapPfxLen, NULL, 0);
+                int ptVal = -1;
+                size_t ptLen = sizeof(ptVal);
+                errno = 0;
+                int ptRC = sysctlbyname("sysctl.proc_translated", &ptVal, &ptLen, NULL, 0);
+                s11SysctlSwapAndTreeOK = (swapRC == 0 &&
+                                          strcmp(swapPfx, "/private/var/vm/swapfile") == 0 &&
+                                          ptRC != 0 && errno == ENOENT);
+
+                typedef pid_t (*RespFn)(pid_t);
+                RespFn fnResp = (RespFn)dlsym(RTLD_DEFAULT, "responsibility_get_pid_responsible_for_pid");
+                s11ResponsibilitySelfOK = (fnResp != NULL && fnResp(getpid()) == getpid());
+
+                s11LsAsnHiddenOK = (dlsym(RTLD_DEFAULT, "_LSGetCurrentApplicationASN") == NULL &&
+                                    dlsym(RTLD_DEFAULT, "_LSASNCreateWithPid") == NULL &&
+                                    dlsym(RTLD_DEFAULT, "_LSCopyApplicationInformation") == NULL);
+
+                s11ObjcMetaAndReqHiddenOK = (objc_getMetaClass("NSApplication") == Nil &&
+                                             objc_getRequiredClass("NSApplication") == Nil);
+            }
+
+            // 18. Round 1 parity: dlsym routing, utmpx/hostuuid/grouplist/kinfo_proc, volumes, AppKit hiding, SuperBlob CD hash
+            {
+                BOOL noMetalAll = (dlsym(RTLD_DEFAULT, "MTLCopyAllDevices") == NULL);
+                BOOL noAudioHas = (dlsym(RTLD_DEFAULT, "AudioObjectHasProperty") == NULL);
+                BOOL noMacSC = (dlsym(RTLD_DEFAULT, "SCDynamicStoreCopyComputerName") == NULL &&
+                                dlsym(RTLD_DEFAULT, "SCNetworkInterfaceCopyAll") == NULL);
+                BOOL hasDlsymRoutes = (dlsym(RTLD_DEFAULT, "task_get_exception_ports") != NULL &&
+                                       dlsym(RTLD_DEFAULT, "getifaddrs") != NULL);
+                void (*setUtx)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "setutxent");
+                void *(*getUtx)(void) = (void *(*)(void))dlsym(RTLD_DEFAULT, "getutxent");
+                void (*endUtx)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "endutxent");
+                BOOL utmpxClean = YES;
+                if (setUtx != NULL && getUtx != NULL && endUtx != NULL) {
+                    setUtx();
+                    utmpxClean = (getUtx() == NULL);
+                    endUtx();
+                }
+                int kpMib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid() };
+                struct kinfo_proc kp;
+                memset(&kp, 0, sizeof(kp));
+                size_t kpSz = sizeof(kp);
+                BOOL kpClean = NO;
+                if (sysctl(kpMib, 4, &kp, &kpSz, NULL, 0) == 0 && kpSz >= sizeof(kp)) {
+                    kpClean = YES;
+                    int ng = kp.kp_eproc.e_ucred.cr_ngroups;
+                    if (ng > 16) ng = 16;
+                    for (int gi = 0; gi < ng; gi++) {
+                        gid_t g = kp.kp_eproc.e_ucred.cr_groups[gi];
+                        if (g == 20U || g == 80U || g == 81U || g == 204U || g == 395U || g == 400U) {
+                            kpClean = NO;
+                            break;
+                        }
+                    }
+                }
+                int glBuf[32] = {0};
+                int glN = 32;
+                int (*fnGL)(const char *, int, int *, int *) = (int (*)(const char *, int, int *, int *))dlsym(RTLD_DEFAULT, "getgrouplist");
+                BOOL glClean = YES;
+                if (fnGL != NULL && fnGL("mobile", (int)getgid(), glBuf, &glN) == 0 && glN > 0 && glN <= 32) {
+                    for (int gi = 0; gi < glN; gi++) {
+                        int g = glBuf[gi];
+                        if (g == 20 || g == 80 || g == 81 || g == 204 || g == 395 || g == 400) {
+                            glClean = NO;
+                            break;
+                        }
+                    }
+                }
+                s11Round1DlsymAndProcOK = (noMetalAll && noAudioHas && noMacSC && hasDlsymRoutes && utmpxClean && kpClean && glClean);
+
+                NSURL *homeURL = [NSURL fileURLWithPath:NSHomeDirectory() isDirectory:YES];
+                id vName = nil, vURL = nil;
+                [homeURL getResourceValue:&vName forKey:NSURLVolumeNameKey error:nil];
+                [homeURL getResourceValue:&vURL forKey:NSURLVolumeURLKey error:nil];
+                BOOL volClean = (!([vName isKindOfClass:[NSString class]] && [(NSString *)vName containsString:@"Macintosh HD"]) &&
+                                 !([vURL isKindOfClass:[NSURL class]] && [[(NSURL *)vURL path] hasPrefix:@"/System/Volumes/Data"]));
+                NSArray<NSURL *> *mounted = [[NSFileManager defaultManager] mountedVolumeURLsIncludingResourceValuesForKeys:nil options:0];
+                for (NSURL *mu in mounted) {
+                    if ([mu.path hasPrefix:@"/System/Volumes/Data"] || [mu.path hasPrefix:@"/Volumes/"]) {
+                        volClean = NO;
+                    }
+                }
+                char csTmp[PATH_MAX] = {0};
+                BOOL confstrClean = (confstr(_CS_DARWIN_USER_TEMP_DIR, csTmp, sizeof(csTmp)) == 0 ||
+                                     strstr(csTmp, "/var/folders/") == NULL);
+                BOOL crPathClean = YES;
+                NSString *crP = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"_CodeSignature/CodeResources"];
+                int crFd = open(crP.fileSystemRepresentation, O_RDONLY | O_CLOEXEC);
+                if (crFd >= 0) {
+                    char crReal[PATH_MAX] = {0};
+                    if (fcntl(crFd, F_GETPATH, crReal) == 0 &&
+                        (strstr(crReal, ".pt_coderes_") != NULL || strstr(crReal, "/AppBackups/") != NULL)) {
+                        crPathClean = NO;
+                    }
+                    close(crFd);
+                }
+                s11Round1VolumeAndCodeResOK = (volClean && confstrClean && crPathClean);
+
+                BOOL appkitHidden = (NSClassFromString(@"NSCursor") == Nil &&
+                                     NSClassFromString(@"NSStatusBar") == Nil &&
+                                     NSClassFromString(@"NSDockTile") == Nil &&
+                                     NSClassFromString(@"NSOpenPanel") == Nil &&
+                                     NSClassFromString(@"NSTouchBar") == Nil &&
+                                     objc_getMetaClass("NSCursor") == Nil);
+                const char **(*fnCopyHdr)(const void *, unsigned int *) =
+                    (const char **(*)(const void *, unsigned int *))dlsym(RTLD_DEFAULT, "objc_copyClassNamesForImageHeader");
+                BOOL hdrClean = YES;
+                if (fnCopyHdr != NULL) {
+                    unsigned int hn = 0;
+                    const char **hnames = fnCopyHdr(_dyld_get_image_header(0), &hn);
+                    if (hnames != NULL) {
+                        for (unsigned int hi = 0; hi < hn; hi++) {
+                            if (hnames[hi] != NULL && strstr(hnames[hi], "PlayTools") != NULL) {
+                                hdrClean = NO;
+                                break;
+                            }
+                        }
+                        free((void *)hnames);
+                    }
+                }
+                BOOL superBlobCDMatch = YES;
+                NSMutableData *sbData = [NSMutableData dataWithLength:(1U << 19)];
+                if (pt_harness_csops(0, 10U, sbData.mutableBytes, sbData.length) == 0) {
+                    const uint8_t *sb = (const uint8_t *)sbData.bytes;
+                    uint32_t sbm = 0, sbl = 0, sbc = 0;
+                    memcpy(&sbm, sb, 4); memcpy(&sbl, sb + 4, 4); memcpy(&sbc, sb + 8, 4);
+                    sbm = ntohl(sbm); sbl = ntohl(sbl); sbc = ntohl(sbc);
+                    if (sbm == 0xfade0cc0U && sbl <= sbData.length && sbc <= 128U) {
+                        const uint8_t *cdPtr = NULL, *s5Ptr = NULL, *s7Ptr = NULL;
+                        uint32_t cdLen = 0, s5Len = 0, s7Len = 0;
+                        for (uint32_t si = 0; si < sbc; si++) {
+                            uint32_t st = 0, so = 0;
+                            memcpy(&st, sb + 12U + si * 8U, 4);
+                            memcpy(&so, sb + 16U + si * 8U, 4);
+                            st = ntohl(st); so = ntohl(so);
+                            if (so + 8U > sbl) continue;
+                            uint32_t cm = 0, cl = 0;
+                            memcpy(&cm, sb + so, 4); memcpy(&cl, sb + so + 4, 4);
+                            cm = ntohl(cm); cl = ntohl(cl);
+                            if (cl < 8U || so + cl > sbl) continue;
+                            if (st == 0U && cm == 0xfade0c02U && cl >= 44U && sb[so + 37U] == 2U && sb[so + 36U] == 32U) {
+                                cdPtr = sb + so; cdLen = cl;
+                            } else if (st == 5U && cm == 0xfade7171U) {
+                                s5Ptr = sb + so; s5Len = cl;
+                            } else if (st == 7U && cm == 0xfade7172U) {
+                                s7Ptr = sb + so; s7Len = cl;
+                            }
+                        }
+                        if (cdPtr != NULL) {
+                            uint32_t hoff = 0, nsp = 0;
+                            memcpy(&hoff, cdPtr + 16U, 4); memcpy(&nsp, cdPtr + 24U, 4);
+                            hoff = ntohl(hoff); nsp = ntohl(nsp);
+                            if (s5Ptr != NULL && nsp >= 5U && hoff >= 160U && hoff <= cdLen) {
+                                uint8_t d5[32];
+                                CC_SHA256(s5Ptr, (CC_LONG)s5Len, d5);
+                                BOOL zero5 = YES;
+                                for (int zi = 0; zi < 32; zi++) if (cdPtr[hoff - 160U + (uint32_t)zi] != 0) zero5 = NO;
+                                if (!zero5 && memcmp(cdPtr + hoff - 160U, d5, 32U) != 0) superBlobCDMatch = NO;
+                            }
+                            if (s7Ptr != NULL && nsp >= 7U && hoff >= 224U && hoff <= cdLen) {
+                                uint8_t d7[32];
+                                CC_SHA256(s7Ptr, (CC_LONG)s7Len, d7);
+                                BOOL zero7 = YES;
+                                for (int zi = 0; zi < 32; zi++) if (cdPtr[hoff - 224U + (uint32_t)zi] != 0) zero7 = NO;
+                                if (!zero7 && memcmp(cdPtr + hoff - 224U, d7, 32U) != 0) superBlobCDMatch = NO;
+                            }
+                        }
+                    }
+                }
+                s11Round1AppKitAndSuperBlobOK = (appkitHidden && hdrClean && superBlobCDMatch);
+            }
+
+            // 19. Round 2 parity: CG/IOHID dlsym blacklist, dlopen_preflight macOS frameworks, CTFontCollection,
+            //     thread_info(THREAD_EXTENDED_INFO), MIG 219/3414, ioctl(SIOCGIFCONF), IOPS, AMFI, imageHeader parity
+            {
+                s11Round2CGAndHIDBlockedOK = (dlsym(RTLD_DEFAULT, "CGMainDisplayID") == NULL &&
+                                              dlsym(RTLD_DEFAULT, "CGGetActiveDisplayList") == NULL &&
+                                              dlsym(RTLD_DEFAULT, "CGWindowListCopyWindowInfo") == NULL &&
+                                              dlsym(RTLD_DEFAULT, "CGPreflightScreenCaptureAccess") == NULL &&
+                                              dlsym(RTLD_DEFAULT, "IOHIDManagerCreate") == NULL &&
+                                              dlsym(RTLD_DEFAULT, "IOHIDManagerCopyDevices") == NULL);
+
+                BOOL dladdrSyscallOK = NO;
+                {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+                    const void *sysDirect = (const void *)&syscall;
+#pragma clang diagnostic pop
+                    Dl_info sdi = {0};
+                    void *sysSym1 = dlsym(RTLD_DEFAULT, "syscall");
+                    void *sysSym2 = dlsym(RTLD_DEFAULT, "__syscall");
+                    if (dladdr(sysDirect, &sdi) != 0 &&
+                        sdi.dli_fname != NULL &&
+                        strcmp(sdi.dli_fname, "/usr/lib/system/libsystem_kernel.dylib") == 0 &&
+                        sdi.dli_saddr == pt_harness_strip_ptr(sysDirect) &&
+                        sysSym1 == sysDirect &&
+                        sysSym2 == sysDirect) {
+                        dladdrSyscallOK = YES;
+                    }
+                }
+                BOOL macFwBlocked = (!dlopen_preflight("/System/Library/Frameworks/Cocoa.framework/Cocoa") &&
+                                     !dlopen_preflight("/System/Library/Frameworks/ServiceManagement.framework/ServiceManagement") &&
+                                     !dlopen_preflight("/System/Library/Frameworks/DiskArbitration.framework/DiskArbitration") &&
+                                     !dlopen_preflight("/System/Library/Frameworks/CoreWLAN.framework/CoreWLAN") &&
+                                     !dlopen_preflight("/System/Library/Frameworks/EndpointSecurity.framework/EndpointSecurity") &&
+                                     (_dyld_shared_cache_contains_path == NULL ||
+                                      (!_dyld_shared_cache_contains_path("/System/Library/Frameworks/Cocoa.framework/Cocoa") &&
+                                       !_dyld_shared_cache_contains_path("/System/Library/Frameworks/AppKit.framework/AppKit") &&
+                                       !_dyld_shared_cache_contains_path("/System/Library/PrivateFrameworks/Catalyst.framework/Catalyst") &&
+                                       !_dyld_shared_cache_contains_path("/System/Library/PrivateFrameworks/ContactsUIMacHelper.framework/ContactsUIMacHelper") &&
+                                       !_dyld_shared_cache_contains_path("/System/Library/PrivateFrameworks/QuickLookIosmac.framework/QuickLookIosmac") &&
+                                       !_dyld_shared_cache_contains_path("/System/Library/PrivateFrameworks/MobileActivationMacOS.framework/MobileActivationMacOS") &&
+                                       !_dyld_shared_cache_contains_path("/usr/lib/libRosetta.dylib") &&
+                                       !_dyld_shared_cache_contains_path("/usr/lib/liboah.dylib"))) &&
+                                     [NSBundle bundleWithPath:@"/System/Library/Frameworks/Cocoa.framework"] == nil &&
+                                     dladdrSyscallOK);
+
+                BOOL ctCollectionClean = YES;
+                void *ctHandle = dlopen("/System/Library/Frameworks/CoreText.framework/CoreText", RTLD_LAZY);
+                if (ctHandle != NULL) {
+                    typedef CFTypeRef (*CreateColFn)(CFDictionaryRef);
+                    typedef CFArrayRef (*CopyMatchFn)(CFTypeRef);
+                    typedef CFTypeRef (*CopyAttrFn)(CFTypeRef, CFStringRef);
+                    CreateColFn fnCreateCol = (CreateColFn)dlsym(RTLD_DEFAULT, "CTFontCollectionCreateFromAvailableFonts");
+                    CopyMatchFn fnMatch = (CopyMatchFn)dlsym(RTLD_DEFAULT, "CTFontCollectionCreateMatchingFontDescriptors");
+                    CopyAttrFn fnAttr = (CopyAttrFn)dlsym(RTLD_DEFAULT, "CTFontDescriptorCopyAttribute");
+                    CFStringRef *pFamKey = (CFStringRef *)dlsym(RTLD_DEFAULT, "kCTFontFamilyNameAttribute");
+                    if (fnCreateCol != NULL && fnMatch != NULL && fnAttr != NULL && pFamKey != NULL && *pFamKey != NULL) {
+                        CFTypeRef col = fnCreateCol(NULL);
+                        if (col != NULL) {
+                            NSArray *descs = CFBridgingRelease(fnMatch(col));
+                            CFRelease(col);
+                            for (id d in descs) {
+                                NSString *fam = CFBridgingRelease(fnAttr((__bridge CFTypeRef)d, *pFamKey));
+                                if ([fam isKindOfClass:[NSString class]]) {
+                                    NSString *low = fam.lowercaseString;
+                                    if ([low isEqualToString:@"monaco"] ||
+                                        [low isEqualToString:@"skia"] ||
+                                        [low isEqualToString:@"osaka"] ||
+                                        [low isEqualToString:@"wingdings"]) {
+                                        ctCollectionClean = NO;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    dlclose(ctHandle);
+                }
+                s11Round2FontsAndDlopenOK = (macFwBlocked && ctCollectionClean);
+
+                BOOL threadsClean = YES;
+                thread_act_array_t thList = NULL;
+                mach_msg_type_number_t thCount = 0;
+                if (task_threads(mach_task_self(), &thList, &thCount) == KERN_SUCCESS && thList != NULL) {
+                    for (mach_msg_type_number_t ti = 0; ti < thCount; ti++) {
+                        thread_extended_info_data_t extInfo = {0};
+                        mach_msg_type_number_t extCnt = THREAD_EXTENDED_INFO_COUNT;
+                        if (thread_info(thList[ti], THREAD_EXTENDED_INFO, (thread_info_t)&extInfo, &extCnt) == KERN_SUCCESS) {
+                            extInfo.pth_name[sizeof(extInfo.pth_name) - 1] = '\0';
+                            if (strstr(extInfo.pth_name, "NSEventThread") != NULL ||
+                                strstr(extInfo.pth_name, "PlayTools") != NULL ||
+                                strstr(extInfo.pth_name, "MacOver") != NULL) {
+                                threadsClean = NO;
+                            }
+                        }
+                        mach_port_deallocate(mach_task_self(), thList[ti]);
+                    }
+                    vm_deallocate(mach_task_self(), (vm_address_t)thList, thCount * sizeof(thread_act_t));
+                }
+
+                BOOL mig219SwapZeroOK = NO;
+                BOOL mig3414NoBrkOK = NO;
+                {
+                    typedef kern_return_t (*Msg2Fn)(void *, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+                    typedef mach_port_t (*GetReplyFn)(void);
+                    typedef void (*ReplyOpFn)(mach_port_t);
+                    Msg2Fn fnMsg2 = (Msg2Fn)dlsym(RTLD_DEFAULT, "mach_msg2_internal");
+                    GetReplyFn fnGetReply = (GetReplyFn)dlsym(RTLD_DEFAULT, "mig_get_reply_port");
+                    ReplyOpFn fnPutReply = (ReplyOpFn)dlsym(RTLD_DEFAULT, "mig_put_reply_port");
+                    ReplyOpFn fnDeallocReply = (ReplyOpFn)dlsym(RTLD_DEFAULT, "mig_dealloc_reply_port");
+                    const uint32_t bits2 = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE);
+                    const uint64_t opt64 = 0x0000000200000003ULL;
+
+                    // MIG 219 (HOST_VM_INFO64)
+                    struct {
+                        mach_msg_header_t hdr;
+                        NDR_record_t ndr;
+                        int flavor;
+                        mach_msg_type_number_t count;
+                    } req219 = {0};
+                    union {
+                        mach_msg_header_t hdr;
+                        uint8_t bytes[1024];
+                    } buf219 = {0};
+                    mach_port_t rport = (fnGetReply != NULL) ? fnGetReply() : MACH_PORT_NULL;
+                    if (fnMsg2 != NULL && MACH_PORT_VALID(rport)) {
+                        host_t h = mach_host_self();
+                        req219.ndr = NDR_record;
+                        req219.flavor = HOST_VM_INFO64;
+                        req219.count = HOST_VM_INFO64_COUNT;
+                        memcpy(buf219.bytes, &req219, sizeof(req219));
+                        buf219.hdr.msgh_bits = bits2;
+                        buf219.hdr.msgh_size = sizeof(req219);
+                        buf219.hdr.msgh_remote_port = h;
+                        buf219.hdr.msgh_local_port = rport;
+                        buf219.hdr.msgh_id = 219;
+                        kern_return_t kr = fnMsg2(buf219.bytes, opt64,
+                                                  (uint64_t)bits2 | ((uint64_t)sizeof(req219) << 32),
+                                                  (uint64_t)h | ((uint64_t)rport << 32),
+                                                  (uint64_t)219U << 32,
+                                                  (uint64_t)rport << 32,
+                                                  (uint64_t)sizeof(buf219), 0);
+                        if (kr == KERN_SUCCESS) {
+                            if (fnPutReply != NULL) fnPutReply(rport);
+                        } else if (fnDeallocReply != NULL) {
+                            fnDeallocReply(rport);
+                        }
+                        if (MACH_PORT_VALID(h)) mach_port_deallocate(mach_task_self(), h);
+                        const size_t pfx219 = sizeof(mach_msg_header_t) + sizeof(NDR_record_t);
+                        if (kr == KERN_SUCCESS && buf219.hdr.msgh_id == 319 &&
+                            !(buf219.hdr.msgh_bits & MACH_MSGH_BITS_COMPLEX) &&
+                            buf219.hdr.msgh_size >= pfx219 + 8 + sizeof(vm_statistics64_data_t)) {
+                            kern_return_t innerRC = KERN_FAILURE;
+                            memcpy(&innerRC, buf219.bytes + pfx219, sizeof(innerRC));
+                            if (innerRC == KERN_SUCCESS) {
+                                vm_statistics64_data_t vm64 = {0};
+                                memcpy(&vm64, buf219.bytes + pfx219 + 8, sizeof(vm64));
+                                mig219SwapZeroOK = (vm64.swapins == 0 && vm64.swapouts == 0);
+                            }
+                        } else if (kr == KERN_SUCCESS && (buf219.hdr.msgh_bits & MACH_MSGH_BITS_COMPLEX)) {
+                            mach_msg_destroy(&buf219.hdr);
+                        }
+                    }
+
+                    // MIG 3414 (task_get_exception_ports for EXC_MASK_BREAKPOINT -> reply 3514)
+                    struct {
+                        mach_msg_header_t hdr;
+                        NDR_record_t ndr;
+                        exception_mask_t mask;
+                    } req3414 = {0};
+                    union {
+                        mach_msg_header_t hdr;
+                        uint8_t bytes[1024];
+                    } buf3414 = {0};
+                    mach_port_t eport = (fnGetReply != NULL) ? fnGetReply() : MACH_PORT_NULL;
+                    if (fnMsg2 != NULL && MACH_PORT_VALID(eport)) {
+                        req3414.ndr = NDR_record;
+                        req3414.mask = EXC_MASK_BREAKPOINT;
+                        memcpy(buf3414.bytes, &req3414, sizeof(req3414));
+                        buf3414.hdr.msgh_bits = bits2;
+                        buf3414.hdr.msgh_size = sizeof(req3414);
+                        buf3414.hdr.msgh_remote_port = mach_task_self();
+                        buf3414.hdr.msgh_local_port = eport;
+                        buf3414.hdr.msgh_id = 3414;
+                        kern_return_t kr = fnMsg2(buf3414.bytes, opt64,
+                                                  (uint64_t)bits2 | ((uint64_t)sizeof(req3414) << 32),
+                                                  (uint64_t)mach_task_self() | ((uint64_t)eport << 32),
+                                                  (uint64_t)3414U << 32,
+                                                  (uint64_t)eport << 32,
+                                                  (uint64_t)sizeof(buf3414), 0);
+                        if (kr == KERN_SUCCESS) {
+                            if (fnPutReply != NULL) fnPutReply(eport);
+                        } else if (fnDeallocReply != NULL) {
+                            fnDeallocReply(eport);
+                        }
+                        if (kr == KERN_SUCCESS && buf3414.hdr.msgh_id == 3514) {
+                            BOOL foundBrkPort = NO;
+                            if (buf3414.hdr.msgh_bits & MACH_MSGH_BITS_COMPLEX) {
+                                mach_msg_body_t body = {0};
+                                memcpy(&body, buf3414.bytes + sizeof(mach_msg_header_t), sizeof(body));
+                                size_t off = sizeof(mach_msg_header_t) + sizeof(mach_msg_body_t);
+                                for (unsigned di = 0; di < body.msgh_descriptor_count && di < EXC_TYPES_COUNT; di++) {
+                                    if (off + (di + 1) * sizeof(mach_msg_port_descriptor_t) > buf3414.hdr.msgh_size) break;
+                                    mach_msg_port_descriptor_t d = {0};
+                                    memcpy(&d, buf3414.bytes + off + di * sizeof(d), sizeof(d));
+                                    if (d.type == MACH_MSG_PORT_DESCRIPTOR && MACH_PORT_VALID(d.name)) {
+                                        foundBrkPort = YES;
+                                    }
+                                }
+                                mach_msg_destroy(&buf3414.hdr);
+                            }
+                            mig3414NoBrkOK = !foundBrkPort;
+                        } else if (kr == KERN_SUCCESS && (buf3414.hdr.msgh_bits & MACH_MSGH_BITS_COMPLEX)) {
+                            mach_msg_destroy(&buf3414.hdr);
+                        }
+                    }
+                }
+
+                BOOL siocgifconfClean = YES;
+                int sockFd = socket(AF_INET, SOCK_DGRAM, 0);
+                if (sockFd >= 0) {
+                    char ifBuf[16384] = {0};
+                    struct ifconf ifc = {0};
+                    ifc.ifc_len = (int)sizeof(ifBuf);
+                    ifc.ifc_buf = ifBuf;
+                    if (ioctl(sockFd, SIOCGIFCONF, &ifc) == 0 && ifc.ifc_len > 0) {
+                        char *p = ifBuf, *end = ifBuf + ifc.ifc_len;
+                        while (p + sizeof(struct ifreq) <= end) {
+                            struct ifreq *ifr = (struct ifreq *)p;
+                            size_t step = sizeof(ifr->ifr_name) + ifr->ifr_addr.sa_len;
+                            if (step < sizeof(struct ifreq)) step = sizeof(struct ifreq);
+                            char nm[IFNAMSIZ + 1] = {0};
+                            memcpy(nm, ifr->ifr_name, IFNAMSIZ);
+                            if (strncmp(nm, "bridge", 6) == 0 ||
+                                strncmp(nm, "vmenet", 6) == 0 ||
+                                strncmp(nm, "anpi", 4) == 0) {
+                                siocgifconfClean = NO;
+                            }
+                            p += step;
+                        }
+                    }
+                    close(sockFd);
+                }
+
+                BOOL iopsNonEmptyOK = YES;
+                {
+                    CFTypeRef (*fnPSInfo)(void) = (CFTypeRef (*)(void))dlsym(RTLD_DEFAULT, "IOPSCopyPowerSourcesInfo");
+                    CFArrayRef (*fnPSList)(CFTypeRef) = (CFArrayRef (*)(CFTypeRef))dlsym(RTLD_DEFAULT, "IOPSCopyPowerSourcesList");
+                    if (fnPSInfo != NULL && fnPSList != NULL) {
+                        CFTypeRef psInfo = fnPSInfo();
+                        if (psInfo != NULL) {
+                            NSArray *psList = CFBridgingRelease(fnPSList(psInfo));
+                            CFRelease(psInfo);
+                            if (psList == nil || psList.count == 0) iopsNonEmptyOK = NO;
+                        }
+                    }
+                }
+
+                BOOL amfiOK = NO;
+                {
+                    typedef int (*AmfiFn)(uint64_t, uint64_t *);
+                    AmfiFn fnAmfi = (AmfiFn)dlsym(RTLD_DEFAULT, "amfi_check_dyld_policy_self");
+                    if (fnAmfi != NULL) {
+                        uint64_t amfiOut = 0xFFFFFFFFFFFFFFFFULL;
+                        int arc = fnAmfi(1ULL, &amfiOut);
+                        amfiOK = (arc == 0 && (amfiOut & 0xF6ULL) == 0ULL);
+                    }
+                }
+
+                BOOL hdrImgParityOK = YES;
+                {
+                    const char **(*fnCopyHdr2)(const void *, unsigned int *) =
+                        (const char **(*)(const void *, unsigned int *))dlsym(RTLD_DEFAULT, "objc_copyClassNamesForImageHeader");
+                    const char **(*fnCopyImg2)(const char *, unsigned int *) =
+                        (const char **(*)(const char *, unsigned int *))dlsym(RTLD_DEFAULT, "objc_copyClassNamesForImage");
+                    const struct mach_header *mh0 = _dyld_get_image_header(0);
+                    const char *img0 = _dyld_get_image_name(0);
+                    if (fnCopyHdr2 != NULL && fnCopyImg2 != NULL && mh0 != NULL && img0 != NULL) {
+                        unsigned int cnHdr = 0, cnImg = 0;
+                        const char **lHdr = fnCopyHdr2(mh0, &cnHdr);
+                        const char **lImg = fnCopyImg2(img0, &cnImg);
+                        if (lHdr != NULL && lImg != NULL) {
+                            if (cnHdr != cnImg) hdrImgParityOK = NO;
+                            for (unsigned int ci = 0; ci < cnHdr; ci++) {
+                                if (lHdr[ci] != NULL && strstr(lHdr[ci], "PlayTools") != NULL) hdrImgParityOK = NO;
+                            }
+                        }
+                        if (lHdr != NULL) free((void *)lHdr);
+                        if (lImg != NULL) free((void *)lImg);
+                    }
+                }
+
+                s11R2ThreadsClean = threadsClean;
+                s11R2Mig219OK = mig219SwapZeroOK;
+                s11R2Mig3414OK = mig3414NoBrkOK;
+                s11R2SiocgifconfClean = siocgifconfClean;
+                s11R2IopsOK = iopsNonEmptyOK;
+                s11R2AmfiOK = amfiOK;
+                s11R2HdrImgOK = hdrImgParityOK;
+                s11Round2MigThreadNetIopsOK = (threadsClean && mig219SwapZeroOK && mig3414NoBrkOK &&
+                                               siocgifconfClean && iopsNonEmptyOK && amfiOK && hdrImgParityOK);
+            }
+
+            // 20. Round 3 parity: csops(5)==SHA256(csops(10) CD)[:20], host_kernel_version==uname().version,
+            //     SYS_csrctl(483)==ENOSYS, dlsym(Metal,"uname")==NULL, CFBundleGetFunctionPointerForName,
+            //     dlopen_from(AppKit), _dyld_find_unwind_sections, pathconf(_PC_CASE_SENSITIVE)==1,
+            //     F_GETPROTECTIONCLASS>0, resolv.conf/firmlinks/Dock.app hidden, IORegistryEntryFromPath
+            {
+                BOOL cdhashMatchOK = NO;
+                uint8_t cdh5[20] = {0};
+                NSMutableData *sb3 = [NSMutableData dataWithLength:(1U << 19)];
+                if (pt_harness_csops(0, 5U, cdh5, sizeof(cdh5)) == 0 &&
+                    pt_harness_csops(0, 10U, sb3.mutableBytes, sb3.length) == 0) {
+                    const uint8_t *b = (const uint8_t *)sb3.bytes;
+                    uint32_t sm = 0, sl = 0, sc = 0;
+                    memcpy(&sm, b, 4); memcpy(&sl, b + 4, 4); memcpy(&sc, b + 8, 4);
+                    sm = ntohl(sm); sl = ntohl(sl); sc = ntohl(sc);
+                    if (sm == 0xfade0cc0U && sl <= sb3.length && sc <= 128U) {
+                        for (uint32_t si = 0; si < sc; si++) {
+                            uint32_t st = 0, so = 0;
+                            memcpy(&st, b + 12U + si * 8U, 4);
+                            memcpy(&so, b + 16U + si * 8U, 4);
+                            st = ntohl(st); so = ntohl(so);
+                            BOOL isCD = (st == 0U || (st >= 0x1000U && st <= 0x1004U));
+                            if (!isCD || so + 44U > sl) continue;
+                            uint32_t cm = 0, cl = 0;
+                            memcpy(&cm, b + so, 4); memcpy(&cl, b + so + 4, 4);
+                            cm = ntohl(cm); cl = ntohl(cl);
+                            if (cm != 0xfade0c02U || cl < 44U || so + cl > sl) continue;
+                            if (b[so + 37U] == 2U && b[so + 36U] == 32U) {
+                                uint8_t d[32] = {0};
+                                CC_SHA256(b + so, (CC_LONG)cl, d);
+                                if (memcmp(cdh5, d, 20U) == 0) { cdhashMatchOK = YES; break; }
+                            } else if (b[so + 37U] == 1U && b[so + 36U] == 20U) {
+                                uint8_t d[20] = {0};
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+                                CC_SHA1(b + so, (CC_LONG)cl, d);
+#pragma clang diagnostic pop
+                                if (memcmp(cdh5, d, 20U) == 0) { cdhashMatchOK = YES; break; }
+                            }
+                        }
+                    }
+                }
+                struct utsname u3 = {0};
+                kernel_version_t hkv3 = {0};
+                host_t h3 = mach_host_self();
+                kern_return_t hkvRC3 = host_kernel_version(h3, hkv3);
+                if (MACH_PORT_VALID(h3)) mach_port_deallocate(mach_task_self(), h3);
+                hkv3[sizeof(hkv3) - 1] = '\0';
+                BOOL hostKvOK = (uname(&u3) == 0 && hkvRC3 == KERN_SUCCESS &&
+                                 strncmp(hkv3, u3.version, sizeof(u3.version) - 1) == 0);
+                uint32_t csrVal = 0;
+                errno = 0;
+                intptr_t csrRC = pt_harness_syscall(483, (uint32_t)1, &csrVal, (size_t)sizeof(csrVal));
+                BOOL csrBlockedOK = (csrRC == -1 && errno == ENOSYS &&
+                                     dlsym(RTLD_DEFAULT, "csr_get_active_config") == NULL &&
+                                     dlsym(RTLD_DEFAULT, "csr_check") == NULL);
+                s11Round3SignKernelCsrOK = (cdhashMatchOK && hostKvOK && csrBlockedOK);
+
+                void *mtlH = dlopen("/System/Library/Frameworks/Metal.framework/Metal", RTLD_LAZY | RTLD_NOLOAD | RTLD_FIRST);
+                BOOL explicitHandleOK = ((mtlH == NULL || dlsym(mtlH, "uname") == NULL) &&
+                                         dlsym(RTLD_MAIN_ONLY, "uname") == NULL);
+                if (mtlH != NULL) dlclose(mtlH);
+                CFBundleRef cgB = CFBundleGetBundleWithIdentifier(CFSTR("com.apple.CoreGraphics"));
+                BOOL cfBundleOK = (cgB == NULL || CFBundleGetFunctionPointerForName(cgB, CFSTR("CGMainDisplayID")) == NULL);
+                typedef void *(*DlopenFromFn3)(const char *, int, void *);
+                DlopenFromFn3 fnDF = (DlopenFromFn3)dlsym(RTLD_DEFAULT, "dlopen_from");
+                void *akFromH = (fnDF != NULL)
+                    ? fnDF("/System/Library/Frameworks/AppKit.framework/AppKit", RTLD_LAZY | RTLD_NOLOAD, (void *)&main)
+                    : NULL;
+                BOOL dlopenFromOK = (akFromH == NULL);
+                if (akFromH != NULL) dlclose(akFromH);
+                typedef struct { const void *mh; const void *d; uintptr_t dl; const void *c; uintptr_t cl; } HarnessUnwindT;
+                typedef bool (*UnwindFn3)(void *, HarnessUnwindT *);
+                typedef const void *(*HdrAddrFn3)(const void *);
+                UnwindFn3 fnUnw = (UnwindFn3)dlsym(RTLD_DEFAULT, "_dyld_find_unwind_sections");
+                HdrAddrFn3 fnHdrA = (HdrAddrFn3)dlsym(RTLD_DEFAULT, "dyld_image_header_containing_address");
+                BOOL unwindOK = YES;
+                if (fnUnw != NULL && fnHdrA != NULL) {
+                    HarnessUnwindT uw = {0};
+                    if (fnUnw((void *)&uname, &uw)) {
+                        const void *ha = fnHdrA((void *)&uname);
+                        if (ha != NULL && uw.mh != ha) unwindOK = NO;
+                    }
+                }
+                s11R3ExplicitHandleOK = explicitHandleOK;
+                s11R3CfBundleOK = cfBundleOK;
+                s11R3DlopenFromOK = dlopenFromOK;
+                s11R3UnwindOK = unwindOK;
+                s11Round3DyldHandleUnwindOK = (explicitHandleOK && cfBundleOK && dlopenFromOK && unwindOK);
+
+                NSString *home3 = NSHomeDirectory();
+                BOOL caseSensOK = (pathconf(home3.fileSystemRepresentation, _PC_CASE_SENSITIVE) == 1);
+                NSString *exec3 = [NSBundle mainBundle].executablePath;
+                int efd3 = (exec3.length > 0) ? open(exec3.fileSystemRepresentation, O_RDONLY | O_CLOEXEC) : -1;
+                int prot3 = -1;
+                if (efd3 >= 0) {
+#ifdef F_GETPROTECTIONCLASS
+                    prot3 = fcntl(efd3, F_GETPROTECTIONCLASS);
+#endif
+                    close(efd3);
+                }
+                BOOL protOK = (prot3 > 0);
+                struct stat st3 = {0};
+                BOOL pathsHiddenOK = (stat("/etc/resolv.conf", &st3) != 0 &&
+                                      stat("/usr/share/firmlinks", &st3) != 0 &&
+                                      stat("/System/Library/CoreServices/Dock.app", &st3) != 0);
+                BOOL ioFromPathOK = YES;
+                {
+                    typedef mach_port_t (*FromPathFn3)(mach_port_t, const char *);
+                    typedef CFTypeRef (*CreatePropFn3)(mach_port_t, CFStringRef, CFAllocatorRef, uint32_t);
+                    typedef kern_return_t (*RelFn3)(mach_port_t);
+                    FromPathFn3 fnFP = (FromPathFn3)dlsym(RTLD_DEFAULT, "IORegistryEntryFromPath");
+                    CreatePropFn3 fnCP = (CreatePropFn3)dlsym(RTLD_DEFAULT, "IORegistryEntryCreateCFProperty");
+                    RelFn3 fnRel3 = (RelFn3)dlsym(RTLD_DEFAULT, "IOObjectRelease");
+                    if (fnFP != NULL && fnCP != NULL && fnRel3 != NULL) {
+                        mach_port_t dt = fnFP(0, "IODeviceTree:/");
+                        if (dt != 0) {
+                            id nm = CFBridgingRelease(fnCP(dt, CFSTR("name"), kCFAllocatorDefault, 0));
+                            NSString *ns = [nm isKindOfClass:[NSString class]] ? nm :
+                                ([nm isKindOfClass:[NSData class]] ? [[NSString alloc] initWithData:nm encoding:NSUTF8StringEncoding] : @"");
+                            if ([ns containsString:@"Mac"]) ioFromPathOK = NO;
+                            fnRel3(dt);
+                        }
+                        mach_port_t opt = fnFP(0, "IODeviceTree:/options");
+                        if (opt != 0) {
+                            id fmm = CFBridgingRelease(fnCP(opt, CFSTR("fmm-computer-name"), kCFAllocatorDefault, 0));
+                            if (fmm != nil) ioFromPathOK = NO;
+                            fnRel3(opt);
+                        }
+                    }
+                }
+                s11Round3FsCasePathsAndIORegOK = (caseSensOK && protOK && pathsHiddenOK && ioFromPathOK);
+            }
         }
 
         // Scenario 12: compat13_7 parity checks
@@ -2240,6 +2879,11 @@ int main(int argc, const char *argv[]) {
         BOOL s12ExtensionKitHiddenOK = NO;
         BOOL s12MetalCompat13GateOK = NO;
         BOOL s12IORegGpuSanitizedOK = NO;
+        BOOL s12Post13EpochCleanOK = NO;
+        BOOL s12Round1JscCAPICleanOK = NO;
+        BOOL s12Round1ReflectionParityOK = NO;
+        BOOL s12Round2Compat13EpochOK = NO;
+        BOOL s12Round3IcuSwiftAvailOK = NO;
         const char *testS12Env = getenv("HARNESS_TEST_SCENARIO12");
         if (testS12Env != NULL && strcmp(testS12Env, "1") == 0) {
             s12FreadlinkHiddenOK = (dlsym(RTLD_DEFAULT, "freadlink") == NULL);
@@ -2302,7 +2946,18 @@ int main(int argc, const char *argv[]) {
                     id optsBenign = [optsCls new];
                     id libBenign = fnNewLib(dev, newLibSel, trivialSrc, optsBenign, &errBenign);
 
+                    SEL supportsBCSel = sel_registerName("supportsBCTextureCompression");
+                    SEL supports32FSel = sel_registerName("supports32BitFloatFiltering");
+                    BOOL bcSupported = [dev respondsToSelector:supportsBCSel]
+                        ? ((BOOL (*)(id, SEL))objc_msgSend)(dev, supportsBCSel)
+                        : NO;
+                    BOOL f32Supported = [dev respondsToSelector:supports32FSel]
+                        ? ((BOOL (*)(id, SEL))objc_msgSend)(dev, supports32FSel)
+                        : NO;
+
                     s12MetalCompat13GateOK = (defaultVer == ((2U << 16) | 2U) &&
+                                              !bcSupported &&
+                                              !f32Supported &&
                                               lib23 == nil && err23 != nil &&
                                               [err23.domain isEqualToString:@"MTLLibraryErrorDomain"] && err23.code == 3 &&
                                               libSimd == nil && errSimd != nil &&
@@ -2357,6 +3012,12 @@ int main(int argc, const char *argv[]) {
                                         foundBad = YES;
                                     }
                                 }
+                                if (strstr(s, "T8103") != NULL ||
+                                    strstr(s, "AGXFirmwareKextG13") != NULL ||
+                                    strstr(s, "AppleH13CamIn") != NULL ||
+                                    strstr(s, "EndpointSecurityDriver") != NULL) {
+                                    foundBad = YES;
+                                }
                             }
                             fnRelease(entry);
                         }
@@ -2364,6 +3025,181 @@ int main(int argc, const char *argv[]) {
                         s12IORegGpuSanitizedOK = (scanned > 0 && !foundBad);
                     }
                 }
+            }
+
+            {
+                BOOL noEnum = (dlsym(RTLD_DEFAULT, "objc_enumerateClasses") == NULL);
+                BOOL noLazyV = (dlsym(RTLD_DEFAULT, "$s7SwiftUI10LazyVStackVMa") == NULL);
+                BOOL noWKWorld = (NSClassFromString(@"WKContentWorld") == Nil);
+                BOOL noGC = (NSClassFromString(@"GCMouse") == Nil && NSClassFromString(@"GCKeyboard") == Nil);
+                BOOL piClsNameOK = (strcmp(class_getName([NSProcessInfo processInfo].class), "NSProcessInfo") == 0);
+                BOOL noVision = ![NSProcessInfo.processInfo respondsToSelector:NSSelectorFromString(@"isiOSAppOnVision")];
+                BOOL noMacSel = ![NSProcessInfo.processInfo respondsToSelector:NSSelectorFromString(@"isiOSAppOnMac")];
+                typedef int32_t (*NSVerFn)(const char *);
+                NSVerFn fnNSVer = (NSVerFn)dlsym(RTLD_DEFAULT, "NSVersionOfRunTimeLibrary");
+                BOOL rtVerOK = (fnNSVer != NULL && (fnNSVer("Foundation") >> 16) == 1677 && (fnNSVer("UIKit") >> 16) == 3698);
+                typedef void (*UVerFn)(uint8_t[4]);
+                UVerFn fnUVer = (UVerFn)dlsym(RTLD_DEFAULT, "u_getVersion");
+                UVerFn fnUniVer = (UVerFn)dlsym(RTLD_DEFAULT, "u_getUnicodeVersion");
+                BOOL icuOK = NO;
+                if (fnUVer != NULL && fnUniVer != NULL) {
+                    uint8_t iv[4] = {0}, uv[4] = {0};
+                    fnUVer(iv);
+                    fnUniVer(uv);
+                    icuOK = (iv[0] == 64 && iv[1] == 2 && uv[0] == 12 && uv[1] == 1);
+                }
+                BOOL jscOK = NO;
+                void *jscH = dlopen("/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore", RTLD_LAZY);
+                if (jscH != NULL) {
+                    Class jscCls = objc_getClass("JSContext");
+                    if (jscCls != Nil) {
+                        id ctx = [jscCls new];
+                        if (ctx != nil) {
+                            SEL evalSel = sel_registerName("evaluateScript:");
+                            id wr = ((id (*)(id, SEL, NSString *))objc_msgSend)(ctx, evalSel, @"typeof WeakRef");
+                            id bi = ((id (*)(id, SEL, NSString *))objc_msgSend)(ctx, evalSel, @"typeof BigInt");
+                            jscOK = ([[wr description] isEqualToString:@"undefined"] &&
+                                     [[bi description] isEqualToString:@"undefined"]);
+                        }
+                    }
+                }
+                s12Post13EpochCleanOK = (noEnum && noLazyV && noWKWorld && noGC &&
+                                         piClsNameOK && noVision && noMacSel && rtVerOK && icuOK && jscOK);
+
+                // Round 1 compat13_7: JSC C API + reflection parity (metaclass, class_getProperty, NSStringFromClass, LinkTimeLibrary)
+                if (jscH != NULL) {
+                    typedef void *(*JSCCreateFn)(void *);
+                    typedef void (*JSCReleaseFn)(void *);
+                    typedef void *(*JSCStrCreateFn)(const char *);
+                    typedef void (*JSCStrReleaseFn)(void *);
+                    typedef void *(*JSCEvalFn)(void *, void *, void *, void *, int, void **);
+                    typedef bool (*JSCToBoolFn)(void *, void *);
+                    JSCCreateFn fnCreate = (JSCCreateFn)dlsym(RTLD_DEFAULT, "JSGlobalContextCreate");
+                    JSCReleaseFn fnRel = (JSCReleaseFn)dlsym(RTLD_DEFAULT, "JSGlobalContextRelease");
+                    JSCStrCreateFn fnStr = (JSCStrCreateFn)dlsym(RTLD_DEFAULT, "JSStringCreateWithUTF8CString");
+                    JSCStrReleaseFn fnStrRel = (JSCStrReleaseFn)dlsym(RTLD_DEFAULT, "JSStringRelease");
+                    JSCEvalFn fnEval = (JSCEvalFn)dlsym(RTLD_DEFAULT, "JSEvaluateScript");
+                    JSCToBoolFn fnBool = (JSCToBoolFn)dlsym(RTLD_DEFAULT, "JSValueToBoolean");
+                    if (fnCreate != NULL && fnRel != NULL && fnStr != NULL && fnStrRel != NULL && fnEval != NULL && fnBool != NULL) {
+                        void *gctx = fnCreate(NULL);
+                        if (gctx != NULL) {
+                            void *s1 = fnStr("typeof WeakRef === 'undefined' && typeof BigInt === 'undefined'");
+                            void *exc = NULL;
+                            void *rv = fnEval(gctx, s1, NULL, NULL, 1, &exc);
+                            s12Round1JscCAPICleanOK = (rv != NULL && exc == NULL && fnBool(gctx, rv));
+                            fnStrRel(s1);
+                            fnRel(gctx);
+                        }
+                    }
+                }
+                BOOL noMacProp = (class_getProperty([NSProcessInfo class], "iOSAppOnMac") == NULL &&
+                                  class_getProperty([NSProcessInfo class], "isiOSAppOnMac") == NULL &&
+                                  class_getProperty([NSProcessInfo class], "iOSAppOnVision") == NULL &&
+                                  class_getProperty([NSProcessInfo class], "isiOSAppOnVision") == NULL);
+                NSString *nsClsName = NSStringFromClass([NSProcessInfo processInfo].class);
+                const char *objClsName = object_getClassName([NSProcessInfo processInfo]);
+                BOOL clsNamesParity = ([nsClsName isEqualToString:@"NSProcessInfo"] &&
+                                       objClsName != NULL && strcmp(objClsName, "NSProcessInfo") == 0);
+                Class uiBtnMeta = object_getClass(NSClassFromString(@"UIButton"));
+                BOOL metaMethodHidden = (uiBtnMeta == Nil ||
+                                         class_getInstanceMethod(uiBtnMeta, NSSelectorFromString(@"buttonWithType:primaryAction:")) == NULL);
+                NSVerFn fnLinkVer = (NSVerFn)dlsym(RTLD_DEFAULT, "NSVersionOfLinkTimeLibrary");
+                BOOL linkVerOK = (fnLinkVer == NULL || (fnLinkVer("Foundation") >> 16) == 1677);
+                s12Round1ReflectionParityOK = (noMacProp && clsNamesParity && metaMethodHidden && linkVerOK);
+
+                // Round 2 compat13_7: JSC structuredClone/AggregateError hidden (ObjC + C API) & Metal raytracing rejected
+                BOOL r2JscObjcOK = NO;
+                BOOL r2JscCOK = NO;
+                if (jscH != NULL) {
+                    Class jscCls2 = objc_getClass("JSContext");
+                    if (jscCls2 != Nil) {
+                        id ctx2 = [jscCls2 new];
+                        if (ctx2 != nil) {
+                            SEL evalSel2 = sel_registerName("evaluateScript:");
+                            id sc = ((id (*)(id, SEL, NSString *))objc_msgSend)(ctx2, evalSel2, @"typeof structuredClone");
+                            id ae = ((id (*)(id, SEL, NSString *))objc_msgSend)(ctx2, evalSel2, @"typeof AggregateError");
+                            r2JscObjcOK = ([[sc description] isEqualToString:@"undefined"] &&
+                                           [[ae description] isEqualToString:@"undefined"]);
+                        }
+                    }
+                    typedef void *(*JSCCreateFn2)(void *);
+                    typedef void (*JSCReleaseFn2)(void *);
+                    typedef void *(*JSCStrCreateFn2)(const char *);
+                    typedef void (*JSCStrReleaseFn2)(void *);
+                    typedef void *(*JSCEvalFn2)(void *, void *, void *, void *, int, void **);
+                    typedef bool (*JSCToBoolFn2)(void *, void *);
+                    JSCCreateFn2 fnC2 = (JSCCreateFn2)dlsym(RTLD_DEFAULT, "JSGlobalContextCreate");
+                    JSCReleaseFn2 fnR2 = (JSCReleaseFn2)dlsym(RTLD_DEFAULT, "JSGlobalContextRelease");
+                    JSCStrCreateFn2 fnS2 = (JSCStrCreateFn2)dlsym(RTLD_DEFAULT, "JSStringCreateWithUTF8CString");
+                    JSCStrReleaseFn2 fnSR2 = (JSCStrReleaseFn2)dlsym(RTLD_DEFAULT, "JSStringRelease");
+                    JSCEvalFn2 fnE2 = (JSCEvalFn2)dlsym(RTLD_DEFAULT, "JSEvaluateScript");
+                    JSCToBoolFn2 fnB2 = (JSCToBoolFn2)dlsym(RTLD_DEFAULT, "JSValueToBoolean");
+                    if (fnC2 != NULL && fnR2 != NULL && fnS2 != NULL && fnSR2 != NULL && fnE2 != NULL && fnB2 != NULL) {
+                        void *gc2 = fnC2(NULL);
+                        if (gc2 != NULL) {
+                            void *s2 = fnS2("typeof structuredClone === 'undefined' && typeof AggregateError === 'undefined'");
+                            void *ex2 = NULL;
+                            void *rv2 = fnE2(gc2, s2, NULL, NULL, 1, &ex2);
+                            r2JscCOK = (rv2 != NULL && ex2 == NULL && fnB2(gc2, rv2));
+                            fnSR2(s2);
+                            fnR2(gc2);
+                        }
+                    }
+                }
+                BOOL r2MetalRtBlockedOK = NO;
+                {
+                    typedef CFTypeRef (*CreateDevFn2)(void);
+                    CreateDevFn2 fnDev2 = (CreateDevFn2)dlsym(RTLD_DEFAULT, "MTLCreateSystemDefaultDevice");
+                    Class optsCls2 = objc_getClass("MTLCompileOptions");
+                    id dev2 = (fnDev2 != NULL) ? CFBridgingRelease(fnDev2()) : nil;
+                    if (dev2 != nil && optsCls2 != Nil) {
+                        SEL newLibSel2 = sel_registerName("newLibraryWithSource:options:error:");
+                        typedef id (*NewLibMsgSendFn2)(id, SEL, NSString *, id, NSError * __autoreleasing *);
+                        NSError * __autoreleasing errRt = nil;
+                        id optsRt = [optsCls2 new];
+                        NSString *rtSrc = @"#include <metal_stdlib>\n#include <metal_raytracing>\nusing namespace metal;\nkernel void rt() {}\n";
+                        id libRt = ((NewLibMsgSendFn2)objc_msgSend)(dev2, newLibSel2, rtSrc, optsRt, &errRt);
+                        r2MetalRtBlockedOK = (libRt == nil && errRt != nil &&
+                                              [errRt.domain isEqualToString:@"MTLLibraryErrorDomain"] && errRt.code == 3);
+                    }
+                }
+                s12Round2Compat13EpochOK = (r2JscObjcOK && r2JscCOK && r2MetalRtBlockedOK);
+
+                // Round 3 compat13_7: u_charAge(0x1F972)==0, AttributedString/Duration hidden, ___isPlatformVersionAtLeast(2,14,0,0)==0
+                BOOL r3IcuAgeOK = NO;
+                {
+                    typedef void (*UCharAgeFn3)(int32_t, uint8_t[4]);
+                    UCharAgeFn3 fnAge = (UCharAgeFn3)dlsym(RTLD_DEFAULT, "u_charAge");
+                    if (fnAge != NULL) {
+                        uint8_t age[4] = {0xFF, 0xFF, 0xFF, 0xFF};
+                        fnAge(0x1F972, age);
+                        r3IcuAgeOK = (age[0] == 0);
+                    }
+                }
+                BOOL r3SwiftHiddenOK = (dlsym(RTLD_DEFAULT, "$s10Foundation16AttributedStringVMn") == NULL &&
+                                        dlsym(RTLD_DEFAULT, "$ss8DurationVMn") == NULL);
+#if __has_attribute(swiftcall)
+                {
+                    pt_harness_swift_lookup_fn fnSw3 = (pt_harness_swift_lookup_fn)dlsym(RTLD_DEFAULT, "swift_getTypeByMangledNameInContext");
+                    if (fnSw3 != NULL) {
+                        const char *m1 = "10Foundation16AttributedStringV";
+                        const char *m2 = "s8DurationV";
+                        if (fnSw3(m1, strlen(m1), NULL, NULL) != NULL ||
+                            fnSw3(m2, strlen(m2), NULL, NULL) != NULL) {
+                            r3SwiftHiddenOK = NO;
+                        }
+                    }
+                }
+#endif
+                BOOL r3AvailOK = NO;
+                {
+                    typedef int32_t (*AvailFn3)(uint32_t, uint32_t, uint32_t, uint32_t);
+                    AvailFn3 fnAv = (AvailFn3)dlsym(RTLD_DEFAULT, "__isPlatformVersionAtLeast");
+                    if (fnAv != NULL) {
+                        r3AvailOK = (fnAv(2U, 14U, 0U, 0U) == 0);
+                    }
+                }
+                s12Round3IcuSwiftAvailOK = (r3IcuAgeOK && r3SwiftHiddenOK && r3AvailOK);
             }
         }
 
@@ -2496,10 +3332,40 @@ int main(int argc, const char *argv[]) {
             @"s11SandboxDlsymOK": s11SandboxDlsymOK ? @YES : @NO,
             @"s11CoreMotionPullCacheOK": s11CoreMotionPullCacheOK ? @YES : @NO,
             @"s11MigHostAndTaskOK": s11MigHostAndTaskOK ? @YES : @NO,
+            @"s11BootstrapBlockedOK": s11BootstrapBlockedOK ? @YES : @NO,
+            @"s11SysctlSwapAndTreeOK": s11SysctlSwapAndTreeOK ? @YES : @NO,
+            @"s11ResponsibilitySelfOK": s11ResponsibilitySelfOK ? @YES : @NO,
+            @"s11LsAsnHiddenOK": s11LsAsnHiddenOK ? @YES : @NO,
+            @"s11ObjcMetaAndReqHiddenOK": s11ObjcMetaAndReqHiddenOK ? @YES : @NO,
+            @"s11Round1DlsymAndProcOK": s11Round1DlsymAndProcOK ? @YES : @NO,
+            @"s11Round1VolumeAndCodeResOK": s11Round1VolumeAndCodeResOK ? @YES : @NO,
+            @"s11Round1AppKitAndSuperBlobOK": s11Round1AppKitAndSuperBlobOK ? @YES : @NO,
+            @"s11Round2CGAndHIDBlockedOK": s11Round2CGAndHIDBlockedOK ? @YES : @NO,
+            @"s11Round2FontsAndDlopenOK": s11Round2FontsAndDlopenOK ? @YES : @NO,
+            @"s11Round2MigThreadNetIopsOK": s11Round2MigThreadNetIopsOK ? @YES : @NO,
+            @"s11R2ThreadsClean": s11R2ThreadsClean ? @YES : @NO,
+            @"s11R2Mig219OK": s11R2Mig219OK ? @YES : @NO,
+            @"s11R2Mig3414OK": s11R2Mig3414OK ? @YES : @NO,
+            @"s11R2SiocgifconfClean": s11R2SiocgifconfClean ? @YES : @NO,
+            @"s11R2IopsOK": s11R2IopsOK ? @YES : @NO,
+            @"s11R2AmfiOK": s11R2AmfiOK ? @YES : @NO,
+            @"s11R2HdrImgOK": s11R2HdrImgOK ? @YES : @NO,
+            @"s11Round3SignKernelCsrOK": s11Round3SignKernelCsrOK ? @YES : @NO,
+            @"s11Round3DyldHandleUnwindOK": s11Round3DyldHandleUnwindOK ? @YES : @NO,
+            @"s11R3ExplicitHandleOK": s11R3ExplicitHandleOK ? @YES : @NO,
+            @"s11R3CfBundleOK": s11R3CfBundleOK ? @YES : @NO,
+            @"s11R3DlopenFromOK": s11R3DlopenFromOK ? @YES : @NO,
+            @"s11R3UnwindOK": s11R3UnwindOK ? @YES : @NO,
+            @"s11Round3FsCasePathsAndIORegOK": s11Round3FsCasePathsAndIORegOK ? @YES : @NO,
             @"s12FreadlinkHiddenOK": s12FreadlinkHiddenOK ? @YES : @NO,
             @"s12ExtensionKitHiddenOK": s12ExtensionKitHiddenOK ? @YES : @NO,
             @"s12MetalCompat13GateOK": s12MetalCompat13GateOK ? @YES : @NO,
             @"s12IORegGpuSanitizedOK": s12IORegGpuSanitizedOK ? @YES : @NO,
+            @"s12Post13EpochCleanOK": s12Post13EpochCleanOK ? @YES : @NO,
+            @"s12Round1JscCAPICleanOK": s12Round1JscCAPICleanOK ? @YES : @NO,
+            @"s12Round1ReflectionParityOK": s12Round1ReflectionParityOK ? @YES : @NO,
+            @"s12Round2Compat13EpochOK": s12Round2Compat13EpochOK ? @YES : @NO,
+            @"s12Round3IcuSwiftAvailOK": s12Round3IcuSwiftAvailOK ? @YES : @NO,
             @"provPath": provPath,
             @"hidPCInstallGen": (hidPCInstallGenNS && hidPCInstallGenCF) ? @YES : @NO,
             @"provURLPath": provURLPath,
@@ -3709,6 +4575,20 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info11["s11SandboxDlsymOK"] is True,
         info11["s11CoreMotionPullCacheOK"] is True,
         info11["s11MigHostAndTaskOK"] is True,
+        info11["s11BootstrapBlockedOK"] is True,
+        info11["s11SysctlSwapAndTreeOK"] is True,
+        info11["s11ResponsibilitySelfOK"] is True,
+        info11["s11LsAsnHiddenOK"] is True,
+        info11["s11ObjcMetaAndReqHiddenOK"] is True,
+        info11["s11Round1DlsymAndProcOK"] is True,
+        info11["s11Round1VolumeAndCodeResOK"] is True,
+        info11["s11Round1AppKitAndSuperBlobOK"] is True,
+        info11["s11Round2CGAndHIDBlockedOK"] is True,
+        info11["s11Round2FontsAndDlopenOK"] is True,
+        info11["s11Round2MigThreadNetIopsOK"] is True,
+        info11["s11Round3SignKernelCsrOK"] is True,
+        info11["s11Round3DyldHandleUnwindOK"] is True,
+        info11["s11Round3FsCasePathsAndIORegOK"] is True,
     ]
     results.append(ScenarioResult(
         name="11. 1.0.4 audit & detect-v2 parity checks",
@@ -3768,6 +4648,11 @@ def run_scenarios(target_bin: Path, work_dir: Path, verbose: bool) -> list[Scena
         info12["s12ExtensionKitHiddenOK"] is True,
         info12["s12MetalCompat13GateOK"] is True,
         info12["s12IORegGpuSanitizedOK"] is True,
+        info12["s12Post13EpochCleanOK"] is True,
+        info12["s12Round1JscCAPICleanOK"] is True,
+        info12["s12Round1ReflectionParityOK"] is True,
+        info12["s12Round2Compat13EpochOK"] is True,
+        info12["s12Round3IcuSwiftAvailOK"] is True,
     ]
     results.append(ScenarioResult(
         name="12. compat13_7 parity (freadlink, ExtensionKit, Metal 2.3 gate, AGX IORegistry)",
