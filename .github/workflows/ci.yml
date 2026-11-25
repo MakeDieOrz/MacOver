@@ -61,6 +61,9 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             test
 
+      - name: Run pure-C unit tests (ASan/UBSan)
+        run: ./ci/run_unit_tests_c.sh
+
       - name: Build PlayCover Release & verify incremental no-op
         run: |
           xcodebuild \

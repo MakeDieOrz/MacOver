@@ -1,8 +1,16 @@
 #include <assert.h>
+#include <mach-o/loader.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "PTArm64StubMath.h"
+#include "PTCallerAddressMath.h"
+#include "PTCodeSignParser.h"
+#include "PTDetectionRules.h"
+#include "PTInterposeRegistry.h"
+#include "PTRegistration.h"
 
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 static uint32_t to_be32(uint32_t v) {
@@ -23,101 +31,35 @@ static uint32_t from_be32(uint32_t v) {
 
 /* ---------- Batch 1 Unit Tests ---------- */
 
-typedef struct {
-    uint8_t *data;
-    size_t len;
-    size_t cap;
-    int failed;
-} der_buf_t;
-
-static void der_append(der_buf_t *b, const void *src, size_t n) {
-    if (b == NULL || b->failed || n == 0 || src == NULL) {
-        return;
-    }
-    if (b->len + n > b->cap) {
-        size_t nc = (b->cap == 0) ? 128U : b->cap * 2U;
-        while (nc < b->len + n) {
-            nc *= 2U;
-        }
-        uint8_t *p = (uint8_t *)realloc(b->data, nc);
-        if (p == NULL) {
-            b->failed = 1;
-            return;
-        }
-        b->data = p;
-        b->cap = nc;
-    }
-    memcpy(b->data + b->len, src, n);
-    b->len += n;
-}
-
-static void der_tag_len(der_buf_t *b, uint8_t tag, size_t len) {
-    der_append(b, &tag, 1U);
-    if (len < 0x80U) {
-        uint8_t l = (uint8_t)len;
-        der_append(b, &l, 1U);
-    } else if (len <= 0xffU) {
-        uint8_t h[2] = { 0x81U, (uint8_t)len };
-        der_append(b, h, 2U);
-    } else if (len <= 0xffffU) {
-        uint8_t h[3] = { 0x82U, (uint8_t)(len >> 8), (uint8_t)(len & 0xffU) };
-        der_append(b, h, 3U);
-    } else if (len <= 0xffffffU) {
-        uint8_t h[4] = {
-            0x83U,
-            (uint8_t)((len >> 16) & 0xffU),
-            (uint8_t)((len >> 8) & 0xffU),
-            (uint8_t)(len & 0xffU)
-        };
-        der_append(b, h, 4U);
-    } else {
-        uint8_t h[5] = {
-            0x84U,
-            (uint8_t)((len >> 24) & 0xffU),
-            (uint8_t)((len >> 16) & 0xffU),
-            (uint8_t)((len >> 8) & 0xffU),
-            (uint8_t)(len & 0xffU)
-        };
-        der_append(b, h, 5U);
-    }
-}
-
-static void der_tlv(der_buf_t *b, uint8_t tag, const void *body, size_t len) {
-    der_tag_len(b, tag, len);
-    der_append(b, body, len);
-}
-
 static void test_der_entitlements_encoding_and_superblob_rewrite(void) {
-    /* Encode sample entitlements dict: { "com.apple.developer.team-identifier": "ABCD123456", "get-task-allow": false } */
-    der_buf_t pair1_body = {0};
+    /* Encode sample entitlements dict using production PTCodeSignParser */
+    pt_der_buf_t pair1_body = {0};
     const char *k1 = "com.apple.developer.team-identifier";
     const char *v1 = "ABCD123456";
-    der_tlv(&pair1_body, 0x0cU, k1, strlen(k1));
-    der_tlv(&pair1_body, 0x0cU, v1, strlen(v1));
-    der_buf_t pair1 = {0};
-    der_tlv(&pair1, 0x30U, pair1_body.data, pair1_body.len);
+    pt_der_buf_wrap_tlv(&pair1_body, 0x0cU, (const uint8_t *)k1, strlen(k1));
+    pt_der_buf_wrap_tlv(&pair1_body, 0x0cU, (const uint8_t *)v1, strlen(v1));
+    pt_der_buf_t pair1 = {0};
+    pt_der_buf_wrap_tlv(&pair1, 0x30U, pair1_body.data, pair1_body.len);
 
-    der_buf_t set_body = {0};
-    der_append(&set_body, pair1.data, pair1.len);
+    pt_der_buf_t set_body = {0};
+    pt_der_buf_append(&set_body, pair1.data, pair1.len);
 
-    der_buf_t app_body = {0};
+    pt_der_buf_t app_body = {0};
     uint8_t ver[3] = { 0x02U, 0x01U, 0x01U };
-    der_append(&app_body, ver, sizeof(ver));
-    der_tlv(&app_body, 0x31U, set_body.data, set_body.len);
+    pt_der_buf_append(&app_body, ver, sizeof(ver));
+    pt_der_buf_wrap_tlv(&app_body, 0x31U, set_body.data, set_body.len);
 
-    der_buf_t root = {0};
-    der_tlv(&root, 0x70U, app_body.data, app_body.len);
+    pt_der_buf_t root = {0};
+    pt_der_buf_wrap_tlv(&root, 0x70U, app_body.data, app_body.len);
 
     assert(!root.failed);
     assert(root.data[0] == 0x70U);
-    /* Ensure zero forbidden markers in DER output */
     for (size_t i = 0; i + 9 <= root.len; i++) {
         assert(memcmp(root.data + i, "PlayTools", 9) != 0);
     }
 
-    /* Verify SuperBlob header magic rewriting constants */
-    uint32_t magic_xml = to_be32(0xfade7171U);
-    uint32_t magic_der = to_be32(0xfade7172U);
+    uint32_t magic_xml = to_be32(PT_CSMAGIC_EMBEDDED_ENTITLEMENTS);
+    uint32_t magic_der = to_be32(PT_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS);
     assert(from_be32(magic_xml) == 0xfade7171U);
     assert(from_be32(magic_der) == 0xfade7172U);
 
@@ -149,38 +91,13 @@ static void test_attr_ref_zero_fill(void) {
     }
 }
 
-static int is_desktop_gid(uint32_t g) {
-    switch (g) {
-        case 12:
-        case 29:
-        case 33:
-        case 61:
-        case 79:
-        case 80:
-        case 81:
-        case 98:
-        case 100:
-        case 101:
-        case 204:
-        case 250:
-        case 395:
-        case 398:
-        case 399:
-        case 400:
-        case 701:
-            return 1;
-        default:
-            return (g >= 390U && g <= 410U) ? 1 : 0;
-    }
-}
-
 static void test_getgroups_filter(void) {
     const uint32_t mac_gids[] = { 20, 12, 29, 33, 61, 79, 80, 81, 98, 100, 101, 204, 250, 395, 398, 399, 400, 701 };
     uint32_t out[32];
     int out_n = 0;
     for (size_t i = 0; i < sizeof(mac_gids) / sizeof(mac_gids[0]); i++) {
         uint32_t g = mac_gids[i];
-        if (is_desktop_gid(g)) {
+        if (pt_is_desktop_supplemental_gid_c(g)) {
             continue;
         }
         if (g == 20U) {
@@ -268,66 +185,15 @@ static void test_ioreg_compat13_sanitize(void) {
 
 /* ---------- Batch 3 Unit Tests ---------- */
 
-static int sf_cmp(const void *k, const void *e) {
-    return strcmp((const char *)k, *(const char * const *)e);
-}
-
-static int is_post13_sf_symbol(const char *s) {
-    static const char *const kPost13Prefixes[] = {
-        "aqi.", "arrow.triangle.", "camera.metering.", "contextualmenu.",
-        "die.face.", "dock.", "figure.", "filemenu.", "menubar.",
-        "point.3.", "rectangle.inset.", "rectangle.split.",
-        "signpost.", "wave.3.", "widget.",
-    };
-    static const char *const kPost13Symbols[] = {
-        "airpodsmax", "airpodspro", "allergens", "ant", "applescript", "applewatch",
-        "banknote", "barometer", "bicycle", "binoculars", "books.vertical", "brain.head.profile",
-        "building.columns", "bus", "case", "character", "checklist", "comb", "cpu",
-        "cross.case", "crown", "cup.and.saucer", "cursorarrow", "diamond", "esim",
-        "externaldrive", "ferry", "figure.walk", "fingerprint", "fork.knife", "fuelpump",
-        "gearshape", "giftcard", "graduationcap", "guitars", "gyroscope", "hifispeaker",
-        "homepod", "horn", "humidity", "hurricane", "internaldrive", "ladybug",
-        "lanyardcard", "laptopcomputer", "leaf", "level", "list.bullet.rectangle", "lungs",
-        "macmini", "macpro", "macstudio", "megaphone", "memorychip", "menucard",
-        "metronome", "newspaper", "note.text", "octagon", "opticaldisc", "opticid",
-        "paintpalette", "parkingsign", "pawprint", "pc", "pianokeys", "pills",
-        "puzzlepiece", "radio", "recordingtape", "ruler", "scroll", "seal",
-        "server.rack", "shareplay", "shippingbox", "sidebar.leading", "sidebar.trailing", "simcard",
-        "sparkles.tv", "swift", "tablecells", "takeoutbag", "terminal", "theatermasks",
-        "tornado", "touchid", "tram", "tropicalstorm", "tuningfork", "visionpro",
-        "wallet.pass", "wrench.and.screwdriver", "xserve"
-    };
-    size_t n = sizeof(kPost13Symbols) / sizeof(kPost13Symbols[0]);
-    for (size_t i = 1; i < n; i++) {
-        assert(strcmp(kPost13Symbols[i - 1], kPost13Symbols[i]) < 0);
-    }
-    for (size_t i = 0; i < sizeof(kPost13Prefixes) / sizeof(kPost13Prefixes[0]); i++) {
-        if (strncmp(s, kPost13Prefixes[i], strlen(kPost13Prefixes[i])) == 0) return 1;
-    }
-    char base[128];
-    snprintf(base, sizeof(base), "%s", s);
-    if (bsearch(base, kPost13Symbols, n, sizeof(kPost13Symbols[0]), sf_cmp) != NULL) return 1;
-    static const char *const kSuffixes[] = { ".fill", ".circle", ".square", ".slash" };
-    for (size_t i = 0; i < sizeof(kSuffixes) / sizeof(kSuffixes[0]); i++) {
-        size_t sl = strlen(kSuffixes[i]), bl = strlen(base);
-        if (bl > sl && strcmp(base + bl - sl, kSuffixes[i]) == 0) {
-            base[bl - sl] = '\0';
-            if (bsearch(base, kPost13Symbols, n, sizeof(kPost13Symbols[0]), sf_cmp) != NULL) return 1;
-            break;
-        }
-    }
-    return 0;
-}
-
 static void test_sf_symbols_and_versions(void) {
-    assert(is_post13_sf_symbol("brain.head.profile") == 1);
-    assert(is_post13_sf_symbol("sparkles.tv.fill") == 1);
-    assert(is_post13_sf_symbol("wrench.and.screwdriver.fill") == 1);
-    assert(is_post13_sf_symbol("gearshape.fill") == 1);
+    assert(pt_is_post13_7_sf_symbol_name_cstr("brain.head.profile"));
+    assert(pt_is_post13_7_sf_symbol_name_cstr("sparkles.tv.fill"));
+    assert(pt_is_post13_7_sf_symbol_name_cstr("wrench.and.screwdriver.fill"));
+    assert(pt_is_post13_7_sf_symbol_name_cstr("gearshape.fill"));
     /* iOS 13.0 (SF Symbols 1.x) must remain allowed */
-    assert(is_post13_sf_symbol("gear") == 0);
-    assert(is_post13_sf_symbol("sparkles") == 0);
-    assert(is_post13_sf_symbol("house.fill") == 0);
+    assert(!pt_is_post13_7_sf_symbol_name_cstr("gear"));
+    assert(!pt_is_post13_7_sf_symbol_name_cstr("sparkles"));
+    assert(!pt_is_post13_7_sf_symbol_name_cstr("house.fill"));
 
     int32_t fnd13 = (1677 << 16) | (104 << 8);
     int32_t uik13 = (3698 << 16) | (54 << 8);
@@ -336,14 +202,6 @@ static void test_sf_symbols_and_versions(void) {
 }
 
 /* ---------- Batch 4 Unit Tests ---------- */
-
-static int is_hidden_ifname_prefix(const char *name) {
-    if (!name || !name[0]) return 0;
-    return (strncmp(name, "vmenet", 6) == 0 ||
-            strncmp(name, "vmnet", 5) == 0 ||
-            strncmp(name, "bridge", 6) == 0 ||
-            strncmp(name, "anpi", 4) == 0) ? 1 : 0;
-}
 
 static int is_code_res_key_dirty(const char *k) {
     if (!k) return 0;
@@ -355,11 +213,14 @@ static int is_code_res_key_dirty(const char *k) {
 }
 
 static void test_network_and_coderesources(void) {
-    assert(is_hidden_ifname_prefix("anpi0") == 1);
-    assert(is_hidden_ifname_prefix("anpi2") == 1);
-    assert(is_hidden_ifname_prefix("bridge100") == 1);
-    assert(is_hidden_ifname_prefix("en0") == 0);
-    assert(is_hidden_ifname_prefix("lo0") == 0);
+    assert(pt_is_hidden_network_ifname_prefix_cstr("anpi0"));
+    assert(pt_is_hidden_network_ifname_prefix_cstr("anpi2"));
+    assert(pt_is_hidden_network_ifname_prefix_cstr("bridge100"));
+    assert(!pt_is_hidden_network_ifname_prefix_cstr("en0"));
+    assert(!pt_is_hidden_network_ifname_prefix_cstr("lo0"));
+    assert(pt_is_secondary_en_ifname_cstr("en1"));
+    assert(pt_is_secondary_en_ifname_cstr("en12"));
+    assert(!pt_is_secondary_en_ifname_cstr("en0"));
 
     assert(is_code_res_key_dirty("Frameworks/AKInterface.framework/AKInterface") == 1);
     assert(is_code_res_key_dirty("Frameworks/PlayTools.framework/PlayTools") == 1);
@@ -368,87 +229,34 @@ static void test_network_and_coderesources(void) {
 
 /* ---------- Round 1 Hardening Unit Tests ---------- */
 
-static uint32_t rotr32(uint32_t x, unsigned n) {
-    return (x >> n) | (x << (32U - n));
+static void test_sha256_raw(const uint8_t *msg, size_t len, uint8_t out[CC_SHA256_DIGEST_LENGTH]) {
+    CC_SHA256(msg, (CC_LONG)len, out);
 }
 
-static void sha256_compute(const uint8_t *msg, size_t len, uint8_t out[32]) {
-    static const uint32_t k[64] = {
-        0x428a2f98U, 0x71374491U, 0xb5c0fbcfU, 0xe9b5dba5U, 0x3956c25bU, 0x59f111f1U, 0x923f82a4U, 0xab1c5ed5U,
-        0xd807aa98U, 0x12835b01U, 0x243185beU, 0x550c7dc3U, 0x72be5d74U, 0x80deb1feU, 0x9bdc06a7U, 0xc19bf174U,
-        0xe49b69c1U, 0xefbe4786U, 0x0fc19dc6U, 0x240ca1ccU, 0x2de92c6fU, 0x4a7484aaU, 0x5cb0a9dcU, 0x76f988daU,
-        0x983e5152U, 0xa831c66dU, 0xb00327c8U, 0xbf597fc7U, 0xc6e00bf3U, 0xd5a79147U, 0x06ca6351U, 0x14292967U,
-        0x27b70a85U, 0x2e1b2138U, 0x4d2c6dfcU, 0x53380d13U, 0x650a7354U, 0x766a0abbU, 0x81c2c92eU, 0x92722c85U,
-        0xa2bfe8a1U, 0xa81a664bU, 0xc24b8b70U, 0xc76c51a3U, 0xd192e819U, 0xd6990624U, 0xf40e3585U, 0x106aa070U,
-        0x19a4c116U, 0x1e376c08U, 0x2748774cU, 0x34b0bcb5U, 0x391c0cb3U, 0x4ed8aa4aU, 0x5b9cca4fU, 0x682e6ff3U,
-        0x748f82eeU, 0x78a5636fU, 0x84c87814U, 0x8cc70208U, 0x90befffaU, 0xa4506cebU, 0xbef9a3f7U, 0xc67178f2U
-    };
-    uint32_t h[8] = {
-        0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU,
-        0x510e527fU, 0x9b05688cU, 0x1f83d9abU, 0x5be0cd19U
-    };
-    size_t padded = ((len + 9U + 63U) / 64U) * 64U;
-    uint8_t *buf = (uint8_t *)calloc(1U, padded);
-    assert(buf != NULL);
-    if (len > 0) memcpy(buf, msg, len);
-    buf[len] = 0x80U;
-    uint64_t bitlen = (uint64_t)len * 8ULL;
-    for (int i = 0; i < 8; i++) {
-        buf[padded - 1U - (size_t)i] = (uint8_t)((bitlen >> (i * 8)) & 0xffULL);
-    }
-    for (size_t off = 0; off < padded; off += 64U) {
-        uint32_t w[64];
-        for (int i = 0; i < 16; i++) {
-            w[i] = ((uint32_t)buf[off + (size_t)i * 4U] << 24) |
-                   ((uint32_t)buf[off + (size_t)i * 4U + 1U] << 16) |
-                   ((uint32_t)buf[off + (size_t)i * 4U + 2U] << 8) |
-                   (uint32_t)buf[off + (size_t)i * 4U + 3U];
-        }
-        for (int i = 16; i < 64; i++) {
-            uint32_t s0 = rotr32(w[i - 15], 7U) ^ rotr32(w[i - 15], 18U) ^ (w[i - 15] >> 3);
-            uint32_t s1 = rotr32(w[i - 2], 17U) ^ rotr32(w[i - 2], 19U) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16] + s0 + w[i - 7] + s1;
-        }
-        uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], hh = h[7];
-        for (int i = 0; i < 64; i++) {
-            uint32_t S1 = rotr32(e, 6U) ^ rotr32(e, 11U) ^ rotr32(e, 25U);
-            uint32_t ch = (e & f) ^ ((~e) & g);
-            uint32_t t1 = hh + S1 + ch + k[i] + w[i];
-            uint32_t S0 = rotr32(a, 2U) ^ rotr32(a, 13U) ^ rotr32(a, 22U);
-            uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
-            uint32_t t2 = S0 + maj;
-            hh = g; g = f; f = e; e = d + t1;
-            d = c; c = b; b = a; a = t1 + t2;
-        }
-        h[0] += a; h[1] += b; h[2] += c; h[3] += d;
-        h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
-    }
-    free(buf);
-    for (int i = 0; i < 8; i++) {
-        out[i * 4] = (uint8_t)(h[i] >> 24);
-        out[i * 4 + 1] = (uint8_t)(h[i] >> 16);
-        out[i * 4 + 2] = (uint8_t)(h[i] >> 8);
-        out[i * 4 + 3] = (uint8_t)h[i];
-    }
+static void test_sha1_raw(const uint8_t *msg, size_t len, uint8_t out[CC_SHA1_DIGEST_LENGTH]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    CC_SHA1(msg, (CC_LONG)len, out);
+#pragma clang diagnostic pop
 }
 
 static void test_der_3byte_len_and_nested_set(void) {
-    der_buf_t b = {0};
-    der_tag_len(&b, 0x31U, 0x12345U);
+    pt_der_buf_t b = {0};
+    pt_der_buf_append_tag_len(&b, 0x31U, 0x12345U);
     assert(!b.failed);
     assert(b.len == 5U);
     assert(b.data[0] == 0x31U && b.data[1] == 0x83U && b.data[2] == 0x01U && b.data[3] == 0x23U && b.data[4] == 0x45U);
     free(b.data);
 
     /* Nested dictionary must use SET tag 0x31 (Apple CE DER spec) */
-    der_buf_t inner_kv = {0};
-    der_tlv(&inner_kv, 0x0cU, "subkey", 6U);
+    pt_der_buf_t inner_kv = {0};
+    pt_der_buf_wrap_tlv(&inner_kv, 0x0cU, (const uint8_t *)"subkey", 6U);
     uint8_t der_true = 0xffU;
-    der_tlv(&inner_kv, 0x01U, &der_true, 1U);
-    der_buf_t inner_seq = {0};
-    der_tlv(&inner_seq, 0x30U, inner_kv.data, inner_kv.len);
-    der_buf_t nested_set = {0};
-    der_tlv(&nested_set, 0x31U, inner_seq.data, inner_seq.len);
+    pt_der_buf_wrap_tlv(&inner_kv, 0x01U, &der_true, 1U);
+    pt_der_buf_t inner_seq = {0};
+    pt_der_buf_wrap_tlv(&inner_seq, 0x30U, inner_kv.data, inner_kv.len);
+    pt_der_buf_t nested_set = {0};
+    pt_der_buf_wrap_tlv(&nested_set, 0x31U, inner_seq.data, inner_seq.len);
     assert(nested_set.data[0] == 0x31U);
     free(inner_kv.data);
     free(inner_seq.data);
@@ -458,13 +266,13 @@ static void test_der_3byte_len_and_nested_set(void) {
 static void test_superblob_cd_special_slot_sha256_update(void) {
     /* Sanity-check SHA-256 against NIST "abc" vector */
     uint8_t abc_hash[32];
-    sha256_compute((const uint8_t *)"abc", 3U, abc_hash);
+    test_sha256_raw((const uint8_t *)"abc", 3U, abc_hash);
     assert(abc_hash[0] == 0xbaU && abc_hash[1] == 0x78U && abc_hash[2] == 0x16U && abc_hash[3] == 0xbfU);
 
     /* Build synthetic CodeDirectory with nSpecialSlots=7, hashOffset=44+7*32=268, hashType=2, hashSize=32 */
     uint8_t cd[300];
     memset(cd, 0, sizeof(cd));
-    uint32_t magic = to_be32(0xfade0c02U);
+    uint32_t magic = to_be32(PT_CSMAGIC_CODEDIRECTORY);
     uint32_t cd_len = to_be32((uint32_t)sizeof(cd));
     uint32_t hash_off = to_be32(268U);
     uint32_t n_special = to_be32(7U);
@@ -473,16 +281,14 @@ static void test_superblob_cd_special_slot_sha256_update(void) {
     memcpy(cd + 16, &hash_off, 4);
     memcpy(cd + 24, &n_special, 4);
     cd[36] = 32U; /* hashSize */
-    cd[37] = 2U;  /* CS_HASHTYPE_SHA256 */
-    /* Seed non-zero stale hashes at special slots -5 and -7 */
+    cd[37] = PT_CS_HASHTYPE_SHA256;
     memset(cd + 268U - 5U * 32U, 0x11, 32U);
     memset(cd + 268U - 7U * 32U, 0x22, 32U);
 
-    /* Sanitized slot 5 (XML) and slot 7 (DER) blobs including 8-byte header */
     const char *xml_body = "<plist><dict/></plist>";
     size_t xml_blob_len = 8U + strlen(xml_body);
     uint8_t slot5[64];
-    uint32_t m5 = to_be32(0xfade7171U), l5 = to_be32((uint32_t)xml_blob_len);
+    uint32_t m5 = to_be32(PT_CSMAGIC_EMBEDDED_ENTITLEMENTS), l5 = to_be32((uint32_t)xml_blob_len);
     memcpy(slot5, &m5, 4);
     memcpy(slot5 + 4, &l5, 4);
     memcpy(slot5 + 8, xml_body, strlen(xml_body));
@@ -490,22 +296,22 @@ static void test_superblob_cd_special_slot_sha256_update(void) {
     uint8_t der_body[6] = { 0x70U, 0x04U, 0x02U, 0x01U, 0x01U, 0x31U };
     size_t der_blob_len = 8U + sizeof(der_body);
     uint8_t slot7[32];
-    uint32_t m7 = to_be32(0xfade7172U), l7 = to_be32((uint32_t)der_blob_len);
+    uint32_t m7 = to_be32(PT_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS), l7 = to_be32((uint32_t)der_blob_len);
     memcpy(slot7, &m7, 4);
     memcpy(slot7 + 4, &l7, 4);
     memcpy(slot7 + 8, der_body, sizeof(der_body));
 
-    /* Update CD special slots -5 and -7 */
-    uint8_t h5[32], h7[32];
-    sha256_compute(slot5, xml_blob_len, h5);
-    sha256_compute(slot7, der_blob_len, h7);
-    memcpy(cd + 268U - 5U * 32U, h5, 32U);
-    memcpy(cd + 268U - 7U * 32U, h7, 32U);
+    /* Compute & patch via production PTCodeSignParser */
+    uint8_t xml_sha256[CC_SHA256_DIGEST_LENGTH], der_sha256[CC_SHA256_DIGEST_LENGTH];
+    uint8_t zero_sha1[CC_SHA1_DIGEST_LENGTH] = {0};
+    pt_sha256_cs_blob(PT_CSMAGIC_EMBEDDED_ENTITLEMENTS, (const uint8_t *)xml_body, strlen(xml_body), xml_sha256);
+    pt_sha256_cs_blob(PT_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS, der_body, sizeof(der_body), der_sha256);
+    pt_patch_code_directory_entitlement_hashes(
+        cd, sizeof(cd), true, xml_sha256, zero_sha1, true, der_sha256, zero_sha1);
 
-    /* Verify detector check passes */
     uint8_t verify5[32], verify7[32];
-    sha256_compute(slot5, xml_blob_len, verify5);
-    sha256_compute(slot7, der_blob_len, verify7);
+    test_sha256_raw(slot5, xml_blob_len, verify5);
+    test_sha256_raw(slot7, der_blob_len, verify7);
     assert(memcmp(cd + 268U - 5U * 32U, verify5, 32U) == 0);
     assert(memcmp(cd + 268U - 7U * 32U, verify7, 32U) == 0);
 }
@@ -566,40 +372,11 @@ static void test_fnv1a_linear_dedup(void) {
     free(pool);
 }
 
-static int is_post13_sf_symbol_multisuffix(const char *s) {
-    static const char *const kTable[] = {
-        "applelogo", "brain.head.profile", "gearshape", "gearshape.2",
-        "ipad", "iphone", "leaf", "macbook", "sparkles.tv", "wrench.and.screwdriver"
-    };
-    size_t n = sizeof(kTable) / sizeof(kTable[0]);
-    for (size_t i = 1; i < n; i++) {
-        assert(strcmp(kTable[i - 1], kTable[i]) < 0);
-    }
-    char base[128];
-    snprintf(base, sizeof(base), "%s", s);
-    if (bsearch(base, kTable, n, sizeof(kTable[0]), sf_cmp) != NULL) return 1;
-    static const char *const kSuffixes[] = { ".fill", ".circle", ".square", ".slash" };
-    int changed = 1;
-    while (changed) {
-        changed = 0;
-        for (size_t i = 0; i < sizeof(kSuffixes) / sizeof(kSuffixes[0]); i++) {
-            size_t sl = strlen(kSuffixes[i]), bl = strlen(base);
-            if (bl > sl && strcmp(base + bl - sl, kSuffixes[i]) == 0) {
-                base[bl - sl] = '\0';
-                if (bsearch(base, kTable, n, sizeof(kTable[0]), sf_cmp) != NULL) return 1;
-                changed = 1;
-                break;
-            }
-        }
-    }
-    return 0;
-}
-
 static void test_sf_symbols_multisuffix(void) {
-    assert(is_post13_sf_symbol_multisuffix("leaf.circle.fill") == 1);
-    assert(is_post13_sf_symbol_multisuffix("gearshape.2.fill") == 1);
-    assert(is_post13_sf_symbol_multisuffix("applelogo") == 1);
-    assert(is_post13_sf_symbol_multisuffix("house.circle.fill") == 0);
+    assert(pt_is_post13_7_sf_symbol_name_cstr("leaf.circle.fill"));
+    assert(pt_is_post13_7_sf_symbol_name_cstr("gearshape.2.fill"));
+    assert(pt_is_post13_7_sf_symbol_name_cstr("applelogo"));
+    assert(!pt_is_post13_7_sf_symbol_name_cstr("house.circle.fill"));
 }
 
 static int ci_contains(const char *hay, const char *needle) {
@@ -671,7 +448,7 @@ static void test_ioreg_agx_path_and_kinfo_cr_groups_and_prefs(void) {
     int w = 0;
     for (int i = 0; i < cr_ngroups; i++) {
         uint32_t g = cr_groups[i];
-        if (is_desktop_gid(g)) continue;
+        if (pt_is_desktop_supplemental_gid_c((gid_t)g)) continue;
         if (g == 20U) g = 501U;
         cr_groups[w++] = g;
     }
@@ -697,30 +474,6 @@ static void test_ioreg_agx_path_and_kinfo_cr_groups_and_prefs(void) {
     }
 }
 
-static int is_blocked_cg_or_hid_symbol(const char *sym) {
-    static const char *const kBlocked[] = {
-        "CGMainDisplayID",
-        "CGGetActiveDisplayList",
-        "CGGetOnlineDisplayList",
-        "CGWindowListCopyWindowInfo",
-        "CGPreflightScreenCaptureAccess",
-        "CGRequestScreenCaptureAccess",
-        "CGSessionCopyCurrentDictionary",
-        "CGDisplayBounds",
-        "CGDisplayPixelsWide",
-        "CGDisplayPixelsHigh",
-        "IOHIDManagerCreate",
-        "IOHIDManagerCopyDevices",
-        "IOHIDManagerOpen",
-        "IOHIDManagerSetDeviceMatching"
-    };
-    if (sym == NULL) return 0;
-    for (size_t i = 0; i < sizeof(kBlocked) / sizeof(kBlocked[0]); i++) {
-        if (strcmp(sym, kBlocked[i]) == 0) return 1;
-    }
-    return 0;
-}
-
 static void test_round2_cg_hid_dlsym_blacklist(void) {
     const char *blocked[] = {
         "CGMainDisplayID", "CGGetActiveDisplayList", "CGGetOnlineDisplayList",
@@ -728,42 +481,15 @@ static void test_round2_cg_hid_dlsym_blacklist(void) {
         "CGSessionCopyCurrentDictionary", "IOHIDManagerCreate", "IOHIDManagerCopyDevices"
     };
     for (size_t i = 0; i < sizeof(blocked) / sizeof(blocked[0]); i++) {
-        assert(is_blocked_cg_or_hid_symbol(blocked[i]) == 1);
+        assert(pt_is_hidden_macos_only_dlsym_symbol_cstr(blocked[i]));
     }
     const char *allowed_ios_cg[] = {
         "CGContextDrawImage", "CGImageCreate", "CGColorSpaceCreateDeviceRGB",
         "CGPathCreateMutable", "CGBitmapContextCreate", "CGDataProviderCreateWithData"
     };
     for (size_t i = 0; i < sizeof(allowed_ios_cg) / sizeof(allowed_ios_cg[0]); i++) {
-        assert(is_blocked_cg_or_hid_symbol(allowed_ios_cg[i]) == 0);
+        assert(!pt_is_hidden_macos_only_dlsym_symbol_cstr(allowed_ios_cg[i]));
     }
-}
-
-static int is_macos_only_framework_path(const char *path) {
-    static const char *const kMacFrameworks[] = {
-        "AppKit.framework", "Cocoa.framework", "Carbon.framework",
-        "ServiceManagement.framework", "DiskArbitration.framework",
-        "CoreWLAN.framework", "EndpointSecurity.framework",
-        "ScriptingBridge.framework", "ApplicationServices.framework",
-        "QTKit.framework", "ScreenCaptureKit.framework", "IOBluetooth.framework"
-    };
-    if (path == NULL) return 0;
-    for (size_t i = 0; i < sizeof(kMacFrameworks) / sizeof(kMacFrameworks[0]); i++) {
-        if (ci_contains(path, kMacFrameworks[i])) return 1;
-    }
-    return 0;
-}
-
-static int is_macos_only_desktop_font(const char *name) {
-    static const char *const kDesktopFonts[] = {
-        "monaco", "lucida grande", "lucidagrande", "skia", "osaka",
-        "applegothic", "wingdings", "andale mono", "big caslon", "comic sans ms"
-    };
-    if (name == NULL) return 0;
-    for (size_t i = 0; i < sizeof(kDesktopFonts) / sizeof(kDesktopFonts[0]); i++) {
-        if (ci_contains(name, kDesktopFonts[i])) return 1;
-    }
-    return 0;
 }
 
 static void test_round2_macos_framework_and_font_filters(void) {
@@ -779,7 +505,7 @@ static void test_round2_macos_framework_and_font_filters(void) {
         "/System/Library/Frameworks/AppKit.framework/AppKit"
     };
     for (size_t i = 0; i < sizeof(mac_fw) / sizeof(mac_fw[0]); i++) {
-        assert(is_macos_only_framework_path(mac_fw[i]) == 1);
+        assert(pt_is_macos_only_framework_path_cstr(mac_fw[i]));
     }
     const char *ios_fw[] = {
         "/System/Library/Frameworks/UIKit.framework/UIKit",
@@ -788,7 +514,7 @@ static void test_round2_macos_framework_and_font_filters(void) {
         "/System/Library/Frameworks/Metal.framework/Metal"
     };
     for (size_t i = 0; i < sizeof(ios_fw) / sizeof(ios_fw[0]); i++) {
-        assert(is_macos_only_framework_path(ios_fw[i]) == 0);
+        assert(!pt_is_macos_only_framework_path_cstr(ios_fw[i]));
     }
 
     const char *mac_fonts[] = {
@@ -796,26 +522,14 @@ static void test_round2_macos_framework_and_font_filters(void) {
         "Wingdings", "Andale Mono", "Big Caslon", "Comic Sans MS"
     };
     for (size_t i = 0; i < sizeof(mac_fonts) / sizeof(mac_fonts[0]); i++) {
-        assert(is_macos_only_desktop_font(mac_fonts[i]) == 1);
+        assert(pt_is_hidden_desktop_font_name_cstr(mac_fonts[i]));
     }
     const char *ios_fonts[] = {
         "Helvetica", "SF Pro", "PingFang SC", "Avenir", "Georgia", "Menlo"
     };
     for (size_t i = 0; i < sizeof(ios_fonts) / sizeof(ios_fonts[0]); i++) {
-        assert(is_macos_only_desktop_font(ios_fonts[i]) == 0);
+        assert(!pt_is_hidden_desktop_font_name_cstr(ios_fonts[i]));
     }
-}
-
-static int is_desktop_xattr_name(const char *name) {
-    static const char *const kExact[] = {
-        "com.apple.quarantine", "com.apple.provenance", "com.apple.macl",
-        "com.apple.FinderInfo", "com.apple.ResourceFork"
-    };
-    if (name == NULL) return 0;
-    for (size_t i = 0; i < sizeof(kExact) / sizeof(kExact[0]); i++) {
-        if (strcmp(name, kExact[i]) == 0) return 1;
-    }
-    return strncmp(name, "com.apple.metadata:", 19U) == 0;
 }
 
 static uint64_t sanitize_osvariant_status(uint64_t raw) {
@@ -844,10 +558,10 @@ static void test_round2_xattr_osvariant_and_afunix(void) {
         "com.apple.metadata:kMDItemWhereFroms"
     };
     for (size_t i = 0; i < sizeof(bad_xattrs) / sizeof(bad_xattrs[0]); i++) {
-        assert(is_desktop_xattr_name(bad_xattrs[i]) == 1);
+        assert(pt_is_hidden_xattr_name_cstr(bad_xattrs[i]));
     }
-    assert(is_desktop_xattr_name("com.example.custom") == 0);
-    assert(is_desktop_xattr_name("com.apple.decmpfs") == 0);
+    assert(!pt_is_hidden_xattr_name_cstr("com.example.custom"));
+    assert(!pt_is_hidden_xattr_name_cstr("com.apple.decmpfs"));
 
     /* Simulate listxattr buffer compaction removing desktop xattrs */
     const char raw_list[] = "com.apple.quarantine\0com.example.custom\0com.apple.macl\0com.apple.metadata:kMDItemWhereFroms\0";
@@ -856,7 +570,7 @@ static void test_round2_xattr_osvariant_and_afunix(void) {
     const char *cur = raw_list, *end = raw_list + sizeof(raw_list) - 1U;
     while (cur < end) {
         size_t slen = strlen(cur);
-        if (slen > 0 && !is_desktop_xattr_name(cur)) {
+        if (slen > 0 && !pt_is_hidden_xattr_name_cstr(cur)) {
             memcpy(filtered + out_len, cur, slen + 1U);
             out_len += slen + 1U;
         }
@@ -902,119 +616,66 @@ static void put_be32(uint8_t *p, uint32_t v) {
     p[3] = (uint8_t)(v & 0xFFU);
 }
 
-static uint32_t rol32(uint32_t x, uint32_t n) { return (x << n) | (x >> (32U - n)); }
-
-static void sha1_compute(const uint8_t *data, size_t len, uint8_t out[20]) {
-    uint32_t h0 = 0x67452301U, h1 = 0xEFCDAB89U, h2 = 0x98BADCFEU, h3 = 0x10325476U, h4 = 0xC3D2E1F0U;
-    size_t padded_len = ((len + 9U + 63U) / 64U) * 64U;
-    uint8_t *buf = (uint8_t *)calloc(1, padded_len);
-    assert(buf != NULL);
-    memcpy(buf, data, len);
-    buf[len] = 0x80U;
-    uint64_t bits = (uint64_t)len * 8ULL;
-    for (int i = 0; i < 8; i++) buf[padded_len - 1U - (size_t)i] = (uint8_t)((bits >> (i * 8)) & 0xFFU);
-    for (size_t off = 0; off < padded_len; off += 64U) {
-        uint32_t w[80];
-        for (int i = 0; i < 16; i++) {
-            w[i] = ((uint32_t)buf[off + (size_t)i * 4U] << 24) |
-                   ((uint32_t)buf[off + (size_t)i * 4U + 1U] << 16) |
-                   ((uint32_t)buf[off + (size_t)i * 4U + 2U] << 8) |
-                   ((uint32_t)buf[off + (size_t)i * 4U + 3U]);
-        }
-        for (int i = 16; i < 80; i++) w[i] = rol32(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1U);
-        uint32_t a = h0, b = h1, c = h2, d = h3, e = h4;
-        for (int i = 0; i < 80; i++) {
-            uint32_t f, k;
-            if (i < 20) { f = (b & c) | ((~b) & d); k = 0x5A827999U; }
-            else if (i < 40) { f = b ^ c ^ d; k = 0x6ED9EBA1U; }
-            else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8F1BBCDCU; }
-            else { f = b ^ c ^ d; k = 0xCA62C1D6U; }
-            uint32_t tmp = rol32(a, 5U) + f + e + k + w[i];
-            e = d; d = c; c = rol32(b, 30U); b = a; a = tmp;
-        }
-        h0 += a; h1 += b; h2 += c; h3 += d; h4 += e;
-    }
-    free(buf);
-    uint32_t hs[5] = { h0, h1, h2, h3, h4 };
-    for (int i = 0; i < 5; i++) put_be32(out + (size_t)i * 4U, hs[i]);
-}
-
-static int is_post13_hardware_sf_symbol_prefix(const char *s) {
-    static const char *const kHwPrefixes[] = {
-        "macbook", "imac", "macmini", "macpro", "macstudio",
-        "applewatch", "airpods", "visionpro", "xserve", "homepod"
-    };
-    if (s == NULL) return 0;
-    for (size_t i = 0; i < sizeof(kHwPrefixes) / sizeof(kHwPrefixes[0]); i++) {
-        size_t plen = strlen(kHwPrefixes[i]);
-        if (strncmp(s, kHwPrefixes[i], plen) == 0 &&
-            (s[plen] == '\0' || s[plen] == '.' || s[plen] == '_')) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
 static void test_round2_sha1_sha256_cd_and_sfsymbols(void) {
     /* Verify SHA-1 standard test vector ("abc") */
     uint8_t abc_digest[20];
-    sha1_compute((const uint8_t *)"abc", 3U, abc_digest);
+    test_sha1_raw((const uint8_t *)"abc", 3U, abc_digest);
     const uint8_t expected_abc[20] = {
         0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e,
         0x25, 0x71, 0x78, 0x50, 0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d
     };
     assert(memcmp(abc_digest, expected_abc, 20U) == 0);
 
-    /* Dual CodeDirectory patching: SHA-1 (hashType=1, hashSize=20) + SHA-256 (hashType=2, hashSize=32) */
-    const uint8_t slot5[16] = { 0xfa, 0xde, 0x71, 0x71, 0, 0, 0, 16, '<', 'p', 'l', 'i', 's', 't', '/', '>' };
-    const uint8_t slot7[12] = { 0xfa, 0xde, 0x71, 0x72, 0, 0, 0, 12, 0x30, 0x02, 0x05, 0x00 };
+    /* Dual CodeDirectory patching via production PTCodeSignParser */
+    const uint8_t xml_payload[8] = { '<', 'p', 'l', 'i', 's', 't', '/', '>' };
+    const uint8_t der_payload[4] = { 0x30, 0x02, 0x05, 0x00 };
+
+    uint8_t s5_sha1[CC_SHA1_DIGEST_LENGTH], s7_sha1[CC_SHA1_DIGEST_LENGTH];
+    uint8_t s5_sha256[CC_SHA256_DIGEST_LENGTH], s7_sha256[CC_SHA256_DIGEST_LENGTH];
+    pt_sha1_cs_blob(PT_CSMAGIC_EMBEDDED_ENTITLEMENTS, xml_payload, sizeof(xml_payload), s5_sha1);
+    pt_sha1_cs_blob(PT_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS, der_payload, sizeof(der_payload), s7_sha1);
+    pt_sha256_cs_blob(PT_CSMAGIC_EMBEDDED_ENTITLEMENTS, xml_payload, sizeof(xml_payload), s5_sha256);
+    pt_sha256_cs_blob(PT_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS, der_payload, sizeof(der_payload), s7_sha256);
 
     uint8_t cd_sha1[256];
     memset(cd_sha1, 0, sizeof(cd_sha1));
-    put_be32(cd_sha1 + 0, 0xfade0c02U);
+    put_be32(cd_sha1 + 0, PT_CSMAGIC_CODEDIRECTORY);
     put_be32(cd_sha1 + 4, 240U);
     put_be32(cd_sha1 + 16, 200U); /* hashOffset */
     put_be32(cd_sha1 + 24, 7U);   /* nSpecialSlots */
     cd_sha1[36] = 20U;            /* hashSize */
-    cd_sha1[37] = 1U;             /* hashType = SHA-1 */
-
-    uint8_t s5_sha1[20], s7_sha1[20];
-    sha1_compute(slot5, sizeof(slot5), s5_sha1);
-    sha1_compute(slot7, sizeof(slot7), s7_sha1);
-    memcpy(cd_sha1 + 200U - 5U * 20U, s5_sha1, 20U);
-    memcpy(cd_sha1 + 200U - 7U * 20U, s7_sha1, 20U);
+    cd_sha1[37] = PT_CS_HASHTYPE_SHA1;
+    pt_patch_code_directory_entitlement_hashes(
+        cd_sha1, sizeof(cd_sha1), true, s5_sha256, s5_sha1, true, s7_sha256, s7_sha1);
     assert(memcmp(cd_sha1 + 100U, s5_sha1, 20U) == 0);
     assert(memcmp(cd_sha1 + 60U, s7_sha1, 20U) == 0);
 
     uint8_t cd_sha256[320];
     memset(cd_sha256, 0, sizeof(cd_sha256));
-    put_be32(cd_sha256 + 0, 0xfade0c02U);
+    put_be32(cd_sha256 + 0, PT_CSMAGIC_CODEDIRECTORY);
     put_be32(cd_sha256 + 4, 300U);
     put_be32(cd_sha256 + 16, 280U); /* hashOffset */
     put_be32(cd_sha256 + 24, 7U);   /* nSpecialSlots */
     cd_sha256[36] = 32U;            /* hashSize */
-    cd_sha256[37] = 2U;             /* hashType = SHA-256 */
-
-    uint8_t s5_sha256[32], s7_sha256[32];
-    sha256_compute(slot5, sizeof(slot5), s5_sha256);
-    sha256_compute(slot7, sizeof(slot7), s7_sha256);
-    memcpy(cd_sha256 + 280U - 5U * 32U, s5_sha256, 32U);
-    memcpy(cd_sha256 + 280U - 7U * 32U, s7_sha256, 32U);
+    cd_sha256[37] = PT_CS_HASHTYPE_SHA256;
+    pt_patch_code_directory_entitlement_hashes(
+        cd_sha256, sizeof(cd_sha256), true, s5_sha256, s5_sha1, true, s7_sha256, s7_sha1);
     assert(memcmp(cd_sha256 + 120U, s5_sha256, 32U) == 0);
     assert(memcmp(cd_sha256 + 56U, s7_sha256, 32U) == 0);
 
-    /* SF Symbols hardware prefix checks */
-    assert(is_post13_hardware_sf_symbol_prefix("macbook") == 1);
-    assert(is_post13_hardware_sf_symbol_prefix("macbook.gen2") == 1);
-    assert(is_post13_hardware_sf_symbol_prefix("imac.fill") == 1);
-    assert(is_post13_hardware_sf_symbol_prefix("macmini") == 1);
-    assert(is_post13_hardware_sf_symbol_prefix("macpro.gen3") == 1);
-    assert(is_post13_hardware_sf_symbol_prefix("macstudio") == 1);
-    assert(is_post13_hardware_sf_symbol_prefix("applewatch.watchface") == 1);
-    assert(is_post13_hardware_sf_symbol_prefix("airpods.pro") == 1);
-    assert(is_post13_hardware_sf_symbol_prefix("visionpro") == 1);
-    assert(is_post13_hardware_sf_symbol_prefix("gear") == 0);
-    assert(is_post13_hardware_sf_symbol_prefix("house.fill") == 0);
+    /* SF Symbols hardware prefix checks directly via production PTDetectionRules */
+    assert(pt_is_post13_7_sf_symbol_name_cstr("macbook"));
+    assert(pt_is_post13_7_sf_symbol_name_cstr("macbook.gen2"));
+    assert(pt_is_post13_7_sf_symbol_name_cstr("macmini"));
+    assert(pt_is_post13_7_sf_symbol_name_cstr("macstudio"));
+    assert(pt_is_post13_7_sf_symbol_name_cstr("applewatch.watchface"));
+    assert(pt_is_post13_7_sf_symbol_name_cstr("airpods.pro"));
+    assert(pt_is_post13_7_sf_symbol_name_cstr("visionpro"));
+    assert(pt_is_post13_7_sf_symbol_name_cstr("imac"));
+    assert(pt_is_post13_7_sf_symbol_name_cstr("imac.fill"));
+    assert(pt_is_post13_7_sf_symbol_name_cstr("macpro.gen3"));
+    assert(!pt_is_post13_7_sf_symbol_name_cstr("gear"));
+    assert(!pt_is_post13_7_sf_symbol_name_cstr("house.fill"));
 }
 
 static uint32_t l1i_cache_size_for_machine(const char *machine) {
@@ -1042,7 +703,7 @@ static void test_round3_cdhash_kernel_version_and_l1i(void) {
     for (size_t i = 44; i < sizeof(cd); i++) cd[i] = (uint8_t)(i * 7U + 3U);
 
     uint8_t full_sha256[32];
-    sha256_compute(cd, sizeof(cd), full_sha256);
+    test_sha256_raw(cd, sizeof(cd), full_sha256);
     uint8_t cdhash5[20];
     memcpy(cdhash5, full_sha256, 20U);
     assert(memcmp(cdhash5, full_sha256, 20U) == 0);
@@ -1100,37 +761,6 @@ static void test_round3_fs_case_gid_and_prot(void) {
     assert(spoofed_prot > 0 && spoofed_prot == 4);
 }
 
-static int is_round3_hidden_dlsym_symbol(const char *sym) {
-    static const char *const kExactOrPrefix[] = {
-        "Authorization", "SecKeychain", "SecACL", "SecAccess", "SecTrustedApplication",
-        "SCDynamicStore", "SCPreferences", "SCNetworkSet", "SCNetworkService",
-        "SCBondInterface", "SCVLANInterface", "CVDisplayLink", "FSEventStream",
-        "LSOpen", "LSCopyApplicationURLs", "LSFindApplication", "AECreateDesc",
-        "AESendMessage", "MDQuery", "csr_check", "csr_get_active_config", "csrctl",
-        "IOBluetooth", "CGMainDisplayID", "CGWindowList", "IOHIDManager"
-    };
-    if (sym == NULL) return 0;
-    for (size_t i = 0; i < sizeof(kExactOrPrefix) / sizeof(kExactOrPrefix[0]); i++) {
-        if (strncmp(sym, kExactOrPrefix[i], strlen(kExactOrPrefix[i])) == 0) return 1;
-    }
-    return 0;
-}
-
-static int is_round3_macos_framework_path(const char *path) {
-    static const char *const kTokens[] = {
-        "/AppKit.framework", "/Cocoa.framework", "/Carbon.framework",
-        "/Quartz.framework", "/CoreMediaIO.framework", "/IOUSBHost.framework",
-        "/DFRFoundation.framework", "/LoginUIKit.framework", "/FinderKit.framework",
-        "/FSEvents.framework", "/LaunchServices.framework", "/DiscRecording.framework",
-        "/ServiceManagement.framework", "/DiskArbitration.framework", "/EndpointSecurity.framework"
-    };
-    if (path == NULL) return 0;
-    for (size_t i = 0; i < sizeof(kTokens) / sizeof(kTokens[0]); i++) {
-        if (ci_contains(path, kTokens[i])) return 1;
-    }
-    return 0;
-}
-
 static int is_icu_age_post_13_7(uint8_t major, uint8_t minor) {
     /* iOS 13.7 ships ICU 64.2 / Unicode 12.1 */
     return (major > 12U) || (major == 12U && minor > 1U);
@@ -1162,23 +792,23 @@ static void test_round3_extended_dlsym_fw_icu_swift(void) {
         "SCDynamicStoreCopyComputerName", "IOBluetoothDeviceInquiryCreateWithDelegate"
     };
     for (size_t i = 0; i < sizeof(blocked_syms) / sizeof(blocked_syms[0]); i++) {
-        assert(is_round3_hidden_dlsym_symbol(blocked_syms[i]) == 1);
+        assert(pt_is_hidden_macos_only_dlsym_symbol_cstr(blocked_syms[i]));
     }
     const char *safe_ios_syms[] = {
         "CGContextDrawImage", "CGColorSpaceCreateDeviceRGB", "CGImageCreate",
         "SecItemCopyMatching", "SecKeyCreateRandomKey", "SCNetworkReachabilityCreateWithName"
     };
     for (size_t i = 0; i < sizeof(safe_ios_syms) / sizeof(safe_ios_syms[0]); i++) {
-        assert(is_round3_hidden_dlsym_symbol(safe_ios_syms[i]) == 0);
+        assert(!pt_is_hidden_macos_only_dlsym_symbol_cstr(safe_ios_syms[i]));
     }
 
     /* /Quartz.framework hidden while QuartzCore.framework MUST remain visible */
-    assert(is_round3_macos_framework_path("/System/Library/Frameworks/Quartz.framework/Quartz") == 1);
-    assert(is_round3_macos_framework_path("/System/Library/Frameworks/CoreMediaIO.framework/CoreMediaIO") == 1);
-    assert(is_round3_macos_framework_path("/System/Library/PrivateFrameworks/DFRFoundation.framework/DFRFoundation") == 1);
-    assert(is_round3_macos_framework_path("/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/FSEvents") == 1);
-    assert(is_round3_macos_framework_path("/System/Library/Frameworks/QuartzCore.framework/QuartzCore") == 0);
-    assert(is_round3_macos_framework_path("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics") == 0);
+    assert(pt_is_macos_only_framework_path_cstr("/System/Library/Frameworks/Quartz.framework/Quartz"));
+    assert(pt_is_macos_only_framework_path_cstr("/System/Library/Frameworks/CoreMediaIO.framework/CoreMediaIO"));
+    assert(pt_is_macos_only_framework_path_cstr("/System/Library/PrivateFrameworks/DFRFoundation.framework/DFRFoundation"));
+    assert(pt_is_macos_only_framework_path_cstr("/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/FSEvents"));
+    assert(!pt_is_macos_only_framework_path_cstr("/System/Library/Frameworks/QuartzCore.framework/QuartzCore"));
+    assert(!pt_is_macos_only_framework_path_cstr("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"));
 
     /* ICU u_charAge > 12.1 predicate */
     assert(is_icu_age_post_13_7(12U, 1U) == 0);
@@ -1202,36 +832,6 @@ static void test_round3_extended_dlsym_fw_icu_swift(void) {
     assert(verify_swift_length_prefixed_mangling("99Foundation16AttributedStringV") == 0);
 }
 
-static int is_hidden_bundle_id_regression(const char *bid, int compat13_7) {
-    static const char *const kMacOnlyBundleIDs[] = {
-        "com.apple.AppKit", "com.apple.Cocoa", "com.apple.Carbon",
-        "com.apple.ApplicationServices", "com.apple.ServiceManagement",
-        "com.apple.ScriptingBridge", "com.apple.DiskArbitration",
-        "com.apple.Hypervisor", "com.apple.Virtualization", "com.apple.CoreWLAN",
-        "com.apple.OpenDirectory", "com.apple.DirectoryService", "com.apple.FinderSync",
-        "com.apple.SystemAdministration", "com.apple.Automator", "com.apple.AppleScriptObjC",
-        "com.apple.InputMethodKit", "com.apple.PreferencePanes", "com.apple.ScreenSaver",
-        "com.apple.SecurityInterface", "com.apple.OSAKit", "com.apple.NetFS",
-        "com.apple.ParavirtualizedGraphics", "com.apple.DriverKit"
-    };
-    static const char *const kPost137BundleIDs[] = {
-        "com.apple.ExtensionKit", "com.apple.ExtensionFoundation", "com.apple.AppIntents",
-        "com.apple.OSLog", "com.apple.WorkoutKit", "com.apple.FamilyControls",
-        "com.apple.ManagedSettings", "com.apple.DeviceActivity", "com.apple.CoreTransferable",
-        "com.apple.Spatial", "com.apple.LockedCameraCapture", "com.apple.MarketplaceKit"
-    };
-    if (bid == NULL) return 0;
-    for (size_t i = 0; i < sizeof(kMacOnlyBundleIDs) / sizeof(kMacOnlyBundleIDs[0]); i++) {
-        if (strcmp(bid, kMacOnlyBundleIDs[i]) == 0) return 1;
-    }
-    if (compat13_7) {
-        for (size_t i = 0; i < sizeof(kPost137BundleIDs) / sizeof(kPost137BundleIDs[0]); i++) {
-            if (strcmp(bid, kPost137BundleIDs[i]) == 0) return 1;
-        }
-    }
-    return 0;
-}
-
 static void test_round3_hidden_bundle_ids_regression(void) {
     const char *must_hide_always[] = {
         "com.apple.ApplicationServices", "com.apple.ServiceManagement",
@@ -1244,8 +844,8 @@ static void test_round3_hidden_bundle_ids_regression(void) {
         "com.apple.ParavirtualizedGraphics", "com.apple.DriverKit"
     };
     for (size_t i = 0; i < sizeof(must_hide_always) / sizeof(must_hide_always[0]); i++) {
-        assert(is_hidden_bundle_id_regression(must_hide_always[i], 0) == 1);
-        assert(is_hidden_bundle_id_regression(must_hide_always[i], 1) == 1);
+        assert(pt_is_hidden_bundle_id_rule_cstr(must_hide_always[i], false));
+        assert(pt_is_hidden_bundle_id_rule_cstr(must_hide_always[i], true));
     }
     const char *must_hide_compat13[] = {
         "com.apple.ExtensionKit", "com.apple.ExtensionFoundation", "com.apple.AppIntents",
@@ -1254,40 +854,17 @@ static void test_round3_hidden_bundle_ids_regression(void) {
         "com.apple.Spatial", "com.apple.LockedCameraCapture", "com.apple.MarketplaceKit"
     };
     for (size_t i = 0; i < sizeof(must_hide_compat13) / sizeof(must_hide_compat13[0]); i++) {
-        assert(is_hidden_bundle_id_regression(must_hide_compat13[i], 0) == 0);
-        assert(is_hidden_bundle_id_regression(must_hide_compat13[i], 1) == 1);
+        assert(!pt_is_hidden_bundle_id_rule_cstr(must_hide_compat13[i], false));
+        assert(pt_is_hidden_bundle_id_rule_cstr(must_hide_compat13[i], true));
     }
     const char *safe_ios_bundles[] = {
         "com.apple.UIKit", "com.apple.Foundation", "com.apple.CoreGraphics",
         "com.apple.Metal", "com.apple.QuartzCore"
     };
     for (size_t i = 0; i < sizeof(safe_ios_bundles) / sizeof(safe_ios_bundles[0]); i++) {
-        assert(is_hidden_bundle_id_regression(safe_ios_bundles[i], 0) == 0);
-        assert(is_hidden_bundle_id_regression(safe_ios_bundles[i], 1) == 0);
+        assert(!pt_is_hidden_bundle_id_rule_cstr(safe_ios_bundles[i], false));
+        assert(!pt_is_hidden_bundle_id_rule_cstr(safe_ios_bundles[i], true));
     }
-}
-
-static int is_inactive_en_interface_name(const char *ifname) {
-    /* Matches en1..en99+ (excluding en0), using full numeric suffix parsing instead of single-digit check */
-    if (ifname == NULL || strncmp(ifname, "en", 2U) != 0 || ifname[2] < '0' || ifname[2] > '9') return 0;
-    const char *p = ifname + 2;
-    unsigned long idx = 0;
-    while (*p != '\0') {
-        if (*p < '0' || *p > '9') return 0;
-        idx = idx * 10UL + (unsigned long)(*p - '0');
-        p++;
-    }
-    return idx >= 1UL;
-}
-
-static int mock_path_has_component(const char *path, const char *comp) {
-    size_t clen = strlen(comp);
-    const char *cur = path;
-    while ((cur = strstr(cur, comp)) != NULL) {
-        if ((cur == path || cur[-1] == '/') && (cur[clen] == '\0' || cur[clen] == '/')) return 1;
-        cur += 1;
-    }
-    return 0;
 }
 
 static int mock_is_app_embedded(const char *path) {
@@ -1354,8 +931,8 @@ static void test_round4_audit_regressions(void) {
     memset(cd_sha1, 0x11, sizeof(cd_sha1));
     memset(cd_sha256, 0x22, sizeof(cd_sha256));
     uint8_t h_sha1[20], h_sha256[32];
-    sha1_compute(cd_sha1, sizeof(cd_sha1), h_sha1);
-    sha256_compute(cd_sha256, sizeof(cd_sha256), h_sha256);
+    test_sha1_raw(cd_sha1, sizeof(cd_sha1), h_sha1);
+    test_sha256_raw(cd_sha256, sizeof(cd_sha256), h_sha256);
     /* Simulate XNU csops(5) picking SHA-256 alt CD (0x1000) over SHA-1 primary CD (0) */
     uint8_t kernel_cdhash[20];
     memcpy(kernel_cdhash, h_sha256, 20U);
@@ -1402,13 +979,13 @@ static void test_round4_audit_regressions(void) {
         assert(ver == -1);
     }
 
-    /* 6. Multi-digit en10+ interface matching (must match en1..en15, must NOT match en0 or en0a) */
-    assert(is_inactive_en_interface_name("en0") == 0);
-    assert(is_inactive_en_interface_name("en1") == 1);
-    assert(is_inactive_en_interface_name("en9") == 1);
-    assert(is_inactive_en_interface_name("en10") == 1);
-    assert(is_inactive_en_interface_name("en15") == 1);
-    assert(is_inactive_en_interface_name("en1a") == 0);
+    /* 6. Multi-digit en10+ interface matching via production PTDetectionRules */
+    assert(!pt_is_secondary_en_ifname_cstr("en0"));
+    assert(pt_is_secondary_en_ifname_cstr("en1"));
+    assert(pt_is_secondary_en_ifname_cstr("en9"));
+    assert(pt_is_secondary_en_ifname_cstr("en10"));
+    assert(pt_is_secondary_en_ifname_cstr("en15"));
+    assert(!pt_is_secondary_en_ifname_cstr("en1a"));
 
     /* 7. MTLDevice compat13_7 three-property symmetry: supportsBCTextureCompression, supports32BitMSAA, supports32BitFloatFiltering */
     const char *compat13_mtl_props[] = {
@@ -1427,9 +1004,9 @@ static void test_round4_audit_regressions(void) {
     assert(kSysOpenatDprotectedNp == 218);
 
     /* 9. Path-component boundary & app-embedded bundle exemption must NOT match MyCocoa.framework as Cocoa.framework */
-    assert(mock_path_has_component("/System/Library/Frameworks/Cocoa.framework/Cocoa", "Cocoa.framework") == 1);
-    assert(mock_path_has_component("/System/Library/Frameworks/Cocoa.framework", "Cocoa.framework") == 1);
-    assert(mock_path_has_component("/var/containers/Bundle/Application/X/DemoApp.app/Frameworks/MyCocoa.framework/MyCocoa", "Cocoa.framework") == 0);
+    assert(pt_path_has_component("/System/Library/Frameworks/Cocoa.framework/Cocoa", "Cocoa.framework"));
+    assert(pt_path_has_component("/System/Library/Frameworks/Cocoa.framework", "Cocoa.framework"));
+    assert(!pt_path_has_component("/var/containers/Bundle/Application/X/DemoApp.app/Frameworks/MyCocoa.framework/MyCocoa", "Cocoa.framework"));
     assert(mock_is_app_embedded("/var/containers/Bundle/Application/X/DemoApp.app/Frameworks/MyCocoa.framework/MyCocoa") == 1);
     assert(mock_is_app_embedded("/var/containers/Bundle/Application/X/DemoApp.app/Frameworks/Charts.framework/Charts") == 1);
     assert(mock_is_app_embedded("/System/Library/Frameworks/Charts.framework/Charts") == 0);
@@ -1463,42 +1040,8 @@ static uint32_t mock_encode_ldr_x_uimm(uint32_t rt, uintptr_t byte_off) {
     return 0xF9400200U | (rt & 0x1FU) | ((uint32_t)(byte_off >> 3) << 10);
 }
 
-static int mock_decode_arm64_stub_target_slot(uintptr_t stub_pc,
-                                              const uint32_t *words,
-                                              uint32_t stride,
-                                              uintptr_t *out_slot) {
-    if (words == NULL || out_slot == NULL || stride < 12U) return 0;
-    uint32_t w0 = words[0];
-    if ((w0 & 0x9F00001FU) != 0x90000010U) return 0;
-    uint32_t imm21 = (((w0 >> 5) & 0x7FFFFU) << 2) | ((w0 >> 29) & 0x3U);
-    int32_t simm21 = (int32_t)imm21;
-    if ((imm21 & (1U << 20)) != 0U) {
-        simm21 -= (int32_t)(1U << 21);
-    }
-    uintptr_t page = (uintptr_t)((int64_t)(stub_pc & ~(uintptr_t)0xFFFU) + ((int64_t)simm21) * 4096LL);
-    uint32_t w1 = words[1];
-    uint32_t w2 = words[2];
-    if ((w1 & 0xFFC003FFU) == 0xF9400210U && w2 == 0xD61F0200U) {
-        *out_slot = page + (((uintptr_t)((w1 >> 10) & 0xFFFU)) << 3);
-        return 1;
-    }
-    if (stride >= 16U && (w1 & 0xFFC003FFU) == 0x91000210U && (w2 & 0xFFC003FEU) == 0xF9400210U) {
-        uint32_t rt = w2 & 0x1FU;
-        uint32_t w3 = words[3];
-        int branch_ok = (rt == 16U && (w3 == 0xD61F0200U || w3 == 0xD71F0A10U)) ||
-                        (rt == 17U && (w3 == 0xD61F0220U || w3 == 0xD71F0A30U || w3 == 0xD71F0E30U));
-        if (branch_ok) {
-            uintptr_t imm12 = (uintptr_t)((w1 >> 10) & 0xFFFU);
-            uintptr_t uimm = ((uintptr_t)((w2 >> 10) & 0xFFFU)) << 3;
-            *out_slot = page + imm12 + uimm;
-            return 1;
-        }
-    }
-    return 0;
-}
-
 static void test_arm64_stub_decoder_and_got_bitmap(void) {
-    /* 12-byte ARM64 stub with positive and negative ADRP page offsets */
+    /* 12-byte ARM64 stub with positive and negative ADRP page offsets via production PTArm64StubMath */
     uintptr_t pc_pos = 0x101451f10ULL;
     uintptr_t target_pos = 0x10188c960ULL;
     uint32_t stub_pos[3] = {
@@ -1507,7 +1050,7 @@ static void test_arm64_stub_decoder_and_got_bitmap(void) {
         0xD61F0200U, /* br x16 */
     };
     uintptr_t decoded = 0;
-    assert(mock_decode_arm64_stub_target_slot(pc_pos, stub_pos, 12U, &decoded) == 1);
+    assert(pt_decode_arm64_stub_target_slot(pc_pos, stub_pos, 12U, &decoded));
     assert(decoded == target_pos);
 
     uintptr_t pc_neg = 0x102400100ULL;
@@ -1518,7 +1061,7 @@ static void test_arm64_stub_decoder_and_got_bitmap(void) {
         0xD61F0200U,
     };
     decoded = 0;
-    assert(mock_decode_arm64_stub_target_slot(pc_neg, stub_neg, 12U, &decoded) == 1);
+    assert(pt_decode_arm64_stub_target_slot(pc_neg, stub_neg, 12U, &decoded));
     assert(decoded == target_neg);
 
     /* 16-byte ARM64e/PAC stub: adrp x16; add x16, x16, #imm12; ldr x17, [x16, #uimm]; braa x17, x16 */
@@ -1531,17 +1074,17 @@ static void test_arm64_stub_decoder_and_got_bitmap(void) {
         0xD71F0A30U, /* braa x17, x16 */
     };
     decoded = 0;
-    assert(mock_decode_arm64_stub_target_slot(pc_pac, stub_pac, 16U, &decoded) == 1);
+    assert(pt_decode_arm64_stub_target_slot(pc_pac, stub_pac, 16U, &decoded));
     assert(decoded == target_pac);
 
     /* Fail-closed rejections: short stride, NOP, wrong register, BLR instead of BR */
-    assert(mock_decode_arm64_stub_target_slot(pc_pos, stub_pos, 8U, &decoded) == 0);
+    assert(!pt_decode_arm64_stub_target_slot(pc_pos, stub_pos, 8U, &decoded));
     uint32_t bad_nop[3] = { 0xD503201FU, stub_pos[1], stub_pos[2] };
-    assert(mock_decode_arm64_stub_target_slot(pc_pos, bad_nop, 12U, &decoded) == 0);
+    assert(!pt_decode_arm64_stub_target_slot(pc_pos, bad_nop, 12U, &decoded));
     uint32_t bad_reg[3] = { stub_pos[0], mock_encode_ldr_x_uimm(15U, 0x960U), stub_pos[2] };
-    assert(mock_decode_arm64_stub_target_slot(pc_pos, bad_reg, 12U, &decoded) == 0);
+    assert(!pt_decode_arm64_stub_target_slot(pc_pos, bad_reg, 12U, &decoded));
     uint32_t bad_blr[3] = { stub_pos[0], stub_pos[1], 0xD63F0200U };
-    assert(mock_decode_arm64_stub_target_slot(pc_pos, bad_blr, 12U, &decoded) == 0);
+    assert(!pt_decode_arm64_stub_target_slot(pc_pos, bad_blr, 12U, &decoded));
 
     /* GOT bitmap: mark slot 3 & slot 67 as stubbed, leave slot 2 & slot 66 un-stubbed */
     uint64_t bitmap[2] = {0, 0};
@@ -1579,11 +1122,12 @@ static void test_v105_macos_frameworks_and_vm_read_got_sanitize(void) {
         "NetAuth.framework", "IO80211.framework", "AppleVA.framework", "libUniversalAccess.dylib",
     };
     for (size_t i = 0; i < sizeof(macos_paths) / sizeof(macos_paths[0]); i++) {
-        assert(mock_path_has_component(macos_paths[i], comps[i]) == 1);
+        assert(pt_path_has_component(macos_paths[i], comps[i]));
+        assert(pt_is_macos_only_framework_path_cstr(macos_paths[i]));
         assert(mock_is_app_embedded(macos_paths[i]) == 0);
     }
-    assert(mock_path_has_component("/System/Library/Frameworks/OpenGLES.framework/OpenGLES", "OpenGL.framework") == 0);
-    assert(mock_path_has_component("/System/Library/Frameworks/QuickLook.framework/QuickLook", "QuickLookUI.framework") == 0);
+    assert(!pt_path_has_component("/System/Library/Frameworks/OpenGLES.framework/OpenGLES", "OpenGL.framework"));
+    assert(!pt_path_has_component("/System/Library/Frameworks/QuickLook.framework/QuickLook", "QuickLookUI.framework"));
     assert(mock_is_app_embedded("/var/containers/Bundle/Application/X/DemoApp.app/Frameworks/OpenGL.framework/OpenGL") == 1);
 
     /* Aligned vm_read GOT/lazy slot sanitization window math */
@@ -1683,6 +1227,112 @@ static void test_v105_batch2_sysctl_iokit_mig_and_metal(void) {
     assert(line == 2 && col == 10);
 }
 
+static int pt_dummy_fn_a(void) { return 1; }
+static int pt_dummy_fn_b(void) { return 2; }
+
+static void test_production_c_modules_extra(void) {
+    /* 1. pt_filter_xattr_list_buffer compaction + unterminated tail */
+    char xbuf[128];
+    const char *entries[] = {
+        "com.apple.quarantine",
+        "com.example.keep1",
+        "com.apple.metadata:kMDItemWhereFroms",
+        "com.apple.decmpfs"
+    };
+    size_t pos = 0;
+    for (size_t i = 0; i < 4U; i++) {
+        size_t l = strlen(entries[i]) + 1U;
+        memcpy(xbuf + pos, entries[i], l);
+        pos += l;
+    }
+    ssize_t filtered_len = pt_filter_xattr_list_buffer(xbuf, (ssize_t)pos);
+    const char expected[] = "com.example.keep1\0com.apple.decmpfs\0";
+    assert(filtered_len == (ssize_t)(sizeof(expected) - 1U));
+    assert(memcmp(xbuf, expected, (size_t)filtered_len) == 0);
+
+    /* 2. pt_normalize_lexical_path & pt_match_prefix_modulo_private */
+    char norm[256];
+    assert(pt_normalize_lexical_path("/private//var/./mobile/../tmp/", norm, sizeof(norm)) == norm);
+    assert(strcmp(norm, "/private/var/tmp") == 0);
+    const char *rel = pt_match_prefix_modulo_private("/var/containers/Bundle/Application/X", "/private/var/containers", 23U);
+    assert(rel != NULL && strcmp(rel, "/Bundle/Application/X") == 0);
+
+    /* 3. Env, Prefs, Threads, Mach services */
+    assert(pt_is_hidden_env_key_cstr("DYLD_INSERT_LIBRARIES"));
+    assert(!pt_is_hidden_env_key_cstr("HOME"));
+    assert(pt_is_hidden_macos_pref_key_cstr("NSWindow Frame Main"));
+    assert(!pt_is_hidden_macos_pref_key_cstr("AppleLanguages"));
+    assert(pt_is_hidden_thread_name_cstr("com.apple.NSEventThread"));
+    assert(!pt_is_hidden_thread_name_cstr("com.apple.main-thread"));
+    assert(pt_is_hidden_macos_mach_service_cstr("com.apple.dock.server"));
+    assert(!pt_is_hidden_macos_mach_service_cstr("com.apple.SecurityServer"));
+
+    /* 4. pt_collect_two_table_macho_sections on synthetic Mach-O buffer */
+    struct {
+        struct mach_header_64 hdr;
+        struct segment_command_64 seg_text;
+        struct section_64 sec_stubs;
+        struct segment_command_64 seg_data;
+        struct section_64 sec_la;
+        struct section_64 sec_got;
+    } fake_mh;
+    memset(&fake_mh, 0, sizeof(fake_mh));
+    fake_mh.hdr.magic = MH_MAGIC_64;
+    fake_mh.hdr.ncmds = 2U;
+    fake_mh.hdr.sizeofcmds = sizeof(fake_mh) - sizeof(fake_mh.hdr);
+    fake_mh.seg_text.cmd = LC_SEGMENT_64;
+    fake_mh.seg_text.cmdsize = sizeof(fake_mh.seg_text) + sizeof(fake_mh.sec_stubs);
+    memcpy(fake_mh.seg_text.segname, "__TEXT", 6);
+    fake_mh.seg_text.vmaddr = (uint64_t)(uintptr_t)&fake_mh;
+    fake_mh.seg_text.nsects = 1U;
+    fake_mh.sec_stubs.flags = S_SYMBOL_STUBS;
+    fake_mh.sec_stubs.addr = (uint64_t)(uintptr_t)&fake_mh + 0x1000ULL;
+    fake_mh.sec_stubs.size = 36U;
+    fake_mh.sec_stubs.reserved2 = 12U;
+    fake_mh.seg_data.cmd = LC_SEGMENT_64;
+    fake_mh.seg_data.cmdsize = sizeof(fake_mh.seg_data) + 2U * sizeof(fake_mh.sec_la);
+    memcpy(fake_mh.seg_data.segname, "__DATA_CONST", 12);
+    fake_mh.seg_data.nsects = 2U;
+    fake_mh.sec_la.flags = S_LAZY_SYMBOL_POINTERS;
+    fake_mh.sec_la.addr = 0x200000000ULL;
+    fake_mh.sec_la.size = sizeof(void *);
+    fake_mh.sec_got.flags = S_NON_LAZY_SYMBOL_POINTERS;
+    memcpy(fake_mh.sec_got.sectname, "__got", 5);
+    fake_mh.sec_got.addr = 0x200004000ULL;
+    fake_mh.sec_got.size = 4U * sizeof(void *);
+
+    uintptr_t stubs_start = 0, stubs_size = 0;
+    uint32_t stubs_stride = 0, got_count = 0;
+    pt_got_sec_range_t got_secs[PT_MAX_NONLAZY_GOT_SECS];
+    assert(pt_collect_two_table_macho_sections(
+        &fake_mh.hdr, 0, &stubs_start, &stubs_size, &stubs_stride, got_secs, &got_count));
+    assert(stubs_size == 36U && stubs_stride == 12U && got_count == 1U &&
+           got_secs[0].start == 0x200004000ULL && got_secs[0].size == 4U * sizeof(void *));
+
+    /* 5. PTInterposeRegistry hash table lookup + compat13_7 hiding */
+    const pt_dlsym_entry_t reg_entries[2] = {
+        { "pt_sym_alpha", (const void *)&pt_dummy_fn_a, NULL, PT_DLSYM_FLAG_NONE },
+        { "pt_sym_beta", (const void *)&pt_dummy_fn_b, (const void *)&pt_dummy_fn_b,
+          PT_DLSYM_FLAG_WEAK_GUARD | PT_DLSYM_FLAG_HIDE_IN_COMPAT13_7 },
+    };
+    uint16_t reg_slots[16];
+    pt_dlsym_index_t reg_idx;
+    size_t dup_cnt = pt_dlsym_index_build(&reg_idx, reg_entries, 2U, reg_slots, 16U);
+    assert(dup_cnt == 0U);
+    assert(pt_dlsym_index_lookup(&reg_idx, "pt_sym_alpha", false) == (const void *)&pt_dummy_fn_a);
+    assert(pt_dlsym_index_lookup(&reg_idx, "pt_sym_beta", false) == (const void *)&pt_dummy_fn_b);
+    assert(pt_dlsym_index_lookup(&reg_idx, "pt_sym_beta", true) == NULL);
+
+    /* 6. PTCallerAddressMath helpers */
+    uint64_t packed_caller = 0ULL;
+    assert(pt_caller_addr_try_pack(0x104008000ULL, PT_CALLER_APP, &packed_caller));
+    uint8_t out_kind = PT_CALLER_UNKNOWN;
+    assert(pt_caller_addr_cache_match(packed_caller, 0x104008000ULL, &out_kind));
+    assert(out_kind == PT_CALLER_APP);
+    assert(pt_caller_addr_cache_slot(0x104008000ULL) < PT_CALLER_ADDR_CACHE_SIZE);
+    assert(pt_wrapper_cache_slot(pt_caller_compound_key(0x104008000ULL, 0x104008010ULL)) < PT_WRAPPER_CACHE_SIZE);
+}
+
 int main(void) {
     test_der_entitlements_encoding_and_superblob_rewrite();
     test_attr_ref_zero_fill();
@@ -1709,6 +1359,7 @@ int main(void) {
     test_arm64_stub_decoder_and_got_bitmap();
     test_v105_macos_frameworks_and_vm_read_got_sanitize();
     test_v105_batch2_sysctl_iokit_mig_and_metal();
+    test_production_c_modules_extra();
     printf("All compat104 unit tests passed.\n");
     return 0;
 }
