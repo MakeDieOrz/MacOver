@@ -7,6 +7,9 @@
 #if __has_include(<sys/fsgetpath.h>)
 #include <sys/fsgetpath.h>
 #endif
+#if __has_include(<sys/unistd.h>)
+#include <sys/unistd.h>
+#endif
 
 extern const char *dyld_image_path_containing_address(const void *addr);
 extern const struct mach_header *dyld_image_header_containing_address(const void *addr);
@@ -3756,10 +3759,16 @@ typedef uint64_t pt_guardid_t;
 extern int guarded_open_np(const char *path, const pt_guardid_t *guard, u_int guardflags, int flags, ...);
 extern int guarded_open_dprotected_np(const char *path, const pt_guardid_t *guard, u_int guardflags, int flags, int dpclass, int dpflags, ...);
 
-static int pt_guarded_open_np(const char *path, const pt_guardid_t *guard, u_int guardflags, int flags, ...) {
+__attribute__((visibility("hidden")))
+int pt_fs_guarded_open_np_with_caller(const char *path,
+                                      const void *guard,
+                                      u_int guardflags,
+                                      int flags,
+                                      mode_t mode,
+                                      const void *caller) {
     char vbuf[PATH_MAX];
     pt_fs_path_disposition_t disp = pt_prepare_fs_path_mode(path,
-                                                            __builtin_return_address(0),
+                                                            caller,
                                                             vbuf,
                                                             sizeof(vbuf),
                                                             &path,
@@ -3772,20 +3781,35 @@ static int pt_guarded_open_np(const char *path, const pt_guardid_t *guard, u_int
         errno = (flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC)) ? EACCES : EPERM;
         return -1;
     }
+    if (flags & O_CREAT) {
+        return guarded_open_np(path, (const pt_guardid_t *)guard, guardflags, flags, mode);
+    }
+    return guarded_open_np(path, (const pt_guardid_t *)guard, guardflags, flags);
+}
+
+static int pt_guarded_open_np(const char *path, const pt_guardid_t *guard, u_int guardflags, int flags, ...) {
+    mode_t mode = 0;
     if (flags & O_CREAT) {
         va_list ap;
         va_start(ap, flags);
-        int mode = va_arg(ap, int);
+        mode = (mode_t)va_arg(ap, int);
         va_end(ap);
-        return guarded_open_np(path, guard, guardflags, flags, mode);
     }
-    return guarded_open_np(path, guard, guardflags, flags);
+    return pt_fs_guarded_open_np_with_caller(path, guard, guardflags, flags, mode, __builtin_return_address(0));
 }
 
-static int pt_guarded_open_dprotected_np(const char *path, const pt_guardid_t *guard, u_int guardflags, int flags, int dpclass, int dpflags, ...) {
+__attribute__((visibility("hidden")))
+int pt_fs_guarded_open_dprotected_np_with_caller(const char *path,
+                                                 const void *guard,
+                                                 u_int guardflags,
+                                                 int flags,
+                                                 int dpclass,
+                                                 int dpflags,
+                                                 mode_t mode,
+                                                 const void *caller) {
     char vbuf[PATH_MAX];
     pt_fs_path_disposition_t disp = pt_prepare_fs_path_mode(path,
-                                                            __builtin_return_address(0),
+                                                            caller,
                                                             vbuf,
                                                             sizeof(vbuf),
                                                             &path,
@@ -3799,13 +3823,59 @@ static int pt_guarded_open_dprotected_np(const char *path, const pt_guardid_t *g
         return -1;
     }
     if (flags & O_CREAT) {
+        return guarded_open_dprotected_np(path, (const pt_guardid_t *)guard, guardflags, flags, dpclass, dpflags, mode);
+    }
+    return guarded_open_dprotected_np(path, (const pt_guardid_t *)guard, guardflags, flags, dpclass, dpflags);
+}
+
+static int pt_guarded_open_dprotected_np(const char *path, const pt_guardid_t *guard, u_int guardflags, int flags, int dpclass, int dpflags, ...) {
+    mode_t mode = 0;
+    if (flags & O_CREAT) {
         va_list ap;
         va_start(ap, dpflags);
-        int mode = va_arg(ap, int);
+        mode = (mode_t)va_arg(ap, int);
         va_end(ap);
-        return guarded_open_dprotected_np(path, guard, guardflags, flags, dpclass, dpflags, mode);
     }
-    return guarded_open_dprotected_np(path, guard, guardflags, flags, dpclass, dpflags);
+    return pt_fs_guarded_open_dprotected_np_with_caller(path, guard, guardflags, flags, dpclass, dpflags, mode, __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
+int pt_fs_open_extended_with_caller(const char *path,
+                                    int flags,
+                                    uid_t uid,
+                                    gid_t gid,
+                                    mode_t mode,
+                                    void *xsecurity,
+                                    const void *caller) {
+    char vbuf[PATH_MAX];
+    const char *resolved = NULL;
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_mode(path,
+                                                            caller,
+                                                            vbuf,
+                                                            sizeof(vbuf),
+                                                            &resolved,
+                                                            pt_open_flags_are_readonly(flags));
+    if (disp == PT_FS_PATH_HIDDEN) {
+        errno = ENOENT;
+        return -1;
+    }
+    if (disp == PT_FS_PATH_VIRTUAL_ANCESTOR) {
+        errno = (flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC)) ? EACCES : EPERM;
+        return -1;
+    }
+    if (resolved == NULL) {
+        errno = EFAULT;
+        return -1;
+    }
+    return (int)pt_orig_syscall(277,
+                                (uintptr_t)resolved,
+                                (uintptr_t)flags,
+                                (uintptr_t)uid,
+                                (uintptr_t)gid,
+                                (uintptr_t)mode,
+                                (uintptr_t)xsecurity,
+                                0,
+                                0);
 }
 
 extern FILE *pt_orig_fopen_darwin_extsn(const char *, const char *) __asm("_fopen$DARWIN_EXTSN");
@@ -4036,6 +4106,85 @@ static int pt_lstatx_np(const char *path, struct stat *buf, filesec_t fsec) {
 }
 
 __attribute__((visibility("hidden")))
+int pt_fs_stat_extended_with_caller(const char *path,
+                                    void *ub,
+                                    void *xsecurity,
+                                    size_t *xsecurity_size,
+                                    BOOL is_64,
+                                    BOOL follow_links,
+                                    const void *caller) {
+    char vbuf[PATH_MAX];
+    const char *resolved = NULL;
+    BOOL virtual_anc = NO;
+    if (pt_fs_prepare_legacy_stat_path_with_caller(AT_FDCWD, NO, path, caller, vbuf, sizeof(vbuf), &resolved, &virtual_anc) != 0) {
+        return -1;
+    }
+    if (virtual_anc) {
+        if (ub == NULL || !pt_is_valid_user_pointer(ub)) {
+            errno = EFAULT;
+            return -1;
+        }
+        struct stat st64;
+        memset(&st64, 0, sizeof(st64));
+        int sr = pt_fs_stat_with_caller(path, &st64, follow_links, caller);
+        if (sr == 0) {
+            if (is_64) {
+                memcpy(ub, &st64, sizeof(st64));
+            } else {
+                pt_copy_stat64_to_legacy_user64_stat(&st64, ub);
+            }
+            if (xsecurity_size != NULL && pt_is_valid_user_pointer(xsecurity_size)) {
+                *xsecurity_size = 0;
+            }
+        }
+        return sr;
+    }
+    int sysno = is_64 ? (follow_links ? 341 : 342) : (follow_links ? 279 : 280);
+    int ret = (int)pt_orig_syscall(sysno,
+                                   (uintptr_t)resolved,
+                                   (uintptr_t)ub,
+                                   (uintptr_t)xsecurity,
+                                   (uintptr_t)xsecurity_size,
+                                   0, 0, 0, 0);
+    if (ret == 0 && ub != NULL && pt_is_valid_user_pointer(ub)) {
+        if (is_64) {
+            pt_sanitize_stat_buf((struct stat *)ub, caller);
+        } else {
+            pt_sanitize_legacy_user64_stat_in_place(ub, caller);
+        }
+    }
+    return ret;
+}
+
+__attribute__((visibility("hidden")))
+int pt_fs_fstat_extended_with_caller(int fd,
+                                     void *ub,
+                                     void *xsecurity,
+                                     size_t *xsecurity_size,
+                                     BOOL is_64,
+                                     const void *caller) {
+    if (!pt_is_effective_system_or_playtools_caller(caller) && pt_fd_is_sensitive(fd, caller)) {
+        errno = EBADF;
+        return -1;
+    }
+    int sysno = is_64 ? 343 : 281;
+    int ret = (int)pt_orig_syscall(sysno,
+                                   (uintptr_t)fd,
+                                   (uintptr_t)ub,
+                                   (uintptr_t)xsecurity,
+                                   (uintptr_t)xsecurity_size,
+                                   0, 0, 0, 0);
+    if (ret == 0 && ub != NULL && pt_is_valid_user_pointer(ub)) {
+        if (is_64) {
+            pt_sanitize_stat_buf((struct stat *)ub, caller);
+        } else {
+            pt_sanitize_legacy_user64_stat_in_place(ub, caller);
+        }
+    }
+    return ret;
+}
+
+__attribute__((visibility("hidden")))
 int pt_fs_access_with_caller(const char *path, int mode, const void *caller) {
     char vbuf[PATH_MAX];
     pt_fs_path_disposition_t disp = pt_prepare_fs_path_mode(path,
@@ -4090,6 +4239,112 @@ static int pt_faccessat(int fd, const char *path, int mode, int flag) {
     return pt_fs_faccessat_with_caller(fd, path, mode, flag, __builtin_return_address(0));
 }
 
+__attribute__((visibility("hidden")))
+int pt_fs_access_extended_with_caller(void *entries,
+                                      size_t size,
+                                      void *results,
+                                      uid_t uid,
+                                      const void *caller) {
+    if (!pt_is_bypass_enabled() || pt_is_effective_system_or_playtools_caller(caller)) {
+        return (int)pt_orig_syscall(284, (uintptr_t)entries, (uintptr_t)size, (uintptr_t)results, (uintptr_t)uid, 0, 0, 0, 0);
+    }
+    if (entries == NULL || results == NULL ||
+        !pt_is_valid_user_pointer(entries) || !pt_is_valid_user_pointer(results)) {
+        errno = EFAULT;
+        return -1;
+    }
+    if (size < sizeof(struct accessx_descriptor) || size > 16384U) {
+        errno = EINVAL;
+        return -1;
+    }
+    const struct accessx_descriptor *descs = (const struct accessx_descriptor *)entries;
+    unsigned int first_off = descs[0].ad_name_offset;
+    if (first_off < sizeof(struct accessx_descriptor) ||
+        first_off > size ||
+        (first_off % sizeof(struct accessx_descriptor)) != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    size_t count = first_off / sizeof(struct accessx_descriptor);
+    if (count == 0 || count > 100U) {
+        errno = EINVAL;
+        return -1;
+    }
+    const char *base = (const char *)entries;
+    const char *prev_path = NULL;
+    int *res_out = (int *)results;
+    for (size_t i = 0; i < count; i++) {
+        const char *cur_path = NULL;
+        unsigned int off = descs[i].ad_name_offset;
+        if (off != 0) {
+            if (off < first_off || off >= size) {
+                errno = EINVAL;
+                return -1;
+            }
+            size_t avail = size - off;
+            const char *cand = base + off;
+            if (memchr(cand, '\0', avail) == NULL) {
+                errno = EINVAL;
+                return -1;
+            }
+            cur_path = cand;
+            prev_path = cand;
+        } else {
+            if (prev_path == NULL) {
+                errno = EINVAL;
+                return -1;
+            }
+            cur_path = prev_path;
+        }
+
+        char vbuf[PATH_MAX];
+        const char *resolved = NULL;
+        BOOL readonly_req = ((descs[i].ad_flags & (W_OK | 0xF000)) == 0);
+        pt_fs_path_disposition_t disp = pt_prepare_fs_path_mode(cur_path,
+                                                                caller,
+                                                                vbuf,
+                                                                sizeof(vbuf),
+                                                                &resolved,
+                                                                readonly_req);
+        if (disp == PT_FS_PATH_HIDDEN) {
+            res_out[i] = ENOENT;
+            continue;
+        }
+        if (disp == PT_FS_PATH_VIRTUAL_ANCESTOR) {
+            res_out[i] = readonly_req ? 0 : EACCES;
+            continue;
+        }
+        if (resolved == NULL) {
+            res_out[i] = EFAULT;
+            continue;
+        }
+        size_t rlen = strlen(resolved) + 1U;
+        if (sizeof(struct accessx_descriptor) + rlen > 16384U) {
+            res_out[i] = ENAMETOOLONG;
+            continue;
+        }
+        uint8_t single_buf[sizeof(struct accessx_descriptor) + PATH_MAX];
+        struct accessx_descriptor *sdesc = (struct accessx_descriptor *)single_buf;
+        sdesc->ad_name_offset = (unsigned int)sizeof(struct accessx_descriptor);
+        sdesc->ad_flags = descs[i].ad_flags;
+        sdesc->ad_pad[0] = descs[i].ad_pad[0];
+        sdesc->ad_pad[1] = descs[i].ad_pad[1];
+        memcpy(single_buf + sizeof(struct accessx_descriptor), resolved, rlen);
+        int single_res = 0;
+        int saved_errno = errno;
+        intptr_t rc = pt_orig_syscall(284,
+                                      (uintptr_t)single_buf,
+                                      (uintptr_t)(sizeof(struct accessx_descriptor) + rlen),
+                                      (uintptr_t)&single_res,
+                                      (uintptr_t)uid,
+                                      0, 0, 0, 0);
+        int call_errno = errno;
+        errno = saved_errno;
+        res_out[i] = (rc == 0) ? single_res : call_errno;
+    }
+    return 0;
+}
+
 static ssize_t pt_finish_readlink(ssize_t len,
                                   char *raw_buf,
                                   char * restrict buf,
@@ -4117,6 +4372,51 @@ static ssize_t pt_finish_readlink(ssize_t len,
     size_t copy_len = out_len < bufsize ? out_len : bufsize;
     memcpy(buf, out_path, copy_len);
     return (ssize_t)copy_len;
+}
+
+extern ssize_t pt_orig_freadlink(int fd, char *buf, size_t bufsize) __asm("_freadlink") __attribute__((weak_import));
+
+__attribute__((visibility("hidden")))
+ssize_t pt_fs_freadlink_with_caller(int fd, char *buf, size_t bufsize, const void *caller) {
+    BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
+    if (!is_sys && pt_is_bypass_enabled()) {
+        if (pt_is_compat13_7_active()) {
+            errno = ENOSYS;
+            return -1;
+        }
+        if (pt_fd_is_sensitive(fd, caller)) {
+            errno = EBADF;
+            return -1;
+        }
+    }
+    ssize_t r = (&pt_orig_freadlink != NULL)
+        ? pt_orig_freadlink(fd, buf, bufsize)
+        : (ssize_t)pt_orig_syscall(551, (uintptr_t)fd, (uintptr_t)buf, (uintptr_t)bufsize, 0, 0, 0, 0, 0);
+    if (r > 0 && !is_sys && pt_is_bypass_enabled() &&
+        buf != NULL && bufsize > 0 && pt_is_valid_user_pointer(buf)) {
+        size_t slen = ((size_t)r < PATH_MAX) ? (size_t)r : (PATH_MAX - 1U);
+        char raw_buf[PATH_MAX];
+        memcpy(raw_buf, buf, slen);
+        raw_buf[slen] = '\0';
+        if ((raw_buf[0] == '/' && pt_is_sensitive_host_fd_path(raw_buf, caller)) ||
+            pt_is_hidden_dyld_image_name(raw_buf)) {
+            errno = EBADF;
+            return -1;
+        }
+        char vout[PATH_MAX];
+        const char *virt = pt_virtualize_path_for_app(raw_buf, vout, sizeof(vout), NO);
+        if (virt != raw_buf) {
+            size_t vlen = strlen(virt);
+            size_t copy_len = (vlen < bufsize) ? vlen : bufsize;
+            memcpy(buf, virt, copy_len);
+            return (ssize_t)copy_len;
+        }
+    }
+    return r;
+}
+
+static ssize_t pt_freadlink(int fd, char *buf, size_t bufsize) {
+    return pt_fs_freadlink_with_caller(fd, buf, bufsize, __builtin_return_address(0));
 }
 
 __attribute__((visibility("hidden")))
@@ -4290,9 +4590,10 @@ static char *pt_getcwd(char *buf, size_t size) {
     return alloc;
 }
 
-static int pt_chdir(const char *path) {
+__attribute__((visibility("hidden")))
+int pt_fs_chdir_with_caller(const char *path, const void *caller) {
     char vbuf[PATH_MAX];
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path(path, __builtin_return_address(0), vbuf, sizeof(vbuf), &path);
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path(path, caller, vbuf, sizeof(vbuf), &path);
     if (disp == PT_FS_PATH_HIDDEN) {
         errno = ENOENT;
         return -1;
@@ -4304,12 +4605,21 @@ static int pt_chdir(const char *path) {
     return chdir(path);
 }
 
-static int pt_fchdir(int fd) {
-    if (pt_fd_is_sensitive(fd, __builtin_return_address(0))) {
+static int pt_chdir(const char *path) {
+    return pt_fs_chdir_with_caller(path, __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
+int pt_fs_fchdir_with_caller(int fd, const void *caller) {
+    if (pt_fd_is_sensitive(fd, caller)) {
         errno = EACCES;
         return -1;
     }
     return fchdir(fd);
+}
+
+static int pt_fchdir(int fd) {
+    return pt_fs_fchdir_with_caller(fd, __builtin_return_address(0));
 }
 
 static int pt_handle_fcntl_getpath(int ret, int cmd, void *parg, const void *caller) {
@@ -4861,6 +5171,95 @@ static int pt_fs_proc_pidfdinfo_ex(int pid,
     }
     errno = saved_errno;
     return ret;
+}
+
+static int pt_sanitize_proc_fd_or_fileport_buffer(int ret,
+                                                   int flavor,
+                                                   void *buffer,
+                                                   const void *caller,
+                                                   BOOL raw_syscall_abi) {
+    if (buffer != NULL) {
+        if (flavor == PROC_PIDFDVNODEPATHINFO &&
+            (size_t)ret >= sizeof(struct vnode_fdinfowithpath)) {
+            struct vnode_fdinfowithpath *info = (struct vnode_fdinfowithpath *)buffer;
+            if (pt_is_sensitive_host_fd_path(info->pvip.vip_path, caller)) {
+                memset(info, 0, sizeof(struct vnode_fdinfowithpath));
+                errno = EBADF;
+                return raw_syscall_abi ? -1 : 0;
+            }
+            char vout[PATH_MAX];
+            const char *virt = pt_virtualize_path_for_app(info->pvip.vip_path, vout, sizeof(vout), YES);
+            if (virt != info->pvip.vip_path) {
+                strlcpy(info->pvip.vip_path, virt, sizeof(info->pvip.vip_path));
+            }
+        } else if (flavor == PROC_PIDFDSOCKETINFO &&
+                   pt_is_bypass_enabled() &&
+                   (size_t)ret >= sizeof(pt_socket_fdinfo_t)) {
+            pt_socket_fdinfo_t sfi;
+            memcpy(&sfi, buffer, sizeof(sfi));
+            if (sfi.psi.soi_family == AF_UNIX || sfi.psi.soi_kind == SOCKINFO_UN) {
+                BOOL drop_a = pt_sanitize_sockaddr_un_in_place(&sfi.psi.soi_proto.pri_un.unsi_addr.ua_sun, caller);
+                BOOL drop_c = pt_sanitize_sockaddr_un_in_place(&sfi.psi.soi_proto.pri_un.unsi_caddr.ua_sun, caller);
+                if (drop_a || drop_c) {
+                    memset(buffer, 0, sizeof(pt_socket_fdinfo_t));
+                    errno = EBADF;
+                    return raw_syscall_abi ? -1 : 0;
+                }
+                memcpy(buffer, &sfi, sizeof(sfi));
+            }
+        }
+    }
+    return ret;
+}
+
+extern int proc_pidfileportinfo(int pid, uint32_t fileport, int flavor, void *buffer, int buffersize);
+
+static int pt_fs_proc_pidfileportinfo_ex(int pid,
+                                         uint32_t fileport,
+                                         int flavor,
+                                         void *buffer,
+                                         int buffersize,
+                                         const void *caller,
+                                         BOOL raw_syscall_abi) {
+    BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
+    if (!is_sys && pid != 0 && pid != getpid()) {
+        errno = ESRCH;
+        return raw_syscall_abi ? -1 : 0;
+    }
+    int saved_errno = errno;
+    errno = 0;
+    int ret = proc_pidfileportinfo(pid, fileport, flavor, buffer, buffersize);
+    int call_errno = errno;
+    if (ret < 0 || call_errno != 0) {
+        errno = (call_errno != 0) ? call_errno : ESRCH;
+        return raw_syscall_abi ? -1 : 0;
+    }
+    if (ret == 0) {
+        errno = saved_errno;
+        return 0;
+    }
+    if (!is_sys) {
+        int san_ret = pt_sanitize_proc_fd_or_fileport_buffer(ret, flavor, buffer, caller, raw_syscall_abi);
+        if (san_ret != ret) {
+            return san_ret;
+        }
+    }
+    errno = saved_errno;
+    return ret;
+}
+
+__attribute__((visibility("hidden")))
+int pt_fs_proc_pidfileportinfo_syscall_with_caller(int pid,
+                                                   uint32_t fileport,
+                                                   int flavor,
+                                                   void *buffer,
+                                                   int buffersize,
+                                                   const void *caller) {
+    return pt_fs_proc_pidfileportinfo_ex(pid, fileport, flavor, buffer, buffersize, caller, YES);
+}
+
+static int pt_proc_pidfileportinfo(int pid, uint32_t fileport, int flavor, void *buffer, int buffersize) {
+    return pt_fs_proc_pidfileportinfo_ex(pid, fileport, flavor, buffer, buffersize, __builtin_return_address(0), NO);
 }
 
 __attribute__((visibility("hidden")))
@@ -5737,6 +6136,83 @@ ssize_t pt_fs_getdirentries64_syscall_with_caller(int fd, void *buf, size_t bufs
 
 static ssize_t pt_getdirentries64(int fd, void *buf, size_t bufsize, off_t *position) {
     return pt_fs_getdirentries64_syscall_with_caller(fd, buf, bufsize, position, __builtin_return_address(0));
+}
+
+extern int pt_orig_getdirentries(int fd, char *buf, int nbytes, long *basep) __asm("_getdirentries");
+
+typedef struct __attribute__((packed)) {
+    uint32_t d_ino;
+    uint16_t d_reclen;
+    uint8_t  d_type;
+    uint8_t  d_namlen;
+} pt_legacy_dirent_hdr_t;
+
+__attribute__((visibility("hidden")))
+ssize_t pt_fs_getdirentries_syscall_with_caller(int fd, void *buf, size_t bufsize, long *basep, const void *caller) {
+    int cap_bytes = (bufsize > (size_t)INT_MAX) ? INT_MAX : (int)bufsize;
+    BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
+    if (is_sys || !pt_is_bypass_enabled()) {
+        return (ssize_t)pt_orig_getdirentries(fd, (char *)buf, cap_bytes, basep);
+    }
+    char dirpath[PATH_MAX];
+    dirpath[0] = '\0';
+    int saved_errno = errno;
+    if (fd >= 0 && fcntl(fd, F_GETPATH, dirpath) != -1 && pt_is_sensitive_host_fd_path(dirpath, caller)) {
+        errno = EBADF;
+        return -1;
+    }
+    errno = saved_errno;
+    int is_sys_int = 0;
+    int in_data_root = (dirpath[0] != '\0') ? (pt_path_equals_real_data_root(dirpath) ? 1 : 0) : -1;
+    for (int guard = 0; guard < 256; guard++) {
+        int nbytes = pt_orig_getdirentries(fd, (char *)buf, cap_bytes, basep);
+        if (nbytes <= 0 || buf == NULL) {
+            return (ssize_t)nbytes;
+        }
+        uint8_t *base = (uint8_t *)buf;
+        size_t total = (size_t)nbytes;
+        size_t read_off = 0;
+        size_t write_off = 0;
+        const size_t hdr_sz = sizeof(pt_legacy_dirent_hdr_t);
+        while (read_off + hdr_sz < total) {
+            pt_legacy_dirent_hdr_t hdr;
+            memcpy(&hdr, base + read_off, hdr_sz);
+            uint16_t reclen = hdr.d_reclen;
+            if (reclen < hdr_sz || read_off + reclen > total) {
+                size_t rem = total - read_off;
+                if (write_off != read_off) {
+                    memmove(base + write_off, base + read_off, rem);
+                }
+                write_off += rem;
+                break;
+            }
+            char namebuf[NAME_MAX + 1];
+            size_t max_name = (size_t)reclen - hdr_sz;
+            size_t nlen = (hdr.d_namlen < max_name) ? (size_t)hdr.d_namlen : max_name;
+            if (nlen >= sizeof(namebuf)) {
+                nlen = sizeof(namebuf) - 1U;
+            }
+            memcpy(namebuf, base + read_off + hdr_sz, nlen);
+            namebuf[nlen] = '\0';
+            if (!pt_should_hide_dirent(namebuf, hdr.d_type, caller, &is_sys_int, &in_data_root,
+                                       NULL, fd, (dirpath[0] != '\0') ? dirpath : NULL)) {
+                if (write_off != read_off) {
+                    memmove(base + write_off, base + read_off, reclen);
+                }
+                write_off += reclen;
+            }
+            read_off += reclen;
+        }
+        if (write_off > 0) {
+            return (ssize_t)write_off;
+        }
+    }
+    return 0;
+}
+
+static int pt_getdirentries(int fd, char *buf, int nbytes, long *basep) {
+    size_t sz = (nbytes > 0) ? (size_t)nbytes : 0U;
+    return (int)pt_fs_getdirentries_syscall_with_caller(fd, buf, sz, basep, __builtin_return_address(0));
 }
 
 static struct dirent *pt_readdir(DIR *dirp) {
@@ -8601,6 +9077,7 @@ DYLD_INTERPOSE(pt_fcntl, fcntl)
 DYLD_INTERPOSE(pt_fcntl_nocancel, pt_orig_fcntl_nocancel)
 DYLD_INTERPOSE(pt_proc_pidpath, proc_pidpath)
 DYLD_INTERPOSE(pt_proc_pidfdinfo, proc_pidfdinfo)
+DYLD_INTERPOSE(pt_proc_pidfileportinfo, proc_pidfileportinfo)
 DYLD_INTERPOSE(pt_proc_pidinfo, proc_pidinfo)
 DYLD_INTERPOSE(pt_proc_listpids, proc_listpids)
 DYLD_INTERPOSE(pt_proc_listallpids, proc_listallpids)
@@ -8831,6 +9308,9 @@ void *pt_fs_dlsym_route(const char *symbol) {
     if (strcmp(symbol, "proc_pidfdinfo") == 0) {
         return (void *)&pt_proc_pidfdinfo;
     }
+    if (strcmp(symbol, "proc_pidfileportinfo") == 0) {
+        return (void *)&pt_proc_pidfileportinfo;
+    }
     if (strcmp(symbol, "proc_regionfilename") == 0) {
         return (void *)&pt_proc_regionfilename;
     }
@@ -8881,6 +9361,12 @@ void *pt_fs_dlsym_route(const char *symbol) {
     }
     if (strcmp(symbol, "__getdirentries64") == 0) {
         return (void *)&pt_getdirentries64;
+    }
+    if (strcmp(symbol, "getdirentries") == 0) {
+        return (void *)&pt_getdirentries;
+    }
+    if (strcmp(symbol, "freadlink") == 0 && &pt_orig_freadlink != NULL && !pt_is_compat13_7_active()) {
+        return (void *)&pt_freadlink;
     }
     if (strcmp(symbol, "getmntinfo") == 0) {
         return (void *)&pt_getmntinfo;
@@ -8991,3 +9477,5 @@ DYLD_INTERPOSE(pt_sqlite3_open, sqlite3_open)
 DYLD_INTERPOSE(pt_sqlite3_open_v2, sqlite3_open_v2)
 DYLD_INTERPOSE(pt_fsgetpath, fsgetpath)
 DYLD_INTERPOSE(pt_fstat, fstat)
+DYLD_INTERPOSE(pt_getdirentries, pt_orig_getdirentries)
+DYLD_INTERPOSE(pt_freadlink, pt_orig_freadlink)
