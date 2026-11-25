@@ -92,7 +92,7 @@ public class NetworkVM {
 
     public static func urlAccessible(url: URL,
                                      popup: Bool = false,
-                                     completion: ((URL?, Bool) -> Void)? = nil) {
+                                     completion: (@Sendable (URL?, Bool) -> Void)? = nil) {
         Task {
             let (finalURL, available) = await isURLAccessible(url: url, popup: popup)
             await MainActor.run {

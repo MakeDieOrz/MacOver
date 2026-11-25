@@ -92,7 +92,7 @@ public extension URL {
     func enumerateContents(blocking: Bool = true,
                            includingPropertiesForKeys keys: [URLResourceKey]? = nil,
                            options: FileManager.DirectoryEnumerationOptions? = nil,
-                           _ callback: @escaping (URL, URLResourceValues) throws -> Void) {
+                           _ callback: @escaping @Sendable (URL, URLResourceValues) throws -> Void) {
         let resourceKeys = keys ?? [.isRegularFileKey, .fileSizeKey]
         guard let enumerator = FileManager.default.enumerator(
             at: self,

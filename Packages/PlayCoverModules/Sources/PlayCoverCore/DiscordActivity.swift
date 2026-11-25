@@ -7,7 +7,7 @@
 
 import Foundation
 
-public struct DiscordActivity: Codable, Equatable {
+public struct DiscordActivity: Codable, Equatable, Sendable {
     public var enable = false
     public var applicationID = ""
     public var details = ""

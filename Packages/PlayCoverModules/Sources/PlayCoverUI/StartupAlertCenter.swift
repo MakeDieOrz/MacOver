@@ -1,6 +1,6 @@
 import Foundation
 
-public enum StartupAlertItem: Identifiable, Equatable {
+public enum StartupAlertItem: Identifiable, Equatable, Sendable {
     case lowPowerMode
     case audioSampleRate(deviceID: UInt32, currentSampleRate: Double)
     case safeModeActivated(appName: String, bundleID: String, breadcrumbPath: String)

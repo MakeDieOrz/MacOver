@@ -1,11 +1,13 @@
 import CryptoKit
 import Foundation
 import MachO
-import XCTest
+import Synchronization
+import Testing
 @testable import PlayCoverCore
 @testable import PlayCoverMachO
 
-final class PlayCoverMachOSPMTests: XCTestCase {
+@Suite(.serialized)
+struct PlayCoverMachOSPMTests {
     private func makeSyntheticArm64MachO(
         dylibPath: String = "/System/Library/Frameworks/Foundation.framework/Foundation",
         platform: UInt32 = UInt32(PLATFORM_MACCATALYST)
@@ -21,7 +23,6 @@ final class PlayCoverMachOSPMTests: XCTestCase {
             reserved: 0
         )
 
-        // LC_BUILD_VERSION
         var buildCmd = build_version_command(
             cmd: UInt32(LC_BUILD_VERSION),
             cmdsize: UInt32(MemoryLayout<build_version_command>.size),
@@ -31,7 +32,6 @@ final class PlayCoverMachOSPMTests: XCTestCase {
             ntools: 0
         )
 
-        // LC_LOAD_DYLIB padded to 8 bytes
         let strData = Data(dylibPath.utf8) + Data([0])
         let baseDylibSize = MemoryLayout<dylib_command>.size
         let totalDylibSize = (baseDylibSize + strData.count + 7) & ~7
@@ -58,13 +58,13 @@ final class PlayCoverMachOSPMTests: XCTestCase {
 
         var binary = Data(bytes: &header, count: MemoryLayout<mach_header_64>.size)
         binary.append(commandsData)
-        // Add generous load command padding + minimal __TEXT payload so EarliestContentOffset permits injection.
         let paddingNeeded = max(0, 4096 - binary.count)
         binary.append(Data(repeating: 0, count: paddingNeeded))
         return binary
     }
 
-    func testInspectAndValidationOnSyntheticArm64Binary() throws {
+    @Test
+    func inspectAndValidationOnSyntheticArm64Binary() throws {
         let tmpDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("PlayCoverMachOSPMTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
@@ -73,8 +73,8 @@ final class PlayCoverMachOSPMTests: XCTestCase {
         let binURL = tmpDir.appendingPathComponent("SyntheticBin")
         try makeSyntheticArm64MachO().write(to: binURL)
 
-        XCTAssertTrue(try Macho.isMachoValidArch(binURL))
-        XCTAssertFalse(try Macho.isMachoEncrypted(atURL: binURL))
+        #expect(try Macho.isMachoValidArch(binURL))
+        #expect(try !Macho.isMachoEncrypted(atURL: binURL))
 
         let mockPath =
             "/Users/test/Library/Containers/app.makedie.MacOver/" +
@@ -83,19 +83,22 @@ final class PlayCoverMachOSPMTests: XCTestCase {
             atURL: binURL,
             playToolsPath: mockPath
         )
-        XCTAssertFalse(inspected.hasPlayTools)
-        XCTAssertTrue(inspected.isCatalyst)
+        #expect(!inspected.hasPlayTools)
+        #expect(inspected.isCatalyst)
 
         let iosBinURL = tmpDir.appendingPathComponent("SyntheticIOSBin")
         try makeSyntheticArm64MachO(platform: UInt32(PLATFORM_IOS)).write(to: iosBinURL)
-        XCTAssertFalse(try Macho.isMachoValidArch(iosBinURL))
+        #expect(try !Macho.isMachoValidArch(iosBinURL))
 
         let invalidURL = tmpDir.appendingPathComponent("Invalid")
         try Data("not-macho".utf8).write(to: invalidURL)
-        XCTAssertThrowsError(try Macho.isMachoValidArch(invalidURL))
+        #expect(throws: (any Error).self) {
+            try Macho.isMachoValidArch(invalidURL)
+        }
     }
 
-    func testSyncUserPluginsWithStubbedSigner() throws {
+    @Test
+    func syncUserPluginsWithStubbedSigner() throws {
         let tmpDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("PlayCoverMachOPlugins-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
@@ -109,20 +112,23 @@ final class PlayCoverMachOSPMTests: XCTestCase {
         try Data("{\"identifier\":\"com.example.p\"}".utf8)
             .write(to: storeDir.appendingPathComponent("Plugin.manifest.json"))
 
-        var signed: [String] = []
-        try PlayTools.syncUserPlugins(from: storeDir, into: targetDir) { signed.append($0.lastPathComponent) }
-        XCTAssertEqual(signed, ["Plugin.dylib"])
-        XCTAssertTrue(FileManager.default.fileExists(atPath: targetDir.appendingPathComponent("Plugin.dylib").path))
+        let signed = Mutex<[String]>([])
+        try PlayTools.syncUserPlugins(from: storeDir, into: targetDir) { url in
+            signed.withLock { $0.append(url.lastPathComponent) }
+        }
+        #expect(signed.withLock { $0 } == ["Plugin.dylib"])
+        #expect(FileManager.default.fileExists(atPath: targetDir.appendingPathComponent("Plugin.dylib").path))
         let manifestTarget = targetDir.appendingPathComponent("Plugin.manifest.json")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: manifestTarget.path))
+        #expect(FileManager.default.fileExists(atPath: manifestTarget.path))
     }
 
-    func testPlayToolsPathIsIsolatedInsideMacOverContainer() {
+    @Test
+    func playToolsPathIsIsolatedInsideMacOverContainer() {
         let path = PlayTools.playToolsPath.path
         let expectedSuffix =
             "/Library/Containers/app.makedie.MacOver/Frameworks/PlayTools.framework/PlayTools"
-        XCTAssertTrue(path.hasSuffix(expectedSuffix))
-        XCTAssertFalse(path.hasSuffix("/Library/Frameworks/PlayTools.framework/PlayTools"))
+        #expect(path.hasSuffix(expectedSuffix))
+        #expect(!path.hasSuffix("/Library/Frameworks/PlayTools.framework/PlayTools"))
     }
 
     private struct SyntheticSVCBinary {
@@ -171,7 +177,7 @@ final class PlayCoverMachOSPMTests: XCTestCase {
         codeSvcRelOffsets.append(textFileStart + (codeWords.count - 1) * 4)
 
         let dicRelOffset = textFileStart + codeWords.count * 4
-        codeWords.append(svcWord) // Must remain untouched because covered by LC_DATA_IN_CODE
+        codeWords.append(svcWord)
 
         if codeSvcCount >= 2 {
             codeWords.append(retWord)
@@ -367,7 +373,8 @@ final class PlayCoverMachOSPMTests: XCTestCase {
         }
     }
 
-    func testInlineSyscallPatcherThinAndFatRoundTripAndExclusions() throws {
+    @Test
+    func inlineSyscallPatcherThinAndFatRoundTripAndExclusions() throws {
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appendingPathComponent("svc-patcher-test-\(UUID().uuidString)")
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
@@ -417,72 +424,68 @@ final class PlayCoverMachOSPMTests: XCTestCase {
             manifestURL: manifestURL,
             enabled: true
         )
-        XCTAssertTrue(res1.modified)
-        XCTAssertEqual(res1.patchedSiteCount, 3)
-        XCTAssertEqual(Set(res1.modifiedBinaryURLs.map { $0.lastPathComponent }), ["TestApp", "Helper"])
+        #expect(res1.modified)
+        #expect(res1.patchedSiteCount == 3)
+        #expect(Set(res1.modifiedBinaryURLs.map { $0.lastPathComponent }) == ["TestApp", "Helper"])
 
-        // Verify permissions & patched words + exclusions
         let mainPerms = (try fm.attributesOfItem(atPath: mainExecURL.path)[.posixPermissions] as? NSNumber)?.intValue
-        XCTAssertEqual(mainPerms, 0o755)
+        #expect(mainPerms == 0o755)
         for off in mainSynth.codeSvcFileOffsets {
-            XCTAssertEqual(try readUInt32LE(from: mainExecURL, at: off), InlineSyscallPatcher.brkInstruction)
+            #expect(try readUInt32LE(from: mainExecURL, at: off) == InlineSyscallPatcher.brkInstruction)
         }
-        XCTAssertEqual(
-            try readUInt32LE(from: mainExecURL, at: mainSynth.dataInCodeSvcFileOffset),
-            InlineSyscallPatcher.svcInstruction
+        #expect(
+            try readUInt32LE(from: mainExecURL, at: mainSynth.dataInCodeSvcFileOffset)
+                == InlineSyscallPatcher.svcInstruction
         )
-        XCTAssertEqual(
-            try readUInt32LE(from: mainExecURL, at: mainSynth.dataConstSvcFileOffset),
-            InlineSyscallPatcher.svcInstruction
+        #expect(
+            try readUInt32LE(from: mainExecURL, at: mainSynth.dataConstSvcFileOffset)
+                == InlineSyscallPatcher.svcInstruction
         )
 
         let fatSvcOff = fatDylib.arm64SliceOffset + dylibSynth.codeSvcFileOffsets[0]
         let fatDICOOff = fatDylib.arm64SliceOffset + dylibSynth.dataInCodeSvcFileOffset
         let fatConstOff = fatDylib.arm64SliceOffset + dylibSynth.dataConstSvcFileOffset
-        XCTAssertEqual(try readUInt32LE(from: helperURL, at: fatSvcOff), InlineSyscallPatcher.brkInstruction)
-        XCTAssertEqual(try readUInt32LE(from: helperURL, at: fatDICOOff), InlineSyscallPatcher.svcInstruction)
-        XCTAssertEqual(try readUInt32LE(from: helperURL, at: fatConstOff), InlineSyscallPatcher.svcInstruction)
+        #expect(try readUInt32LE(from: helperURL, at: fatSvcOff) == InlineSyscallPatcher.brkInstruction)
+        #expect(try readUInt32LE(from: helperURL, at: fatDICOOff) == InlineSyscallPatcher.svcInstruction)
+        #expect(try readUInt32LE(from: helperURL, at: fatConstOff) == InlineSyscallPatcher.svcInstruction)
 
-        XCTAssertEqual(
-            try readUInt32LE(from: excludedURL, at: dylibSynth.codeSvcFileOffsets[0]),
-            InlineSyscallPatcher.svcInstruction
+        #expect(
+            try readUInt32LE(from: excludedURL, at: dylibSynth.codeSvcFileOffsets[0])
+                == InlineSyscallPatcher.svcInstruction
         )
 
         let manifestData = try Data(contentsOf: manifestURL)
         let manifest = try JSONDecoder().decode(SVCPatchManifest.self, from: manifestData)
-        XCTAssertEqual(manifest.schemaVersion, 1)
-        XCTAssertEqual(manifest.bundleIdentifier, "com.example.svc")
-        XCTAssertEqual(manifest.originalInstruction, InlineSyscallPatcher.svcInstruction)
-        XCTAssertEqual(manifest.patchInstruction, InlineSyscallPatcher.brkInstruction)
-        XCTAssertEqual(manifest.files.count, 2)
-        let mainManifestEntry = try XCTUnwrap(manifest.files.first { $0.relativePath == "TestApp" })
-        XCTAssertEqual(mainManifestEntry.sites.map { $0.vmOffset }, mainSynth.codeSvcVMOffsets)
+        #expect(manifest.schemaVersion == 1)
+        #expect(manifest.bundleIdentifier == "com.example.svc")
+        #expect(manifest.originalInstruction == InlineSyscallPatcher.svcInstruction)
+        #expect(manifest.patchInstruction == InlineSyscallPatcher.brkInstruction)
+        #expect(manifest.files.count == 2)
+        let mainManifestEntry = try #require(manifest.files.first { $0.relativePath == "TestApp" })
+        #expect(mainManifestEntry.sites.map { $0.vmOffset } == mainSynth.codeSvcVMOffsets)
 
-        // Second apply must be a clean no-op
         let res2 = try InlineSyscallPatcher.reconcile(
             appBundleURL: appURL,
             bundleIdentifier: "com.example.svc",
             manifestURL: manifestURL,
             enabled: true
         )
-        XCTAssertFalse(res2.modified)
-        XCTAssertTrue(res2.modifiedBinaryURLs.isEmpty)
-        XCTAssertEqual(res2.patchedSiteCount, 3)
+        #expect(!res2.modified)
+        #expect(res2.modifiedBinaryURLs.isEmpty)
+        #expect(res2.patchedSiteCount == 3)
 
-        // Exact byte-for-byte revert when disabled
         let revert1 = try InlineSyscallPatcher.reconcile(
             appBundleURL: appURL,
             bundleIdentifier: "com.example.svc",
             manifestURL: manifestURL,
             enabled: false
         )
-        XCTAssertTrue(revert1.modified)
-        XCTAssertEqual(revert1.patchedSiteCount, 0)
-        XCTAssertFalse(fm.fileExists(atPath: manifestURL.path))
-        XCTAssertEqual(try Data(contentsOf: mainExecURL), mainSynth.data)
-        XCTAssertEqual(try Data(contentsOf: helperURL), fatDylib.data)
+        #expect(revert1.modified)
+        #expect(revert1.patchedSiteCount == 0)
+        #expect(!fm.fileExists(atPath: manifestURL.path))
+        #expect(try Data(contentsOf: mainExecURL) == mainSynth.data)
+        #expect(try Data(contentsOf: helperURL) == fatDylib.data)
 
-        // Re-patch, simulate codesign __LINKEDIT mutation, verify idempotency + clean revert
         _ = try InlineSyscallPatcher.reconcile(
             appBundleURL: appURL,
             bundleIdentifier: "com.example.svc",
@@ -502,7 +505,7 @@ final class PlayCoverMachOSPMTests: XCTestCase {
             manifestURL: manifestURL,
             enabled: true
         )
-        XCTAssertFalse(resAfterResign.modified)
+        #expect(!resAfterResign.modified)
 
         let revertAfterResign = try InlineSyscallPatcher.reconcile(
             appBundleURL: appURL,
@@ -510,10 +513,10 @@ final class PlayCoverMachOSPMTests: XCTestCase {
             manifestURL: manifestURL,
             enabled: false
         )
-        XCTAssertTrue(revertAfterResign.modified)
-        XCTAssertFalse(fm.fileExists(atPath: manifestURL.path))
+        #expect(revertAfterResign.modified)
+        #expect(!fm.fileExists(atPath: manifestURL.path))
         for off in mainSynth.codeSvcFileOffsets {
-            XCTAssertEqual(try readUInt32LE(from: mainExecURL, at: off), InlineSyscallPatcher.svcInstruction)
+            #expect(try readUInt32LE(from: mainExecURL, at: off) == InlineSyscallPatcher.svcInstruction)
         }
     }
 
@@ -559,7 +562,8 @@ final class PlayCoverMachOSPMTests: XCTestCase {
         return (fat, arm64eOffset, arm64Offset)
     }
 
-    func testInlineSyscallPatcherCorruptManifestRecoveryAndArm64SliceDeduplication() throws {
+    @Test
+    func inlineSyscallPatcherCorruptManifestRecoveryAndArm64SliceDeduplication() throws {
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appendingPathComponent("svc-recovery-test-\(UUID().uuidString)")
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
@@ -595,53 +599,48 @@ final class PlayCoverMachOSPMTests: XCTestCase {
         try fm.createDirectory(at: manifestURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("{corrupt-json".utf8).write(to: manifestURL)
 
-        // Disabled / Safe Mode must recover cleanly from corrupt JSON manifest without throwing.
         let recoveryResult = try InlineSyscallPatcher.reconcile(
             appBundleURL: appURL,
             bundleIdentifier: "com.example.fat",
             manifestURL: manifestURL,
             enabled: false
         )
-        XCTAssertFalse(recoveryResult.modified)
-        XCTAssertEqual(recoveryResult.patchedSiteCount, 0)
-        XCTAssertFalse(fm.fileExists(atPath: manifestURL.path))
+        #expect(!recoveryResult.modified)
+        #expect(recoveryResult.patchedSiteCount == 0)
+        #expect(!fm.fileExists(atPath: manifestURL.path))
 
-        // Applying patches to a fat binary with both arm64e and arm64 (subtype 0)
-        // must only target the arm64 (subtype 0) slice and never mix sliceOffset entries.
         let patchResult = try InlineSyscallPatcher.reconcile(
             appBundleURL: appURL,
             bundleIdentifier: "com.example.fat",
             manifestURL: manifestURL,
             enabled: true
         )
-        XCTAssertTrue(patchResult.modified)
-        XCTAssertEqual(patchResult.patchedSiteCount, 2)
+        #expect(patchResult.modified)
+        #expect(patchResult.patchedSiteCount == 2)
 
         let manifest = try JSONDecoder().decode(SVCPatchManifest.self, from: Data(contentsOf: manifestURL))
-        let entry = try XCTUnwrap(manifest.files.first)
-        XCTAssertEqual(entry.sites.count, 2)
-        XCTAssertTrue(entry.sites.allSatisfy { $0.sliceOffset == UInt64(fat.arm64Offset) })
+        let entry = try #require(manifest.files.first)
+        #expect(entry.sites.count == 2)
+        #expect(entry.sites.allSatisfy { $0.sliceOffset == UInt64(fat.arm64Offset) })
 
         for off in arm64Synth.codeSvcFileOffsets {
-            XCTAssertEqual(
-                try readUInt32LE(from: execURL, at: fat.arm64Offset + off),
-                InlineSyscallPatcher.brkInstruction
+            #expect(
+                try readUInt32LE(from: execURL, at: fat.arm64Offset + off)
+                    == InlineSyscallPatcher.brkInstruction
             )
         }
-        // arm64e slice remains untouched
-        XCTAssertEqual(
-            try readUInt32LE(from: execURL, at: fat.arm64eOffset + arm64eSynth.codeSvcFileOffsets[0]),
-            InlineSyscallPatcher.svcInstruction
+        #expect(
+            try readUInt32LE(from: execURL, at: fat.arm64eOffset + arm64eSynth.codeSvcFileOffsets[0])
+                == InlineSyscallPatcher.svcInstruction
         )
 
-        // Second apply must remain idempotent.
         let secondApply = try InlineSyscallPatcher.reconcile(
             appBundleURL: appURL,
             bundleIdentifier: "com.example.fat",
             manifestURL: manifestURL,
             enabled: true
         )
-        XCTAssertFalse(secondApply.modified)
+        #expect(!secondApply.modified)
 
         let revertResult = try InlineSyscallPatcher.reconcile(
             appBundleURL: appURL,
@@ -649,11 +648,12 @@ final class PlayCoverMachOSPMTests: XCTestCase {
             manifestURL: manifestURL,
             enabled: false
         )
-        XCTAssertTrue(revertResult.modified)
-        XCTAssertEqual(try Data(contentsOf: execURL), fat.data)
+        #expect(revertResult.modified)
+        #expect(try Data(contentsOf: execURL) == fat.data)
     }
 
-    func testPlayToolsRemoveFromAppRevertsSVCPatches() async throws {
+    @Test
+    func playToolsRemoveFromAppRevertsSVCPatches() async throws {
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appendingPathComponent("playtools-remove-svc-\(UUID().uuidString)")
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
@@ -686,26 +686,26 @@ final class PlayCoverMachOSPMTests: XCTestCase {
             manifestURL: manifestURL,
             enabled: true
         )
-        XCTAssertTrue(applyResult.modified)
-        XCTAssertTrue(fm.fileExists(atPath: manifestURL.path))
+        #expect(applyResult.modified)
+        #expect(fm.fileExists(atPath: manifestURL.path))
         for off in synth.codeSvcFileOffsets {
-            XCTAssertEqual(try readUInt32LE(from: execURL, at: off), InlineSyscallPatcher.brkInstruction)
+            #expect(try readUInt32LE(from: execURL, at: off) == InlineSyscallPatcher.brkInstruction)
         }
 
-        var signedApp = false
+        let signedApp = Mutex(false)
         await PlayTools.removeFromApp(
             execURL,
             appBundleURL: appURL,
             bundleIdentifier: "com.example.removept",
             svcManifestURL: manifestURL,
             signMacho: { _ in },
-            signApp: { _ in signedApp = true }
+            signApp: { _ in signedApp.withLock { $0 = true } }
         )
 
-        XCTAssertTrue(signedApp)
-        XCTAssertFalse(fm.fileExists(atPath: manifestURL.path))
+        #expect(signedApp.withLock { $0 })
+        #expect(!fm.fileExists(atPath: manifestURL.path))
         for off in synth.codeSvcFileOffsets {
-            XCTAssertEqual(try readUInt32LE(from: execURL, at: off), InlineSyscallPatcher.svcInstruction)
+            #expect(try readUInt32LE(from: execURL, at: off) == InlineSyscallPatcher.svcInstruction)
         }
     }
 }

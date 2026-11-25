@@ -1,69 +1,68 @@
 import Foundation
-import XCTest
+import Testing
 @testable import PlayCoverCore
 @testable import PlayCoverSandbox
 
-final class PlayCoverSandboxSPMTests: XCTestCase {
-    func testDualTrackPrivilegeEscalatorRulesAndCommandQuoting() {
-        XCTAssertEqual(
+@Suite(.serialized)
+struct PlayCoverSandboxSPMTests {
+    @Test
+    func dualTrackPrivilegeEscalatorRulesAndCommandQuoting() {
+        #expect(
             DualTrackPrivilegeEscalator.selectTrack(
                 macOS13OrNewer: true,
                 hasDeveloperIDTeam: true,
                 hasEmbeddedHelperPlist: true
-            ),
-            .xpcHelper
+            ) == .xpcHelper
         )
-        XCTAssertEqual(
+        #expect(
             DualTrackPrivilegeEscalator.selectTrack(
                 macOS13OrNewer: true,
                 hasDeveloperIDTeam: true,
                 hasEmbeddedHelperPlist: false
-            ),
-            .appleScriptGUI
+            ) == .appleScriptGUI
         )
-        XCTAssertEqual(
+        #expect(
             DualTrackPrivilegeEscalator.selectTrack(
                 macOS13OrNewer: true,
                 hasDeveloperIDTeam: false,
                 hasEmbeddedHelperPlist: true
-            ),
-            .appleScriptGUI
+            ) == .appleScriptGUI
         )
-        XCTAssertEqual(
+        #expect(
             DualTrackPrivilegeEscalator.selectTrack(
                 macOS13OrNewer: false,
                 hasDeveloperIDTeam: true,
                 hasEmbeddedHelperPlist: true
-            ),
-            .appleScriptGUI
+            ) == .appleScriptGUI
         )
 
-        XCTAssertTrue(
+        #expect(
             DualTrackPrivilegeEscalator.hasDeveloperIDIdentity(
                 teamIdentifier: "ABCDE12345",
                 leafCommonName: "Developer ID Application: Example Corp (ABCDE12345)"
             )
         )
-        XCTAssertFalse(
-            DualTrackPrivilegeEscalator.hasDeveloperIDIdentity(
+        #expect(
+            !DualTrackPrivilegeEscalator.hasDeveloperIDIdentity(
                 teamIdentifier: "ABCDE12345",
                 leafCommonName: "Apple Development: Test User"
             )
         )
-        XCTAssertEqual(DualTrackPrivilegeEscalator.shellSingleQuoted("a'b"), "'a'\"'\"'b'")
+        #expect(DualTrackPrivilegeEscalator.shellSingleQuoted("a'b") == "'a'\"'\"'b'")
 
         let script = DualTrackPrivilegeEscalator.buildAppleScriptPrivilegeCommand(
             binary: "/usr/sbin/nvram",
             arguments: ["boot-args=amfi_get_out_of_my_way=1"]
         )
-        XCTAssertTrue(script.contains("with administrator privileges"))
+        #expect(script.contains("with administrator privileges"))
         _ = DualTrackPrivilegeEscalator.preFlightStatus()
     }
 
-    func testHelperSecurityValidatorContainerAndBundleChecks() {
-        XCTAssertTrue(HelperSecurityValidator.validateBundleIdentifier("app.makedie.MacOver"))
-        XCTAssertFalse(HelperSecurityValidator.validateBundleIdentifier("../bad"))
-        XCTAssertFalse(HelperSecurityValidator.validateBundleIdentifier(""))
+    @Test
+    func helperSecurityValidatorContainerAndBundleChecks() {
+        #expect(HelperSecurityValidator.validateBundleIdentifier("app.makedie.MacOver"))
+        #expect(!HelperSecurityValidator.validateBundleIdentifier("../bad"))
+        #expect(!HelperSecurityValidator.validateBundleIdentifier(""))
 
         let containersRoot = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Containers", isDirectory: true)
@@ -72,13 +71,13 @@ final class PlayCoverSandboxSPMTests: XCTestCase {
             .appendingPathComponent("com.example.game/Data/Library", isDirectory: true)
             .path
 
-        XCTAssertNotNil(HelperSecurityValidator.validateContainerPath(validContainer))
-        XCTAssertNil(HelperSecurityValidator.validateContainerPath(containersRoot.path + "/../Documents"))
-        XCTAssertNil(HelperSecurityValidator.validateContainerPath("/etc/passwd"))
+        #expect(HelperSecurityValidator.validateContainerPath(validContainer) != nil)
+        #expect(HelperSecurityValidator.validateContainerPath(containersRoot.path + "/../Documents") == nil)
+        #expect(HelperSecurityValidator.validateContainerPath("/etc/passwd") == nil)
 
-        XCTAssertTrue(HelperSecurityValidator.isValidTeamIdentifier("ABCDE12345"))
-        XCTAssertFalse(HelperSecurityValidator.isValidTeamIdentifier("invalid-team!"))
-        XCTAssertNil(HelperSecurityValidator.clientCodeSigningRequirement(teamID: nil))
-        XCTAssertNotNil(HelperSecurityValidator.clientCodeSigningRequirement(teamID: "ABCDE12345"))
+        #expect(HelperSecurityValidator.isValidTeamIdentifier("ABCDE12345"))
+        #expect(!HelperSecurityValidator.isValidTeamIdentifier("invalid-team!"))
+        #expect(HelperSecurityValidator.clientCodeSigningRequirement(teamID: nil) == nil)
+        #expect(HelperSecurityValidator.clientCodeSigningRequirement(teamID: "ABCDE12345") != nil)
     }
 }

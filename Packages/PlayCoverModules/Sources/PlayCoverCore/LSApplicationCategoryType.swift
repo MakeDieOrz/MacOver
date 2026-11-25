@@ -1,6 +1,6 @@
 import Foundation
 
-public enum LSApplicationCategoryType: String, CaseIterable, Codable, Hashable {
+public enum LSApplicationCategoryType: String, CaseIterable, Codable, Hashable, Sendable {
     case business = "public.app-category.business"
     case developerTools = "public.app-category.developer-tools"
     case education = "public.app-category.education"

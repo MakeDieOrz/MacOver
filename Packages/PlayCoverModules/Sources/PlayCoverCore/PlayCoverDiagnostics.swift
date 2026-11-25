@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 
 public enum PlayCoverDiagnosticToastKind: Equatable, Sendable {
     case notice
@@ -7,43 +8,40 @@ public enum PlayCoverDiagnosticToastKind: Equatable, Sendable {
 }
 
 public enum PlayCoverDiagnostics {
-    private static let lock = NSLock()
-    private static var logHandler: ((String, Bool) -> Void)?
-    private static var errorHandler: ((String) -> Void)?
-    private static var messageHandler: ((String) -> Void)?
-    private static var toastHandler: ((PlayCoverDiagnosticToastKind, String, UInt64) -> Void)?
-    private static var activeToastChecker: ((PlayCoverDiagnosticToastKind) -> Bool)?
+    private struct Handlers {
+        var logHandler: (@Sendable (String, Bool) -> Void)?
+        var errorHandler: (@Sendable (String) -> Void)?
+        var messageHandler: (@Sendable (String) -> Void)?
+        var toastHandler: (@Sendable (PlayCoverDiagnosticToastKind, String, UInt64) -> Void)?
+        var activeToastChecker: (@Sendable (PlayCoverDiagnosticToastKind) -> Bool)?
+    }
+
+    private static let state = Mutex<Handlers>(Handlers())
 
     public static func configure(
-        logHandler: ((String, Bool) -> Void)?,
-        errorHandler: ((String) -> Void)?,
-        messageHandler: ((String) -> Void)?,
-        toastHandler: ((PlayCoverDiagnosticToastKind, String, UInt64) -> Void)?,
-        activeToastChecker: ((PlayCoverDiagnosticToastKind) -> Bool)? = nil
+        logHandler: (@Sendable (String, Bool) -> Void)?,
+        errorHandler: (@Sendable (String) -> Void)?,
+        messageHandler: (@Sendable (String) -> Void)?,
+        toastHandler: (@Sendable (PlayCoverDiagnosticToastKind, String, UInt64) -> Void)?,
+        activeToastChecker: (@Sendable (PlayCoverDiagnosticToastKind) -> Bool)? = nil
     ) {
-        lock.lock()
-        self.logHandler = logHandler
-        self.errorHandler = errorHandler
-        self.messageHandler = messageHandler
-        self.toastHandler = toastHandler
-        self.activeToastChecker = activeToastChecker
-        lock.unlock()
+        state.withLock { handlers in
+            handlers.logHandler = logHandler
+            handlers.errorHandler = errorHandler
+            handlers.messageHandler = messageHandler
+            handlers.toastHandler = toastHandler
+            handlers.activeToastChecker = activeToastChecker
+        }
     }
 
     public static func reset() {
-        lock.lock()
-        logHandler = nil
-        errorHandler = nil
-        messageHandler = nil
-        toastHandler = nil
-        activeToastChecker = nil
-        lock.unlock()
+        state.withLock { handlers in
+            handlers = Handlers()
+        }
     }
 
     public static func log(_ str: String, isError: Bool = false) {
-        lock.lock()
-        let handler = logHandler
-        lock.unlock()
+        let handler = state.withLock { $0.logHandler }
         if let handler {
             handler(str, isError)
         } else {
@@ -56,9 +54,7 @@ public enum PlayCoverDiagnostics {
     }
 
     public static func reportError(_ message: String) {
-        lock.lock()
-        let handler = errorHandler
-        lock.unlock()
+        let handler = state.withLock { $0.errorHandler }
         if let handler {
             handler(message)
         } else {
@@ -67,9 +63,7 @@ public enum PlayCoverDiagnostics {
     }
 
     public static func reportMessage(_ message: String) {
-        lock.lock()
-        let handler = messageHandler
-        lock.unlock()
+        let handler = state.withLock { $0.messageHandler }
         if let handler {
             handler(message)
         } else {
@@ -82,9 +76,7 @@ public enum PlayCoverDiagnostics {
         toastDetails: String,
         timeRemaining: UInt64 = 3
     ) {
-        lock.lock()
-        let handler = toastHandler
-        lock.unlock()
+        let handler = state.withLock { $0.toastHandler }
         if let handler {
             handler(toastType, toastDetails, timeRemaining)
         } else {
@@ -93,9 +85,7 @@ public enum PlayCoverDiagnostics {
     }
 
     public static func hasActiveToast(ofType kind: PlayCoverDiagnosticToastKind) -> Bool {
-        lock.lock()
-        let checker = activeToastChecker
-        lock.unlock()
+        let checker = state.withLock { $0.activeToastChecker }
         return checker?(kind) ?? false
     }
 }

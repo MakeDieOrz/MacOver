@@ -5,9 +5,15 @@
 
 import Foundation
 import PlayCoverCore
+import Synchronization
 
 public class SystemConfig {
-    public static var isFirstTimePlaySign = false
+    private static let isFirstTimePlaySignLock = Mutex<Bool>(false)
+
+    public static var isFirstTimePlaySign: Bool {
+        get { isFirstTimePlaySignLock.withLock { $0 } }
+        set { isFirstTimePlaySignLock.withLock { $0 = newValue } }
+    }
 
     public static let isPlaySignActive: Bool = isSIPDisabled() && isRunningAMFIEnabled()
 

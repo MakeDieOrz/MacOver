@@ -7,6 +7,7 @@ import Darwin
 import Foundation
 import MachO
 import PlayCoverCore
+import Synchronization
 
 // This has so many functionality in it that 250 lines is darn near impossible
 public class PlayTools {
@@ -52,15 +53,12 @@ public class PlayTools {
         return playCoverPath
     }
 
-    private static let installLock = NSLock()
-    private static var currentInstallTask: Task<Void, Error>?
-    private static var lastInstallError: Error?
-
-    private static func withInstallLock<T>(_ body: () -> T) -> T {
-        installLock.lock()
-        defer { installLock.unlock() }
-        return body()
+    private struct InstallState {
+        var currentInstallTask: Task<Void, Error>?
+        var lastInstallError: Error?
     }
+
+    private static let installState = Mutex<InstallState>(InstallState())
 
     private static func clearExtendedAttributes(at url: URL) {
         _ = try? Shell.run(print: false, "/usr/bin/xattr", "-cr", url.path)
@@ -175,24 +173,24 @@ public class PlayTools {
 
     @discardableResult
     private static func startOrJoinSystemInstall(reportError: Bool) -> Task<Void, Error> {
-        withInstallLock {
-            if let existing = currentInstallTask {
+        installState.withLock { state in
+            if let existing = state.currentInstallTask {
                 return existing
             }
             let task = Task.detached(priority: .userInitiated) {
                 defer {
-                    withInstallLock {
-                        currentInstallTask = nil
+                    installState.withLock { inner in
+                        inner.currentInstallTask = nil
                     }
                 }
                 do {
                     try performStagedSystemInstall()
-                    withInstallLock {
-                        lastInstallError = nil
+                    installState.withLock { inner in
+                        inner.lastInstallError = nil
                     }
                 } catch {
-                    withInstallLock {
-                        lastInstallError = error
+                    installState.withLock { inner in
+                        inner.lastInstallError = error
                     }
                     PlayCoverDiagnostics.log("PlayTools installation failed: \(error)", isError: true)
                     if reportError {
@@ -201,7 +199,7 @@ public class PlayTools {
                     throw error
                 }
             }
-            currentInstallTask = task
+            state.currentInstallTask = task
             return task
         }
     }
@@ -211,7 +209,7 @@ public class PlayTools {
     }
 
     public static func waitForSystemInstall() async {
-        let activeTask = withInstallLock { currentInstallTask }
+        let activeTask = installState.withLock { $0.currentInstallTask }
 
         if let activeTask {
             _ = try? await activeTask.value
@@ -225,7 +223,7 @@ public class PlayTools {
     }
 
     public static func systemInstallFailure() -> Error? {
-        withInstallLock { lastInstallError }
+        installState.withLock { $0.lastInstallError }
     }
 
     public static func installInIPA(_ exec: URL, appInfo: AppInfo? = nil, signBundle: Bool = true) async throws {

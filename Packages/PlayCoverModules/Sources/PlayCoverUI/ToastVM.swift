@@ -6,12 +6,13 @@
 //
 
 import Foundation
+import Synchronization
 
-public enum ToastType: Hashable {
+public enum ToastType: Hashable, Sendable {
     case notice, error, network
 }
 
-public struct ToastInfo: Identifiable, Hashable {
+public struct ToastInfo: Identifiable, Hashable, Sendable {
     public let id: UUID
     public let toastType: ToastType
     public let toastDetails: String
@@ -25,28 +26,22 @@ public struct ToastInfo: Identifiable, Hashable {
     }
 }
 
-public final class ToastVM: ObservableObject {
+public final class ToastVM: ObservableObject, @unchecked Sendable {
     @Published public var toasts: [ToastInfo] = []
     @Published public var isShown: Bool = true
 
-    private let activeTypesLock = NSLock()
-    private var activeTypesByID: [UUID: ToastType] = [:]
+    private let activeTypesByID = Mutex<[UUID: ToastType]>([:])
 
     public init() {}
 
     public func hasToast(ofType type: ToastType) -> Bool {
-        activeTypesLock.lock()
-        let exists = activeTypesByID.values.contains(type)
-        activeTypesLock.unlock()
-        return exists
+        activeTypesByID.withLock { $0.values.contains(type) }
     }
 
     @discardableResult
     public func showToast(toastType: ToastType, toastDetails: String, timeRemaining: UInt64 = 2) -> UUID {
         let toast = ToastInfo(toastType: toastType, toastDetails: toastDetails, timeRemaining: timeRemaining)
-        activeTypesLock.lock()
-        activeTypesByID[toast.id] = toastType
-        activeTypesLock.unlock()
+        activeTypesByID.withLock { $0[toast.id] = toastType }
         if Thread.isMainThread {
             toasts.append(toast)
         } else {
@@ -58,9 +53,7 @@ public final class ToastVM: ObservableObject {
     }
 
     public func dismiss(id: UUID) {
-        activeTypesLock.lock()
-        activeTypesByID.removeValue(forKey: id)
-        activeTypesLock.unlock()
+        activeTypesByID.withLock { _ = $0.removeValue(forKey: id) }
         if Thread.isMainThread {
             toasts.removeAll { $0.id == id }
         } else {

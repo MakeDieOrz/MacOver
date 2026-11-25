@@ -10,6 +10,7 @@ let package = Package(
         .library(name: "PlayCoverCore", targets: ["PlayCoverCore"]),
         .library(name: "PlayCoverMachO", targets: ["PlayCoverMachO"]),
         .library(name: "PlayCoverKeymapping", targets: ["PlayCoverKeymapping"]),
+        .library(name: "PlayCoverNetwork", targets: ["PlayCoverNetwork"]),
         .library(name: "PlayCoverSandbox", targets: ["PlayCoverSandbox"]),
         .library(name: "PlayCoverUI", targets: ["PlayCoverUI"])
     ],
@@ -24,6 +25,10 @@ let package = Package(
         ),
         .target(
             name: "PlayCoverKeymapping",
+            dependencies: ["PlayCoverCore"]
+        ),
+        .target(
+            name: "PlayCoverNetwork",
             dependencies: ["PlayCoverCore"]
         ),
         .target(
@@ -43,6 +48,10 @@ let package = Package(
             dependencies: ["PlayCoverMachO", "PlayCoverCore"]
         ),
         .testTarget(
+            name: "PlayCoverNetworkSPMTests",
+            dependencies: ["PlayCoverNetwork", "PlayCoverCore"]
+        ),
+        .testTarget(
             name: "PlayCoverSandboxSPMTests",
             dependencies: ["PlayCoverSandbox", "PlayCoverCore"]
         ),
@@ -51,5 +60,5 @@ let package = Package(
             dependencies: ["PlayCoverUI", "PlayCoverCore"]
         )
     ],
-    swiftLanguageModes: [.v5]
+    swiftLanguageModes: [.v6]
 )

@@ -1,7 +1,7 @@
 import Foundation
 import PlayCoverCore
 
-public enum KeyCoverStatus: String, Codable, Hashable {
+public enum KeyCoverStatus: String, Codable, Hashable, Sendable {
     case disabled
     case selfGeneratedPassword
     case userProvidedPassword

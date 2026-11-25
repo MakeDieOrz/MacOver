@@ -510,6 +510,7 @@ public enum PlayCoverRestartField: String, CaseIterable, Equatable, Hashable, Se
     case floatingWindow
     case enableNetworkRules
     case blockedURLPatterns
+    case networkProxy
     case keymapping
     case disableBuiltinMouse
     case blockSleepSpamming

@@ -7,7 +7,7 @@
 
 import Foundation
 
-public struct ITunesResult: Codable {
+public struct ITunesResult: Codable, Sendable {
     public let isGameCenterEnabled: Bool
     public let features: [String]
     public let advisories: [String]
@@ -54,7 +54,7 @@ public struct ITunesResult: Codable {
     public let userRatingCount: Int
 }
 
-public struct ITunesResponse: Codable {
+public struct ITunesResponse: Codable, Sendable {
     public let resultCount: Int
     public let results: [ITunesResult]
 }

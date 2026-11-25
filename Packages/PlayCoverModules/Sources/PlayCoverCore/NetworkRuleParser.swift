@@ -9,7 +9,7 @@ public enum NetworkRuleParser {
     public static let disabledPrefix = "#!OFF "
     private static let disabledMarker = "#!OFF"
 
-    public struct RuleMeta: Equatable {
+    public struct RuleMeta: Equatable, Sendable {
         public let isEnabled: Bool
         public let isAllow: Bool
         public let kindKey: String

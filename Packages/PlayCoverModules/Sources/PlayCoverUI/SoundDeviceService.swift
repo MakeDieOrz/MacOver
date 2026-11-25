@@ -8,7 +8,7 @@ import Foundation
 import PlayCoverCore
 import SwiftUI
 
-public class SoundDeviceService {
+public final class SoundDeviceService: @unchecked Sendable {
 
     private let startupAlerts: StartupAlertCenter
 

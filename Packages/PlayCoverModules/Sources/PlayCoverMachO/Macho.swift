@@ -7,17 +7,31 @@ import Darwin
 import Foundation
 import MachO
 import PlayCoverCore
+import Synchronization
 
 @_silgen_name("_dyld_shared_cache_contains_path")
 private func dyldSharedCacheContainsPath(_ path: UnsafePointer<CChar>) -> Bool
 
 public enum MachoCodeSigner {
-    public static var verifySignature: (URL) throws -> Void = { url in
-        try runCodesign(["--verify", "--deep", "--strict", url.path])
+    private struct SignerHooks {
+        var verifySignature: @Sendable (URL) throws -> Void = { url in
+            try MachoCodeSigner.runCodesign(["--verify", "--deep", "--strict", url.path])
+        }
+        var signBinary: @Sendable (URL) throws -> Void = { url in
+            try MachoCodeSigner.runCodesign(["-fs-", url.path])
+        }
     }
 
-    public static var signBinary: (URL) throws -> Void = { url in
-        try runCodesign(["-fs-", url.path])
+    private static let hooks = Mutex<SignerHooks>(SignerHooks())
+
+    public static var verifySignature: @Sendable (URL) throws -> Void {
+        get { hooks.withLock { $0.verifySignature } }
+        set { hooks.withLock { $0.verifySignature = newValue } }
+    }
+
+    public static var signBinary: @Sendable (URL) throws -> Void {
+        get { hooks.withLock { $0.signBinary } }
+        set { hooks.withLock { $0.signBinary = newValue } }
     }
 
     private static func runCodesign(_ arguments: [String]) throws {
@@ -86,8 +100,7 @@ public class Macho {
         }
     }
 
-    private static let verifiedLock = NSLock()
-    private static var verifiedStamps: [String: VerifiedBinaryStamp] = [:]
+    private static let verifiedStampsLock = Mutex<[String: VerifiedBinaryStamp]>([:])
 
     private static func currentStamp(for url: URL) -> VerifiedBinaryStamp? {
         var st = stat()
@@ -100,9 +113,9 @@ public class Macho {
     }
 
     private static func invalidateStamp(for url: URL) {
-        verifiedLock.lock()
-        verifiedStamps.removeValue(forKey: url.path)
-        verifiedLock.unlock()
+        verifiedStampsLock.withLock {
+            _ = $0.removeValue(forKey: url.path)
+        }
     }
 
     public static func inspectArm64Slice(at url: URL) throws -> SliceContext {
@@ -814,9 +827,7 @@ public class Macho {
         }
 
         if let stamp = currentStamp(for: macho) {
-            verifiedLock.lock()
-            let alreadyVerified = (verifiedStamps[macho.path] == stamp)
-            verifiedLock.unlock()
+            let alreadyVerified = verifiedStampsLock.withLock { $0[macho.path] == stamp }
             if alreadyVerified && !permissionsRepaired {
                 return false
             }
@@ -863,9 +874,7 @@ public class Macho {
 
         if !needsFix && !ctx.isFat {
             if let stamp = currentStamp(for: macho) {
-                verifiedLock.lock()
-                verifiedStamps[macho.path] = stamp
-                verifiedLock.unlock()
+                verifiedStampsLock.withLock { $0[macho.path] = stamp }
             }
             return permissionsRepaired
         }
@@ -876,9 +885,7 @@ public class Macho {
         }
 
         if let stamp = currentStamp(for: macho) {
-            verifiedLock.lock()
-            verifiedStamps[macho.path] = stamp
-            verifiedLock.unlock()
+            verifiedStampsLock.withLock { $0[macho.path] = stamp }
         }
         return outcome.rewroteBinary || outcome.createdSymlink || ctx.isFat || permissionsRepaired
     }

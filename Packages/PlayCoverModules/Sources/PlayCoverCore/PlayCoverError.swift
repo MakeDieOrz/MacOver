@@ -1,6 +1,6 @@
 import Foundation
 
-public enum PlayCoverError: Error, Equatable {
+public enum PlayCoverError: Error, Equatable, Sendable {
     case infoPlistNotFound
     case waitInstallation
     case waitDownload
