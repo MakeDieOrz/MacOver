@@ -2283,12 +2283,12 @@ static kern_return_t pt_thread_get_exception_ports(thread_act_t thread,
     return kr;
 }
 
-DYLD_INTERPOSE(pt_task_set_exception_ports, task_set_exception_ports)
-DYLD_INTERPOSE(pt_task_swap_exception_ports, task_swap_exception_ports)
-DYLD_INTERPOSE(pt_task_get_exception_ports, task_get_exception_ports)
-DYLD_INTERPOSE(pt_thread_set_exception_ports, thread_set_exception_ports)
-DYLD_INTERPOSE(pt_thread_swap_exception_ports, thread_swap_exception_ports)
-DYLD_INTERPOSE(pt_thread_get_exception_ports, thread_get_exception_ports)
+PT_INTERPOSE(pt_task_set_exception_ports, task_set_exception_ports)
+PT_INTERPOSE(pt_task_swap_exception_ports, task_swap_exception_ports)
+PT_INTERPOSE(pt_task_get_exception_ports, task_get_exception_ports)
+PT_INTERPOSE(pt_thread_set_exception_ports, thread_set_exception_ports)
+PT_INTERPOSE(pt_thread_swap_exception_ports, thread_swap_exception_ports)
+PT_INTERPOSE(pt_thread_get_exception_ports, thread_get_exception_ports)
 
 __attribute__((visibility("hidden")))
 BOOL pt_svc_get_redaction_info(mach_port_t *out_svc_port,
@@ -2341,32 +2341,6 @@ BOOL pt_svc_get_redaction_info(mach_port_t *out_svc_port,
         pt_svc_release_send_right(saved.port);
     }
     return YES;
-}
-
-__attribute__((visibility("hidden")))
-void *pt_svc_dlsym_route(const char *symbol) {
-    if (symbol == NULL) {
-        return NULL;
-    }
-    if (strcmp(symbol, "task_set_exception_ports") == 0) {
-        return (void *)&pt_task_set_exception_ports;
-    }
-    if (strcmp(symbol, "task_swap_exception_ports") == 0) {
-        return (void *)&pt_task_swap_exception_ports;
-    }
-    if (strcmp(symbol, "task_get_exception_ports") == 0) {
-        return (void *)&pt_task_get_exception_ports;
-    }
-    if (strcmp(symbol, "thread_set_exception_ports") == 0) {
-        return (void *)&pt_thread_set_exception_ports;
-    }
-    if (strcmp(symbol, "thread_swap_exception_ports") == 0) {
-        return (void *)&pt_thread_swap_exception_ports;
-    }
-    if (strcmp(symbol, "thread_get_exception_ports") == 0) {
-        return (void *)&pt_thread_get_exception_ports;
-    }
-    return NULL;
 }
 
 // MARK: - Initialization

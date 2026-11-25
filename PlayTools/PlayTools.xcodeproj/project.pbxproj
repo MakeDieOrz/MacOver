@@ -120,6 +120,43 @@
 		AA71A11D2F00000700623C15 /* PTNetworkVirtualizer.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A10A2F00000700623C15 /* PTNetworkVirtualizer.m */; };
 		AA71A11E2F00000700623C15 /* PTEntitlements.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A10B2F00000700623C15 /* PTEntitlements.m */; };
 		AA71A1482F00000A00623C15 /* PTSvcInterceptor.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A1472F00000A00623C15 /* PTSvcInterceptor.m */; };
+		AA71A1552F00000B00623C15 /* PTInterposeRegistry.h in Headers */ = {isa = PBXBuildFile; fileRef = AA71A1502F00000B00623C15 /* PTInterposeRegistry.h */; };
+		AA71A1562F00000B00623C15 /* PTInterposeRegistry.c in Sources */ = {isa = PBXBuildFile; fileRef = AA71A1512F00000B00623C15 /* PTInterposeRegistry.c */; };
+		AA71A1572F00000B00623C15 /* PTInterposeRegistry.c in Sources */ = {isa = PBXBuildFile; fileRef = AA71A1512F00000B00623C15 /* PTInterposeRegistry.c */; };
+		AA71A1582F00000B00623C15 /* PTInterposeRegistryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA71A1522F00000B00623C15 /* PTInterposeRegistryTests.swift */; };
+		AA71A1592F00000B00623C15 /* PTCoreMotionVirtualizer.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A1532F00000B00623C15 /* PTCoreMotionVirtualizer.m */; };
+		AA71A15A2F00000B00623C15 /* PTWebKitVirtualizer.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A1542F00000B00623C15 /* PTWebKitVirtualizer.m */; };
+		AA71A1932F00000C00623C15 /* PTArm64StubMath.h in Headers */ = {isa = PBXBuildFile; fileRef = AA71A1922F00000C00623C15 /* PTArm64StubMath.h */; };
+		AA71A1952F00000C00623C15 /* PTCodeSignParser.h in Headers */ = {isa = PBXBuildFile; fileRef = AA71A1942F00000C00623C15 /* PTCodeSignParser.h */; };
+		AA71A1972F00000C00623C15 /* PTDetectionRules.h in Headers */ = {isa = PBXBuildFile; fileRef = AA71A1962F00000C00623C15 /* PTDetectionRules.h */; };
+		AA71A1992F00000C00623C15 /* PTArm64StubMath.c in Sources */ = {isa = PBXBuildFile; fileRef = AA71A1982F00000C00623C15 /* PTArm64StubMath.c */; };
+		AA71A19B2F00000C00623C15 /* PTCodeSignParser.c in Sources */ = {isa = PBXBuildFile; fileRef = AA71A19A2F00000C00623C15 /* PTCodeSignParser.c */; };
+		AA71A19D2F00000C00623C15 /* PTDetectionRules.c in Sources */ = {isa = PBXBuildFile; fileRef = AA71A19C2F00000C00623C15 /* PTDetectionRules.c */; };
+		AA71A1612F00000C00623C15 /* PTCommon.h in Headers */ = {isa = PBXBuildFile; fileRef = AA71A1602F00000C00623C15 /* PTCommon.h */; };
+		AA71A1632F00000C00623C15 /* PTDyldInternal.h in Headers */ = {isa = PBXBuildFile; fileRef = AA71A1622F00000C00623C15 /* PTDyldInternal.h */; };
+		AA71A1652F00000C00623C15 /* PTEntitlementsInternal.h in Headers */ = {isa = PBXBuildFile; fileRef = AA71A1642F00000C00623C15 /* PTEntitlementsInternal.h */; };
+		AA71A1672F00000C00623C15 /* PTFSInternal.h in Headers */ = {isa = PBXBuildFile; fileRef = AA71A1662F00000C00623C15 /* PTFSInternal.h */; };
+		AA71A1692F00000C00623C15 /* PTKernelABI.h in Headers */ = {isa = PBXBuildFile; fileRef = AA71A1682F00000C00623C15 /* PTKernelABI.h */; };
+		AA71A16B2F00000C00623C15 /* PTNetworkInternal.h in Headers */ = {isa = PBXBuildFile; fileRef = AA71A16A2F00000C00623C15 /* PTNetworkInternal.h */; };
+		AA71A16D2F00000C00623C15 /* PTSvcInternal.h in Headers */ = {isa = PBXBuildFile; fileRef = AA71A16C2F00000C00623C15 /* PTSvcInternal.h */; };
+		AA71A16F2F00000C00623C15 /* PTSystemSpooferInternal.h in Headers */ = {isa = PBXBuildFile; fileRef = AA71A16E2F00000C00623C15 /* PTSystemSpooferInternal.h */; };
+		AA71A1712F00000C00623C15 /* PTDyldLoaders.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A1702F00000C00623C15 /* PTDyldLoaders.m */; };
+		AA71A1732F00000C00623C15 /* PTFSAttrStatfs.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A1722F00000C00623C15 /* PTFSAttrStatfs.m */; };
+		AA71A1752F00000C00623C15 /* PTFSMutatorsWalkers.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A1742F00000C00623C15 /* PTFSMutatorsWalkers.m */; };
+		AA71A1772F00000C00623C15 /* PTFSOpenStat.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A1762F00000C00623C15 /* PTFSOpenStat.m */; };
+		AA71A1792F00000C00623C15 /* PTFSPathResolver.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A1782F00000C00623C15 /* PTFSPathResolver.m */; };
+		AA71A17B2F00000C00623C15 /* PTFSProcDir.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A17A2F00000C00623C15 /* PTFSProcDir.m */; };
+		AA71A17D2F00000C00623C15 /* PTMediaInputSpooferObjC.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A17C2F00000C00623C15 /* PTMediaInputSpooferObjC.m */; };
+		AA71A17F2F00000C00623C15 /* PTNetworkRules.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A17E2F00000C00623C15 /* PTNetworkRules.m */; };
+		AA71A1812F00000C00623C15 /* PTNetworkSocketIf.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A1802F00000C00623C15 /* PTNetworkSocketIf.m */; };
+		AA71A1832F00000C00623C15 /* PTObjCRuntimeVirtualizer.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A1822F00000C00623C15 /* PTObjCRuntimeVirtualizer.m */; };
+		AA71A1852F00000C00623C15 /* PTSystemSpooferEnvBundle.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A1842F00000C00623C15 /* PTSystemSpooferEnvBundle.m */; };
+		AA71A1872F00000C00623C15 /* PTSystemSpooferIOKitMG.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A1862F00000C00623C15 /* PTSystemSpooferIOKitMG.m */; };
+		AA71A1892F00000C00623C15 /* PTSystemSpooferIdentity.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A1882F00000C00623C15 /* PTSystemSpooferIdentity.m */; };
+		AA71A18B2F00000C00623C15 /* PTSystemSpooferMachVM.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A18A2F00000C00623C15 /* PTSystemSpooferMachVM.m */; };
+		AA71A18D2F00000C00623C15 /* PTSystemSpooferSyscallMIG.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A18C2F00000C00623C15 /* PTSystemSpooferSyscallMIG.m */; };
+		AA71A18F2F00000C00623C15 /* PTSystemSpooferSysctl.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A18E2F00000C00623C15 /* PTSystemSpooferSysctl.m */; };
+		AA71A1912F00000C00623C15 /* PTWebKitScripts.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A1902F00000C00623C15 /* PTWebKitScripts.m */; };
 		AA71A11F2F00000700623C15 /* PTRegistration.c in Sources */ = {isa = PBXBuildFile; fileRef = AA71A1032F00000700623C15 /* PTRegistration.c */; };
 		AA71A1202F00000700623C15 /* PTSafeMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA71A10C2F00000700623C15 /* PTSafeMode.swift */; };
 		AA71A1212F00000700623C15 /* PTPluginContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA71A10D2F00000700623C15 /* PTPluginContainer.swift */; };
@@ -276,6 +313,42 @@
 		AA71A10A2F00000700623C15 /* PTNetworkVirtualizer.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTNetworkVirtualizer.m; sourceTree = "<group>"; };
 		AA71A10B2F00000700623C15 /* PTEntitlements.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTEntitlements.m; sourceTree = "<group>"; };
 		AA71A1472F00000A00623C15 /* PTSvcInterceptor.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTSvcInterceptor.m; sourceTree = "<group>"; };
+		AA71A1502F00000B00623C15 /* PTInterposeRegistry.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PTInterposeRegistry.h; sourceTree = "<group>"; };
+		AA71A1512F00000B00623C15 /* PTInterposeRegistry.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = PTInterposeRegistry.c; sourceTree = "<group>"; };
+		AA71A1522F00000B00623C15 /* PTInterposeRegistryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PTInterposeRegistryTests.swift; sourceTree = "<group>"; };
+		AA71A1532F00000B00623C15 /* PTCoreMotionVirtualizer.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTCoreMotionVirtualizer.m; sourceTree = "<group>"; };
+		AA71A1542F00000B00623C15 /* PTWebKitVirtualizer.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTWebKitVirtualizer.m; sourceTree = "<group>"; };
+		AA71A1922F00000C00623C15 /* PTArm64StubMath.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PTArm64StubMath.h; sourceTree = "<group>"; };
+		AA71A1942F00000C00623C15 /* PTCodeSignParser.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PTCodeSignParser.h; sourceTree = "<group>"; };
+		AA71A1962F00000C00623C15 /* PTDetectionRules.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PTDetectionRules.h; sourceTree = "<group>"; };
+		AA71A1982F00000C00623C15 /* PTArm64StubMath.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = PTArm64StubMath.c; sourceTree = "<group>"; };
+		AA71A19A2F00000C00623C15 /* PTCodeSignParser.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = PTCodeSignParser.c; sourceTree = "<group>"; };
+		AA71A19C2F00000C00623C15 /* PTDetectionRules.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = PTDetectionRules.c; sourceTree = "<group>"; };
+		AA71A1602F00000C00623C15 /* PTCommon.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PTCommon.h; sourceTree = "<group>"; };
+		AA71A1622F00000C00623C15 /* PTDyldInternal.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PTDyldInternal.h; sourceTree = "<group>"; };
+		AA71A1642F00000C00623C15 /* PTEntitlementsInternal.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PTEntitlementsInternal.h; sourceTree = "<group>"; };
+		AA71A1662F00000C00623C15 /* PTFSInternal.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PTFSInternal.h; sourceTree = "<group>"; };
+		AA71A1682F00000C00623C15 /* PTKernelABI.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PTKernelABI.h; sourceTree = "<group>"; };
+		AA71A16A2F00000C00623C15 /* PTNetworkInternal.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PTNetworkInternal.h; sourceTree = "<group>"; };
+		AA71A16C2F00000C00623C15 /* PTSvcInternal.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PTSvcInternal.h; sourceTree = "<group>"; };
+		AA71A16E2F00000C00623C15 /* PTSystemSpooferInternal.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PTSystemSpooferInternal.h; sourceTree = "<group>"; };
+		AA71A1702F00000C00623C15 /* PTDyldLoaders.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTDyldLoaders.m; sourceTree = "<group>"; };
+		AA71A1722F00000C00623C15 /* PTFSAttrStatfs.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTFSAttrStatfs.m; sourceTree = "<group>"; };
+		AA71A1742F00000C00623C15 /* PTFSMutatorsWalkers.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTFSMutatorsWalkers.m; sourceTree = "<group>"; };
+		AA71A1762F00000C00623C15 /* PTFSOpenStat.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTFSOpenStat.m; sourceTree = "<group>"; };
+		AA71A1782F00000C00623C15 /* PTFSPathResolver.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTFSPathResolver.m; sourceTree = "<group>"; };
+		AA71A17A2F00000C00623C15 /* PTFSProcDir.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTFSProcDir.m; sourceTree = "<group>"; };
+		AA71A17C2F00000C00623C15 /* PTMediaInputSpooferObjC.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTMediaInputSpooferObjC.m; sourceTree = "<group>"; };
+		AA71A17E2F00000C00623C15 /* PTNetworkRules.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTNetworkRules.m; sourceTree = "<group>"; };
+		AA71A1802F00000C00623C15 /* PTNetworkSocketIf.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTNetworkSocketIf.m; sourceTree = "<group>"; };
+		AA71A1822F00000C00623C15 /* PTObjCRuntimeVirtualizer.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTObjCRuntimeVirtualizer.m; sourceTree = "<group>"; };
+		AA71A1842F00000C00623C15 /* PTSystemSpooferEnvBundle.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTSystemSpooferEnvBundle.m; sourceTree = "<group>"; };
+		AA71A1862F00000C00623C15 /* PTSystemSpooferIOKitMG.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTSystemSpooferIOKitMG.m; sourceTree = "<group>"; };
+		AA71A1882F00000C00623C15 /* PTSystemSpooferIdentity.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTSystemSpooferIdentity.m; sourceTree = "<group>"; };
+		AA71A18A2F00000C00623C15 /* PTSystemSpooferMachVM.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTSystemSpooferMachVM.m; sourceTree = "<group>"; };
+		AA71A18C2F00000C00623C15 /* PTSystemSpooferSyscallMIG.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTSystemSpooferSyscallMIG.m; sourceTree = "<group>"; };
+		AA71A18E2F00000C00623C15 /* PTSystemSpooferSysctl.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTSystemSpooferSysctl.m; sourceTree = "<group>"; };
+		AA71A1902F00000C00623C15 /* PTWebKitScripts.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTWebKitScripts.m; sourceTree = "<group>"; };
 		AA71A10C2F00000700623C15 /* PTSafeMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PTSafeMode.swift; sourceTree = "<group>"; };
 		AA71A10D2F00000700623C15 /* PTPluginContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PTPluginContainer.swift; sourceTree = "<group>"; };
 		AA71A10E2F00000700623C15 /* PTRegistrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PTRegistrationTests.swift; sourceTree = "<group>"; };
@@ -555,6 +628,7 @@
 				AA71A10F2F00000700623C15 /* PTPluginContainerTests.swift */,
 				AA71A1362F00000800623C15 /* PlayedAppleDBBackupTests.swift */,
 				AA71A1462F00000900623C15 /* PTDebugTraceTests.swift */,
+				AA71A1522F00000B00623C15 /* PTInterposeRegistryTests.swift */,
 			);
 			path = PlayToolsTests;
 			sourceTree = "<group>";
@@ -632,8 +706,21 @@
 			children = (
 				AA71A1002F00000700623C15 /* PTInternal.h */,
 				AA71A1012F00000700623C15 /* PSInternal.h */,
+				AA71A1922F00000C00623C15 /* PTArm64StubMath.h */,
+				AA71A1942F00000C00623C15 /* PTCodeSignParser.h */,
+				AA71A1962F00000C00623C15 /* PTDetectionRules.h */,
+				AA71A1602F00000C00623C15 /* PTCommon.h */,
+				AA71A1622F00000C00623C15 /* PTDyldInternal.h */,
+				AA71A1642F00000C00623C15 /* PTEntitlementsInternal.h */,
+				AA71A1662F00000C00623C15 /* PTFSInternal.h */,
+				AA71A1682F00000C00623C15 /* PTKernelABI.h */,
+				AA71A16A2F00000C00623C15 /* PTNetworkInternal.h */,
+				AA71A16C2F00000C00623C15 /* PTSvcInternal.h */,
+				AA71A16E2F00000C00623C15 /* PTSystemSpooferInternal.h */,
 				AA71A1022F00000700623C15 /* PTRegistration.h */,
 				AA71A1032F00000700623C15 /* PTRegistration.c */,
+				AA71A1502F00000B00623C15 /* PTInterposeRegistry.h */,
+				AA71A1512F00000B00623C15 /* PTInterposeRegistry.c */,
 				AA71A1412F00000900623C15 /* PTDebugTrace.h */,
 				AA71A1432F00000900623C15 /* PTDebugTrace.c */,
 				AA71A1042F00000700623C15 /* PTDyldVirtualizer.m */,
@@ -641,10 +728,32 @@
 				AA71A1062F00000700623C15 /* PTFSVirtualizerObjC.m */,
 				AA71A1072F00000700623C15 /* PTSystemSpoofer.m */,
 				AA71A1082F00000700623C15 /* PTSystemSpooferObjC.m */,
+				AA71A1532F00000B00623C15 /* PTCoreMotionVirtualizer.m */,
+				AA71A1542F00000B00623C15 /* PTWebKitVirtualizer.m */,
 				AA71A1092F00000700623C15 /* PTGraphicsVirtualizer.m */,
 				AA71A10A2F00000700623C15 /* PTNetworkVirtualizer.m */,
 				AA71A10B2F00000700623C15 /* PTEntitlements.m */,
 				AA71A1472F00000A00623C15 /* PTSvcInterceptor.m */,
+				AA71A1982F00000C00623C15 /* PTArm64StubMath.c */,
+				AA71A19A2F00000C00623C15 /* PTCodeSignParser.c */,
+				AA71A19C2F00000C00623C15 /* PTDetectionRules.c */,
+				AA71A1702F00000C00623C15 /* PTDyldLoaders.m */,
+				AA71A1722F00000C00623C15 /* PTFSAttrStatfs.m */,
+				AA71A1742F00000C00623C15 /* PTFSMutatorsWalkers.m */,
+				AA71A1762F00000C00623C15 /* PTFSOpenStat.m */,
+				AA71A1782F00000C00623C15 /* PTFSPathResolver.m */,
+				AA71A17A2F00000C00623C15 /* PTFSProcDir.m */,
+				AA71A17C2F00000C00623C15 /* PTMediaInputSpooferObjC.m */,
+				AA71A17E2F00000C00623C15 /* PTNetworkRules.m */,
+				AA71A1802F00000C00623C15 /* PTNetworkSocketIf.m */,
+				AA71A1822F00000C00623C15 /* PTObjCRuntimeVirtualizer.m */,
+				AA71A1842F00000C00623C15 /* PTSystemSpooferEnvBundle.m */,
+				AA71A1862F00000C00623C15 /* PTSystemSpooferIOKitMG.m */,
+				AA71A1882F00000C00623C15 /* PTSystemSpooferIdentity.m */,
+				AA71A18A2F00000C00623C15 /* PTSystemSpooferMachVM.m */,
+				AA71A18C2F00000C00623C15 /* PTSystemSpooferSyscallMIG.m */,
+				AA71A18E2F00000C00623C15 /* PTSystemSpooferSysctl.m */,
+				AA71A1902F00000C00623C15 /* PTWebKitScripts.m */,
 			);
 			path = Subsystems;
 			sourceTree = "<group>";
@@ -756,6 +865,18 @@
 				AA71A1122F00000700623C15 /* PTInternal.h in Headers */,
 				AA71A1132F00000700623C15 /* PSInternal.h in Headers */,
 				AA71A1422F00000900623C15 /* PTDebugTrace.h in Headers */,
+				AA71A1552F00000B00623C15 /* PTInterposeRegistry.h in Headers */,
+				AA71A1932F00000C00623C15 /* PTArm64StubMath.h in Headers */,
+				AA71A1952F00000C00623C15 /* PTCodeSignParser.h in Headers */,
+				AA71A1972F00000C00623C15 /* PTDetectionRules.h in Headers */,
+				AA71A1612F00000C00623C15 /* PTCommon.h in Headers */,
+				AA71A1632F00000C00623C15 /* PTDyldInternal.h in Headers */,
+				AA71A1652F00000C00623C15 /* PTEntitlementsInternal.h in Headers */,
+				AA71A1672F00000C00623C15 /* PTFSInternal.h in Headers */,
+				AA71A1692F00000C00623C15 /* PTKernelABI.h in Headers */,
+				AA71A16B2F00000C00623C15 /* PTNetworkInternal.h in Headers */,
+				AA71A16D2F00000C00623C15 /* PTSvcInternal.h in Headers */,
+				AA71A16F2F00000C00623C15 /* PTSystemSpooferInternal.h in Headers */,
 				AA719872287A81A000623C15 /* UITouch+Private.h in Headers */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -1080,8 +1201,21 @@
 				"$(SRCROOT)/PlayTools/Utils/PTSafeMode.swift",
 				"$(SRCROOT)/PlayTools/Subsystems/PTInternal.h",
 				"$(SRCROOT)/PlayTools/Subsystems/PSInternal.h",
+				"$(SRCROOT)/PlayTools/Subsystems/PTArm64StubMath.h",
+				"$(SRCROOT)/PlayTools/Subsystems/PTCodeSignParser.h",
+				"$(SRCROOT)/PlayTools/Subsystems/PTDetectionRules.h",
+				"$(SRCROOT)/PlayTools/Subsystems/PTCommon.h",
+				"$(SRCROOT)/PlayTools/Subsystems/PTDyldInternal.h",
+				"$(SRCROOT)/PlayTools/Subsystems/PTEntitlementsInternal.h",
+				"$(SRCROOT)/PlayTools/Subsystems/PTFSInternal.h",
+				"$(SRCROOT)/PlayTools/Subsystems/PTKernelABI.h",
+				"$(SRCROOT)/PlayTools/Subsystems/PTNetworkInternal.h",
+				"$(SRCROOT)/PlayTools/Subsystems/PTSvcInternal.h",
+				"$(SRCROOT)/PlayTools/Subsystems/PTSystemSpooferInternal.h",
 				"$(SRCROOT)/PlayTools/Subsystems/PTRegistration.h",
 				"$(SRCROOT)/PlayTools/Subsystems/PTRegistration.c",
+				"$(SRCROOT)/PlayTools/Subsystems/PTInterposeRegistry.h",
+				"$(SRCROOT)/PlayTools/Subsystems/PTInterposeRegistry.c",
 				"$(SRCROOT)/PlayTools/Subsystems/PTDebugTrace.h",
 				"$(SRCROOT)/PlayTools/Subsystems/PTDebugTrace.c",
 				"$(SRCROOT)/PlayTools/Subsystems/PTDyldVirtualizer.m",
@@ -1089,10 +1223,32 @@
 				"$(SRCROOT)/PlayTools/Subsystems/PTFSVirtualizerObjC.m",
 				"$(SRCROOT)/PlayTools/Subsystems/PTSystemSpoofer.m",
 				"$(SRCROOT)/PlayTools/Subsystems/PTSystemSpooferObjC.m",
+				"$(SRCROOT)/PlayTools/Subsystems/PTCoreMotionVirtualizer.m",
+				"$(SRCROOT)/PlayTools/Subsystems/PTWebKitVirtualizer.m",
 				"$(SRCROOT)/PlayTools/Subsystems/PTGraphicsVirtualizer.m",
 				"$(SRCROOT)/PlayTools/Subsystems/PTNetworkVirtualizer.m",
 				"$(SRCROOT)/PlayTools/Subsystems/PTEntitlements.m",
 				"$(SRCROOT)/PlayTools/Subsystems/PTSvcInterceptor.m",
+				"$(SRCROOT)/PlayTools/Subsystems/PTArm64StubMath.c",
+				"$(SRCROOT)/PlayTools/Subsystems/PTCodeSignParser.c",
+				"$(SRCROOT)/PlayTools/Subsystems/PTDetectionRules.c",
+				"$(SRCROOT)/PlayTools/Subsystems/PTDyldLoaders.m",
+				"$(SRCROOT)/PlayTools/Subsystems/PTFSAttrStatfs.m",
+				"$(SRCROOT)/PlayTools/Subsystems/PTFSMutatorsWalkers.m",
+				"$(SRCROOT)/PlayTools/Subsystems/PTFSOpenStat.m",
+				"$(SRCROOT)/PlayTools/Subsystems/PTFSPathResolver.m",
+				"$(SRCROOT)/PlayTools/Subsystems/PTFSProcDir.m",
+				"$(SRCROOT)/PlayTools/Subsystems/PTMediaInputSpooferObjC.m",
+				"$(SRCROOT)/PlayTools/Subsystems/PTNetworkRules.m",
+				"$(SRCROOT)/PlayTools/Subsystems/PTNetworkSocketIf.m",
+				"$(SRCROOT)/PlayTools/Subsystems/PTObjCRuntimeVirtualizer.m",
+				"$(SRCROOT)/PlayTools/Subsystems/PTSystemSpooferEnvBundle.m",
+				"$(SRCROOT)/PlayTools/Subsystems/PTSystemSpooferIOKitMG.m",
+				"$(SRCROOT)/PlayTools/Subsystems/PTSystemSpooferIdentity.m",
+				"$(SRCROOT)/PlayTools/Subsystems/PTSystemSpooferMachVM.m",
+				"$(SRCROOT)/PlayTools/Subsystems/PTSystemSpooferSyscallMIG.m",
+				"$(SRCROOT)/PlayTools/Subsystems/PTSystemSpooferSysctl.m",
+				"$(SRCROOT)/PlayTools/Subsystems/PTWebKitScripts.m",
 			);
 			name = "Build PlayTools XCFramework";
 			outputFileListPaths = (
@@ -1158,16 +1314,39 @@
 				AA71A1142F00000700623C15 /* PTSafeMode.swift in Sources */,
 				AA71A1152F00000700623C15 /* PTPluginContainer.swift in Sources */,
 				AA71A1162F00000700623C15 /* PTRegistration.c in Sources */,
+				AA71A1562F00000B00623C15 /* PTInterposeRegistry.c in Sources */,
 				AA71A1442F00000900623C15 /* PTDebugTrace.c in Sources */,
 				AA71A1172F00000700623C15 /* PTDyldVirtualizer.m in Sources */,
 				AA71A1182F00000700623C15 /* PTFSVirtualizer.m in Sources */,
 				AA71A1192F00000700623C15 /* PTFSVirtualizerObjC.m in Sources */,
 				AA71A11A2F00000700623C15 /* PTSystemSpoofer.m in Sources */,
 				AA71A11B2F00000700623C15 /* PTSystemSpooferObjC.m in Sources */,
+				AA71A1592F00000B00623C15 /* PTCoreMotionVirtualizer.m in Sources */,
+				AA71A15A2F00000B00623C15 /* PTWebKitVirtualizer.m in Sources */,
 				AA71A11C2F00000700623C15 /* PTGraphicsVirtualizer.m in Sources */,
 				AA71A11D2F00000700623C15 /* PTNetworkVirtualizer.m in Sources */,
 				AA71A11E2F00000700623C15 /* PTEntitlements.m in Sources */,
 				AA71A1482F00000A00623C15 /* PTSvcInterceptor.m in Sources */,
+				AA71A1992F00000C00623C15 /* PTArm64StubMath.c in Sources */,
+				AA71A19B2F00000C00623C15 /* PTCodeSignParser.c in Sources */,
+				AA71A19D2F00000C00623C15 /* PTDetectionRules.c in Sources */,
+				AA71A1712F00000C00623C15 /* PTDyldLoaders.m in Sources */,
+				AA71A1732F00000C00623C15 /* PTFSAttrStatfs.m in Sources */,
+				AA71A1752F00000C00623C15 /* PTFSMutatorsWalkers.m in Sources */,
+				AA71A1772F00000C00623C15 /* PTFSOpenStat.m in Sources */,
+				AA71A1792F00000C00623C15 /* PTFSPathResolver.m in Sources */,
+				AA71A17B2F00000C00623C15 /* PTFSProcDir.m in Sources */,
+				AA71A17D2F00000C00623C15 /* PTMediaInputSpooferObjC.m in Sources */,
+				AA71A17F2F00000C00623C15 /* PTNetworkRules.m in Sources */,
+				AA71A1812F00000C00623C15 /* PTNetworkSocketIf.m in Sources */,
+				AA71A1832F00000C00623C15 /* PTObjCRuntimeVirtualizer.m in Sources */,
+				AA71A1852F00000C00623C15 /* PTSystemSpooferEnvBundle.m in Sources */,
+				AA71A1872F00000C00623C15 /* PTSystemSpooferIOKitMG.m in Sources */,
+				AA71A1892F00000C00623C15 /* PTSystemSpooferIdentity.m in Sources */,
+				AA71A18B2F00000C00623C15 /* PTSystemSpooferMachVM.m in Sources */,
+				AA71A18D2F00000C00623C15 /* PTSystemSpooferSyscallMIG.m in Sources */,
+				AA71A18F2F00000C00623C15 /* PTSystemSpooferSysctl.m in Sources */,
+				AA71A1912F00000C00623C15 /* PTWebKitScripts.m in Sources */,
 				9562D16F2AB50D34002C329D /* ActionDispatcher.swift in Sources */,
 				2847AE48298EFC0F00B0F983 /* PlayScreen.swift in Sources */,
 				9562D1532AB484FD002C329D /* EventAdapter.swift in Sources */,
@@ -1229,8 +1408,10 @@
 				AA71A0962F00000600623C15 /* PlaySettingsTests.swift in Sources */,
 				AA71A0A32F00000600623C15 /* AKPluginLoaderTests.swift in Sources */,
 				AA71A11F2F00000700623C15 /* PTRegistration.c in Sources */,
+				AA71A1572F00000B00623C15 /* PTInterposeRegistry.c in Sources */,
 				AA71A1452F00000900623C15 /* PTDebugTrace.c in Sources */,
 				AA71A1472F00000900623C15 /* PTDebugTraceTests.swift in Sources */,
+				AA71A1582F00000B00623C15 /* PTInterposeRegistryTests.swift in Sources */,
 				AA71A1202F00000700623C15 /* PTSafeMode.swift in Sources */,
 				AA71A1212F00000700623C15 /* PTPluginContainer.swift in Sources */,
 				AA71A1222F00000700623C15 /* PTRegistrationTests.swift in Sources */,

@@ -9,7 +9,11 @@
 #ifndef PSInternal_h
 #define PSInternal_h
 
-#import "PTInternal.h"
+#import "PTCommon.h"
+#import "PTSystemSpooferInternal.h"
+#import "PTFSInternal.h"
+#import "PTDyldInternal.h"
+#import "PTNetworkInternal.h"
 
 //
 //  PlayShadow.m
@@ -19,7 +23,6 @@
 //
 
 #import <Foundation/Foundation.h>
-#import <CoreMotion/CoreMotion.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <UIKit/UIKit.h>
@@ -38,51 +41,6 @@
 #import "../PTCallerAddressMath.h"
 #import <PlayTools/PlayTools-Swift.h>
 
-extern const char *dyld_image_path_containing_address(const void *addr);
-extern __attribute__((visibility("hidden"))) const char *pt_sanitize_image_path_for_app(const char *raw_path);
-extern __attribute__((visibility("hidden"))) const char *pt_sanitize_image_path_for_cstr(const char *raw_path);
-extern __attribute__((visibility("hidden"))) const char *pt_resolve_virtual_path(const char *path, char *buf, size_t bufsize);
-extern __attribute__((visibility("hidden"))) const char *pt_virtualize_path_for_app(const char *path, char *buf, size_t bufsize, BOOL use_private_prefix);
-extern __attribute__((visibility("hidden"))) const char *pt_get_virtual_home_cstr(void);
-extern __attribute__((visibility("hidden"))) const char *pt_get_virtual_tmpdir_cstr(void);
-extern __attribute__((visibility("hidden"))) const char *pt_get_host_user_root_cstr(void);
-extern __attribute__((visibility("hidden"))) const char *pt_get_device_model_cstr(void);
-extern __attribute__((visibility("hidden"))) const char *pt_get_oem_id_cstr(void);
-extern __attribute__((visibility("hidden"))) const char *pt_get_spoofed_ios_version_cstr(void);
-extern __attribute__((visibility("hidden"))) uint32_t pt_get_spoofed_cpu_cores(void);
-extern __attribute__((visibility("hidden"))) uint64_t pt_get_spoofed_physical_memory(void);
-extern __attribute__((visibility("hidden"))) const char *pt_get_spoofed_gpu_name_cstr(void);
-extern __attribute__((visibility("hidden"))) int32_t pt_get_spoofed_max_apple_gpu_family(void);
-extern __attribute__((visibility("hidden"))) const char *pt_get_spoofed_gpu_arch_cstr(void);
-extern __attribute__((visibility("hidden"))) BOOL pt_is_bypass_enabled(void);
-extern __attribute__((visibility("hidden"))) BOOL pt_is_virtual_container_path(const char *path);
-extern __attribute__((visibility("hidden"))) BOOL pt_is_virtual_container_ancestor_dir(const char *path);
-extern __attribute__((visibility("hidden"))) BOOL pt_is_system_or_playtools_caller(const void *ret_addr);
-extern __attribute__((visibility("hidden"))) BOOL pt_is_effective_system_or_playtools_caller(const void *ret_addr);
-extern __attribute__((visibility("hidden"))) BOOL pt_is_hidden_path(const char *path, const void *caller);
-extern __attribute__((visibility("hidden"))) BOOL pt_is_hidden_env_key(const char *name);
-extern __attribute__((visibility("hidden"))) BOOL pt_is_hidden_env_value(const char *val, BOOL has_virtual_container);
-extern __attribute__((visibility("hidden"))) pt_env_entry_action_t pt_resolve_env_entry(
-    const char *key,
-    const char *raw_val,
-    BOOL has_raw_entry,
-    BOOL bypass_enabled,
-    const char *vh,
-    const char *vt,
-    const char **out_val);
-extern __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_selector_name(const char *selName);
-extern __attribute__((visibility("hidden"))) BOOL pt_get_spoofed_device_is_ipad(void);
-extern __attribute__((visibility("hidden"))) double pt_get_device_native_scale(void);
-extern __attribute__((visibility("hidden"))) uint32_t pt_get_device_native_width(void);
-extern __attribute__((visibility("hidden"))) uint32_t pt_get_device_native_height(void);
-extern __attribute__((visibility("hidden"))) BOOL pt_is_system_version_plist_dict(NSDictionary *dict);
-extern __attribute__((visibility("hidden"))) BOOL pt_sanitize_ios_build_version_cstr(const char *build_cstr, const char *ios_ver_cstr, char *out_buf, size_t out_size);
-extern __attribute__((visibility("hidden"))) void pt_sanitize_system_version_dict(NSMutableDictionary *dict);
-extern __attribute__((visibility("hidden"))) const char *pt_register_and_virtualize_group_container(const char *real_group_path, char *buf, size_t bufsize, BOOL use_private_prefix);
-extern __attribute__((visibility("hidden"))) void pt_register_swizzled_imp(const void *hook_imp, const void *orig_imp);
-extern __attribute__((visibility("hidden"))) void pt_register_hidden_swizzle_selector(SEL sel);
-extern __attribute__((visibility("hidden"))) BOOL pt_is_address_in_playtools(const void *addr);
-
 
 #define PS_SWIZZLE_MAX_ACTIVE_FRAMES 32
 
@@ -91,14 +49,6 @@ typedef struct {
     CFMutableDictionaryRef dict;
     Class dispatched_cls;
 } ps_swizzle_active_frame_t;
-
-__attribute__((visibility("hidden")))
-@interface PSVirtualFileReadScope : NSObject
-@property (nonatomic, copy) NSString *allowedRealPath;
-@property (nonatomic, copy) NSString *expectedDocRealPath;
-@property (nonatomic, assign) BOOL allowSubtree;
-@property (nonatomic, assign) BOOL allowAllAppContainers;
-@end
 
 __attribute__((visibility("hidden")))
 @interface PlayShadowLoader : NSObject
@@ -166,36 +116,60 @@ __attribute__((visibility("hidden"))) void ps_swizzle_class_sel_storing_imp(os_u
 __attribute__((visibility("hidden"))) BOOL ps_class_defines_instance_method(Class cls, SEL sel);
 
 // PTFSVirtualizerObjC exports
-extern __attribute__((visibility("hidden"))) os_unfair_lock s_wkCanonRootsLock;
-extern __attribute__((visibility("hidden"))) NSMutableArray<NSString *> *s_wkCanonContainerRoots;
 __attribute__((visibility("hidden"))) NSString *ps_strip_iossupport_nsstring(NSString *p);
 __attribute__((visibility("hidden"))) BOOL ps_is_virtual_ancestor_nsstring(NSString *path);
+__attribute__((visibility("hidden"))) NSString *ps_normalize_virtual_ancestor_nsstring(NSString *path);
 __attribute__((visibility("hidden"))) NSString *ps_resolve_virtual_nsstring_path(NSString *path);
+__attribute__((visibility("hidden"))) NSURL *ps_rebuild_file_nsurl(NSURL *origURL, NSString *newPath);
 __attribute__((visibility("hidden"))) NSURL *ps_resolve_virtual_nsurl(NSURL *url);
 __attribute__((visibility("hidden"))) NSString *ps_virtualize_nsstring_path_for_app(NSString *path, BOOL usePrivatePrefix);
 __attribute__((visibility("hidden"))) NSURL *ps_virtualize_nsurl_for_app(NSURL *url, BOOL usePrivatePrefix);
 __attribute__((visibility("hidden"))) BOOL ps_is_effective_system_or_playtools_caller(const void *ret_addr);
 __attribute__((visibility("hidden"))) BOOL ps_is_hidden_path(NSString *path, const void *caller);
 __attribute__((visibility("hidden"))) BOOL ps_is_virtual_container_nsstring(NSString *path);
-__attribute__((visibility("hidden"))) NSString *ps_extract_virtual_container_root(NSString *virtPath);
-__attribute__((visibility("hidden"))) void ps_seed_wk_canon_container_roots(void);
-__attribute__((visibility("hidden"))) NSString *ps_canonical_container_real_path_from_url(NSURL *url);
-__attribute__((visibility("hidden"))) BOOL ps_real_path_matches_or_under(NSString *candidate, NSString *root, BOOL allowSubtree);
-__attribute__((visibility("hidden"))) void ps_set_wkwebview_read_scope(id webView, PSVirtualFileReadScope *scope);
-__attribute__((visibility("hidden"))) id ps_shared_vfile_scheme_handler(void);
-__attribute__((visibility("hidden"))) void ps_install_webkit_hooks_if_loaded(void);
 __attribute__((visibility("hidden"))) void ps_install_quicklook_hooks_if_loaded(void);
 
-// PTSystemSpooferObjC exports
+// PTWebKitVirtualizer & PTWebKitScripts exports
+extern __attribute__((visibility("hidden"))) NSString * const kPSWKEnvScriptMarker;
+extern __attribute__((visibility("hidden"))) NSString * const kPSWKVFileScriptMarker;
+__attribute__((visibility("hidden"))) void ps_install_webkit_hooks_if_loaded(void);
+__attribute__((visibility("hidden"))) NSString *ps_build_wk_env_user_script_source_uncached(
+    NSString *plat,
+    NSString *uaToken,
+    unsigned int cores,
+    int ptWidth,
+    int ptHeight,
+    double dpr,
+    BOOL compat13,
+    int32_t maxAppleFam);
+__attribute__((visibility("hidden"))) NSString *ps_build_wk_vfile_user_script_source(void);
+
+// PTCoreMotionVirtualizer exports
+__attribute__((visibility("hidden"))) void ps_install_coremotion_hooks_if_loaded(void);
+
+static inline BOOL ps_is_iphone_device_model(void) {
+    const char *m = pt_get_device_model_cstr();
+    return (m != NULL && strncmp(m, "iPhone", 6) == 0);
+}
+
+// PTSystemSpooferObjC & PTMediaInputSpooferObjC exports
 extern __attribute__((visibility("hidden"))) NSBundle * (*s_orig_bundleForClass)(id, SEL, Class);
 extern __attribute__((visibility("hidden"))) NSUUID * (*s_orig_device_identifierForVendor)(id, SEL);
 __attribute__((visibility("hidden"))) NSBundle *ps_hook_bundle_for_class(id self, SEL _cmd, Class aClass);
 __attribute__((visibility("hidden"))) NSUUID *ps_hook_device_identifierForVendor(id self, SEL _cmd);
 __attribute__((visibility("hidden"))) NSURL *ps_virtualize_bundle_url_for_caller(NSURL *url, const void *caller);
 __attribute__((visibility("hidden"))) NSString *ps_app_settings_plist_path(void);
+__attribute__((visibility("hidden"))) BOOL ps_get_cached_ios_sysver(NSOperatingSystemVersion *outVer, NSString * __autoreleasing *outVerString);
 __attribute__((visibility("hidden"))) void ps_install_system_jailbreak_bypass_hooks(void);
 __attribute__((visibility("hidden"))) void ps_load_environment_bypass_hooks(void);
 __attribute__((visibility("hidden"))) void ps_install_dynamic_system_bundle_hooks(void);
+__attribute__((visibility("hidden"))) void ps_install_uifont_hooks_if_loaded(void);
+__attribute__((visibility("hidden"))) void ps_install_audio_session_port_hooks(void);
+__attribute__((visibility("hidden"))) void ps_install_avcapture_hooks_if_loaded(void);
+__attribute__((visibility("hidden"))) void ps_install_app_attest_hooks_if_loaded(void);
+__attribute__((visibility("hidden"))) void ps_install_local_auth_hooks_if_loaded(void);
+__attribute__((visibility("hidden"))) void ps_install_game_controller_hooks_if_loaded(void);
+__attribute__((visibility("hidden"))) void ps_install_jscontext_hooks_if_loaded(void);
 
 // PTGraphicsVirtualizer exports
 __attribute__((visibility("hidden"))) void pt_install_graphics_hooks_if_loaded(void);

@@ -4,6 +4,8 @@
 //
 
 #import "PTInternal.h"
+#import "PTCodeSignParser.h"
+#import "PTDetectionRules.h"
 #include <CommonCrypto/CommonDigest.h>
 
 static NSDictionary *pt_get_fallback_entitlements_dict(void) {
@@ -79,17 +81,6 @@ static BOOL pt_is_hidden_entitlement_key(NSString *key) {
 #define PT_CS_OPS_DER_ENTITLEMENTS_BLOB 16U
 #define PT_CS_OPS_VALIDATION_CATEGORY 17U
 #define PT_CS_VALIDATION_CATEGORY_APPSTORE 3U
-#define PT_CSMAGIC_EMBEDDED_ENTITLEMENTS 0xfade7171U
-#define PT_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS 0xfade7172U
-#define PT_CSMAGIC_EMBEDDED_SIGNATURE 0xfade0cc0U
-#define PT_CSMAGIC_CODEDIRECTORY 0xfade0c02U
-#define PT_CSSLOT_CODEDIRECTORY 0U
-#define PT_CSSLOT_ENTITLEMENTS 5U
-#define PT_CSSLOT_DER_ENTITLEMENTS 7U
-#define PT_CSSLOT_ALTERNATE_CODEDIRECTORIES 0x1000U
-#define PT_CSSLOT_ALTERNATE_CODEDIRECTORY_MAX 5U
-#define PT_CS_HASHTYPE_SHA256 2U
-#define PT_CS_HASHTYPE_SHA256_TRUNCATED 3U
 #define PT_CS_VALID 0x00000001U
 #define PT_CS_ADHOC 0x00000002U
 #define PT_CS_GET_TASK_ALLOW 0x00000004U
@@ -284,100 +275,6 @@ static NSData *pt_get_synthesized_entitlements_xml_data(void) {
         }
     });
     return s_xml_data;
-}
-
-typedef struct {
-    uint8_t *data;
-    size_t len;
-    size_t cap;
-    BOOL failed;
-} pt_der_buf_t;
-
-static void pt_der_buf_append(pt_der_buf_t *b, const void *src, size_t n) {
-    if (b == NULL || b->failed || n == 0 || src == NULL) {
-        return;
-    }
-    if (n > (16U << 20) - b->len) {
-        b->failed = YES;
-        return;
-    }
-    if (b->len + n > b->cap) {
-        size_t new_cap = (b->cap == 0) ? 256U : b->cap;
-        while (new_cap < b->len + n) {
-            if (new_cap > (8U << 20)) {
-                b->failed = YES;
-                return;
-            }
-            new_cap *= 2U;
-        }
-        uint8_t *grown = (uint8_t *)realloc(b->data, new_cap);
-        if (grown == NULL) {
-            b->failed = YES;
-            return;
-        }
-        b->data = grown;
-        b->cap = new_cap;
-    }
-    memcpy(b->data + b->len, src, n);
-    b->len += n;
-}
-
-static void pt_der_buf_append_byte(pt_der_buf_t *b, uint8_t v) {
-    pt_der_buf_append(b, &v, 1U);
-}
-
-static void pt_der_buf_append_tag_len(pt_der_buf_t *b, uint8_t tag, size_t content_len) {
-    pt_der_buf_append_byte(b, tag);
-    if (content_len < 0x80U) {
-        pt_der_buf_append_byte(b, (uint8_t)content_len);
-    } else if (content_len <= 0xffU) {
-        uint8_t hdr[2] = { 0x81U, (uint8_t)content_len };
-        pt_der_buf_append(b, hdr, sizeof(hdr));
-    } else if (content_len <= 0xffffU) {
-        uint8_t hdr[3] = { 0x82U, (uint8_t)(content_len >> 8), (uint8_t)(content_len & 0xffU) };
-        pt_der_buf_append(b, hdr, sizeof(hdr));
-    } else if (content_len <= 0xffffffU) {
-        uint8_t hdr[4] = {
-            0x83U,
-            (uint8_t)((content_len >> 16) & 0xffU),
-            (uint8_t)((content_len >> 8) & 0xffU),
-            (uint8_t)(content_len & 0xffU)
-        };
-        pt_der_buf_append(b, hdr, sizeof(hdr));
-    } else {
-        uint8_t hdr[5] = {
-            0x84U,
-            (uint8_t)((content_len >> 24) & 0xffU),
-            (uint8_t)((content_len >> 16) & 0xffU),
-            (uint8_t)((content_len >> 8) & 0xffU),
-            (uint8_t)(content_len & 0xffU)
-        };
-        pt_der_buf_append(b, hdr, sizeof(hdr));
-    }
-}
-
-static void pt_der_buf_wrap_tlv(pt_der_buf_t *out, uint8_t tag, const uint8_t *body, size_t body_len) {
-    pt_der_buf_append_tag_len(out, tag, body_len);
-    pt_der_buf_append(out, body, body_len);
-}
-
-typedef struct {
-    uint8_t *bytes;
-    size_t len;
-} pt_der_item_t;
-
-static int pt_der_item_cmp(const void *a, const void *b) {
-    const pt_der_item_t *ia = (const pt_der_item_t *)a;
-    const pt_der_item_t *ib = (const pt_der_item_t *)b;
-    size_t min_len = (ia->len < ib->len) ? ia->len : ib->len;
-    int c = (min_len > 0) ? memcmp(ia->bytes, ib->bytes, min_len) : 0;
-    if (c != 0) {
-        return c;
-    }
-    if (ia->len < ib->len) {
-        return -1;
-    }
-    return (ia->len > ib->len) ? 1 : 0;
 }
 
 static BOOL pt_der_encode_objc_value(id val, pt_der_buf_t *out);
@@ -1021,96 +918,6 @@ static OSStatus pt_SecStaticCodeCheckValidity(SecStaticCodeRef staticCode,
 
 extern int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
 extern int csops_audittoken(pid_t pid, unsigned int ops, void *useraddr, size_t usersize, audit_token_t *token);
-
-#ifndef PT_CS_HASHTYPE_SHA1
-#define PT_CS_HASHTYPE_SHA1 1U
-#endif
-
-static void pt_sha256_cs_blob(uint32_t host_magic, const uint8_t *payload, size_t payload_len, uint8_t out_hash[CC_SHA256_DIGEST_LENGTH]) {
-    size_t full_sz = 8U + payload_len;
-    uint32_t hdr[2] = { htonl(host_magic), htonl((uint32_t)full_sz) };
-    CC_SHA256_CTX ctx;
-    CC_SHA256_Init(&ctx);
-    CC_SHA256_Update(&ctx, hdr, sizeof(hdr));
-    if (payload != NULL && payload_len > 0) {
-        CC_SHA256_Update(&ctx, payload, (CC_LONG)payload_len);
-    }
-    CC_SHA256_Final(out_hash, &ctx);
-}
-
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-static void pt_sha1_cs_blob(uint32_t host_magic, const uint8_t *payload, size_t payload_len, uint8_t out_hash[CC_SHA1_DIGEST_LENGTH]) {
-    size_t full_sz = 8U + payload_len;
-    uint32_t hdr[2] = { htonl(host_magic), htonl((uint32_t)full_sz) };
-    CC_SHA1_CTX ctx;
-    CC_SHA1_Init(&ctx);
-    CC_SHA1_Update(&ctx, hdr, sizeof(hdr));
-    if (payload != NULL && payload_len > 0) {
-        CC_SHA1_Update(&ctx, payload, (CC_LONG)payload_len);
-    }
-    CC_SHA1_Final(out_hash, &ctx);
-}
-#pragma clang diagnostic pop
-
-static void pt_patch_code_directory_entitlement_hashes(uint8_t *cd_buf,
-                                                       size_t cd_len,
-                                                       BOOL has_xml,
-                                                       const uint8_t xml_hash[CC_SHA256_DIGEST_LENGTH],
-                                                       const uint8_t xml_sha1[CC_SHA1_DIGEST_LENGTH],
-                                                       BOOL has_der,
-                                                       const uint8_t der_hash[CC_SHA256_DIGEST_LENGTH],
-                                                       const uint8_t der_sha1[CC_SHA1_DIGEST_LENGTH]) {
-    if (cd_buf == NULL || cd_len < 40U) {
-        return;
-    }
-    uint32_t cd_magic = 0, cd_declared_len = 0, hash_offset = 0, n_special = 0;
-    memcpy(&cd_magic, cd_buf + 0U, sizeof(cd_magic));
-    memcpy(&cd_declared_len, cd_buf + 4U, sizeof(cd_declared_len));
-    memcpy(&hash_offset, cd_buf + 16U, sizeof(hash_offset));
-    memcpy(&n_special, cd_buf + 24U, sizeof(n_special));
-    cd_magic = ntohl(cd_magic);
-    cd_declared_len = ntohl(cd_declared_len);
-    hash_offset = ntohl(hash_offset);
-    n_special = ntohl(n_special);
-    if (cd_magic != PT_CSMAGIC_CODEDIRECTORY || cd_declared_len > cd_len || hash_offset > cd_len) {
-        return;
-    }
-    uint8_t hash_size = cd_buf[36];
-    uint8_t hash_type = cd_buf[37];
-    const uint8_t *use_xml = NULL;
-    const uint8_t *use_der = NULL;
-    if ((hash_type == PT_CS_HASHTYPE_SHA256 && hash_size == CC_SHA256_DIGEST_LENGTH) ||
-        (hash_type == PT_CS_HASHTYPE_SHA256_TRUNCATED && hash_size == 20U)) {
-        use_xml = xml_hash;
-        use_der = der_hash;
-    } else if (hash_type == PT_CS_HASHTYPE_SHA1 && hash_size == CC_SHA1_DIGEST_LENGTH) {
-        use_xml = xml_sha1;
-        use_der = der_sha1;
-    } else {
-        return;
-    }
-    if (n_special >= PT_CSSLOT_ENTITLEMENTS && hash_offset >= (uint32_t)PT_CSSLOT_ENTITLEMENTS * (uint32_t)hash_size) {
-        size_t off5 = (size_t)hash_offset - (size_t)PT_CSSLOT_ENTITLEMENTS * (size_t)hash_size;
-        if (off5 + (size_t)hash_size <= cd_len) {
-            if (has_xml && use_xml != NULL) {
-                memcpy(cd_buf + off5, use_xml, (size_t)hash_size);
-            } else {
-                memset(cd_buf + off5, 0, (size_t)hash_size);
-            }
-        }
-    }
-    if (n_special >= PT_CSSLOT_DER_ENTITLEMENTS && hash_offset >= (uint32_t)PT_CSSLOT_DER_ENTITLEMENTS * (uint32_t)hash_size) {
-        size_t off7 = (size_t)hash_offset - (size_t)PT_CSSLOT_DER_ENTITLEMENTS * (size_t)hash_size;
-        if (off7 + (size_t)hash_size <= cd_len) {
-            if (has_der && use_der != NULL) {
-                memcpy(cd_buf + off7, use_der, (size_t)hash_size);
-            } else {
-                memset(cd_buf + off7, 0, (size_t)hash_size);
-            }
-        }
-    }
-}
 
 static os_unfair_lock s_spoofed_cdhash_lock = OS_UNFAIR_LOCK_INIT;
 static uint8_t s_spoofed_primary_cdhash[20];
@@ -2014,14 +1821,14 @@ static OSStatus pt_SecKeyGeneratePair(CFDictionaryRef parameters, SecKeyRef *pub
     return retval;
 }
 
-DYLD_INTERPOSE(pt_SecItemCopyMatching, SecItemCopyMatching)
-DYLD_INTERPOSE(pt_SecItemAdd, SecItemAdd)
-DYLD_INTERPOSE(pt_SecItemUpdate, SecItemUpdate)
-DYLD_INTERPOSE(pt_SecItemDelete, SecItemDelete)
-DYLD_INTERPOSE(pt_SecKeyCreateRandomKey, SecKeyCreateRandomKey)
-DYLD_INTERPOSE(pt_SecKeyCopyExternalRepresentation, SecKeyCopyExternalRepresentation)
-DYLD_INTERPOSE(pt_SecKeyCopyAttributes, SecKeyCopyAttributes)
-DYLD_INTERPOSE(pt_SecKeyGeneratePair, SecKeyGeneratePair)
+PT_INTERPOSE(pt_SecItemCopyMatching, SecItemCopyMatching)
+PT_INTERPOSE(pt_SecItemAdd, SecItemAdd)
+PT_INTERPOSE(pt_SecItemUpdate, SecItemUpdate)
+PT_INTERPOSE(pt_SecItemDelete, SecItemDelete)
+PT_INTERPOSE(pt_SecKeyCreateRandomKey, SecKeyCreateRandomKey)
+PT_INTERPOSE(pt_SecKeyCopyExternalRepresentation, SecKeyCopyExternalRepresentation)
+PT_INTERPOSE(pt_SecKeyCopyAttributes, SecKeyCopyAttributes)
+PT_INTERPOSE(pt_SecKeyGeneratePair, SecKeyGeneratePair)
 #pragma clang diagnostic pop
 
 
@@ -2157,37 +1964,7 @@ static int pt_sandbox_check_impl(BOOL use_audit_token,
 
 __attribute__((visibility("hidden")))
 BOOL pt_is_hidden_macos_mach_service(const char *name) {
-    if (name == NULL || name[0] == '\0') {
-        return NO;
-    }
-    if (strcmp(name, "com.apple.dock.server") == 0 ||
-        strncmp(name, "com.apple.dock.", 15) == 0 ||
-        strncmp(name, "com.apple.windowserver.", 23) == 0 ||
-        strncmp(name, "com.apple.finder.", 17) == 0 ||
-        strcmp(name, "com.apple.Finder") == 0 ||
-        strncmp(name, "com.apple.coreservices.launchservicesd", 38) == 0 ||
-        strncmp(name, "com.apple.coreservices.appleevents", 34) == 0 ||
-        strncmp(name, "com.apple.coreservices.quarantine-resolver", 42) == 0 ||
-        strncmp(name, "com.apple.coreservices.sharedfilelistd", 38) == 0 ||
-        strncmp(name, "com.apple.loginwindow", 21) == 0 ||
-        strncmp(name, "com.apple.systemuiserver", 24) == 0 ||
-        strcmp(name, "com.apple.pasteboard.1") == 0 ||
-        strcmp(name, "com.apple.CoreDisplay.master") == 0 ||
-        strncmp(name, "com.apple.SkyLight.", 19) == 0 ||
-        strncmp(name, "com.apple.ControlCenter", 23) == 0 ||
-        strncmp(name, "com.apple.tsm.uiserver", 22) == 0 ||
-        strcmp(name, "com.apple.DesktopServicesHelper") == 0 ||
-        strncmp(name, "com.apple.endpointsecurity.", 27) == 0) {
-        return YES;
-    }
-    if (strcasestr(name, "playcover") != NULL ||
-        strcasestr(name, "macover") != NULL ||
-        strcasestr(name, "app.makedie") != NULL ||
-        strcasestr(name, "playtools") != NULL ||
-        strcasestr(name, "akinterface") != NULL) {
-        return YES;
-    }
-    return NO;
+    return pt_is_hidden_macos_mach_service_cstr(name) ? YES : NO;
 }
 
 static int pt_sandbox_check(pid_t pid, const char *operation, int type, ...) {
@@ -2359,105 +2136,29 @@ static int pt_mac_syscall(const char *policy, int call, void *arg) {
     return pt_orig_mac_syscall(policy, call, arg);
 }
 
-__attribute__((visibility("hidden")))
-void *pt_entitlements_dlsym_route(const char *symbol) {
-    if (symbol == NULL) {
-        return NULL;
-    }
-    if (strcmp(symbol, "__mac_syscall") == 0) {
-        return (void *)&pt_mac_syscall;
-    }
-    if (strcmp(symbol, "amfi_check_dyld_policy_self") == 0) {
-        return (void *)&pt_amfi_check_dyld_policy_self;
-    }
-    if (strcmp(symbol, "sandbox_check") == 0) {
-        return (void *)&pt_sandbox_check;
-    }
-    if (strcmp(symbol, "sandbox_check_by_audit_token") == 0) {
-        return (void *)&pt_sandbox_check_by_audit_token;
-    }
-    if (strcmp(symbol, "sandbox_extension_issue_file") == 0) {
-        return (void *)&pt_sandbox_extension_issue_file;
-    }
-    if (strcmp(symbol, "sandbox_extension_issue_file_to_self") == 0) {
-        return (void *)&pt_sandbox_extension_issue_file_to_self;
-    }
-    if (strcmp(symbol, "sandbox_extension_issue_file_to_process") == 0) {
-        return (void *)&pt_sandbox_extension_issue_file_to_process;
-    }
-    if (strcmp(symbol, "sandbox_extension_issue_file_to_process_by_pid") == 0) {
-        return (void *)&pt_sandbox_extension_issue_file_to_process_by_pid;
-    }
-    if (strcmp(symbol, "csops") == 0) {
-        return (void *)&pt_csops;
-    }
-    if (strcmp(symbol, "csops_audittoken") == 0) {
-        return (void *)&pt_csops_audittoken;
-    }
-    if (strcmp(symbol, "ptrace") == 0 || strcmp(symbol, "__ptrace") == 0) {
-        return (void *)&pt_ptrace;
-    }
-    if (strcmp(symbol, "SecTaskCopyValueForEntitlement") == 0) {
-        return (void *)&pt_SecTaskCopyValueForEntitlement;
-    }
-    if (strcmp(symbol, "SecTaskCopyValuesForEntitlements") == 0) {
-        return (void *)&pt_SecTaskCopyValuesForEntitlements;
-    }
-    if (strcmp(symbol, "SecTaskGetCodeSignStatus") == 0) {
-        return (void *)&pt_SecTaskGetCodeSignStatus;
-    }
-    if (strcmp(symbol, "SecTaskCopySigningIdentifier") == 0) {
-        return (void *)&pt_SecTaskCopySigningIdentifier;
-    }
-    if (strcmp(symbol, "SecItemCopyMatching") == 0) {
-        return (void *)&pt_SecItemCopyMatching;
-    }
-    if (strcmp(symbol, "SecItemAdd") == 0) {
-        return (void *)&pt_SecItemAdd;
-    }
-    if (strcmp(symbol, "SecItemUpdate") == 0) {
-        return (void *)&pt_SecItemUpdate;
-    }
-    if (strcmp(symbol, "SecItemDelete") == 0) {
-        return (void *)&pt_SecItemDelete;
-    }
-    if (strcmp(symbol, "SecKeyCreateRandomKey") == 0) {
-        return (void *)&pt_SecKeyCreateRandomKey;
-    }
-    if (strcmp(symbol, "SecKeyCopyExternalRepresentation") == 0) {
-        return (void *)&pt_SecKeyCopyExternalRepresentation;
-    }
-    if (strcmp(symbol, "SecKeyCopyAttributes") == 0) {
-        return (void *)&pt_SecKeyCopyAttributes;
-    }
-    if (strcmp(symbol, "SecKeyGeneratePair") == 0) {
-        return (void *)&pt_SecKeyGeneratePair;
-    }
-    return NULL;
-}
-
-
-DYLD_INTERPOSE(pt_SecTaskCopyValueForEntitlement, SecTaskCopyValueForEntitlement)
-DYLD_INTERPOSE(pt_SecTaskCopyValuesForEntitlements, SecTaskCopyValuesForEntitlements)
-DYLD_INTERPOSE(pt_SecTaskGetCodeSignStatus, SecTaskGetCodeSignStatus)
-DYLD_INTERPOSE(pt_SecTaskCopySigningIdentifier, SecTaskCopySigningIdentifier)
-DYLD_INTERPOSE(pt_SecCodeCopySelf, SecCodeCopySelf)
-DYLD_INTERPOSE(pt_SecCodeCopyStaticCode, SecCodeCopyStaticCode)
-DYLD_INTERPOSE(pt_SecCodeCopyPath, SecCodeCopyPath)
-DYLD_INTERPOSE(pt_SecCodeCopySigningInformation, SecCodeCopySigningInformation)
-DYLD_INTERPOSE(pt_SecCodeCheckValidity, SecCodeCheckValidity)
-DYLD_INTERPOSE(pt_SecCodeCheckValidityWithErrors, SecCodeCheckValidityWithErrors)
-DYLD_INTERPOSE(pt_SecStaticCodeCreateWithPath, SecStaticCodeCreateWithPath)
-DYLD_INTERPOSE(pt_SecStaticCodeCreateWithPathAndAttributes, SecStaticCodeCreateWithPathAndAttributes)
-DYLD_INTERPOSE(pt_SecStaticCodeCheckValidity, SecStaticCodeCheckValidity)
-DYLD_INTERPOSE(pt_SecStaticCodeCheckValidityWithErrors, SecStaticCodeCheckValidityWithErrors)
-DYLD_INTERPOSE(pt_csops, csops)
-DYLD_INTERPOSE(pt_csops_audittoken, csops_audittoken)
-DYLD_INTERPOSE(pt_ptrace, ptrace)
-DYLD_INTERPOSE(pt_sandbox_extension_issue_file, sandbox_extension_issue_file)
-DYLD_INTERPOSE(pt_sandbox_extension_issue_file_to_self, sandbox_extension_issue_file_to_self)
-DYLD_INTERPOSE(pt_sandbox_extension_issue_file_to_process, sandbox_extension_issue_file_to_process)
-DYLD_INTERPOSE(pt_sandbox_extension_issue_file_to_process_by_pid, sandbox_extension_issue_file_to_process_by_pid)
-DYLD_INTERPOSE(pt_sandbox_check, sandbox_check)
-DYLD_INTERPOSE(pt_sandbox_check_by_audit_token, sandbox_check_by_audit_token)
-DYLD_INTERPOSE(pt_mac_syscall, pt_orig_mac_syscall)
+PT_INTERPOSE(pt_SecTaskCopyValueForEntitlement, SecTaskCopyValueForEntitlement)
+PT_INTERPOSE(pt_SecTaskCopyValuesForEntitlements, SecTaskCopyValuesForEntitlements)
+PT_INTERPOSE(pt_SecTaskGetCodeSignStatus, SecTaskGetCodeSignStatus)
+PT_INTERPOSE(pt_SecTaskCopySigningIdentifier, SecTaskCopySigningIdentifier)
+PT_INTERPOSE_ONLY(pt_SecCodeCopySelf, SecCodeCopySelf)
+PT_INTERPOSE_ONLY(pt_SecCodeCopyStaticCode, SecCodeCopyStaticCode)
+PT_INTERPOSE_ONLY(pt_SecCodeCopyPath, SecCodeCopyPath)
+PT_INTERPOSE_ONLY(pt_SecCodeCopySigningInformation, SecCodeCopySigningInformation)
+PT_INTERPOSE_ONLY(pt_SecCodeCheckValidity, SecCodeCheckValidity)
+PT_INTERPOSE_ONLY(pt_SecCodeCheckValidityWithErrors, SecCodeCheckValidityWithErrors)
+PT_INTERPOSE_ONLY(pt_SecStaticCodeCreateWithPath, SecStaticCodeCreateWithPath)
+PT_INTERPOSE_ONLY(pt_SecStaticCodeCreateWithPathAndAttributes, SecStaticCodeCreateWithPathAndAttributes)
+PT_INTERPOSE_ONLY(pt_SecStaticCodeCheckValidity, SecStaticCodeCheckValidity)
+PT_INTERPOSE_ONLY(pt_SecStaticCodeCheckValidityWithErrors, SecStaticCodeCheckValidityWithErrors)
+PT_INTERPOSE(pt_csops, csops)
+PT_INTERPOSE(pt_csops_audittoken, csops_audittoken)
+PT_INTERPOSE(pt_ptrace, ptrace)
+PT_DLSYM_ONLY("__ptrace", pt_ptrace)
+PT_DLSYM_ONLY("amfi_check_dyld_policy_self", pt_amfi_check_dyld_policy_self)
+PT_INTERPOSE(pt_sandbox_extension_issue_file, sandbox_extension_issue_file)
+PT_INTERPOSE(pt_sandbox_extension_issue_file_to_self, sandbox_extension_issue_file_to_self)
+PT_INTERPOSE(pt_sandbox_extension_issue_file_to_process, sandbox_extension_issue_file_to_process)
+PT_INTERPOSE(pt_sandbox_extension_issue_file_to_process_by_pid, sandbox_extension_issue_file_to_process_by_pid)
+PT_INTERPOSE(pt_sandbox_check, sandbox_check)
+PT_INTERPOSE(pt_sandbox_check_by_audit_token, sandbox_check_by_audit_token)
+PT_INTERPOSE_NAMED(pt_mac_syscall, pt_orig_mac_syscall, "__mac_syscall")
