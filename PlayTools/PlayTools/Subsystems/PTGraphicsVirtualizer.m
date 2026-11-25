@@ -54,9 +54,11 @@ static CFMutableDictionaryRef s_mtl_orig_architecture_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_arch_name_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_new_lib_sync_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_new_lib_async_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_new_texture_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_opts_langver_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_opts_set_langver_imps = NULL;
 static const char kPSMTLCompileOptionsExplicitLangVerKey = 0;
+static _Atomic BOOL s_mtl_app_created_32f_texture = NO;
 
 static void pt_mtl_line_and_col_for_location(NSString *source, NSUInteger loc, NSUInteger *outLine, NSUInteger *outCol) {
     NSUInteger line = 1;
@@ -90,6 +92,40 @@ static NSUInteger pt_mtl_default_compile_language_version(void) {
         }
     });
     return s_default_lang_ver;
+}
+
+static NSString *pt_mtl_format_missing_header_diagnostic(NSString *source, NSString *headerName) {
+    NSString *bracketed = [NSString stringWithFormat:@"<%@>", headerName];
+    NSRange hdrRange = [source rangeOfString:bracketed];
+    if (hdrRange.location == NSNotFound) {
+        hdrRange = [source rangeOfString:headerName];
+    }
+    if (hdrRange.location == NSNotFound) {
+        return nil;
+    }
+    NSUInteger line = 1, col = 10;
+    pt_mtl_line_and_col_for_location(source, hdrRange.location, &line, &col);
+    NSRange lineRange = [source lineRangeForRange:NSMakeRange(hdrRange.location, 0)];
+    NSString *srcLine = [[source substringWithRange:lineRange]
+        stringByTrimmingCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+    NSMutableString *caret = [NSMutableString stringWithCapacity:(col + hdrRange.length + 1)];
+    NSUInteger col0 = (col > 0) ? (col - 1) : 0;
+    for (NSUInteger i = 0; i < col0; i++) {
+        unichar ch = (i < srcLine.length) ? [srcLine characterAtIndex:i] : ' ';
+        [caret appendString:(ch == '\t') ? @"\t" : @" "];
+    }
+    [caret appendString:@"^"];
+    NSUInteger tildes = (hdrRange.length > 1) ? (hdrRange.length - 1) : (headerName.length + 1);
+    for (NSUInteger i = 0; i < tildes; i++) {
+        [caret appendString:@"~"];
+    }
+    return [NSString stringWithFormat:
+            @"program_source:%lu:%lu: fatal error: '%@' file not found\n%@\n%@",
+            (unsigned long)line,
+            (unsigned long)col,
+            headerName,
+            srcLine.length > 0 ? srcLine : [NSString stringWithFormat:@"#include %@", bracketed],
+            caret];
 }
 
 static BOOL pt_mtl_should_reject_source_for_compat13(NSString *source, id options, NSError **outError) {
@@ -133,24 +169,16 @@ static BOOL pt_mtl_should_reject_source_for_compat13(NSString *source, id option
     if (outError != NULL) {
         NSString *msg = @"Compilation failed:\nInvalid languageVersion";
         if (source != nil && [source isKindOfClass:[NSString class]]) {
-            NSRange hdrRange = [source rangeOfString:@"metal_simdgroup_matrix"];
-            NSRange rtHdrRange = [source rangeOfString:@"metal_raytracing"];
-            if (hdrRange.location != NSNotFound) {
-                NSUInteger line = 1, col = 10;
-                pt_mtl_line_and_col_for_location(source, hdrRange.location, &line, &col);
-                msg = [NSString stringWithFormat:
-                       @"program_source:%lu:%lu: fatal error: 'metal_simdgroup_matrix' file not found\n"
-                        "#include <metal_simdgroup_matrix>\n"
-                        "         ^~~~~~~~~~~~~~~~~~~~~~~~",
-                       (unsigned long)line, (unsigned long)col];
-            } else if (rtHdrRange.location != NSNotFound) {
-                NSUInteger line = 1, col = 10;
-                pt_mtl_line_and_col_for_location(source, rtHdrRange.location, &line, &col);
-                msg = [NSString stringWithFormat:
-                       @"program_source:%lu:%lu: fatal error: 'metal_raytracing' file not found\n"
-                        "#include <metal_raytracing>\n"
-                        "         ^~~~~~~~~~~~~~~~~~",
-                       (unsigned long)line, (unsigned long)col];
+            NSString *simdMsg = [source containsString:@"metal_simdgroup_matrix"]
+                ? pt_mtl_format_missing_header_diagnostic(source, @"metal_simdgroup_matrix")
+                : nil;
+            NSString *rtMsg = [source containsString:@"metal_raytracing"]
+                ? pt_mtl_format_missing_header_diagnostic(source, @"metal_raytracing")
+                : nil;
+            if (simdMsg != nil) {
+                msg = simdMsg;
+            } else if (rtMsg != nil) {
+                msg = rtMsg;
             } else {
                 NSRange symRange = [source rangeOfString:@"simdgroup_multiply_accumulate"];
                 NSRange rtSymRange = [source rangeOfString:@"raytracing::intersector"];
@@ -176,6 +204,39 @@ static BOOL pt_mtl_should_reject_source_for_compat13(NSString *source, id option
                                     }];
     }
     return YES;
+}
+
+static NSString *pt_mtl_rewrite_source_for_apple5_32f(NSString *source, const void *caller) {
+    if (source == nil || ![source isKindOfClass:[NSString class]] ||
+        !pt_is_bypass_enabled() ||
+        ps_is_effective_system_or_playtools_caller(caller) ||
+        (!pt_is_compat13_7_active() && pt_get_spoofed_max_apple_gpu_family() >= 1007)) {
+        return source;
+    }
+    BOOL shouldRewrite = atomic_load_explicit(&s_mtl_app_created_32f_texture, memory_order_acquire) ||
+        ([source containsString:@"kernel "] && [source containsString:@"texture"]);
+    if (!shouldRewrite) {
+        return source;
+    }
+    if (![source containsString:@"filter::linear"] &&
+        ![source containsString:@"min_filter::linear"] &&
+        ![source containsString:@"mag_filter::linear"]) {
+        return source;
+    }
+    NSMutableString *rewritten = [source mutableCopy];
+    [rewritten replaceOccurrencesOfString:@"min_filter::linear"
+                               withString:@"min_filter::nearest"
+                                  options:0
+                                    range:NSMakeRange(0, rewritten.length)];
+    [rewritten replaceOccurrencesOfString:@"mag_filter::linear"
+                               withString:@"mag_filter::nearest"
+                                  options:0
+                                    range:NSMakeRange(0, rewritten.length)];
+    [rewritten replaceOccurrencesOfString:@"filter::linear"
+                               withString:@"filter::nearest"
+                                  options:0
+                                    range:NSMakeRange(0, rewritten.length)];
+    return rewritten;
 }
 
 static uint64_t ps_mtl_memory_cap(void) {
@@ -914,7 +975,8 @@ static uint64_t ps_mtl_memory_cap(void) {
 }
 
 - (id) pm_ps_mtl_newLibraryWithSource:(NSString *)source options:(id)options error:(NSError **)error NS_RETURNS_RETAINED {
-    if (!ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    const void *caller = __builtin_return_address(0);
+    if (!ps_is_effective_system_or_playtools_caller(caller)) {
         NSError *rejectError = nil;
         if (pt_mtl_should_reject_source_for_compat13(source, options, &rejectError)) {
             if (error != NULL) {
@@ -922,6 +984,7 @@ static uint64_t ps_mtl_memory_cap(void) {
             }
             return nil;
         }
+        source = pt_mtl_rewrite_source_for_apple5_32f(source, caller);
     }
     SEL sel = sel_registerName("newLibraryWithSource:options:error:");
     BOOL pushed = NO;
@@ -940,7 +1003,8 @@ static uint64_t ps_mtl_memory_cap(void) {
 - (void) pm_ps_mtl_newLibraryWithSource:(NSString *)source
                                 options:(id)options
                       completionHandler:(void (^)(id library, NSError *error))completionHandler {
-    if (!ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    const void *caller = __builtin_return_address(0);
+    if (!ps_is_effective_system_or_playtools_caller(caller)) {
         NSError *rejectError = nil;
         if (pt_mtl_should_reject_source_for_compat13(source, options, &rejectError)) {
             if (completionHandler != nil) {
@@ -948,6 +1012,7 @@ static uint64_t ps_mtl_memory_cap(void) {
             }
             return;
         }
+        source = pt_mtl_rewrite_source_for_apple5_32f(source, caller);
     }
     SEL sel = sel_registerName("newLibraryWithSource:options:completionHandler:");
     BOOL pushed = NO;
@@ -959,6 +1024,32 @@ static uint64_t ps_mtl_memory_cap(void) {
             ps_pop_orig_imp_frame(pushed);
         }
     }
+}
+
+- (id) pm_ps_mtl_newTextureWithDescriptor:(id)descriptor NS_RETURNS_RETAINED {
+    if (descriptor != nil &&
+        pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        SEL pfSel = sel_registerName("pixelFormat");
+        if ([descriptor respondsToSelector:pfSel]) {
+            NSUInteger pf = ((NSUInteger (*)(id, SEL))objc_msgSend)(descriptor, pfSel);
+            if (pf == 55U || pf == 105U || pf == 125U) {
+                atomic_store_explicit(&s_mtl_app_created_32f_texture, YES, memory_order_release);
+            }
+        }
+    }
+    SEL sel = sel_registerName("newTextureWithDescriptor:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_new_texture_imps, self, &pushed);
+    if (origIMP != NULL) {
+        typedef id (*PTMTLNewTexOrigFn)(id, SEL, id) NS_RETURNS_RETAINED;
+        @try {
+            return ((PTMTLNewTexOrigFn)origIMP)(self, sel, descriptor);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    return nil;
 }
 
 - (void) pm_ps_mtl_opts_setLanguageVersion:(NSUInteger)ver {
@@ -1142,6 +1233,9 @@ static void ps_swizzle_mtl_device_class(Class cls) {
     ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_new_lib_async_imps, cls,
                                      sel_registerName("newLibraryWithSource:options:completionHandler:"),
                                      @selector(pm_ps_mtl_newLibraryWithSource:options:completionHandler:));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_new_texture_imps, cls,
+                                     sel_registerName("newTextureWithDescriptor:"),
+                                     @selector(pm_ps_mtl_newTextureWithDescriptor:));
 }
 
 __attribute__((visibility("hidden"))) void ps_install_metal_hooks_if_loaded(void) {

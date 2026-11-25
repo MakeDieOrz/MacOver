@@ -4,6 +4,7 @@
 //
 
 #import "PSInternal.h"
+@import CoreGraphics;
 @import CoreText;
 @import JavaScriptCore;
 #include <math.h>
@@ -334,8 +335,148 @@ static CTFontDescriptorRef _Nullable pt_CTFontDescriptorCreateMatchingFontDescri
     return res;
 }
 
+static CTFontDescriptorRef ps_sanitize_ctfont_descriptor(CTFontDescriptorRef descriptor,
+                                                         CGFloat size,
+                                                         const void *caller,
+                                                         BOOL *outAllocated) {
+    if (outAllocated != NULL) {
+        *outAllocated = NO;
+    }
+    if (descriptor != NULL &&
+        pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(caller)) {
+        BOOL hide = NO;
+        @autoreleasepool {
+            hide = ps_is_hidden_desktop_font_descriptor(descriptor);
+        }
+        if (hide) {
+            CTFontDescriptorRef fallback = CTFontDescriptorCreateWithNameAndSize(CFSTR("Helvetica"), size);
+            if (fallback != NULL) {
+                if (outAllocated != NULL) {
+                    *outAllocated = YES;
+                }
+                return fallback;
+            }
+        }
+    }
+    return descriptor;
+}
+
+static CTFontRef pt_CTFontCreateWithFontDescriptor(
+    CTFontDescriptorRef descriptor,
+    CGFloat size,
+    const CGAffineTransform * _Nullable matrix) CF_RETURNS_RETAINED {
+    BOOL allocated = NO;
+    CTFontDescriptorRef effectiveDesc = ps_sanitize_ctfont_descriptor(
+        descriptor, size, __builtin_return_address(0), &allocated);
+    CTFontRef font = CTFontCreateWithFontDescriptor(effectiveDesc, size, matrix);
+    if (allocated && effectiveDesc != NULL) {
+        CFRelease(effectiveDesc);
+    }
+    return font;
+}
+
+static CTFontRef pt_CTFontCreateWithFontDescriptorAndOptions(
+    CTFontDescriptorRef descriptor,
+    CGFloat size,
+    const CGAffineTransform * _Nullable matrix,
+    CTFontOptions options) CF_RETURNS_RETAINED {
+    BOOL allocated = NO;
+    CTFontDescriptorRef effectiveDesc = ps_sanitize_ctfont_descriptor(
+        descriptor, size, __builtin_return_address(0), &allocated);
+    CTFontRef font = CTFontCreateWithFontDescriptorAndOptions(effectiveDesc, size, matrix, options);
+    if (allocated && effectiveDesc != NULL) {
+        CFRelease(effectiveDesc);
+    }
+    return font;
+}
+
+static CGFontRef _Nullable pt_CGFontCreateWithFontName(CFStringRef _Nullable name) CF_RETURNS_RETAINED {
+    if (name != NULL &&
+        pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        BOOL hide = NO;
+        @autoreleasepool {
+            hide = ps_is_hidden_desktop_font_name((__bridge NSString *)name);
+        }
+        if (hide) {
+            return NULL;
+        }
+    }
+    return CGFontCreateWithFontName(name);
+}
+
+extern CFArrayRef _Nullable pt_orig_CTFontManagerCopyAvailableFontURLs(void)
+    __asm("_CTFontManagerCopyAvailableFontURLs") __attribute__((weak_import)) CF_RETURNS_RETAINED;
+
+static BOOL ps_is_hidden_desktop_font_url(NSURL *url) {
+    if (![url isKindOfClass:[NSURL class]]) {
+        return NO;
+    }
+    NSString *path = url.path;
+    if (path.length > 0 &&
+        ([path hasPrefix:@"/Users/"] || [path hasPrefix:@"/Library/Fonts/"])) {
+        return YES;
+    }
+    NSString *stem = url.URLByDeletingPathExtension.lastPathComponent;
+    return ps_is_hidden_desktop_font_name(stem);
+}
+
+static CFArrayRef _Nullable pt_CTFontManagerCopyAvailableFontURLs(void) CF_RETURNS_RETAINED {
+    if (&pt_orig_CTFontManagerCopyAvailableFontURLs == NULL) {
+        return NULL;
+    }
+    CFArrayRef rawArray = pt_orig_CTFontManagerCopyAvailableFontURLs();
+    if (rawArray == NULL ||
+        !pt_is_bypass_enabled() ||
+        ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return rawArray;
+    }
+    CFArrayRef outArray = rawArray;
+    @autoreleasepool {
+        CFIndex count = CFArrayGetCount(rawArray);
+        CFTypeID urlTypeID = CFURLGetTypeID();
+        BOOL hasHidden = NO;
+        for (CFIndex i = 0; i < count; i++) {
+            CFTypeRef val = CFArrayGetValueAtIndex(rawArray, i);
+            if (val != NULL && CFGetTypeID(val) == urlTypeID &&
+                ps_is_hidden_desktop_font_url((__bridge NSURL *)val)) {
+                hasHidden = YES;
+                break;
+            }
+        }
+        if (hasHidden) {
+            CFMutableArrayRef filtered = CFArrayCreateMutable(kCFAllocatorDefault, count, &kCFTypeArrayCallBacks);
+            if (filtered != NULL) {
+                for (CFIndex i = 0; i < count; i++) {
+                    CFTypeRef val = CFArrayGetValueAtIndex(rawArray, i);
+                    if (val == NULL) {
+                        continue;
+                    }
+                    if (CFGetTypeID(val) == urlTypeID &&
+                        ps_is_hidden_desktop_font_url((__bridge NSURL *)val)) {
+                        continue;
+                    }
+                    CFArrayAppendValue(filtered, val);
+                }
+                CFArrayRef copy = CFArrayCreateCopy(kCFAllocatorDefault, filtered);
+                CFRelease(filtered);
+                if (copy != NULL) {
+                    CFRelease(rawArray);
+                    outArray = copy;
+                }
+            }
+        }
+    }
+    return outArray;
+}
+
 DYLD_INTERPOSE(pt_CTFontCreateWithName, CTFontCreateWithName)
 DYLD_INTERPOSE(pt_CTFontCreateWithNameAndOptions, CTFontCreateWithNameAndOptions)
+DYLD_INTERPOSE(pt_CTFontCreateWithFontDescriptor, CTFontCreateWithFontDescriptor)
+DYLD_INTERPOSE(pt_CTFontCreateWithFontDescriptorAndOptions, CTFontCreateWithFontDescriptorAndOptions)
+DYLD_INTERPOSE(pt_CGFontCreateWithFontName, CGFontCreateWithFontName)
+DYLD_INTERPOSE(pt_CTFontManagerCopyAvailableFontURLs, pt_orig_CTFontManagerCopyAvailableFontURLs)
 DYLD_INTERPOSE(pt_CTFontManagerCopyAvailableFontFamilyNames, CTFontManagerCopyAvailableFontFamilyNames)
 DYLD_INTERPOSE(pt_CTFontManagerCopyAvailablePostScriptNames, CTFontManagerCopyAvailablePostScriptNames)
 DYLD_INTERPOSE(pt_CTFontCollectionCreateMatchingFontDescriptors, CTFontCollectionCreateMatchingFontDescriptors)
@@ -432,6 +573,15 @@ __attribute__((visibility("hidden"))) void *pt_objc_spoofer_dlsym_route(const ch
     }
     if (strcmp(symbol, "CTFontCreateWithNameAndOptions") == 0) {
         return (void *)&pt_CTFontCreateWithNameAndOptions;
+    }
+    if (strcmp(symbol, "CTFontCreateWithFontDescriptor") == 0) {
+        return (void *)&pt_CTFontCreateWithFontDescriptor;
+    }
+    if (strcmp(symbol, "CTFontCreateWithFontDescriptorAndOptions") == 0) {
+        return (void *)&pt_CTFontCreateWithFontDescriptorAndOptions;
+    }
+    if (strcmp(symbol, "CGFontCreateWithFontName") == 0) {
+        return (void *)&pt_CGFontCreateWithFontName;
     }
     if (strcmp(symbol, "CTFontManagerCopyAvailableFontFamilyNames") == 0) {
         return (void *)&pt_CTFontManagerCopyAvailableFontFamilyNames;

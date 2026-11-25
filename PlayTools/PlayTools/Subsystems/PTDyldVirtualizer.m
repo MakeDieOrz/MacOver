@@ -5205,6 +5205,52 @@ static void *pt_dlopen(const char *path, int mode) {
     return handle;
 }
 
+extern void *dlopen_audited(const char *path, int mode) __attribute__((weak_import));
+
+static void *pt_dlopen_audited(const char *path, int mode) {
+    if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire)) {
+        if (&dlopen_audited != NULL) {
+            return dlopen_audited(path, mode);
+        }
+        return dlopen(path, mode);
+    }
+    s_tls_dlerror_pending = false;
+    const void *caller = __builtin_return_address(0);
+    const char *orig_path = path;
+    char resolved_buf[PATH_MAX];
+    if (path != NULL) {
+        path = pt_resolve_virtual_bundle_path(path, resolved_buf, sizeof(resolved_buf));
+    }
+    if (pt_should_block_resolved_dlopen_path(orig_path, path, caller)) {
+        PT_DEBUG_TRACE("dyld", "blocked dlopen_audited path=%s", path != NULL ? path : "<null>");
+        const char *base = (path != NULL) ? strrchr(path, '/') : NULL;
+        const char *shown = (base != NULL && base[1] != '\0') ? (base + 1) : (path != NULL ? path : "<null>");
+        if (pt_is_hidden_dyld_image_name(shown)) {
+            shown = "image";
+        }
+        char msg[256];
+        snprintf(msg, sizeof(msg), "dlopen_audited(%s, 0x%04x): image not found", shown, mode);
+        pt_set_synthetic_dlerror(msg);
+        return NULL;
+    }
+    void *handle = NULL;
+    if (path != NULL &&
+        (path[0] == '@' || path[0] != '/') &&
+        caller != NULL) {
+        handle = dlopen_from(path, mode, (void *)caller);
+    } else if (&dlopen_audited != NULL) {
+        handle = dlopen_audited(path, mode);
+    } else if (caller != NULL) {
+        handle = dlopen_from(path, mode, (void *)caller);
+    } else {
+        handle = dlopen(path, mode);
+    }
+    if (handle != NULL && orig_path != NULL) {
+        ps_notify_dynamic_image_loaded();
+    }
+    return handle;
+}
+
 static bool pt_dlopen_preflight(const char *path) {
     if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire)) {
         return dlopen_preflight(path);
@@ -5303,6 +5349,19 @@ extern const void *swift_getTypeByMangledNameInContextInMetadataState2(size_t me
                                                                        size_t typeNameLength,
                                                                        const void *context,
                                                                        const void * const *genericArgs)
+    __attribute__((swiftcall)) __attribute__((weak_import));
+
+extern const void *swift_getTypeByMangledNameInEnvironment(const char *typeNameStart,
+                                                           size_t typeNameLength,
+                                                           const void *environment,
+                                                           const void * const *genericArgs)
+    __attribute__((swiftcall)) __attribute__((weak_import));
+
+extern const void *swift_getTypeByMangledNameInEnvironmentInMetadataState(size_t metadataState,
+                                                                          const char *typeNameStart,
+                                                                          size_t typeNameLength,
+                                                                          const void *environment,
+                                                                          const void * const *genericArgs)
     __attribute__((swiftcall)) __attribute__((weak_import));
 
 extern const void *pt_orig_swift_typeByName(uint64_t w0, uint64_t w1)
@@ -5557,6 +5616,52 @@ static const void *pt_swift_getTypeByMangledNameInContextInMetadataState2(size_t
     return meta;
 }
 
+static const void *pt_swift_getTypeByMangledNameInEnvironment(const char *typeNameStart,
+                                                              size_t typeNameLength,
+                                                              const void *environment,
+                                                              const void * const *genericArgs)
+    __attribute__((swiftcall)) {
+    const void *caller = __builtin_return_address(0);
+    if (pt_should_hide_swift_type_lookup(typeNameStart, typeNameLength, caller) ||
+        &swift_getTypeByMangledNameInEnvironment == NULL) {
+        return NULL;
+    }
+    const void *meta = swift_getTypeByMangledNameInEnvironment(typeNameStart,
+                                                              typeNameLength,
+                                                              environment,
+                                                              genericArgs);
+    if (meta != NULL && pt_is_bypass_enabled() &&
+        pt_should_hide_swift_metadata_ptr(meta) &&
+        pt_is_swift_type_lookup_app_caller(caller)) {
+        return NULL;
+    }
+    return meta;
+}
+
+static const void *pt_swift_getTypeByMangledNameInEnvironmentInMetadataState(size_t metadataState,
+                                                                             const char *typeNameStart,
+                                                                             size_t typeNameLength,
+                                                                             const void *environment,
+                                                                             const void * const *genericArgs)
+    __attribute__((swiftcall)) {
+    const void *caller = __builtin_return_address(0);
+    if (pt_should_hide_swift_type_lookup(typeNameStart, typeNameLength, caller) ||
+        &swift_getTypeByMangledNameInEnvironmentInMetadataState == NULL) {
+        return NULL;
+    }
+    const void *meta = swift_getTypeByMangledNameInEnvironmentInMetadataState(metadataState,
+                                                                             typeNameStart,
+                                                                             typeNameLength,
+                                                                             environment,
+                                                                             genericArgs);
+    if (meta != NULL && pt_is_bypass_enabled() &&
+        pt_should_hide_swift_metadata_ptr(meta) &&
+        pt_is_swift_type_lookup_app_caller(caller)) {
+        return NULL;
+    }
+    return meta;
+}
+
 static const void *pt_swift_conformsToProtocol(const void *type, const void *protocol) {
     if (&swift_conformsToProtocol == NULL) {
         return NULL;
@@ -5642,7 +5747,9 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_macos_only_dlsym_symbol(
         PT_HAS_PREFIX_LIT(symbol, "SecAccess") ||
         PT_HAS_PREFIX_LIT(symbol, "SecTrustedApplication") ||
         PT_HAS_PREFIX_LIT(symbol, "Authorization") ||
+        strcmp(symbol, "MTLCopyAllDevices") == 0 ||
         PT_HAS_PREFIX_LIT(symbol, "MTLCopyAllDevices") ||
+        strcmp(symbol, "CTFontManagerCopyAvailableFontURLs") == 0 ||
         PT_HAS_PREFIX_LIT(symbol, "AudioObject") ||
         PT_HAS_PREFIX_LIT(symbol, "AudioHardware") ||
         strcmp(symbol, "AudioDeviceCreateIOProcID") == 0 ||
@@ -5777,6 +5884,14 @@ __attribute__((visibility("hidden"))) void *pt_route_dlsym_symbol_for_app(const 
     if (strcmp(symbol, "swift_getTypeByMangledNameInContextInMetadataState2") == 0 &&
         &swift_getTypeByMangledNameInContextInMetadataState2 != NULL) {
         return (void *)&pt_swift_getTypeByMangledNameInContextInMetadataState2;
+    }
+    if (strcmp(symbol, "swift_getTypeByMangledNameInEnvironment") == 0 &&
+        &swift_getTypeByMangledNameInEnvironment != NULL) {
+        return (void *)&pt_swift_getTypeByMangledNameInEnvironment;
+    }
+    if (strcmp(symbol, "swift_getTypeByMangledNameInEnvironmentInMetadataState") == 0 &&
+        &swift_getTypeByMangledNameInEnvironmentInMetadataState != NULL) {
+        return (void *)&pt_swift_getTypeByMangledNameInEnvironmentInMetadataState;
     }
     if (strcmp(symbol, "$ss11_typeByNameyypXpSgSSF") == 0 &&
         &pt_orig_swift_typeByName != NULL) {
@@ -5995,6 +6110,9 @@ __attribute__((visibility("hidden"))) void *pt_route_dlsym_symbol_for_app(const 
     }
     if (strcmp(symbol, "dlopen") == 0) {
         return (void *)&pt_dlopen;
+    }
+    if (strcmp(symbol, "dlopen_audited") == 0) {
+        return (void *)&pt_dlopen_audited;
     }
     if (strcmp(symbol, "dlopen_from") == 0) {
         return (void *)&pt_dlopen_from;
@@ -6268,6 +6386,7 @@ DYLD_INTERPOSE(pt_getsegmentdata, getsegmentdata)
 DYLD_INTERPOSE(pt_getsectdatafromheader_64, getsectdatafromheader_64)
 DYLD_INTERPOSE(pt_dladdr, dladdr)
 DYLD_INTERPOSE(pt_dlopen, dlopen)
+DYLD_INTERPOSE(pt_dlopen_audited, dlopen_audited)
 DYLD_INTERPOSE(pt_dlopen_from, dlopen_from)
 DYLD_INTERPOSE(pt_dlopen_preflight, dlopen_preflight)
 DYLD_INTERPOSE(pt_dlsym, dlsym)
@@ -6276,6 +6395,8 @@ DYLD_INTERPOSE(pt_swift_getTypeByMangledNameInContext, swift_getTypeByMangledNam
 DYLD_INTERPOSE(pt_swift_getTypeByMangledNameInContext2, swift_getTypeByMangledNameInContext2)
 DYLD_INTERPOSE(pt_swift_getTypeByMangledNameInContextInMetadataState, swift_getTypeByMangledNameInContextInMetadataState)
 DYLD_INTERPOSE(pt_swift_getTypeByMangledNameInContextInMetadataState2, swift_getTypeByMangledNameInContextInMetadataState2)
+DYLD_INTERPOSE(pt_swift_getTypeByMangledNameInEnvironment, swift_getTypeByMangledNameInEnvironment)
+DYLD_INTERPOSE(pt_swift_getTypeByMangledNameInEnvironmentInMetadataState, swift_getTypeByMangledNameInEnvironmentInMetadataState)
 DYLD_INTERPOSE(pt_swift_typeByName, pt_orig_swift_typeByName)
 DYLD_INTERPOSE(pt_swift_conformsToProtocol, swift_conformsToProtocol)
 
