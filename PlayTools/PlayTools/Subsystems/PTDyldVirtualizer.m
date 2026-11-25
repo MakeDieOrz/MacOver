@@ -462,6 +462,20 @@ static BOOL pt_is_macos_only_framework_path(const char *name) {
         "DebugSymbols.framework",
         "CommerceKit.framework",
         "CommerceCore.framework",
+        "OpenGL.framework",
+        "OpenCL.framework",
+        "GLUT.framework",
+        "Kerberos.framework",
+        "LDAP.framework",
+        "AppleLDAP.framework",
+        "QuickLookUI.framework",
+        "QuickLookNonBaseSystem.framework",
+        "PreferencePanesSupport.framework",
+        "SecurityFoundation.framework",
+        "NetAuth.framework",
+        "IO80211.framework",
+        "AppleVA.framework",
+        "libUniversalAccess.dylib",
         "libRosetta.dylib",
         "liboah.dylib",
         "libSMC.dylib",
@@ -1296,6 +1310,137 @@ void pt_init_nonlazy_got_cloaking(void) {
     }
     pthread_once(&s_interpose_once, pt_init_interpose_tuples);
     _dyld_register_func_for_add_image(pt_got_cloak_on_dyld_image_added);
+#endif
+}
+
+static const struct mach_header_64 *pt_validated_app_arm64_header_for_addr(uintptr_t addr) {
+#if defined(__arm64__) || defined(__aarch64__)
+    const struct mach_header *mh = dyld_image_header_containing_address((const void *)addr);
+    if (mh == NULL || !pt_is_valid_user_pointer((const void *)mh)) {
+        return NULL;
+    }
+    const struct mach_header_64 *mh64 = (const struct mach_header_64 *)mh;
+    uint32_t cpu_sub = (uint32_t)mh64->cpusubtype & ~(uint32_t)CPU_SUBTYPE_MASK;
+    if (mh64->magic != MH_MAGIC_64 ||
+        mh64->cputype != CPU_TYPE_ARM64 ||
+        cpu_sub == CPU_SUBTYPE_ARM64E ||
+        mh64->sizeofcmds == 0 ||
+        mh64->sizeofcmds > (1U << 20)) {
+        return NULL;
+    }
+    const char *img_path = dyld_image_path_containing_address((const void *)mh);
+    if (img_path == NULL) {
+        return NULL;
+    }
+    bool cacheable = false;
+    if (pt_classify_caller_image_path(img_path, &cacheable) != PT_CALLER_APP ||
+        pt_should_hide_dyld_image(img_path) ||
+        pt_is_hidden_dyld_image_header(mh) ||
+        pt_is_address_in_playtools((const void *)mh)) {
+        return NULL;
+    }
+    return mh64;
+#else
+    (void)addr;
+    return NULL;
+#endif
+}
+
+__attribute__((visibility("hidden")))
+void pt_dyld_sanitize_got_ptrs_in_vm_read_buffer(uintptr_t read_start, uint8_t *dst, size_t copied) {
+#if defined(__arm64__) || defined(__aarch64__)
+    if (dst == NULL || copied < sizeof(void *) || read_start > UINTPTR_MAX - copied || !pt_is_bypass_enabled()) {
+        return;
+    }
+    uintptr_t read_end = read_start + copied;
+    const struct mach_header_64 *mh64 = pt_validated_app_arm64_header_for_addr(read_start);
+    if (mh64 == NULL) {
+        mh64 = pt_validated_app_arm64_header_for_addr(read_end - 1U);
+    }
+    if (mh64 == NULL) {
+        return;
+    }
+
+    const uint8_t *base = (const uint8_t *)mh64;
+    size_t total = sizeof(struct mach_header_64) + (size_t)mh64->sizeofcmds;
+    size_t off = sizeof(struct mach_header_64);
+    uintptr_t slide = 0;
+    BOOL has_text = NO;
+    for (uint32_t i = 0; i < mh64->ncmds && off + sizeof(struct load_command) <= total; i++) {
+        const struct load_command *lc = (const struct load_command *)(base + off);
+        if (lc->cmdsize < sizeof(struct load_command) || off + lc->cmdsize > total) {
+            break;
+        }
+        if (lc->cmd == LC_SEGMENT_64 && lc->cmdsize >= sizeof(struct segment_command_64)) {
+            const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+            if (strncmp(seg->segname, "__TEXT", 16) == 0) {
+                slide = (uintptr_t)mh64 - (uintptr_t)seg->vmaddr;
+                has_text = YES;
+                break;
+            }
+        }
+        off += lc->cmdsize;
+    }
+    if (!has_text) {
+        return;
+    }
+
+    off = sizeof(struct mach_header_64);
+    for (uint32_t i = 0; i < mh64->ncmds && off + sizeof(struct load_command) <= total; i++) {
+        const struct load_command *lc = (const struct load_command *)(base + off);
+        if (lc->cmdsize < sizeof(struct load_command) || off + lc->cmdsize > total) {
+            break;
+        }
+        off += lc->cmdsize;
+        if (lc->cmd != LC_SEGMENT_64 || lc->cmdsize < sizeof(struct segment_command_64)) {
+            continue;
+        }
+        const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+        if ((size_t)seg->nsects > (lc->cmdsize - sizeof(struct segment_command_64)) / sizeof(struct section_64)) {
+            break;
+        }
+        const struct section_64 *sects = (const struct section_64 *)(seg + 1);
+        for (uint32_t s = 0; s < seg->nsects; s++) {
+            uint32_t stype = sects[s].flags & SECTION_TYPE;
+            if ((stype != S_NON_LAZY_SYMBOL_POINTERS && stype != S_LAZY_SYMBOL_POINTERS) ||
+                strncmp(sects[s].sectname, "__auth_", 7) == 0) {
+                continue;
+            }
+            uintptr_t s_addr = (uintptr_t)sects[s].addr + slide;
+            uintptr_t s_size = (uintptr_t)sects[s].size;
+            if (s_size < sizeof(void *) ||
+                s_size > UINTPTR_MAX - s_addr ||
+                (s_addr % sizeof(void *)) != 0) {
+                continue;
+            }
+            uintptr_t s_end = s_addr + s_size;
+            uintptr_t ov_start = (read_start > s_addr) ? read_start : s_addr;
+            uintptr_t ov_end = (read_end < s_end) ? read_end : s_end;
+            if (ov_start >= ov_end ||
+                ov_end - ov_start < sizeof(void *) ||
+                ov_start > UINTPTR_MAX - (sizeof(void *) - 1U)) {
+                continue;
+            }
+            uintptr_t slot_addr = (ov_start + (sizeof(void *) - 1U)) & ~(sizeof(void *) - 1U);
+            while (slot_addr <= ov_end - sizeof(void *)) {
+                size_t dst_off = (size_t)(slot_addr - read_start);
+                const void *val = NULL;
+                memcpy(&val, dst + dst_off, sizeof(val));
+                const void *orig = pt_resolve_dyld_interposed_only(val);
+                if (orig != NULL) {
+                    memcpy(dst + dst_off, &orig, sizeof(orig));
+                }
+                if (ov_end - slot_addr < 2U * sizeof(void *)) {
+                    break;
+                }
+                slot_addr += sizeof(void *);
+            }
+        }
+    }
+#else
+    (void)read_start;
+    (void)dst;
+    (void)copied;
 #endif
 }
 
@@ -6203,21 +6348,41 @@ static id ps_hook_nsobject_instanceMethodSignatureForSelector(id self, SEL _cmd,
 }
 
 static IMP ps_hook_nsobject_methodForSelector(id self, SEL _cmd, SEL aSelector) {
+    const void *caller = __builtin_return_address(0);
     if (pt_is_valid_user_pointer((const void *)aSelector) &&
-        ps_should_hide_selector_for_target_class(object_getClass(self), aSelector, __builtin_return_address(0)) &&
+        ps_should_hide_selector_for_target_class(object_getClass(self), aSelector, caller) &&
         s_nsobject_notFoundIMP != NULL) {
         return s_nsobject_notFoundIMP;
     }
-    return s_orig_nsobject_methodForSelector ? s_orig_nsobject_methodForSelector(self, _cmd, aSelector) : s_nsobject_notFoundIMP;
+    IMP imp = s_orig_nsobject_methodForSelector ? s_orig_nsobject_methodForSelector(self, _cmd, aSelector) : s_nsobject_notFoundIMP;
+    if (imp != NULL &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(caller)) {
+        const void *orig = pt_lookup_swizzled_raw_orig_imp((const void *)imp);
+        if (orig != NULL) {
+            return (IMP)orig;
+        }
+    }
+    return imp;
 }
 
 static IMP ps_hook_nsobject_instanceMethodForSelector(id self, SEL _cmd, SEL aSelector) {
+    const void *caller = __builtin_return_address(0);
     if (pt_is_valid_user_pointer((const void *)aSelector) &&
-        ps_should_hide_selector_for_target_class((Class)self, aSelector, __builtin_return_address(0)) &&
+        ps_should_hide_selector_for_target_class((Class)self, aSelector, caller) &&
         s_nsobject_notFoundIMP != NULL) {
         return s_nsobject_notFoundIMP;
     }
-    return s_orig_nsobject_instanceMethodForSelector ? s_orig_nsobject_instanceMethodForSelector(self, _cmd, aSelector) : s_nsobject_notFoundIMP;
+    IMP imp = s_orig_nsobject_instanceMethodForSelector ? s_orig_nsobject_instanceMethodForSelector(self, _cmd, aSelector) : s_nsobject_notFoundIMP;
+    if (imp != NULL &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(caller)) {
+        const void *orig = pt_lookup_swizzled_raw_orig_imp((const void *)imp);
+        if (orig != NULL) {
+            return (IMP)orig;
+        }
+    }
+    return imp;
 }
 
 __attribute__((visibility("hidden"))) void ps_install_nsobject_reflection_hooks(void) {

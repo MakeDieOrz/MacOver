@@ -347,6 +347,12 @@ int main(int argc, const char *argv[]) {
 
         // Direct Mach-O linked checks verify internal state across Safe Mode & PTRegistration.
         BOOL safeModeActive = [PTSafeMode isActive];
+        NSFileManager *earlyFM = [NSFileManager defaultManager];
+        NSString *stateDir = pt_state_dir();
+        NSString *crumbPath = [stateDir stringByAppendingPathComponent:@".launching_in_progress"];
+        NSString *triggeredPath = [stateDir stringByAppendingPathComponent:@".safe_mode_last_triggered"];
+        BOOL crumbAtStart = [earlyFM fileExistsAtPath:crumbPath];
+        BOOL triggeredAtStart = [earlyFM fileExistsAtPath:triggeredPath];
         double customScaler = (double)[[PlaySettings shared] customScaler];
         BOOL inverseScreenValues = [[PlaySettings shared] inverseScreenValues];
         NSInteger windowFixMethod = [[PlaySettings shared] windowFixMethod];
@@ -2872,6 +2878,71 @@ int main(int argc, const char *argv[]) {
                 }
                 s11Round3FsCasePathsAndIORegOK = (caseSensOK && protOK && pathsHiddenOK && ioFromPathOK);
             }
+
+            {
+                // v1.0.5 parity: remaining macOS-only frameworks, methodForSelector IMP unwrap, mach_vm_read GOT sanitize
+                BOOL fw105OK = (!dlopen_preflight("/System/Library/Frameworks/OpenGL.framework/OpenGL") &&
+                                !dlopen_preflight("/System/Library/Frameworks/Kerberos.framework/Kerberos") &&
+                                !dlopen_preflight("/System/Library/Frameworks/QuickLookUI.framework/QuickLookUI") &&
+                                !dlopen_preflight("/System/Library/Frameworks/SecurityFoundation.framework/SecurityFoundation") &&
+                                (_dyld_shared_cache_contains_path == NULL ||
+                                 (!_dyld_shared_cache_contains_path("/System/Library/Frameworks/OpenGL.framework/OpenGL") &&
+                                  !_dyld_shared_cache_contains_path("/System/Library/Frameworks/LDAP.framework/LDAP") &&
+                                  !_dyld_shared_cache_contains_path("/System/Library/PrivateFrameworks/PreferencePanesSupport.framework/PreferencePanesSupport") &&
+                                  !_dyld_shared_cache_contains_path("/System/Library/PrivateFrameworks/NetAuth.framework/NetAuth"))) &&
+                                [NSBundle bundleWithIdentifier:@"com.apple.opengl"] == nil &&
+                                [NSBundle bundleWithIdentifier:@"com.apple.Kerberos"] == nil &&
+                                [NSBundle bundleWithIdentifier:@"com.apple.securityfoundation"] == nil &&
+                                (_dyld_shared_cache_contains_path == NULL ||
+                                 _dyld_shared_cache_contains_path("/System/Library/Frameworks/OpenGLES.framework/OpenGLES")) &&
+                                dlopen_preflight("/System/Library/Frameworks/QuickLook.framework/QuickLook"));
+
+                IMP impCls = class_getMethodImplementation([UIDevice class], @selector(model));
+                IMP impInstSel = [UIDevice instanceMethodForSelector:@selector(model)];
+                IMP impObjSel = [[UIDevice currentDevice] methodForSelector:@selector(model)];
+                BOOL impUnwrap105OK = (impCls != NULL && impInstSel == impCls && impObjSel == impCls);
+
+                BOOL vmGotSanitizedOK = NO;
+                extern const struct mach_header_64 _mh_execute_header;
+                unsigned long gotSz105 = 0;
+                uint8_t *gotPtr105 = getsectiondata(&_mh_execute_header, "__DATA_CONST", "__got", &gotSz105);
+                if (gotPtr105 == NULL) {
+                    gotPtr105 = getsectiondata(&_mh_execute_header, "__DATA", "__got", &gotSz105);
+                }
+                if (gotPtr105 != NULL && gotSz105 >= sizeof(void *)) {
+                    NSMutableData *gotReadBuf = [NSMutableData dataWithLength:gotSz105];
+                    mach_vm_size_t gotOutCnt = 0;
+                    if (mach_vm_read_overwrite(mach_task_self(),
+                                               (mach_vm_address_t)(uintptr_t)gotPtr105,
+                                               (mach_vm_size_t)gotSz105,
+                                               (mach_vm_address_t)(uintptr_t)gotReadBuf.mutableBytes,
+                                               &gotOutCnt) == KERN_SUCCESS &&
+                        gotOutCnt == gotSz105) {
+                        const void * const *slots = (const void * const *)gotReadBuf.bytes;
+                        size_t nslots = (size_t)gotOutCnt / sizeof(void *);
+                        const void *ptOpen = (const void *)&open;
+                        const void *ptSysctl = (const void *)&sysctl;
+                        BOOL leakedPtOpenOrSysctl = NO;
+                        BOOL sawLibSysKernelOrC = NO;
+                        for (size_t k = 0; k < nslots; k++) {
+                            if (slots[k] == ptOpen || slots[k] == ptSysctl) {
+                                leakedPtOpenOrSysctl = YES;
+                            }
+                            Dl_info di = {0};
+                            if (slots[k] != NULL && dladdr(slots[k], &di) != 0 && di.dli_fname != NULL &&
+                                (strstr(di.dli_fname, "libsystem_kernel.dylib") != NULL ||
+                                 strstr(di.dli_fname, "libsystem_c.dylib") != NULL)) {
+                                sawLibSysKernelOrC = YES;
+                            }
+                        }
+                        vmGotSanitizedOK = (!leakedPtOpenOrSysctl && sawLibSysKernelOrC);
+                    }
+                }
+                s11Round3FsCasePathsAndIORegOK = (s11Round3FsCasePathsAndIORegOK &&
+                                                  fw105OK &&
+                                                  impUnwrap105OK &&
+                                                  vmGotSanitizedOK);
+            }
         }
 
         // Scenario 12: compat13_7 parity checks
@@ -3202,13 +3273,6 @@ int main(int argc, const char *argv[]) {
                 s12Round3IcuSwiftAvailOK = (r3IcuAgeOK && r3SwiftHiddenOK && r3AvailOK);
             }
         }
-
-        NSString *stateDir = pt_state_dir();
-        NSString *crumbPath = [stateDir stringByAppendingPathComponent:@".launching_in_progress"];
-        NSString *triggeredPath = [stateDir stringByAppendingPathComponent:@".safe_mode_last_triggered"];
-
-        BOOL crumbAtStart = [fm fileExistsAtPath:crumbPath];
-        BOOL triggeredAtStart = [fm fileExistsAtPath:triggeredPath];
 
         double sleepSecs = 0.0;
         const char *sleepEnv = getenv("HARNESS_SLEEP_SECS");
@@ -4698,6 +4762,7 @@ def run_scenarios(
 #include <errno.h>
 #include <fcntl.h>
 #include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <mach/task_info.h>
 #include <mach-o/dyld.h>
 #include <mach-o/dyld_images.h>
@@ -4819,6 +4884,51 @@ int main(void) {
         BOOL ptr_lstat_ok = check_ptr_in_dylib(p_lstat, "libsystem_kernel.dylib");
         BOOL ptr_dlsym_ok = check_ptr_in_dylib(p_dlsym, "libdyld.dylib");
 
+        BOOL vm_read_lazy_sanitized_ok = NO;
+        extern const struct mach_header_64 _mh_execute_header;
+        unsigned long la_sz = 0;
+        uint8_t *la_ptr = NULL;
+        const uint8_t *mh_base = (const uint8_t *)&_mh_execute_header;
+        intptr_t mh_slide = _dyld_get_image_vmaddr_slide(0);
+        size_t total_cmds = sizeof(struct mach_header_64) + (size_t)_mh_execute_header.sizeofcmds;
+        size_t lc_off = sizeof(struct mach_header_64);
+        for (uint32_t ci = 0; ci < _mh_execute_header.ncmds && lc_off + sizeof(struct load_command) <= total_cmds; ci++) {
+            const struct load_command *lc = (const struct load_command *)(mh_base + lc_off);
+            if (lc->cmdsize < sizeof(struct load_command) || lc_off + lc->cmdsize > total_cmds) break;
+            if (lc->cmd == LC_SEGMENT_64 && lc->cmdsize >= sizeof(struct segment_command_64)) {
+                const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+                const struct section_64 *sects = (const struct section_64 *)(seg + 1);
+                for (uint32_t si = 0; si < seg->nsects; si++) {
+                    if ((sects[si].flags & SECTION_TYPE) == S_LAZY_SYMBOL_POINTERS && sects[si].size >= sizeof(void *)) {
+                        la_ptr = (uint8_t *)((uintptr_t)sects[si].addr + (uintptr_t)mh_slide);
+                        la_sz = (unsigned long)sects[si].size;
+                        break;
+                    }
+                }
+            }
+            if (la_ptr != NULL) break;
+            lc_off += lc->cmdsize;
+        }
+        if (la_ptr != NULL && la_sz >= sizeof(void *)) {
+            NSMutableData *laReadBuf = [NSMutableData dataWithLength:la_sz];
+            mach_vm_size_t laOut = 0;
+            if (mach_vm_read_overwrite(mach_task_self(),
+                                       (mach_vm_address_t)(uintptr_t)la_ptr,
+                                       (mach_vm_size_t)la_sz,
+                                       (mach_vm_address_t)(uintptr_t)laReadBuf.mutableBytes,
+                                       &laOut) == KERN_SUCCESS &&
+                laOut == la_sz) {
+                const void * const *lslots = (const void * const *)laReadBuf.bytes;
+                size_t nlslots = (size_t)laOut / sizeof(void *);
+                BOOL sawRealOpen = NO, sawRealSysctl = NO;
+                for (size_t lk = 0; lk < nlslots; lk++) {
+                    if (lslots[lk] == p_open) sawRealOpen = YES;
+                    if (lslots[lk] == p_sysctl) sawRealSysctl = YES;
+                }
+                vm_read_lazy_sanitized_ok = (sawRealOpen && sawRealSysctl);
+            }
+        }
+
         NSDictionary *out = @{
             @"openSpoofed": @(open_spoofed),
             @"sysctlSpoofed": @(sysctl_spoofed),
@@ -4832,6 +4942,7 @@ int main(void) {
             @"ptrStatOK": @(ptr_stat_ok),
             @"ptrLstatOK": @(ptr_lstat_ok),
             @"ptrDlsymOK": @(ptr_dlsym_ok),
+            @"vmReadLazySanitizedOK": @(vm_read_lazy_sanitized_ok),
         };
         NSData *jsonData = [NSJSONSerialization dataWithJSONObject:out options:0 error:nil];
         NSString *jsonStr = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
@@ -4906,6 +5017,7 @@ int main(void) {
         info13["ptrStatOK"] is True,
         info13["ptrLstatOK"] is True,
         info13["ptrDlsymOK"] is True,
+        info13["vmReadLazySanitizedOK"] is True,
         proc13_off.returncode == 0,
     ]
     results.append(ScenarioResult(

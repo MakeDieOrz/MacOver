@@ -1558,6 +1558,76 @@ static void test_arm64_stub_decoder_and_got_bitmap(void) {
     assert((bitmap[1] & (1ULL << 2U)) == 0ULL);
 }
 
+static void test_v105_macos_frameworks_and_vm_read_got_sanitize(void) {
+    /* Remaining macOS-only frameworks must match as whole components and preserve iOS siblings */
+    const char *macos_paths[] = {
+        "/System/Library/Frameworks/OpenGL.framework/OpenGL",
+        "/System/Library/Frameworks/OpenGL.framework/Libraries/libGL.dylib",
+        "/System/Library/Frameworks/Kerberos.framework/Kerberos",
+        "/System/Library/Frameworks/LDAP.framework/LDAP",
+        "/System/Library/Frameworks/QuickLookUI.framework/QuickLookUI",
+        "/System/Library/PrivateFrameworks/PreferencePanesSupport.framework/PreferencePanesSupport",
+        "/System/Library/Frameworks/SecurityFoundation.framework/SecurityFoundation",
+        "/System/Library/PrivateFrameworks/NetAuth.framework/NetAuth",
+        "/System/Library/PrivateFrameworks/IO80211.framework/IO80211",
+        "/System/Library/PrivateFrameworks/AppleVA.framework/AppleVA",
+        "/usr/lib/libUniversalAccess.dylib",
+    };
+    const char *comps[] = {
+        "OpenGL.framework", "OpenGL.framework", "Kerberos.framework", "LDAP.framework",
+        "QuickLookUI.framework", "PreferencePanesSupport.framework", "SecurityFoundation.framework",
+        "NetAuth.framework", "IO80211.framework", "AppleVA.framework", "libUniversalAccess.dylib",
+    };
+    for (size_t i = 0; i < sizeof(macos_paths) / sizeof(macos_paths[0]); i++) {
+        assert(mock_path_has_component(macos_paths[i], comps[i]) == 1);
+        assert(mock_is_app_embedded(macos_paths[i]) == 0);
+    }
+    assert(mock_path_has_component("/System/Library/Frameworks/OpenGLES.framework/OpenGLES", "OpenGL.framework") == 0);
+    assert(mock_path_has_component("/System/Library/Frameworks/QuickLook.framework/QuickLook", "QuickLookUI.framework") == 0);
+    assert(mock_is_app_embedded("/var/containers/Bundle/Application/X/DemoApp.app/Frameworks/OpenGL.framework/OpenGL") == 1);
+
+    /* Aligned vm_read GOT/lazy slot sanitization window math */
+    const uintptr_t sec_start = 0x104008000ULL;
+    const uintptr_t sec_end = sec_start + 5U * sizeof(uintptr_t);
+    const uintptr_t fake_pt_open = 0x101001111ULL;
+    const uintptr_t fake_real_open = 0x19f002222ULL;
+    const uintptr_t untouched_val = 0x123456789abcdef0ULL;
+
+    /* Partial unaligned read starting at sec_start + 3 through sec_start + 36 */
+    uintptr_t read_start = sec_start + 3U;
+    uint8_t buf[33];
+    memset(buf, 0xAA, sizeof(buf));
+    /* Place fake_pt_open at aligned slot sec_start + 8 (offset 5) and fake_pt_open at sec_start + 16 (offset 13) */
+    memcpy(buf + (sec_start + 8U - read_start), &fake_pt_open, sizeof(fake_pt_open));
+    memcpy(buf + (sec_start + 16U - read_start), &untouched_val, sizeof(untouched_val));
+    memcpy(buf + (sec_start + 24U - read_start), &fake_pt_open, sizeof(fake_pt_open));
+
+    uintptr_t read_end = read_start + sizeof(buf);
+    uintptr_t ov_start = (read_start > sec_start) ? read_start : sec_start;
+    uintptr_t ov_end = (read_end < sec_end) ? read_end : sec_end;
+    uintptr_t slot_addr = (ov_start + (sizeof(uintptr_t) - 1U)) & ~(sizeof(uintptr_t) - 1U);
+    assert(slot_addr == sec_start + 8U);
+    while (slot_addr <= ov_end - sizeof(uintptr_t)) {
+        size_t dst_off = (size_t)(slot_addr - read_start);
+        uintptr_t val = 0;
+        memcpy(&val, buf + dst_off, sizeof(val));
+        if (val == fake_pt_open) {
+            memcpy(buf + dst_off, &fake_real_open, sizeof(fake_real_open));
+        }
+        if (ov_end - slot_addr < 2U * sizeof(uintptr_t)) {
+            break;
+        }
+        slot_addr += sizeof(uintptr_t);
+    }
+    uintptr_t got8 = 0, got16 = 0, got24 = 0;
+    memcpy(&got8, buf + 5U, sizeof(got8));
+    memcpy(&got16, buf + 13U, sizeof(got16));
+    memcpy(&got24, buf + 21U, sizeof(got24));
+    assert(got8 == fake_real_open);
+    assert(got16 == untouched_val);
+    assert(got24 == fake_real_open);
+}
+
 int main(void) {
     test_der_entitlements_encoding_and_superblob_rewrite();
     test_attr_ref_zero_fill();
@@ -1582,6 +1652,7 @@ int main(void) {
     test_round3_hidden_bundle_ids_regression();
     test_round4_audit_regressions();
     test_arm64_stub_decoder_and_got_bitmap();
+    test_v105_macos_frameworks_and_vm_read_got_sanitize();
     printf("All compat104 unit tests passed.\n");
     return 0;
 }

@@ -4904,7 +4904,7 @@ static int pt_proc_regionfilename(int pid, uint64_t address, void *buffer, uint3
     int ret = proc_regionfilename(pid, address, buffer, buffersize);
     if (ret > 0 && buffer != NULL && buffersize > 1 && !is_sys) {
         char *pbuf = (char *)buffer;
-        if (pt_is_hidden_dyld_image_name(pbuf) ||
+        if (pt_should_hide_dyld_image(pbuf) ||
             pt_is_sensitive_host_fd_path(pbuf, caller)) {
             const char *fb = pt_fallback_system_image_path();
             size_t n = strlcpy(pbuf, fb, (size_t)buffersize);
@@ -4932,7 +4932,7 @@ BOOL pt_fs_probe_hidden_region_path(uintptr_t addr, const void *caller) {
     int pr = proc_pidinfo(getpid(), PROC_PIDREGIONPATHINFO, (uint64_t)addr, &probe_rp, (int)sizeof(probe_rp));
     errno = saved_errno;
     if (pr >= (int)sizeof(probe_rp) && probe_rp.prp_vip.vip_path[0] != '\0' &&
-        (pt_is_hidden_dyld_image_name(probe_rp.prp_vip.vip_path) ||
+        (pt_should_hide_dyld_image(probe_rp.prp_vip.vip_path) ||
          pt_is_sensitive_host_fd_path(probe_rp.prp_vip.vip_path, caller))) {
         return YES;
     }
@@ -4996,7 +4996,7 @@ static int pt_fs_proc_pidinfo_ex(int pid,
                 rsize = rpinfo.prp_prinfo.pri_size;
                 rprot = rpinfo.prp_prinfo.pri_protection;
                 if (rpinfo.prp_vip.vip_path[0] != '\0' &&
-                    (pt_is_hidden_dyld_image_name(rpinfo.prp_vip.vip_path) ||
+                    (pt_should_hide_dyld_image(rpinfo.prp_vip.vip_path) ||
                      pt_is_sensitive_host_fd_path(rpinfo.prp_vip.vip_path, caller))) {
                     path_hidden = YES;
                 }

@@ -776,6 +776,7 @@ __attribute__((visibility("hidden"))) void pt_register_swizzled_imp(const void *
 __attribute__((visibility("hidden"))) void pt_register_hidden_swizzle_selector(SEL sel);
 __attribute__((visibility("hidden"))) BOOL pt_is_address_in_playtools(const void *addr);
 __attribute__((visibility("hidden"))) void pt_init_nonlazy_got_cloaking(void);
+__attribute__((visibility("hidden"))) void pt_dyld_sanitize_got_ptrs_in_vm_read_buffer(uintptr_t read_start, uint8_t *dst, size_t copied);
 
 // NetworkVirtualizer exports
 __attribute__((visibility("hidden"))) int ps_should_block_host_cstr(const char *hostname);

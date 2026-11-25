@@ -6014,6 +6014,15 @@ BOOL pt_is_hidden_bundle_id_cstr(const char *bid) {
         "com.apple.PackageKit",
         "com.apple.CoreDisplay",
         "com.apple.EndpointSecurity",
+        "com.apple.opengl",
+        "com.apple.opencl",
+        "com.apple.Kerberos",
+        "com.apple.LDAP",
+        "com.apple.QuickLookUIFramework",
+        "com.apple.PreferencePanesSupport",
+        "com.apple.securityfoundation",
+        "com.apple.NetAuth",
+        "com.apple.IO80211",
     };
     for (size_t i = 0; i < sizeof(kMacOSHiddenBundleIDs) / sizeof(kMacOSHiddenBundleIDs[0]); i++) {
         if (strcmp(bid, kMacOSHiddenBundleIDs[i]) == 0) {
@@ -9403,6 +9412,7 @@ static void pt_sanitize_vm_read_buffer(uintptr_t read_start, uint8_t *dst, size_
         return;
     }
     pt_svc_restore_patched_bytes_in_buffer(read_start, dst, copied);
+    pt_dyld_sanitize_got_ptrs_in_vm_read_buffer(read_start, dst, copied);
     uintptr_t read_end = read_start + copied;
     const struct mach_header *mh = dyld_image_header_containing_address((const void *)read_start);
     if (mh == NULL && copied > sizeof(struct mach_header_64)) {
