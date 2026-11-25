@@ -144,5 +144,4 @@ Libraries used:
 - [Yams](https://github.com/jpsim/Yams)
 - [SwiftSoup](https://github.com/scinfu/SwiftSoup)
 - [Sparkle](https://github.com/sparkle-project/Sparkle)
-- [SwordRPC](https://github.com/spotlightishere/SwordRPC)
 - [inject](https://github.com/paradiseduo/inject) *(early Mach-O injection reference; MacOver uses its own `PlayCoverMachO` implementation)*

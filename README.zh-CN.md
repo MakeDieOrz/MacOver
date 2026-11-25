@@ -144,5 +144,4 @@ python3 Tests/RuntimeHarness/run_runtime_harness.py \
 - [Yams](https://github.com/jpsim/Yams)
 - [SwiftSoup](https://github.com/scinfu/SwiftSoup)
 - [Sparkle](https://github.com/sparkle-project/Sparkle)
-- [SwordRPC](https://github.com/spotlightishere/SwordRPC)
 - [inject](https://github.com/paradiseduo/inject) *（早期 Mach-O 注入方案参考；MacOver 已改用自研 `PlayCoverMachO`）*
