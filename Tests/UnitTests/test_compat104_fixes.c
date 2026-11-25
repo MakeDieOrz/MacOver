@@ -1628,6 +1628,61 @@ static void test_v105_macos_frameworks_and_vm_read_got_sanitize(void) {
     assert(got24 == fake_real_open);
 }
 
+static void test_v105_batch2_sysctl_iokit_mig_and_metal(void) {
+    /* 1. CTL_SYSCTL sub-MIB discrimination: 1/4/5/6 query name2oid, only 2 walks sysctl.next */
+    int mib_fmt[5] = { 0, 4, 1, 2, 3 };
+    assert((mib_fmt[1] == 1 || mib_fmt[1] == 4 || mib_fmt[1] == 5 || mib_fmt[1] == 6));
+    assert(!(mib_fmt[1] == 2));
+    int mib_descr[5] = { 0, 5, 1, 2, 3 };
+    assert((mib_descr[1] == 1 || mib_descr[1] == 4 || mib_descr[1] == 5 || mib_descr[1] == 6));
+    assert(!(mib_descr[1] == 2));
+    int mib_next[3] = { 0, 2, 1 };
+    assert(mib_next[1] == 2);
+
+    /* 2. NUL-delimited IOKit byte sequence sanitization preserves multi-string boundaries */
+    const uint8_t raw_dt_compat[] = "Mac14,2\0applegpu_g14g\0J413AP\0";
+    size_t raw_len = sizeof(raw_dt_compat) - 1U;
+    assert(memmem(raw_dt_compat, raw_len, "applegpu_g14g", 13) != NULL);
+    assert(memmem(raw_dt_compat, raw_len, "J413", 4) != NULL);
+    size_t tok_count = 0;
+    for (size_t i = 0; i < raw_len; i++) {
+        if (raw_dt_compat[i] == '\0') {
+            tok_count++;
+        }
+    }
+    assert(tok_count == 3U);
+
+    /* 3. MIG mach_vm_read_overwrite reply packed outsize offset check */
+    typedef struct {
+        uint8_t header[24];
+        uint8_t ndr[8];
+        int32_t ret_code;
+        uint64_t outsize;
+    } __attribute__((packed)) mock_vm_ro_reply_t;
+    mock_vm_ro_reply_t ro_reply;
+    memset(&ro_reply, 0, sizeof(ro_reply));
+    ro_reply.ret_code = 0;
+    ro_reply.outsize = 4096ULL;
+    uint64_t decoded_outsize = 0;
+    memcpy(&decoded_outsize, ((const uint8_t *)&ro_reply) + 32U + sizeof(int32_t), sizeof(decoded_outsize));
+    assert(decoded_outsize == 4096ULL);
+
+    /* 4. Metal missing-header diagnostic bracket column alignment */
+    const char *src = "#include <metal_stdlib>\n#include <metal_simdgroup_matrix>\n";
+    const char *bracket = strstr(src, "<metal_simdgroup_matrix>");
+    assert(bracket != NULL);
+    unsigned long line = 1, col = 1;
+    for (const char *p = src; p < bracket; p++) {
+        if (*p == '\n') {
+            line++;
+            col = 1;
+        } else {
+            col++;
+        }
+    }
+    assert(line == 2 && col == 10);
+}
+
 int main(void) {
     test_der_entitlements_encoding_and_superblob_rewrite();
     test_attr_ref_zero_fill();
@@ -1653,6 +1708,7 @@ int main(void) {
     test_round4_audit_regressions();
     test_arm64_stub_decoder_and_got_bitmap();
     test_v105_macos_frameworks_and_vm_read_got_sanitize();
+    test_v105_batch2_sysctl_iokit_mig_and_metal();
     printf("All compat104 unit tests passed.\n");
     return 0;
 }

@@ -67,6 +67,7 @@ MOCK_TARGET_M = r"""
 @import PlayTools;
 #include <arpa/inet.h>
 #include <CommonCrypto/CommonDigest.h>
+#include <dirent.h>
 #include <dlfcn.h>
 #include <crt_externs.h>
 #include <errno.h>
@@ -1678,6 +1679,8 @@ int main(int argc, const char *argv[]) {
         BOOL s11Round3DyldHandleUnwindOK = NO;
         BOOL s11R3ExplicitHandleOK = NO, s11R3CfBundleOK = NO, s11R3DlopenFromOK = NO, s11R3UnwindOK = NO;
         BOOL s11Round3FsCasePathsAndIORegOK = NO;
+        BOOL s11V105Batch2OK = NO;
+        NSString *s11B2Detail = @"";
         const char *testS11Env = getenv("HARNESS_TEST_SCENARIO11");
         if (testS11Env != NULL && strcmp(testS11Env, "1") == 0) {
             // 1. PROC_PIDPATHINFO (libproc + SYS_proc_info) returns 0 and virtualized iOS bundle path
@@ -2943,6 +2946,256 @@ int main(int argc, const char *argv[]) {
                                                   impUnwrap105OK &&
                                                   vmGotSanitizedOK);
             }
+
+            {
+                // v1.0.5 Batch 1 & 2 parity: CTL_SYSCTL oidfmt/oiddescr, extended IOKit APIs, vm_copy/read_list,
+                // raw MIG 4808, CGFont/CTFontCreateWithFontDescriptor/AvailableFontURLs, dlopen_audited, FS syscalls.
+                int oiddescrMib[4] = { 0, 5, CTL_KERN, KERN_OSTYPE };
+                char oiddescrBuf[128] = {0};
+                size_t oiddescrSz = sizeof(oiddescrBuf);
+                BOOL sysctlDescrOK = (sysctl(oiddescrMib, 4, oiddescrBuf, &oiddescrSz, NULL, 0) == 0 &&
+                                      oiddescrSz >= 1U && oiddescrSz <= sizeof(oiddescrBuf));
+                int oidfmtMib[4] = { 0, 4, CTL_KERN, KERN_OSTYPE };
+                uint8_t oidfmtBuf[64] = {0};
+                size_t oidfmtSz = sizeof(oidfmtBuf);
+                BOOL sysctlFmtOK = (sysctl(oidfmtMib, 4, oidfmtBuf, &oidfmtSz, NULL, 0) == 0 && oidfmtSz >= 4);
+
+                BOOL iokitExtOK = NO;
+                {
+                    typedef CFStringRef (*CopyClassFn)(mach_port_t);
+                    typedef CFStringRef (*CopySuperFn)(CFStringRef);
+                    typedef CFStringRef (*CopyBundleFn)(CFStringRef);
+                    typedef mach_port_t (*CopyFromPathFn)(mach_port_t, CFStringRef);
+                    typedef CFStringRef (*CopyPathFn)(mach_port_t, const char *);
+                    typedef kern_return_t (*RelFn)(mach_port_t);
+                    CopyClassFn fnCopyClass = (CopyClassFn)dlsym(RTLD_DEFAULT, "IOObjectCopyClass");
+                    CopySuperFn fnCopySuper = (CopySuperFn)dlsym(RTLD_DEFAULT, "IOObjectCopySuperclassForClass");
+                    CopyBundleFn fnCopyBundle = (CopyBundleFn)dlsym(RTLD_DEFAULT, "IOObjectCopyBundleIdentifierForClass");
+                    CopyFromPathFn fnCopyFromPath = (CopyFromPathFn)dlsym(RTLD_DEFAULT, "IORegistryEntryCopyFromPath");
+                    CopyPathFn fnCopyPath = (CopyPathFn)dlsym(RTLD_DEFAULT, "IORegistryEntryCopyPath");
+                    RelFn fnRel = (RelFn)dlsym(RTLD_DEFAULT, "IOObjectRelease");
+                    if (fnCopyClass != NULL && fnCopySuper != NULL && fnCopyBundle != NULL &&
+                        fnCopyFromPath != NULL && fnCopyPath != NULL && fnRel != NULL) {
+                        mach_port_t dt = fnCopyFromPath(0, CFSTR("IODeviceTree:/"));
+                        mach_port_t hiddenSmc = fnCopyFromPath(0, CFSTR("IOService:/AppleSMC"));
+                        BOOL dtOK = NO;
+                        if (dt != 0) {
+                            NSString *cls = CFBridgingRelease(fnCopyClass(dt));
+                            NSString *pth = CFBridgingRelease(fnCopyPath(dt, "IODeviceTree"));
+                            dtOK = (cls != nil && ![cls containsString:@"Mac"] && pth != nil);
+                            fnRel(dt);
+                        }
+                        NSString *hidSup = CFBridgingRelease(fnCopySuper(CFSTR("AppleSMC")));
+                        NSString *hidBid = CFBridgingRelease(fnCopyBundle(CFSTR("AppleThunderboltNHI")));
+                        iokitExtOK = (dtOK && hiddenSmc == 0 && hidSup == nil && hidBid == nil);
+                        if (hiddenSmc != 0) {
+                            fnRel(hiddenSmc);
+                        }
+                    }
+                }
+
+                BOOL vmCopyListAndMigOK = NO;
+                extern const struct mach_header_64 _mh_execute_header;
+                unsigned long gotSzB2 = 0;
+                uint8_t *gotPtrB2 = getsectiondata(&_mh_execute_header, "__DATA_CONST", "__got", &gotSzB2);
+                if (gotPtrB2 == NULL) {
+                    gotPtrB2 = getsectiondata(&_mh_execute_header, "__DATA", "__got", &gotSzB2);
+                }
+                if (gotPtrB2 != NULL && gotSzB2 >= sizeof(void *)) {
+                    const void *ptOpen = (const void *)&open;
+                    NSMutableData *copyBuf = [NSMutableData dataWithLength:gotSzB2];
+                    kern_return_t ckr = mach_vm_copy(mach_task_self(),
+                                                     (mach_vm_address_t)(uintptr_t)gotPtrB2,
+                                                     (mach_vm_size_t)gotSzB2,
+                                                     (mach_vm_address_t)(uintptr_t)copyBuf.mutableBytes);
+                    BOOL copyClean = (ckr == KERN_SUCCESS);
+                    if (copyClean) {
+                        const void * const *slots = (const void * const *)copyBuf.bytes;
+                        for (size_t k = 0; k < gotSzB2 / sizeof(void *); k++) {
+                            if (slots[k] == ptOpen) {
+                                copyClean = NO;
+                            }
+                        }
+                    }
+
+                    struct mach_vm_read_entry rl[1];
+                    rl[0].address = (mach_vm_address_t)(uintptr_t)gotPtrB2;
+                    rl[0].size = (mach_vm_size_t)gotSzB2;
+                    BOOL listClean = (mach_vm_read_list(mach_task_self(), rl, 1) == KERN_SUCCESS &&
+                                      rl[0].address != 0 && rl[0].size >= gotSzB2);
+                    if (listClean) {
+                        const void * const *slots = (const void * const *)(uintptr_t)rl[0].address;
+                        for (size_t k = 0; k < gotSzB2 / sizeof(void *); k++) {
+                            if (slots[k] == ptOpen) {
+                                listClean = NO;
+                            }
+                        }
+                        vm_deallocate(mach_task_self(), (vm_address_t)rl[0].address, (vm_size_t)rl[0].size);
+                    }
+
+                    typedef kern_return_t (*MachMsg2Fn)(void *, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+                    typedef mach_port_t (*GetReplyFnB2)(void);
+                    typedef void (*ReplyOpFnB2)(mach_port_t);
+                    MachMsg2Fn fnMsg2 = (MachMsg2Fn)dlsym(RTLD_DEFAULT, "mach_msg2_internal");
+                    GetReplyFnB2 fnGetReplyB2 = (GetReplyFnB2)dlsym(RTLD_DEFAULT, "mig_get_reply_port");
+                    ReplyOpFnB2 fnPutReplyB2 = (ReplyOpFnB2)dlsym(RTLD_DEFAULT, "mig_put_reply_port");
+                    ReplyOpFnB2 fnDeallocReplyB2 = (ReplyOpFnB2)dlsym(RTLD_DEFAULT, "mig_dealloc_reply_port");
+                    BOOL msg2Present = (fnMsg2 != NULL);
+
+                    union {
+                        struct __attribute__((packed)) {
+                            mach_msg_header_t Head;
+                            NDR_record_t NDR;
+                            uint64_t address;
+                            uint64_t size;
+                            uint64_t data;
+                        } req;
+                        struct __attribute__((packed)) {
+                            mach_msg_header_t Head;
+                            NDR_record_t NDR;
+                            kern_return_t RetCode;
+                            uint64_t outsize;
+                            mach_msg_trailer_t trailer;
+                        } rep;
+                        uint8_t raw[128];
+                    } migMsg;
+                    NSMutableData *migDst = [NSMutableData dataWithLength:gotSzB2];
+                    memset(&migMsg, 0, sizeof(migMsg));
+                    mach_port_t repPort = (fnGetReplyB2 != NULL) ? fnGetReplyB2() : MACH_PORT_NULL;
+                    kern_return_t mkr = KERN_FAILURE;
+                    if (fnMsg2 != NULL && MACH_PORT_VALID(repPort)) {
+                        const uint32_t bits4808 = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE);
+                        const uint64_t opt4808 = 0x0000000200000003ULL;
+                        migMsg.req.Head.msgh_bits = bits4808;
+                        migMsg.req.Head.msgh_size = (mach_msg_size_t)sizeof(migMsg.req);
+                        migMsg.req.Head.msgh_remote_port = mach_task_self();
+                        migMsg.req.Head.msgh_local_port = repPort;
+                        migMsg.req.Head.msgh_id = 4808;
+                        migMsg.req.NDR = NDR_record;
+                        migMsg.req.address = (uint64_t)(uintptr_t)gotPtrB2;
+                        migMsg.req.size = (uint64_t)gotSzB2;
+                        migMsg.req.data = (uint64_t)(uintptr_t)migDst.mutableBytes;
+                        mkr = fnMsg2(migMsg.raw,
+                                     opt4808,
+                                     (uint64_t)bits4808 | ((uint64_t)sizeof(migMsg.req) << 32),
+                                     (uint64_t)mach_task_self() | ((uint64_t)repPort << 32),
+                                     (uint64_t)4808U << 32,
+                                     (uint64_t)repPort << 32,
+                                     (uint64_t)sizeof(migMsg.raw),
+                                     0);
+                        if (mkr == KERN_SUCCESS) {
+                            if (fnPutReplyB2 != NULL) fnPutReplyB2(repPort);
+                        } else if (fnDeallocReplyB2 != NULL) {
+                            fnDeallocReplyB2(repPort);
+                        }
+                    }
+                    BOOL rawMigRoClean = (mkr == KERN_SUCCESS &&
+                                          migMsg.rep.Head.msgh_id == 4908 &&
+                                          migMsg.rep.RetCode == KERN_SUCCESS &&
+                                          migMsg.rep.outsize == gotSzB2);
+                    if (rawMigRoClean) {
+                        const void * const *slots = (const void * const *)migDst.bytes;
+                        for (size_t k = 0; k < gotSzB2 / sizeof(void *); k++) {
+                            if (slots[k] == ptOpen) {
+                                rawMigRoClean = NO;
+                            }
+                        }
+                    }
+                    vmCopyListAndMigOK = (copyClean && listClean && msg2Present && rawMigRoClean);
+                }
+
+                BOOL fontsB2OK = NO;
+                {
+                    typedef CGFontRef (*CGFontFn)(CFStringRef);
+                    CGFontFn fnCGF = (CGFontFn)dlsym(RTLD_DEFAULT, "CGFontCreateWithFontName");
+                    CGFontRef monacoCG = (fnCGF != NULL) ? fnCGF(CFSTR("Monaco")) : NULL;
+                    CTFontDescriptorRef monacoDesc = CTFontDescriptorCreateWithNameAndSize(CFSTR("Monaco"), 12.0);
+                    CTFontRef ctDescFont = (monacoDesc != NULL) ? CTFontCreateWithFontDescriptor(monacoDesc, 12.0, NULL) : NULL;
+                    NSString *ctDescFam = ctDescFont ? CFBridgingRelease(CTFontCopyFamilyName(ctDescFont)) : @"";
+                    void *urlsSym = dlsym(RTLD_DEFAULT, "CTFontManagerCopyAvailableFontURLs");
+                    fontsB2OK = (monacoCG == NULL &&
+                                 ctDescFont != NULL &&
+                                 ![ctDescFam isEqualToString:@"Monaco"] &&
+                                 urlsSym == NULL);
+                    if (monacoCG != NULL) CFRelease(monacoCG);
+                    if (monacoDesc != NULL) CFRelease(monacoDesc);
+                    if (ctDescFont != NULL) CFRelease(ctDescFont);
+                }
+
+                BOOL dlopenAuditedOK = NO;
+                {
+                    typedef void *(*DlAuditedFn)(const char *, int);
+                    DlAuditedFn fnAud = (DlAuditedFn)dlsym(RTLD_DEFAULT, "dlopen_audited");
+                    void *badAud = (fnAud != NULL) ? fnAud("/System/Library/Frameworks/AppKit.framework/AppKit", RTLD_LAZY) : (void *)0x1;
+                    void *okAud = (fnAud != NULL) ? fnAud("/System/Library/Frameworks/OpenGLES.framework/OpenGLES", RTLD_LAZY) : NULL;
+                    dlopenAuditedOK = (fnAud != NULL && badAud == NULL && okAud != NULL);
+                }
+
+                BOOL fsB2OK = YES;
+                {
+                    typedef int (*ChdirFn)(const char *);
+                    ChdirFn fnChdir = (ChdirFn)dlsym(RTLD_DEFAULT, "chdir");
+                    char cwdBefore[PATH_MAX] = {0};
+                    (void)getcwd(cwdBefore, sizeof(cwdBefore));
+                    errno = 0;
+                    int chRc = (fnChdir != NULL) ? fnChdir("/Users") : 0;
+                    if (!(chRc != 0 && errno == ENOENT)) fsB2OK = NO;
+                    if (cwdBefore[0] != '\0' && fnChdir != NULL) {
+                        (void)fnChdir(cwdBefore);
+                    }
+
+                    typedef ssize_t (*GetDirentriesFn)(int, char *, int, long *);
+                    GetDirentriesFn fnGD = (GetDirentriesFn)dlsym(RTLD_DEFAULT, "getdirentries");
+                    int rfd = open("/", O_RDONLY | O_DIRECTORY);
+                    if (rfd >= 0 && fnGD != NULL) {
+                        char dbuf[4096];
+                        long basep = 0;
+                        ssize_t nr = fnGD(rfd, dbuf, (int)sizeof(dbuf), &basep);
+                        if (nr > 0) {
+                            ssize_t off = 0;
+                            while (off + (ssize_t)offsetof(struct dirent, d_name) < nr) {
+                                struct dirent *ent = (struct dirent *)(dbuf + off);
+                                if (ent->d_reclen == 0) break;
+                                if (strcmp(ent->d_name, "Users") == 0 ||
+                                    strcmp(ent->d_name, "Library") == 0 ||
+                                    strcmp(ent->d_name, "Applications") == 0) {
+                                    fsB2OK = NO;
+                                }
+                                off += ent->d_reclen;
+                            }
+                        }
+                        close(rfd);
+                    }
+
+                    int (*fnPidFP)(int, uint32_t, int, void *, int) =
+                        (int (*)(int, uint32_t, int, void *, int))dlsym(RTLD_DEFAULT, "proc_pidfileportinfo");
+                    if (fnPidFP != NULL) {
+                        char vbuf[128] = {0};
+                        errno = 0;
+                        int prc = fnPidFP(1, 0, 1, vbuf, (int)sizeof(vbuf));
+                        if (!(prc <= 0)) fsB2OK = NO;
+                    }
+#if defined(__arm64__) || defined(__aarch64__)
+                    int svcErr2 = 0;
+                    uint64_t gidGuard = 0x11223344ULL;
+                    int64_t gRc = pt_harness_raw_svc(441 /* SYS_guarded_open_np */,
+                                                     (uintptr_t)"/Applications/Safari.app",
+                                                     (uintptr_t)&gidGuard,
+                                                     1 /* GUARD_CLOSE */,
+                                                     O_RDONLY,
+                                                     0,
+                                                     0,
+                                                     &svcErr2);
+                    if (!(gRc < 0 && svcErr2 == ENOENT)) fsB2OK = NO;
+#endif
+                }
+
+                s11B2Detail = [NSString stringWithFormat:@"sysctl=%d/%d(err=%d,sz=%zu) iokit=%d vm=%d fonts=%d dlAud=%d fs=%d",
+                               sysctlDescrOK, sysctlFmtOK, (sysctlDescrOK ? 0 : errno), oiddescrSz,
+                               iokitExtOK, vmCopyListAndMigOK, fontsB2OK, dlopenAuditedOK, fsB2OK];
+                s11V105Batch2OK = (sysctlDescrOK && sysctlFmtOK && iokitExtOK &&
+                                   vmCopyListAndMigOK && fontsB2OK && dlopenAuditedOK && fsB2OK);
+            }
         }
 
         // Scenario 12: compat13_7 parity checks
@@ -3026,6 +3279,62 @@ int main(int argc, const char *argv[]) {
                         ? ((BOOL (*)(id, SEL))objc_msgSend)(dev, supports32FSel)
                         : NO;
 
+                    BOOL mtlDiagAlignedOK = (errSimd != nil &&
+                                             [errSimd.localizedDescription containsString:@"program_source:2:10: fatal error: 'metal_simdgroup_matrix' file not found"] &&
+                                             [errSimd.localizedDescription containsString:@"\n         ^~~~~~~~~~~~~~~~~~~~~~~~"]);
+
+                    BOOL mtl32fNearestOK = NO;
+                    Class texDescCls = NSClassFromString(@"MTLTextureDescriptor");
+                    SEL tex2DSel = sel_registerName("texture2DDescriptorWithPixelFormat:width:height:mipmapped:");
+                    SEL setUsageSel = sel_registerName("setUsage:");
+                    SEL newTexSel = sel_registerName("newTextureWithDescriptor:");
+                    if (texDescCls != Nil && [texDescCls respondsToSelector:tex2DSel] && [dev respondsToSelector:newTexSel]) {
+                        id tDesc = ((id (*)(id, SEL, NSUInteger, NSUInteger, NSUInteger, BOOL))objc_msgSend)(
+                            texDescCls, tex2DSel, 125 /* MTLPixelFormatRGBA32Float */, 2, 1, NO);
+                        if (tDesc != nil && [tDesc respondsToSelector:setUsageSel]) {
+                            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(tDesc, setUsageSel, 1 /* ShaderRead */);
+                        }
+                        id tex32 = (tDesc != nil) ? ((id (*)(id, SEL, id))objc_msgSend)(dev, newTexSel, tDesc) : nil;
+                        if (tex32 != nil) {
+                            float px[8] = { 0.0f, 0.0f, 0.0f, 1.0f, 100.0f, 0.0f, 0.0f, 1.0f };
+                            typedef struct { NSUInteger origin[3]; NSUInteger size[3]; } PTTestMTLRegion;
+                            PTTestMTLRegion reg = { {0, 0, 0}, {2, 1, 1} };
+                            ((void (*)(id, SEL, PTTestMTLRegion, NSUInteger, const void *, NSUInteger))objc_msgSend)(
+                                tex32, sel_registerName("replaceRegion:mipmapLevel:withBytes:bytesPerRow:"),
+                                reg, 0, px, (NSUInteger)(2U * 4U * sizeof(float)));
+                            NSString *lin32fSrc =
+                                @"#include <metal_stdlib>\n"
+                                "using namespace metal;\n"
+                                "kernel void k32f(texture2d<float, access::sample> tex [[texture(0)]], device float *out [[buffer(0)]]) {\n"
+                                "    constexpr sampler s(coord::normalized, filter::linear);\n"
+                                "    out[0] = tex.sample(s, float2(0.45f, 0.5f)).x;\n"
+                                "}\n";
+                            NSError * __autoreleasing err32f = nil;
+                            id lib32f = fnNewLib(dev, newLibSel, lin32fSrc, optsBenign, &err32f);
+                            id fn32f = (lib32f != nil) ? ((id (*)(id, SEL, NSString *))objc_msgSend)(lib32f, sel_registerName("newFunctionWithName:"), @"k32f") : nil;
+                            NSError * __autoreleasing errPso = nil;
+                            id pso32f = (fn32f != nil) ? ((id (*)(id, SEL, id, NSError * __autoreleasing *))objc_msgSend)(dev, sel_registerName("newComputePipelineStateWithFunction:error:"), fn32f, &errPso) : nil;
+                            id outBuf32 = ((id (*)(id, SEL, NSUInteger, NSUInteger))objc_msgSend)(dev, sel_registerName("newBufferWithLength:options:"), sizeof(float), 0);
+                            id cmdQ = ((id (*)(id, SEL))objc_msgSend)(dev, sel_registerName("newCommandQueue"));
+                            id cmdBuf = (cmdQ != nil) ? ((id (*)(id, SEL))objc_msgSend)(cmdQ, sel_registerName("commandBuffer")) : nil;
+                            id compEnc = (cmdBuf != nil) ? ((id (*)(id, SEL))objc_msgSend)(cmdBuf, sel_registerName("computeCommandEncoder")) : nil;
+                            if (pso32f != nil && outBuf32 != nil && compEnc != nil) {
+                                typedef struct { NSUInteger w; NSUInteger h; NSUInteger d; } PTTestMTLSize;
+                                ((void (*)(id, SEL, id))objc_msgSend)(compEnc, sel_registerName("setComputePipelineState:"), pso32f);
+                                ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(compEnc, sel_registerName("setTexture:atIndex:"), tex32, 0);
+                                ((void (*)(id, SEL, id, NSUInteger, NSUInteger))objc_msgSend)(compEnc, sel_registerName("setBuffer:offset:atIndex:"), outBuf32, 0, 0);
+                                PTTestMTLSize grid = {1, 1, 1};
+                                ((void (*)(id, SEL, PTTestMTLSize, PTTestMTLSize))objc_msgSend)(compEnc, sel_registerName("dispatchThreads:threadsPerThreadgroup:"), grid, grid);
+                                ((void (*)(id, SEL))objc_msgSend)(compEnc, sel_registerName("endEncoding"));
+                                ((void (*)(id, SEL))objc_msgSend)(cmdBuf, sel_registerName("commit"));
+                                ((void (*)(id, SEL))objc_msgSend)(cmdBuf, sel_registerName("waitUntilCompleted"));
+                                void *cptr = ((void *(*)(id, SEL))objc_msgSend)(outBuf32, sel_registerName("contents"));
+                                float sampled = (cptr != NULL) ? *(const float *)cptr : 999.0f;
+                                mtl32fNearestOK = (sampled >= -0.01f && sampled < 1.0f);
+                            }
+                        }
+                    }
+
                     s12MetalCompat13GateOK = (defaultVer == ((2U << 16) | 2U) &&
                                               !bcSupported &&
                                               !f32Supported &&
@@ -3033,6 +3342,8 @@ int main(int argc, const char *argv[]) {
                                               [err23.domain isEqualToString:@"MTLLibraryErrorDomain"] && err23.code == 3 &&
                                               libSimd == nil && errSimd != nil &&
                                               [errSimd.domain isEqualToString:@"MTLLibraryErrorDomain"] && errSimd.code == 3 &&
+                                              mtlDiagAlignedOK &&
+                                              mtl32fNearestOK &&
                                               libBenign != nil && errBenign == nil);
                 }
             }
@@ -3421,6 +3732,8 @@ int main(int argc, const char *argv[]) {
             @"s11R3DlopenFromOK": s11R3DlopenFromOK ? @YES : @NO,
             @"s11R3UnwindOK": s11R3UnwindOK ? @YES : @NO,
             @"s11Round3FsCasePathsAndIORegOK": s11Round3FsCasePathsAndIORegOK ? @YES : @NO,
+            @"s11V105Batch2OK": s11V105Batch2OK ? @YES : @NO,
+            @"s11B2Detail": s11B2Detail ?: @"",
             @"s12FreadlinkHiddenOK": s12FreadlinkHiddenOK ? @YES : @NO,
             @"s12ExtensionKitHiddenOK": s12ExtensionKitHiddenOK ? @YES : @NO,
             @"s12MetalCompat13GateOK": s12MetalCompat13GateOK ? @YES : @NO,
@@ -4658,6 +4971,7 @@ def run_scenarios(
         info11["s11Round3SignKernelCsrOK"] is True,
         info11["s11Round3DyldHandleUnwindOK"] is True,
         info11["s11Round3FsCasePathsAndIORegOK"] is True,
+        info11["s11V105Batch2OK"] is True,
     ]
     results.append(ScenarioResult(
         name="11. 1.0.4 audit & detect-v2 parity checks",
@@ -4667,6 +4981,7 @@ def run_scenarios(
             "inlineSvcMachine": info11["inlineSvcMachine"],
             "sysctlMachine": info11["sysctlMachine"],
             **{k: v for k, v in info11.items() if k.startswith("s11")},
+            "s11B2Detail": info11.get("s11B2Detail", ""),
         }, sort_keys=True),
     ))
     if verbose:
