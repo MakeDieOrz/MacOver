@@ -928,7 +928,7 @@ static Class pt_resolve_frontboard_frame_class(Class sceneCoreCls, Class sceneCl
         if (pt_is_bypass_enabled()) {
             pt_install_bypass_screen_hooks(NO);
         }
-    } else if (@available(iOS 16.3, *)) {
+    } else {
         if ([[PlaySettings shared] resizableWindow]) {
             pt_replace_instance_imp(objc_getClass("_UIApplicationInfoParser"), NSSelectorFromString(@"requiresFullScreen"), (IMP)pt_hook_requiresFullScreen, NULL);
             s_screenNativeResizableOnly = YES;
@@ -992,23 +992,6 @@ static Class pt_resolve_frontboard_frame_class(Class sceneCoreCls, Class sceneCl
                 pt_install_bypass_screen_hooks(YES);
                 pt_replace_instance_imp(objc_getClass("UIDevice"), @selector(orientation), (IMP)pt_hook_device_orientation, (IMP *)&s_orig_device_orientation);
             }
-        }
-    }
-    else {
-        if ([[PlaySettings shared] adaptiveDisplay]) {
-            if (frameTargetCls != Nil) {
-                pt_replace_instance_imp(frameTargetCls, @selector(frame), (IMP)pt_hook_scene_frame, (IMP *)&s_orig_scene_frame);
-            }
-            if (sceneCls != Nil && class_getInstanceMethod(sceneCls, @selector(bounds)) != NULL) {
-                pt_replace_instance_imp(sceneCls, @selector(bounds), (IMP)pt_hook_scene_bounds, (IMP *)&s_orig_scene_bounds);
-            }
-            if (fbsModeCls != Nil && class_getInstanceMethod(fbsModeCls, @selector(size)) != NULL) {
-                pt_replace_instance_imp(fbsModeCls, @selector(size), (IMP)pt_hook_fbs_mode_size, (IMP *)&s_orig_fbs_mode_size);
-            }
-        }
-        if (pt_is_bypass_enabled()) {
-            s_screenNativeResizableOnly = YES;
-            pt_install_bypass_screen_hooks(NO);
         }
     }
 

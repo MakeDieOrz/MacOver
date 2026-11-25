@@ -4,21 +4,28 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-DERIVED_DATA=""
+DERIVED_DATA="${REPO_ROOT}/.build/playtools-analyze-dd"
+DERIVED_DATA_EXPLICIT=0
 CHECK_FORMAT=0
+CLEAN_CACHE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --derived-data)
       DERIVED_DATA="${2:?--derived-data requires a path}"
+      DERIVED_DATA_EXPLICIT=1
       shift 2
       ;;
     --check-format)
       CHECK_FORMAT=1
       shift
       ;;
+    --clean)
+      CLEAN_CACHE=1
+      shift
+      ;;
     -h|--help)
-      echo "Usage: $0 [--derived-data <path>] [--check-format]"
+      echo "Usage: $0 [--derived-data <path>] [--check-format] [--clean]"
       exit 0
       ;;
     *)
@@ -28,20 +35,17 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-CLEANUP_DD=0
-if [[ -z "${DERIVED_DATA}" ]]; then
-  DERIVED_DATA="$(mktemp -d "${TMPDIR:-/tmp}/playtools-analyze.XXXXXX")"
-  CLEANUP_DD=1
+if [[ "${CLEAN_CACHE}" -eq 1 ]]; then
+  rm -rf "${DERIVED_DATA}"
 fi
+mkdir -p "${DERIVED_DATA}"
 
 LOG_FILE="$(mktemp "${TMPDIR:-/tmp}/playtools-analyze-log.XXXXXX")"
 cleanup() {
   rm -f "${LOG_FILE}"
-  if [[ "${CLEANUP_DD}" -eq 1 ]]; then
-    rm -rf "${DERIVED_DATA}"
-  fi
 }
 trap cleanup EXIT
+: "${DERIVED_DATA_EXPLICIT}"
 
 if [[ -z "${DEVELOPER_DIR:-}" && -d "/Applications/Xcode.app/Contents/Developer" ]]; then
   export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"

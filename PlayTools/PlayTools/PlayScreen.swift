@@ -6,17 +6,11 @@ import Foundation
 import UIKit
 
 let screen = PlayScreen.shared
-var isInvertFixEnabled: Bool {
-    if #available(iOS 16.3, *) {
-        return false
-    }
-    return PlaySettings.shared.inverseScreenValues && PlaySettings.shared.adaptiveDisplay
-}
 var mainScreenWidth: CGFloat {
-    !isInvertFixEnabled ? PlaySettings.shared.windowSizeWidth : PlaySettings.shared.windowSizeHeight
+    PlaySettings.shared.windowSizeWidth
 }
 var mainScreenHeight: CGFloat {
-    !isInvertFixEnabled ? PlaySettings.shared.windowSizeHeight : PlaySettings.shared.windowSizeWidth
+    PlaySettings.shared.windowSizeHeight
 }
 var customScaler: CGFloat {
     PlaySettings.shared.customScaler
@@ -32,22 +26,14 @@ extension CGSize {
     }
 
     func toAspectRatio() -> CGSize {
-        if #available(iOS 16.3, *) {
-            return CGSize(width: mainScreenWidth, height: mainScreenHeight)
-        } else {
-            return CGSize(width: mainScreenHeight, height: mainScreenWidth)
-        }
+        return CGSize(width: mainScreenWidth, height: mainScreenHeight)
     }
 
     func toAspectRatioInternal() -> CGSize {
         return CGSize(width: mainScreenHeight, height: mainScreenWidth)
     }
     func toAspectRatioDefault() -> CGSize {
-        if #available(iOS 16.3, *) {
-            return CGSize(width: mainScreenWidth, height: mainScreenHeight)
-        } else {
-            return CGSize(width: mainScreenHeight, height: mainScreenWidth)
-        }
+        return CGSize(width: mainScreenWidth, height: mainScreenHeight)
     }
     func toAspectRatioInternalDefault() -> CGSize {
         return CGSize(width: mainScreenWidth, height: mainScreenHeight)
@@ -67,9 +53,6 @@ extension CGRect {
         return CGRect(x: minX, y: minY, width: mainScreenWidth * multiplier, height: mainScreenHeight * multiplier)
     }
 
-    func toAspectRatioReversed() -> CGRect {
-        return CGRect(x: minX, y: minY, width: mainScreenHeight, height: mainScreenWidth)
-    }
     func toAspectRatioDefault(_ multiplier: CGFloat = 1) -> CGRect {
         return CGRect(x: minX, y: minY, width: mainScreenWidth * multiplier, height: mainScreenHeight * multiplier)
     }
@@ -213,10 +196,7 @@ public class PlayScreen: NSObject {
     }
 
     @objc public static func frame(_ rect: CGRect) -> CGRect {
-        if #available(iOS 16.3, *) {
-            return rect.toAspectRatio()
-        }
-        return rect.toAspectRatioReversed()
+        return rect.toAspectRatio()
     }
 
     @objc public static func bounds(_ rect: CGRect) -> CGRect {

@@ -22,8 +22,8 @@ concurrency:
 
 jobs:
   ci:
-    name: Lint, Static Analysis, Tests & Runtime Harness (macos-26)
-    runs-on: macos-26
+    name: Lint, Static Analysis, Tests & Runtime Harness (xcode-27 / macOS 27)
+    runs-on: xcode-27
     timeout-minutes: 45
     steps:
       - name: Checkout
@@ -37,7 +37,8 @@ jobs:
       - name: Run SwiftLint (strict)
         run: |
           command -v swiftlint >/dev/null || brew install swiftlint
-          swiftlint lint --strict
+          TOOL_LIB="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib"
+          DYLD_FRAMEWORK_PATH="${TOOL_LIB}" swiftlint lint --strict
 
       - name: Run PlayCoverModules SwiftPM tests
         run: swift test --package-path Packages/PlayCoverModules
@@ -79,13 +80,14 @@ jobs:
           import sys
 
           out = subprocess.check_output(["otool", "-l", sys.argv[1]], text=True)
-          match = re.search(r"sectname __interpose\s+segname __DATA.*?\n\s+addr\s+0x[0-9a-fA-F]+\s+size\s+(0x[0-9a-fA-F]+)", out, re.S)
+          match = re.search(r"sectname __interpose\s+segname (__DATA(?:_CONST)?)\s+addr\s+0x[0-9a-fA-F]+\s+size\s+(0x[0-9a-fA-F]+)", out)
           if not match:
-              sys.exit("Missing __DATA,__interpose section")
-          size = int(match.group(1), 16)
+              sys.exit("Missing __DATA/__DATA_CONST,__interpose section")
+          segname = match.group(1)
+          size = int(match.group(2), 16)
           if size < 0x1100 or size % 16 != 0:
               sys.exit(f"Unexpected __interpose size: {hex(size)}")
-          print(f"Verified __DATA,__interpose size={hex(size)} ({size // 16} entries)")
+          print(f"Verified {segname},__interpose size={hex(size)} ({size // 16} entries)")
           PY
 
           PLAYCOVER_BIN="${RUNNER_TEMP}/dd-release/Build/Products/Release/MacOver.app/Contents/MacOS/MacOver"
@@ -95,6 +97,7 @@ jobs:
           plutil -lint "${HELPER_PLIST}"
           xcrun vtool -show-build "${PLAYCOVER_BIN}" | grep -q "minos 26.0"
           xcrun vtool -show-build "${HELPER_BIN}" | grep -q "minos 26.0"
+          xcrun vtool -show-build "${PLAYTOOLS_BIN}" | grep -q "minos 26.0"
 
           INCR_LOG=$(xcodebuild \
             -workspace PlayCover.xcworkspace \

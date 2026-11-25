@@ -173,18 +173,14 @@ var keymappingSelectors = [#selector(UIApplication.switchEditorMode(_:)),
 class MenuController {
     init(with builder: UIMenuBuilder) {
     #if canImport(UIKit.UIMainMenuSystem)
-        if #available(iOS 26.0, *) {
-            // Delay to avoid error
-            // Cannot set a main menu system configuration while the main menu system is building.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                let configuration = UIMainMenuSystem.Configuration()
-                configuration.sidebarPreference = .included
-                UIMainMenuSystem.shared.setBuildConfiguration(configuration) { builder in
-                    self.setupMenu(with: builder)
-                }
+        // Delay to avoid error
+        // Cannot set a main menu system configuration while the main menu system is building.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            let configuration = UIMainMenuSystem.Configuration()
+            configuration.sidebarPreference = .included
+            UIMainMenuSystem.shared.setBuildConfiguration(configuration) { builder in
+                self.setupMenu(with: builder)
             }
-        } else {
-            setupMenu(with: builder)
         }
     #else
         setupMenu(with: builder)
