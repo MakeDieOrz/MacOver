@@ -24,6 +24,7 @@ final class PlayCoverDependencies: ObservableObject, @unchecked Sendable {
     let urlObservable: URLObservable
     let urlHandler: URLHandler
     let appIntegrity: AppIntegrity
+    let mitmCoordinator: MITMProxyCoordinator
 
     init(
         userDefaults: UserDefaults = .standard,
@@ -62,6 +63,7 @@ final class PlayCoverDependencies: ObservableObject, @unchecked Sendable {
         let urlObservable = URLObservable()
         let urlHandler = URLHandler()
         let appIntegrity = AppIntegrity()
+        let mitmCoordinator = MainActor.assumeIsolated { MITMProxyCoordinator() }
 
         self.alertPresenter = alertPresenter
         self.startupAlerts = startupAlerts
@@ -85,6 +87,7 @@ final class PlayCoverDependencies: ObservableObject, @unchecked Sendable {
         self.urlObservable = urlObservable
         self.urlHandler = urlHandler
         self.appIntegrity = appIntegrity
+        self.mitmCoordinator = mitmCoordinator
 
         appsVM.dependencies = self
         versionCheck.dependencies = self
@@ -92,17 +95,19 @@ final class PlayCoverDependencies: ObservableObject, @unchecked Sendable {
         cacher.appsVM = appsVM
 
         if configureDiagnostics {
+            let logRef = log
+            let toastRef = toastVM
             PlayCoverDiagnostics.configure(
-                logHandler: { [weak log] message, isError in
-                    log?.log(message, isError: isError)
+                logHandler: { message, isError in
+                    logRef.log(message, isError: isError)
                 },
-                errorHandler: { [weak log] message in
-                    log?.error(message)
+                errorHandler: { message in
+                    logRef.error(message)
                 },
-                messageHandler: { [weak log] message in
-                    log?.msg(message)
+                messageHandler: { message in
+                    logRef.msg(message)
                 },
-                toastHandler: { [weak toastVM] kind, details, timeRemaining in
+                toastHandler: { kind, details, timeRemaining in
                     let mapped: ToastType
                     switch kind {
                     case .notice:
@@ -112,10 +117,9 @@ final class PlayCoverDependencies: ObservableObject, @unchecked Sendable {
                     case .network:
                         mapped = .network
                     }
-                    toastVM?.showToast(toastType: mapped, toastDetails: details, timeRemaining: timeRemaining)
+                    toastRef.showToast(toastType: mapped, toastDetails: details, timeRemaining: timeRemaining)
                 },
-                activeToastChecker: { [weak toastVM] kind in
-                    guard let toastVM else { return false }
+                activeToastChecker: { kind in
                     let mapped: ToastType
                     switch kind {
                     case .notice:
@@ -125,7 +129,7 @@ final class PlayCoverDependencies: ObservableObject, @unchecked Sendable {
                     case .network:
                         mapped = .network
                     }
-                    return toastVM.hasToast(ofType: mapped)
+                    return toastRef.hasToast(ofType: mapped)
                 }
             )
         }

@@ -355,6 +355,9 @@ extension PlayApp {
 
     func runAppExec(discordAlreadyLinked: Bool = false, safeModeOneShot: Bool = false) async throws {
         let launchDate = Date()
+        if let mitmCoordinator = dependencies?.mitmCoordinator {
+            try await mitmCoordinator.prepareForLaunch(app: self, safeModeOneShot: safeModeOneShot)
+        }
         let config = NSWorkspace.OpenConfiguration()
         if safeModeOneShot {
             var env = config.environment
@@ -404,6 +407,11 @@ extension PlayApp {
                     self.enableTimeOut()
                     self.releaseDiscordIPC()
                     self.lockKeyCover()
+                    if let mitmCoordinator = self.dependencies?.mitmCoordinator {
+                        let bid = self.info.bundleIdentifier
+                        let appSettings = self.settings
+                        Task { await mitmCoordinator.handleAppTermination(bundleID: bid, settings: appSettings) }
+                    }
 
                     let elapsed = Date().timeIntervalSince(launchDate)
                     let breadcrumbURL = self.container.containerUrl
@@ -472,6 +480,11 @@ extension PlayApp {
                     } else if runningApp.isActive {
                         self.disableTimeOut()
                     }
+                    if let mitmCoordinator = self.dependencies?.mitmCoordinator {
+                        let bid = self.info.bundleIdentifier
+                        let snapshot = self.settings.settings
+                        Task { await mitmCoordinator.updateLiveConfiguration(for: bid, settings: snapshot) }
+                    }
                 }
 
                 await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
@@ -536,6 +549,11 @@ extension PlayApp {
             self.enableTimeOut()
             self.releaseDiscordIPC()
             self.lockKeyCover()
+            if let mitmCoordinator = self.dependencies?.mitmCoordinator {
+                let bid = self.info.bundleIdentifier
+                let appSettings = self.settings
+                Task { await mitmCoordinator.handleAppTermination(bundleID: bid, settings: appSettings) }
+            }
         }
     }
 

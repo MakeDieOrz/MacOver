@@ -3,7 +3,9 @@
 //  PlayCover
 //
 
+import AppKit
 import PlayCoverCore
+import PlayCoverNetwork
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -14,12 +16,66 @@ private struct NetworkRuleStats {
 }
 
 struct ConfigNetworkPane: View {
+    @ObservedObject var app: PlayApp
     @ObservedObject var settings: AppSettings
+    @EnvironmentObject var mitmCoordinator: MITMProxyCoordinator
+    @Environment(\.openWindow) private var openWindow
 
     @State private var newPattern = ""
+    @State private var newMitmHost = ""
     @State private var searchText = ""
     @State private var editingIndex: Int?
     @State private var editingText = ""
+    @State private var certificates: [AppCertificateRecord] = []
+
+    private var bundleID: String {
+        app.info.bundleIdentifier
+    }
+
+    private var proxyModeBinding: Binding<NetworkProxyMode> {
+        Binding(
+            get: { NetworkProxyMode(rawValue: settings.settings.networkProxyMode) ?? .direct },
+            set: { newMode in
+                settings.update { $0.networkProxyMode = newMode.rawValue }
+                mitmCoordinator.syncCertificates(for: bundleID, settings: settings.settings)
+            }
+        )
+    }
+
+    private var externalProtocolBinding: Binding<ExternalProxyProtocol> {
+        Binding(
+            get: { ExternalProxyProtocol(rawValue: settings.settings.externalProxyProtocol) ?? .http },
+            set: { newProto in
+                settings.update { $0.externalProxyProtocol = newProto.rawValue }
+            }
+        )
+    }
+
+    private var customCertsEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { settings.settings.enableCustomCertificates },
+            set: { newValue in
+                settings.update { $0.enableCustomCertificates = newValue }
+                mitmCoordinator.syncCertificates(for: bundleID, settings: settings.settings)
+            }
+        )
+    }
+
+    private var proxyPortFormatter: NumberFormatter {
+        let fmt = NumberFormatter()
+        fmt.numberStyle = .none
+        fmt.minimum = 1
+        fmt.maximum = 65_535
+        return fmt
+    }
+
+    private var mitmPortFormatter: NumberFormatter {
+        let fmt = NumberFormatter()
+        fmt.numberStyle = .none
+        fmt.minimum = 0
+        fmt.maximum = 65_535
+        return fmt
+    }
 
     private var ruleStats: NetworkRuleStats {
         var stats = NetworkRuleStats()
@@ -49,21 +105,9 @@ struct ConfigNetworkPane: View {
     var body: some View {
         let stats = ruleStats
         Form {
-            Section {
-                Toggle("settings.network.enable", isOn: $settings.settings.enableNetworkRules)
-                Toggle("settings.network.mock200", isOn: $settings.settings.networkBlockMock200)
-                    .disabled(!settings.settings.enableNetworkRules)
-                LabeledContent("config.pane.network") {
-                    Text(String(
-                        format: NSLocalizedString("settings.network.stats", comment: ""),
-                        stats.block,
-                        stats.allow,
-                        stats.disabled
-                    ))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                }
-            }
+            proxyAndMITMSection
+            customCertificatesSection
+            rulesToggleSection(stats: stats)
 
             Section {
                 addRuleBar
@@ -98,6 +142,348 @@ struct ConfigNetworkPane: View {
         }
         .formStyle(.grouped)
         .scrollEdgeEffectStyle(.soft, for: .top)
+        .onAppear { reloadCertificates() }
+        .onChange(of: mitmCoordinator.certificateRevisions[bundleID] ?? 0) { _, _ in
+            reloadCertificates()
+        }
+    }
+
+    private var proxyAndMITMSection: some View {
+        let mode = proxyModeBinding.wrappedValue
+        let certsOrMITMActive = mode == .builtInMITM || settings.settings.enableCustomCertificates
+
+        return Section {
+            Picker("settings.network.proxyMode", selection: proxyModeBinding) {
+                Text("settings.network.proxyMode.direct").tag(NetworkProxyMode.direct)
+                Text("settings.network.proxyMode.external").tag(NetworkProxyMode.external)
+                Text("settings.network.proxyMode.builtInMITM").tag(NetworkProxyMode.builtInMITM)
+            }
+
+            if mode == .external {
+                Picker("settings.network.externalProtocol", selection: externalProtocolBinding) {
+                    Text("HTTP / HTTPS").tag(ExternalProxyProtocol.http)
+                    Text("SOCKS5").tag(ExternalProxyProtocol.socks5)
+                }
+                TextField("settings.network.proxyHost", text: $settings.settings.externalProxyHost)
+                    .textFieldStyle(.roundedBorder)
+                TextField("settings.network.proxyPort", value: $settings.settings.externalProxyPort,
+                          formatter: proxyPortFormatter)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            if mode == .builtInMITM {
+                HStack {
+                    TextField(
+                        "settings.network.mitmPort",
+                        value: $settings.settings.mitmPort,
+                        formatter: mitmPortFormatter
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    Text("settings.network.mitmPortAutoHint")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                LabeledContent("settings.network.mitmStatus") {
+                    HStack(spacing: 8) {
+                        if let port = mitmCoordinator.activePorts[bundleID] {
+                            Label("127.0.0.1:\(port)", systemImage: "dot.radiowaves.left.and.right")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.green)
+                        } else {
+                            Text("settings.network.mitmIdle")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Button("settings.network.openMonitor") {
+                            openWindow(id: "mitm-monitor", value: bundleID)
+                        }
+                    }
+                }
+
+                Toggle("settings.network.captureBodies", isOn: $settings.settings.mitmCaptureBodies)
+            }
+
+            if certsOrMITMActive {
+                Toggle("settings.network.mitmAllHosts", isOn: $settings.settings.mitmAllHosts)
+
+                if !settings.settings.mitmAllHosts {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 8) {
+                            TextField("", text: $newMitmHost, prompt: Text("settings.network.mitmHostPlaceholder"))
+                                .labelsHidden()
+                                .textFieldStyle(.roundedBorder)
+                                .onSubmit { addMITMHostPattern() }
+                            Button("settings.network.addHost") {
+                                addMITMHostPattern()
+                            }
+                            .disabled(newMitmHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        }
+                        ForEach(settings.settings.mitmHostPatterns, id: \.self) { hostPattern in
+                            HStack {
+                                Text(hostPattern)
+                                    .font(.system(.caption, design: .monospaced))
+                                Spacer()
+                                Button(role: .destructive) {
+                                    settings.update { updated in
+                                        updated.mitmHostPatterns.removeAll { $0 == hostPattern }
+                                    }
+                                } label: {
+                                    Image(systemName: "trash").foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.borderless)
+                            }
+                        }
+                    }
+                }
+            }
+
+            if mode != .direct {
+                Toggle("settings.network.hideProxy", isOn: $settings.settings.hideProxyFromApp)
+                Text("settings.network.hideProxy.help")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if certsOrMITMActive {
+                VStack(alignment: .leading, spacing: 2) {
+                    Toggle("settings.network.allowPinningBypass", isOn: $settings.settings.mitmAllowPinningBypass)
+                    Text("settings.network.allowPinningBypass.help")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if settings.settings.strictEmulationMode {
+                Text("settings.network.strictModeIndependentNote")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("settings.network.section.proxyMITM")
+        }
+    }
+
+    private var customCertificatesSection: some View {
+        let mode = proxyModeBinding.wrappedValue
+        let hasBuiltInCA = certificates.contains { $0.source == .generatedBuiltIn }
+
+        return Section {
+            Toggle("settings.network.enableCustomCerts", isOn: customCertsEnabledBinding)
+                .disabled(mode == .builtInMITM)
+
+            HStack(spacing: 8) {
+                Button("settings.network.importCert") {
+                    importCertificateFiles()
+                }
+                Button(hasBuiltInCA ? "settings.network.regenerateCA" : "settings.network.generateCA") {
+                    generateBuiltInCA(forceRegenerate: hasBuiltInCA)
+                }
+            }
+
+            if certificates.isEmpty {
+                Text("settings.network.noCerts")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(certificates) { cert in
+                    certificateRow(cert)
+                }
+            }
+
+            Text("settings.network.certIsolationNote")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } header: {
+            Text("settings.network.section.certificates")
+        }
+    }
+
+    @ViewBuilder
+    private func certificateRow(_ cert: AppCertificateRecord) -> some View {
+        HStack(spacing: 8) {
+            Toggle("", isOn: Binding(
+                get: { cert.enabled },
+                set: { toggleCertificate(cert, enabled: $0) }
+            ))
+            .toggleStyle(.checkbox)
+            .labelsHidden()
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(cert.label)
+                        .font(.caption.weight(.medium))
+                        .lineLimit(1)
+                    Text(NSLocalizedString(
+                        cert.source == .generatedBuiltIn
+                            ? "settings.network.certBadge.builtIn"
+                            : "settings.network.certBadge.imported",
+                        comment: ""
+                    ))
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(cert.source == .generatedBuiltIn ? .blue : .teal)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.secondary.opacity(0.14)))
+                    if cert.isExpired {
+                        Text("settings.network.certBadge.expired")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.red)
+                    }
+                }
+                HStack(spacing: 8) {
+                    Text(cert.shortFingerprint)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                    if let notAfter = cert.notAfter {
+                        Text(notAfter.formatted(date: .abbreviated, time: .omitted))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            Spacer(minLength: 4)
+
+            Button {
+                exportCertificatePEM(cert)
+            } label: {
+                Image(systemName: "square.and.arrow.up")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .help("settings.network.exportCert")
+
+            Button(role: .destructive) {
+                deleteCertificate(cert)
+            } label: {
+                Image(systemName: "trash")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+        }
+    }
+
+    private func rulesToggleSection(stats: NetworkRuleStats) -> some View {
+        Section {
+            Toggle("settings.network.enable", isOn: $settings.settings.enableNetworkRules)
+            Toggle("settings.network.mock200", isOn: $settings.settings.networkBlockMock200)
+                .disabled(!settings.settings.enableNetworkRules)
+            LabeledContent("config.pane.network") {
+                Text(String(
+                    format: NSLocalizedString("settings.network.stats", comment: ""),
+                    stats.block,
+                    stats.allow,
+                    stats.disabled
+                ))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func reloadCertificates() {
+        certificates = mitmCoordinator.certificateStore.listCertificates(for: bundleID)
+    }
+
+    private func addMITMHostPattern() {
+        let trimmed = newMitmHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        settings.update { updated in
+            if !updated.mitmHostPatterns.contains(trimmed) {
+                updated.mitmHostPatterns.append(trimmed)
+            }
+        }
+        newMitmHost = ""
+    }
+
+    private func importCertificateFiles() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        var types: [UTType] = [.x509Certificate, .data]
+        for ext in ["pem", "cer", "crt", "der"] {
+            if let ut = UTType(filenameExtension: ext) {
+                types.append(ut)
+            }
+        }
+        panel.allowedContentTypes = types
+        panel.begin { response in
+            guard response == .OK else { return }
+            let urls = panel.urls
+            Task { @MainActor in
+                do {
+                    for url in urls {
+                        _ = try mitmCoordinator.certificateStore.importCertificates(from: url, for: bundleID)
+                    }
+                    if !settings.settings.enableCustomCertificates {
+                        settings.update { $0.enableCustomCertificates = true }
+                    }
+                    mitmCoordinator.syncCertificates(for: bundleID, settings: settings.settings)
+                    reloadCertificates()
+                } catch {
+                    PlayCoverDiagnostics.reportError(error)
+                }
+            }
+        }
+    }
+
+    private func generateBuiltInCA(forceRegenerate: Bool) {
+        do {
+            if forceRegenerate {
+                _ = try mitmCoordinator.certificateStore.regenerateBuiltInRootCA(for: bundleID)
+            } else {
+                _ = try mitmCoordinator.certificateStore.ensureBuiltInRootCA(for: bundleID)
+            }
+            mitmCoordinator.syncCertificates(for: bundleID, settings: settings.settings)
+            reloadCertificates()
+        } catch {
+            PlayCoverDiagnostics.reportError(error)
+        }
+    }
+
+    private func toggleCertificate(_ cert: AppCertificateRecord, enabled: Bool) {
+        do {
+            try mitmCoordinator.certificateStore.setCertificateEnabled(
+                id: cert.id,
+                enabled: enabled,
+                for: bundleID
+            )
+            mitmCoordinator.syncCertificates(for: bundleID, settings: settings.settings)
+            reloadCertificates()
+        } catch {
+            PlayCoverDiagnostics.reportError(error)
+        }
+    }
+
+    private func exportCertificatePEM(_ cert: AppCertificateRecord) {
+        guard let der = try? mitmCoordinator.certificateStore.certificateDER(id: cert.id, for: bundleID) else {
+            return
+        }
+        let pem = X509CertificateInspector.exportPEM(der: der)
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "\(bundleID)-\(cert.id.prefix(8)).pem"
+        if let pemType = UTType(filenameExtension: "pem") {
+            panel.allowedContentTypes = [pemType, .plainText]
+        } else {
+            panel.allowedContentTypes = [.plainText]
+        }
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            try? pem.write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+
+    private func deleteCertificate(_ cert: AppCertificateRecord) {
+        do {
+            try mitmCoordinator.certificateStore.deleteCertificate(id: cert.id, for: bundleID)
+            mitmCoordinator.syncCertificates(for: bundleID, settings: settings.settings)
+            reloadCertificates()
+        } catch {
+            PlayCoverDiagnostics.reportError(error)
+        }
     }
 
     private var addRuleBar: some View {

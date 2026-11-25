@@ -78,7 +78,7 @@ struct AppConfigurationView: View {
                     ConfigInputPane(app: app, settings: settings)
                         .disabled(!hasPlayTools)
                 case .network:
-                    ConfigNetworkPane(settings: settings)
+                    ConfigNetworkPane(app: app, settings: settings)
                         .disabled(!hasPlayTools)
                 case .plugins:
                     ConfigPluginsPane(

@@ -6,7 +6,7 @@
 import Foundation
 import SwiftUI
 
-class Log: ObservableObject {
+class Log: ObservableObject, @unchecked Sendable {
 
     private weak var alertPresenter: AlertPresenter?
 

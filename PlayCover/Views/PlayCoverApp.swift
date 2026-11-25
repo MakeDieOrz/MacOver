@@ -35,6 +35,7 @@ struct PlayCoverApp: App {
                     .environmentObject(deps.uninstallPreferences)
                     .environmentObject(deps.urlObservable)
                     .environmentObject(deps.modifierKeyObserver)
+                    .environmentObject(deps.mitmCoordinator)
                     .environmentObject(navState)
                     .onAppear {
                         NSWindow.allowsAutomaticWindowTabbing = false
@@ -68,6 +69,7 @@ struct PlayCoverApp: App {
                     .environmentObject(deps.uninstallPreferences)
                     .environmentObject(deps.urlObservable)
                     .environmentObject(deps.modifierKeyObserver)
+                    .environmentObject(deps.mitmCoordinator)
                     .environmentObject(navState)
             }
         }
@@ -80,5 +82,15 @@ struct PlayCoverApp: App {
             PlayCoverMenuBarExtraContent()
                 .environmentObject(deps.appsVM)
         }
+
+        WindowGroup("mitm.monitor.windowTitle", id: "mitm-monitor", for: String.self) { $bundleID in
+            if let bundleID, !bundleID.isEmpty, !ProcessInfo.isRunningUnitTests {
+                MITMTrafficMonitorView(bundleID: bundleID)
+                    .environmentObject(deps.mitmCoordinator)
+            } else {
+                EmptyView()
+            }
+        }
+        .defaultSize(width: 900, height: 580)
     }
 }

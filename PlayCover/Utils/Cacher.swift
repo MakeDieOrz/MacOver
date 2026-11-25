@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 import AppKit
 import DataCache
 import CachedAsyncImage
@@ -88,15 +89,14 @@ class Cacher {
         }
 
         if candidates.isEmpty {
-            let lock = NSLock()
+            let collected = Mutex<[NSImage]>([])
             url.enumerateContents(blocking: true) { file, _ in
                 guard file.lastPathComponent.contains(primaryIconName), let icon = NSImage(contentsOf: file) else {
                     return
                 }
-                lock.lock()
-                candidates.append(icon)
-                lock.unlock()
+                collected.withLock { $0.append(icon) }
             }
+            candidates.append(contentsOf: collected.withLock { $0 })
         }
 
         let bestResImage = candidates.max { $0.size.height < $1.size.height }

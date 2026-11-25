@@ -180,7 +180,8 @@ final class WorkspaceUISnapshotTests: XCTestCase {
             .environmentObject(deps.startupAlerts).environmentObject(deps.keyCoverObservable)
             .environmentObject(deps.keyCoverPreferences).environmentObject(deps.installPreferences)
             .environmentObject(deps.uninstallPreferences).environmentObject(deps.urlObservable)
-            .environmentObject(deps.modifierKeyObserver).environmentObject(context.navState)
+            .environmentObject(deps.modifierKeyObserver).environmentObject(deps.mitmCoordinator)
+            .environmentObject(context.navState)
     }
 
     private func captureWindow<Content: View>(_ rootView: Content, spec: CaptureSpec) {

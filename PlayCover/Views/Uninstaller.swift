@@ -5,6 +5,7 @@
 //  Created by TheMoonThatRises on 9/26/22.
 //
 
+import Synchronization
 import SwiftUI
 
 struct CheckBoxHelper {
@@ -17,6 +18,7 @@ class Uninstaller {
     private static let libraryUrl = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library")
     private static let pruneURLs: [URL] = [
         PlayTools.playCoverContainer.appendingPathComponent("App Settings"),
+        PlayTools.playCoverContainer.appendingPathComponent("Certificates"),
         PlayTools.playCoverContainer.appendingPathComponent("AppBackups"),
         PlayTools.playCoverContainer.appendingPathComponent("Entitlements"),
         PlayTools.playCoverContainer.appendingPathComponent("Keymapping"),
@@ -145,7 +147,18 @@ class Uninstaller {
         let savedEnableNet = app.settings.settings.enableNetworkRules
         let savedMock200 = app.settings.settings.networkBlockMock200
         let savedPatterns = app.settings.settings.blockedURLPatterns
-        let hasConfiguredNetRules = savedEnableNet || !savedPatterns.isEmpty
+        let savedProxyMode = app.settings.settings.networkProxyMode
+        let savedCustomCerts = app.settings.settings.enableCustomCertificates
+        let hasConfiguredNetRules = savedEnableNet || !savedPatterns.isEmpty ||
+            savedProxyMode != "direct" || savedCustomCerts
+
+        if removeNetRules {
+            let certsStore = PerAppCertificateStore(
+                certificatesBaseURL: PlayTools.playCoverContainer.appendingPathComponent("Certificates"),
+                appSettingsBaseURL: PlayTools.playCoverContainer.appendingPathComponent("App Settings")
+            )
+            certsStore.removeAllData(for: app.info.bundleIdentifier)
+        }
 
         if removeSettings && removeNetRules {
             FileManager.default.delete(at: app.settings.settingsUrl)
@@ -158,6 +171,8 @@ class Uninstaller {
                     $0.enableNetworkRules = savedEnableNet
                     $0.networkBlockMock200 = savedMock200
                     $0.blockedURLPatterns = savedPatterns
+                    $0.networkProxyMode = savedProxyMode
+                    $0.enableCustomCertificates = savedCustomCerts
                 }
             }
             uninstallNum += 1
@@ -166,6 +181,10 @@ class Uninstaller {
                 $0.enableNetworkRules = false
                 $0.networkBlockMock200 = true
                 $0.blockedURLPatterns = []
+                $0.networkProxyMode = "direct"
+                $0.enableCustomCertificates = false
+                $0.mitmRuntimePort = 0
+                $0.mitmHostPatterns = []
             }
             uninstallNum += 1
         }
@@ -540,8 +559,7 @@ class Uninstaller {
                     var fullPruneURLs = pruneURLs
                     fullPruneURLs.append(contentsOf: cacheURLs)
 
-                    let prunedLock = NSLock()
-                    var prunedIds: Set<String> = []
+                    let prunedIdsBox = Mutex<Set<String>>([])
 
                     for url in fullPruneURLs {
                         let dirName = url.lastPathComponent
@@ -553,13 +571,17 @@ class Uninstaller {
                                     try clearAppContainer(file, bundleId: resolvedId)
                                 } else {
                                     try removeOrTrashItem(file)
+                                    if dirName == "App Settings" {
+                                        let certsBundle = file.appendingPathExtension("certs")
+                                        try? removeOrTrashItem(certsBundle)
+                                    }
                                 }
-                                prunedLock.lock()
-                                prunedIds.insert(resolvedId)
-                                prunedLock.unlock()
+                                prunedIdsBox.withLock { _ = $0.insert(resolvedId) }
                             }
                         }
                     }
+
+                    let prunedIds = prunedIdsBox.withLock { $0 }
 
                     let remaining = cachedIds.filter { !$0.isEmpty && !prunedIds.contains($0) }
                     let output = remaining.isEmpty ? "" : "\(remaining.joined(separator: "\n"))\n"
