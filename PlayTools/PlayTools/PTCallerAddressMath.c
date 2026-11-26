@@ -7,6 +7,7 @@
 #include "Subsystems/PTRegistration.h"
 #include <stdatomic.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/sysctl.h>
 
 static _Atomic uint64_t s_pt_user_addr_strip_mask = PT_USER_ADDR_STRIP_MASK;
@@ -141,18 +142,18 @@ static const char *pt_math_match_prefix_modulo_private(const char *path, const c
     if (path == NULL || base == NULL || base_len == 0U) {
         return NULL;
     }
-    if (strncmp(path, base, base_len) == 0 && (path[base_len] == '/' || path[base_len] == '\0')) {
+    if (strncasecmp(path, base, base_len) == 0 && (path[base_len] == '/' || path[base_len] == '\0')) {
         return path + base_len;
     }
-    if (base_len > 8U && strncmp(base, "/private/", 9) == 0) {
+    if (base_len > 8U && strncasecmp(base, "/private/", 9) == 0) {
         const char *sbase = base + 8;
         size_t slen = base_len - 8U;
-        if (strncmp(path, sbase, slen) == 0 && (path[slen] == '/' || path[slen] == '\0')) {
+        if (strncasecmp(path, sbase, slen) == 0 && (path[slen] == '/' || path[slen] == '\0')) {
             return path + slen;
         }
-    } else if (strncmp(path, "/private/", 9) == 0) {
+    } else if (strncasecmp(path, "/private/", 9) == 0) {
         const char *spath = path + 8;
-        if (strncmp(spath, base, base_len) == 0 && (spath[base_len] == '/' || spath[base_len] == '\0')) {
+        if (strncasecmp(spath, base, base_len) == 0 && (spath[base_len] == '/' || spath[base_len] == '\0')) {
             return spath + base_len;
         }
     }
@@ -166,10 +167,11 @@ static bool pt_rel_has_sensitive_runtime_component(const char *rel) {
     if (pt_is_registered_hidden_module(rel)) {
         return true;
     }
-    return (strstr(rel, "PlayTools.framework") != NULL || strstr(rel, "PlayTools.dylib") != NULL ||
-            strstr(rel, "Playtools.strings") != NULL || strstr(rel, "app.makedie.MacOver") != NULL ||
-            strstr(rel, "io.playcover.PlayCover") != NULL || strstr(rel, "AKInterface.bundle") != NULL ||
-            strstr(rel, "UserPlugins") != NULL);
+    return (strcasestr(rel, "PlayTools.framework") != NULL || strcasestr(rel, "PlayTools.dylib") != NULL ||
+            strcasestr(rel, "Playtools.strings") != NULL || strcasestr(rel, "app.makedie.MacOver") != NULL ||
+            strcasestr(rel, "io.playcover.PlayCover") != NULL || strcasestr(rel, "AKInterface.bundle") != NULL ||
+            strcasestr(rel, "UserPlugins") != NULL || strcasestr(rel, ".pt_sysver_") != NULL ||
+            strcasestr(rel, ".pt_coderes_") != NULL || strcasestr(rel, ".pt_info_") != NULL);
 }
 
 bool pt_is_nonsensitive_app_or_tmp_path(const char *norm_path, const char *bundle_dir, size_t bundle_len,
@@ -179,7 +181,7 @@ bool pt_is_nonsensitive_app_or_tmp_path(const char *norm_path, const char *bundl
     }
 
     const char *work = norm_path;
-    if (strncmp(work, "/System/Volumes/Data/", 21) == 0) {
+    if (strncasecmp(work, "/System/Volumes/Data/", 21) == 0) {
         work += 20;
     }
 
@@ -196,7 +198,7 @@ bool pt_is_nonsensitive_app_or_tmp_path(const char *norm_path, const char *bundl
 
     if (data_dir != NULL && data_len > 0U) {
         const char *rel = pt_math_match_prefix_modulo_private(work, data_dir, data_len);
-        if (rel != NULL && (strcmp(rel, "/tmp") == 0 || strncmp(rel, "/tmp/", 5) == 0)) {
+        if (rel != NULL && (strcasecmp(rel, "/tmp") == 0 || strncasecmp(rel, "/tmp/", 5) == 0)) {
             return !pt_rel_has_sensitive_runtime_component(rel);
         }
     }

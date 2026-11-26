@@ -34,7 +34,7 @@ __attribute__((visibility("hidden"))) _Thread_local BOOL s_tls_initializing_devi
 
 
 static const pt_device_profile_t s_device_profiles[] = {
-    { "iPad6,7",    "J98aAP",  "Apple A9X",        "Apple A9X GPU",     2, 2, 0, 4ULL << 30, 0x67ceee93U, "RELEASE_ARM64_T8000", "t8000", "iPad Pro (12.9-inch)",                  "ML0F2", "A1584", YES, 2048, 2732, 2.0, 60,  1003, "applegpu_g8s",  12, "G8S"  },
+    { "iPad6,7",    "J98aAP",  "Apple A9X",        "Apple A9X GPU",     2, 2, 0, 4ULL << 30, 0x67ceee93U, "RELEASE_ARM64_S8001", "s8001", "iPad Pro (12.9-inch)",                  "ML0F2", "A1584", YES, 2048, 2732, 2.0, 60,  1003, "applegpu_g8s",  12, "G8S"  },
     { "iPad8,6",    "J320xAP", "Apple A12X Bionic","Apple A12X GPU",    8, 4, 4, 4ULL << 30, 0x07d34b9fU, "RELEASE_ARM64_T8027", "t8027", "iPad Pro (12.9-inch) (3rd generation)", "MTEL2", "A1876", YES, 2048, 2732, 2.0, 120, 1005, "applegpu_g11g",  7, "G11G" },
     { "iPad13,8",   "J522AP",  "Apple M1",         "Apple M1 GPU",      8, 4, 4, 8ULL << 30, 0x1b588bb3U, "RELEASE_ARM64_T8103", "t8103", "iPad Pro (12.9-inch) (5th generation)", "MHNF3", "A2378", YES, 2048, 2732, 2.0, 120, 1007, "applegpu_g13g",  8, "G13G" },
     { "iPad14,5",   "J620AP",  "Apple M2",         "Apple M2 GPU",      8, 4, 4, 8ULL << 30, 0xda33d83dU, "RELEASE_ARM64_T8112", "t8112", "iPad Pro (12.9-inch) (6th generation)", "MNXP3", "A2436", YES, 2048, 2732, 2.0, 120, 1008, "applegpu_g14g", 10, "G14G" },
@@ -1639,12 +1639,15 @@ extern bool pt_orig_availability_version_check(uint32_t count, const pt_dyld_bui
     __asm("__availability_version_check") __attribute__((weak_import));
 
 static BOOL pt_is_availability_app_caller_fp(const void *caller, const void *frame_ptr) {
-    if (!pt_is_effective_system_or_playtools_caller(caller)) {
-        return YES;
+    if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire) || pt_is_in_internal_scope()) {
+        return NO;
     }
     const void *scaller = pt_strip_return_addr((uintptr_t)caller);
+    if (!pt_is_system_or_playtools_caller(scaller)) {
+        return YES;
+    }
     const char *img = (scaller != NULL) ? dyld_image_path_containing_address(scaller) : NULL;
-    if (img == NULL || strstr(img, "libswift") == NULL) {
+    if (img == NULL || strstr(img, "libswiftCore") == NULL) {
         return NO;
     }
     pthread_t self_thr = pthread_self();
@@ -1661,21 +1664,20 @@ static BOOL pt_is_availability_app_caller_fp(const void *caller, const void *fra
         }
         const uintptr_t *frame = (const uintptr_t *)fp;
         uintptr_t next_fp = frame[0];
-        const void *lr = (const void *)frame[1];
-        if (lr != NULL) {
-            if (!pt_is_effective_system_or_playtools_caller(lr)) {
+        const void *slr = pt_strip_return_addr(frame[1]);
+        if (slr != NULL) {
+            if (!pt_is_system_or_playtools_caller(slr)) {
                 return YES;
             }
-            const void *slr = pt_strip_return_addr((uintptr_t)lr);
-            if (slr != NULL && pt_is_address_in_playtools(slr)) {
+            if (pt_is_address_in_playtools(slr)) {
                 if (next_fp <= fp) {
                     break;
                 }
                 fp = next_fp;
                 continue;
             }
-            const char *pimg = (slr != NULL) ? dyld_image_path_containing_address(slr) : NULL;
-            if (pimg == NULL || strstr(pimg, "libswift") == NULL) {
+            const char *pimg = dyld_image_path_containing_address(slr);
+            if (pimg == NULL || strstr(pimg, "libswiftCore") == NULL) {
                 return NO;
             }
         }
@@ -1692,6 +1694,32 @@ BOOL pt_is_availability_app_caller(const void *caller) {
     return pt_is_availability_app_caller_fp(caller, __builtin_frame_address(0));
 }
 
+static uint32_t pt_parse_packed_os_version_cstr(const char *ver_cstr) {
+    if (ver_cstr == NULL || ver_cstr[0] == '\0') {
+        return 0;
+    }
+    int maj = 0, min = 0, pat = 0;
+    if (sscanf(ver_cstr, "%d.%d.%d", &maj, &min, &pat) < 1 || maj <= 0 || maj > 255) {
+        return 0;
+    }
+    if (min < 0 || min > 255) min = 0;
+    if (pat < 0 || pat > 255) pat = 0;
+    return ((uint32_t)maj << 16) | ((uint32_t)min << 8) | (uint32_t)pat;
+}
+
+__attribute__((visibility("hidden")))
+uint32_t pt_get_compat_version_clamp(void) {
+    pt_ensure_host_kernel_info();
+    switch (pt_active_reported_ios_override()) {
+        case PT_REPORTED_IOS_OVERRIDE_13_7:
+            return 0x000D0700U;
+        case PT_REPORTED_IOS_OVERRIDE_18_3:
+            return 0x00120300U;
+        default:
+            return 0U;
+    }
+}
+
 __attribute__((visibility("hidden")))
 bool pt_availability_version_check(uint32_t count, const pt_dyld_build_version_t versions[]) {
     if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire) ||
@@ -1705,20 +1733,23 @@ bool pt_availability_version_check(uint32_t count, const pt_dyld_build_version_t
     const void *fp = __builtin_frame_address(0);
     if (pt_is_availability_app_caller_fp(caller, fp)) {
         pt_ensure_host_kernel_info();
-        pt_reported_ios_override_t mode = pt_active_reported_ios_override();
-        if (mode != PT_REPORTED_IOS_OVERRIDE_NONE) {
-            uint32_t spoofed_ver = (mode == PT_REPORTED_IOS_OVERRIDE_13_7) ? 0x000D0700U : 0x00120300U;
-            for (uint32_t i = 0; i < count; i++) {
-                if (versions[i].platform == 2U) { // PLATFORM_IOS
+        uint32_t spoofed_ver = pt_get_compat_version_clamp();
+        if (spoofed_ver == 0) {
+            spoofed_ver = pt_parse_packed_os_version_cstr(pt_get_spoofed_ios_version_cstr());
+        }
+        for (uint32_t i = 0; i < count; i++) {
+            if (versions[i].platform == 2U) { // PLATFORM_IOS
+                if (spoofed_ver != 0) {
                     return (spoofed_ver >= versions[i].version);
                 }
-            }
-            for (uint32_t i = 0; i < count; i++) {
-                if (versions[i].platform == 6U) { // PLATFORM_MACCATALYST
-                    return (spoofed_ver >= versions[i].version);
-                }
+                pt_dyld_build_version_t ios_only = versions[i];
+                return (pt_orig_availability_version_check != NULL)
+                    ? pt_orig_availability_version_check(1U, &ios_only)
+                    : true;
             }
         }
+        // On real iOS, queries containing only non-iOS platforms (e.g. PLATFORM_MACOS / PLATFORM_MACCATALYST) return true.
+        return true;
     }
     return (pt_orig_availability_version_check != NULL)
         ? pt_orig_availability_version_check(count, versions)
@@ -1735,15 +1766,21 @@ int32_t pt_isPlatformVersionAtLeast(uint32_t platform, uint32_t major, uint32_t 
         }
         if (platform == 2U) { // PLATFORM_IOS
             pt_ensure_host_kernel_info();
-            pt_reported_ios_override_t mode = pt_active_reported_ios_override();
-            if (mode == PT_REPORTED_IOS_OVERRIDE_13_7) {
-                return (major < 13U ||
-                        (major == 13U && (minor < 7U || (minor == 7U && subminor == 0U)))) ? 1 : 0;
+            uint32_t spoofed_ver = pt_get_compat_version_clamp();
+            if (spoofed_ver == 0) {
+                spoofed_ver = pt_parse_packed_os_version_cstr(pt_get_spoofed_ios_version_cstr());
             }
-            if (mode == PT_REPORTED_IOS_OVERRIDE_18_3) {
-                return (major < 18U ||
-                        (major == 18U && (minor < 3U || (minor == 3U && subminor == 0U)))) ? 1 : 0;
+            if (spoofed_ver != 0 && major <= 255U && minor <= 255U && subminor <= 255U) {
+                uint32_t target = (major << 16) | (minor << 8) | subminor;
+                return (spoofed_ver >= target) ? 1 : 0;
             }
+            if (spoofed_ver == 0 && major <= 255U && minor <= 255U && subminor <= 255U) {
+                pt_dyld_build_version_t v = { 2U, (major << 16) | (minor << 8) | subminor };
+                if (pt_orig_availability_version_check != NULL) {
+                    return pt_orig_availability_version_check(1U, &v) ? 1 : 0;
+                }
+            }
+            return 0;
         }
     }
     typedef int32_t (*IsPlatVerFn)(uint32_t, uint32_t, uint32_t, uint32_t);

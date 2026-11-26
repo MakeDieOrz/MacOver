@@ -21,7 +21,7 @@ static uint64_t pt_compute_spoofed_available_memory_with_footprint(uint64_t foot
     return floor_bytes;
 }
 
-static uint64_t pt_compute_spoofed_available_memory(void) {
+__attribute__((visibility("hidden"))) uint64_t pt_compute_spoofed_available_memory(void) {
     uint64_t limit = ((pt_get_spoofed_physical_memory() * 65ULL) / 100ULL) & ~(16384ULL - 1ULL);
     task_vm_info_data_t vm_info;
     mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
@@ -89,6 +89,11 @@ static inline natural_t pt_scale_vm_page_count(natural_t count, uint64_t spoof_p
     return (scaled > UINT32_MAX) ? UINT32_MAX : (natural_t)scaled;
 }
 
+static inline uint64_t pt_scale_vm_page_count64(uint64_t count, uint64_t spoof_pages, uint64_t total_pages) {
+    __uint128_t scaled = ((__uint128_t)count * (__uint128_t)spoof_pages) / (__uint128_t)total_pages;
+    return (scaled > UINT64_MAX) ? UINT64_MAX : (uint64_t)scaled;
+}
+
 __attribute__((visibility("hidden"))) void pt_sanitize_host_basic_info_buf(host_basic_info_data_t *info, size_t out_bytes) {
     if (info == NULL) {
         return;
@@ -104,6 +109,9 @@ __attribute__((visibility("hidden"))) void pt_sanitize_host_basic_info_buf(host_
     }
     if (out_bytes >= offsetof(host_basic_info_data_t, memory_size) + sizeof(info->memory_size)) {
         info->memory_size = (natural_t)((spoof_ram > 0x80000000ULL) ? 0x80000000ULL : spoof_ram);
+    }
+    if (out_bytes >= offsetof(host_basic_info_data_t, cpu_subtype) + sizeof(info->cpu_subtype)) {
+        info->cpu_subtype = CPU_SUBTYPE_ARM64_ALL;
     }
     if (out_bytes >= offsetof(host_basic_info_data_t, physical_cpu) + sizeof(info->physical_cpu)) {
         info->physical_cpu = spoof_cores;
@@ -122,19 +130,34 @@ __attribute__((visibility("hidden"))) void pt_sanitize_host_basic_info_buf(host_
     }
 }
 
+__attribute__((visibility("hidden"))) void pt_sanitize_host_preferred_user_arch_buf(host_preferred_user_arch_data_t *info, size_t out_bytes) {
+    if (info == NULL) {
+        return;
+    }
+    if (out_bytes >= offsetof(host_preferred_user_arch_data_t, cpu_type) + sizeof(info->cpu_type)) {
+        info->cpu_type = CPU_TYPE_ARM64;
+    }
+    if (out_bytes >= offsetof(host_preferred_user_arch_data_t, cpu_subtype) + sizeof(info->cpu_subtype)) {
+        info->cpu_subtype = CPU_SUBTYPE_ARM64_ALL;
+    }
+}
+
 static kern_return_t pt_host_info(host_t host,
                                   host_flavor_t flavor,
                                   host_info_t host_info_out,
                                   mach_msg_type_number_t *host_info_outCnt) {
     kern_return_t kr = host_info(host, flavor, host_info_out, host_info_outCnt);
     if (kr == KERN_SUCCESS &&
-        flavor == HOST_BASIC_INFO &&
         host_info_out != NULL &&
         host_info_outCnt != NULL &&
         pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         size_t out_bytes = (size_t)(*host_info_outCnt) * sizeof(integer_t);
-        pt_sanitize_host_basic_info_buf((host_basic_info_data_t *)host_info_out, out_bytes);
+        if (flavor == HOST_BASIC_INFO) {
+            pt_sanitize_host_basic_info_buf((host_basic_info_data_t *)host_info_out, out_bytes);
+        } else if (flavor == HOST_PREFERRED_USER_ARCH) {
+            pt_sanitize_host_preferred_user_arch_buf((host_preferred_user_arch_data_t *)host_info_out, out_bytes);
+        }
     }
     return kr;
 }
@@ -168,6 +191,30 @@ static kern_return_t pt_host_processor_info(host_t host,
                     *out_processor_infoCnt = (*out_processor_infoCnt / real_cores) * spoof_cores;
                 }
                 *out_processor_count = spoof_cores;
+            } else if (spoof_cores > 0 && real_cores > 0 && real_cores < spoof_cores &&
+                       out_processor_info != NULL && *out_processor_info != NULL &&
+                       out_processor_infoCnt != NULL && (*out_processor_infoCnt % real_cores) == 0) {
+                mach_msg_type_number_t per_core = *out_processor_infoCnt / real_cores;
+                mach_msg_type_number_t new_cnt = per_core * spoof_cores;
+                vm_size_t old_bytes = (vm_size_t)(*out_processor_infoCnt) * sizeof(integer_t);
+                vm_size_t new_bytes = (vm_size_t)new_cnt * sizeof(integer_t);
+                vm_address_t new_addr = 0;
+                if (per_core > 0 &&
+                    vm_allocate(mach_task_self(), &new_addr, new_bytes, VM_FLAGS_ANYWHERE) == KERN_SUCCESS) {
+                    const integer_t *src = (const integer_t *)(*out_processor_info);
+                    integer_t *dst = (integer_t *)new_addr;
+                    memcpy(dst, src, old_bytes);
+                    for (natural_t i = real_cores; i < spoof_cores; i++) {
+                        natural_t src_idx = i % real_cores;
+                        memcpy(dst + (size_t)i * per_core,
+                               src + (size_t)src_idx * per_core,
+                               (size_t)per_core * sizeof(integer_t));
+                    }
+                    vm_deallocate(mach_task_self(), (vm_address_t)(*out_processor_info), old_bytes);
+                    *out_processor_info = (processor_info_array_t)new_addr;
+                    *out_processor_infoCnt = new_cnt;
+                    *out_processor_count = spoof_cores;
+                }
             }
         }
         if (out_processor_info != NULL && *out_processor_info != NULL &&
@@ -191,7 +238,7 @@ __attribute__((visibility("hidden"))) void pt_sanitize_host_vm_info_buf(vm_stati
     uint64_t spoof_pages = pt_get_active_device_profile()->ram_bytes / page_sz;
     uint64_t total_pages = (uint64_t)v->free_count + (uint64_t)v->active_count +
                            (uint64_t)v->inactive_count + (uint64_t)v->wire_count;
-    if (spoof_pages > 0 && total_pages > spoof_pages) {
+    if (spoof_pages > 0 && total_pages > 0 && total_pages != spoof_pages) {
         v->free_count = pt_scale_vm_page_count(v->free_count, spoof_pages, total_pages);
         v->active_count = pt_scale_vm_page_count(v->active_count, spoof_pages, total_pages);
         v->inactive_count = pt_scale_vm_page_count(v->inactive_count, spoof_pages, total_pages);
@@ -213,7 +260,7 @@ __attribute__((visibility("hidden"))) void pt_sanitize_host_vm_info64_buf(vm_sta
     uint64_t spoof_pages = pt_get_active_device_profile()->ram_bytes / page_sz;
     uint64_t total_pages = (uint64_t)v->free_count + (uint64_t)v->active_count +
                            (uint64_t)v->inactive_count + (uint64_t)v->wire_count;
-    if (spoof_pages > 0 && total_pages > spoof_pages) {
+    if (spoof_pages > 0 && total_pages > 0 && total_pages != spoof_pages) {
         v->free_count = pt_scale_vm_page_count(v->free_count, spoof_pages, total_pages);
         v->active_count = pt_scale_vm_page_count(v->active_count, spoof_pages, total_pages);
         v->inactive_count = pt_scale_vm_page_count(v->inactive_count, spoof_pages, total_pages);
@@ -223,6 +270,9 @@ __attribute__((visibility("hidden"))) void pt_sanitize_host_vm_info64_buf(vm_sta
         }
         if (out_bytes >= offsetof(vm_statistics64_data_t, speculative_count) + sizeof(v->speculative_count)) {
             v->speculative_count = pt_scale_vm_page_count(v->speculative_count, spoof_pages, total_pages);
+        }
+        if (out_bytes >= offsetof(vm_statistics64_data_t, total_uncompressed_pages_in_compressor) + sizeof(v->total_uncompressed_pages_in_compressor)) {
+            v->total_uncompressed_pages_in_compressor = pt_scale_vm_page_count64(v->total_uncompressed_pages_in_compressor, spoof_pages, total_pages);
         }
         if (out_bytes >= offsetof(vm_statistics64_data_t, compressor_page_count) + sizeof(v->compressor_page_count)) {
             v->compressor_page_count = pt_scale_vm_page_count(v->compressor_page_count, spoof_pages, total_pages);
@@ -237,12 +287,21 @@ __attribute__((visibility("hidden"))) void pt_sanitize_host_vm_info64_buf(vm_sta
             v->internal_page_count = pt_scale_vm_page_count(v->internal_page_count, spoof_pages, total_pages);
         }
     }
+    if (spoof_pages > 0 && out_bytes >= offsetof(vm_statistics64_data_t, max_mem_count) + sizeof(v->max_mem_count)) {
+        v->max_mem_count = spoof_pages;
+    }
     if (clear_swaps) {
         if (out_bytes >= offsetof(vm_statistics64_data_t, swapins) + sizeof(v->swapins)) {
             v->swapins = 0;
         }
         if (out_bytes >= offsetof(vm_statistics64_data_t, swapouts) + sizeof(v->swapouts)) {
             v->swapouts = 0;
+        }
+        if (out_bytes >= offsetof(vm_statistics64_data_t, swapped_count) + sizeof(v->swapped_count)) {
+            v->swapped_count = 0;
+        }
+        if (out_bytes >= offsetof(vm_statistics64_data_t, swap_count) + sizeof(v->swap_count)) {
+            v->swap_count = 0;
         }
     }
 }
@@ -290,6 +349,9 @@ __attribute__((visibility("hidden"))) void pt_sanitize_task_vm_info_buf(task_vm_
     if (out_bytes >= min_bytes) {
         vm->limit_bytes_remaining = (mach_vm_size_t)pt_compute_spoofed_available_memory_with_footprint(
             (uint64_t)vm->phys_footprint);
+    }
+    if (out_bytes >= offsetof(task_vm_info_data_t, ledger_swapins) + sizeof(vm->ledger_swapins)) {
+        vm->ledger_swapins = 0;
     }
 }
 
@@ -476,6 +538,10 @@ __attribute__((visibility("hidden"))) void pt_sanitize_task_dyld_info_buf(task_d
                         if (tmp_infos.version >= 16) {
                             tmp_infos.platform = PLATFORM_IOS;
                         }
+                        if (pt_is_compat13_7_active()) {
+                            tmp_infos.version = 16;
+                            tmp_infos.dyldVersion = "750.6";
+                        }
                         tmp_infos.errorMessage = NULL;
                         tmp_infos.errorKind = 0;
                         tmp_infos.errorClientOfDylibPath = NULL;
@@ -528,6 +594,10 @@ __attribute__((visibility("hidden"))) void pt_sanitize_task_dyld_info_buf(task_d
                         __atomic_store_n(&s_shadow_dyld_infos.errorTargetDylibPath, (const char *)NULL, __ATOMIC_RELEASE);
                         __atomic_store_n(&s_shadow_dyld_infos.errorSymbol, (const char *)NULL, __ATOMIC_RELEASE);
                         __atomic_store_n(&s_shadow_dyld_infos.infoArrayChangeTimestamp, ts_after, __ATOMIC_RELEASE);
+                        if (pt_is_compat13_7_active()) {
+                            __atomic_store_n(&s_shadow_dyld_infos.version, (uint32_t)16, __ATOMIC_RELEASE);
+                            __atomic_store_n(&s_shadow_dyld_infos.dyldVersion, (const char *)"750.6", __ATOMIC_RELEASE);
+                        }
                     }
                     s_shadow_dyld_reg_gen = cur_reg_gen;
                     s_shadow_dyld_real_count = real_count;
@@ -898,18 +968,31 @@ __attribute__((visibility("hidden"))) void pt_sanitize_vm_read_buffer(uintptr_t 
             size_t backup_len = 0;
             const uint8_t *backup_hdr = pt_get_cached_backup_main_mach_header(&backup_len);
             if (backup_hdr != NULL && backup_len >= sizeof(struct mach_header_64)) {
-                if (rel_off < backup_len) {
-                    size_t copy_len = ov_len;
-                    if (copy_len > backup_len - rel_off) {
-                        copy_len = backup_len - rel_off;
+                const uint8_t *copy_src = backup_hdr;
+                size_t copy_total = backup_len;
+                uint8_t stack_bkp[16384];
+                uint8_t *heap_bkp = NULL;
+                if (pt_get_compat_version_clamp() != 0) {
+                    uint8_t *work_bkp = (backup_len <= sizeof(stack_bkp)) ? stack_bkp : (heap_bkp = (uint8_t *)malloc(backup_len));
+                    if (work_bkp != NULL &&
+                        pt_build_sanitized_mach_header_copy((const struct mach_header_64 *)backup_hdr,
+                                                            work_bkp, backup_len, NULL)) {
+                        copy_src = work_bkp;
                     }
-                    memcpy(dst + dst_off, backup_hdr + rel_off, copy_len);
+                }
+                if (rel_off < copy_total) {
+                    size_t copy_len = ov_len;
+                    if (copy_len > copy_total - rel_off) {
+                        copy_len = copy_total - rel_off;
+                    }
+                    memcpy(dst + dst_off, copy_src + rel_off, copy_len);
                     if (copy_len < ov_len) {
                         memset(dst + dst_off + copy_len, 0, ov_len - copy_len);
                     }
                 } else {
                     memset(dst + dst_off, 0, ov_len);
                 }
+                free(heap_bkp);
                 handled_hdr = YES;
             }
         }
@@ -1127,14 +1210,34 @@ static BOOL pt_vm_region_should_probe_path(vm_region_flavor_t flavor,
 
 #define PT_VM_REGION_MAX_SKIPS 4096
 
-static kern_return_t pt_vm_region_64(vm_map_read_t target_task,
-                                     vm_address_t *address,
-                                     vm_size_t *size,
-                                     vm_region_flavor_t flavor,
-                                     vm_region_info_t info,
-                                     mach_msg_type_number_t *infoCnt,
-                                     mach_port_t *object_name) {
-    const void *caller = __builtin_return_address(0);
+__attribute__((visibility("hidden")))
+BOOL pt_vm_region_should_hide_range(uintptr_t cur_addr,
+                                    uintptr_t cur_size,
+                                    vm_region_flavor_t flavor,
+                                    const void *info,
+                                    mach_msg_type_number_t infoCnt,
+                                    BOOL is_recurse,
+                                    const void *caller) {
+    vm_prot_t prot = pt_extract_vm_region_prot(flavor, info, infoCnt, is_recurse);
+    BOOL path_hidden = NO;
+    if (pt_vm_region_should_probe_path(flavor, info, infoCnt, is_recurse) &&
+        dyld_image_header_containing_address((const void *)cur_addr) == NULL) {
+        path_hidden = pt_fs_probe_hidden_region_path(cur_addr, caller);
+    }
+    return (path_hidden ||
+            pt_is_hidden_vm_region_range(cur_addr, cur_size) ||
+            pt_is_hidden_unregistered_macho_region(cur_addr, cur_size, prot));
+}
+
+__attribute__((visibility("hidden")))
+kern_return_t pt_vm_region_64_with_caller(vm_map_read_t target_task,
+                                          vm_address_t *address,
+                                          vm_size_t *size,
+                                          vm_region_flavor_t flavor,
+                                          vm_region_info_t info,
+                                          mach_msg_type_number_t *infoCnt,
+                                          mach_port_t *object_name,
+                                          const void *caller) {
     BOOL filter = (address != NULL && size != NULL && infoCnt != NULL &&
                    target_task == mach_task_self() &&
                    pt_is_bypass_enabled() &&
@@ -1147,15 +1250,7 @@ static kern_return_t pt_vm_region_64(vm_map_read_t target_task,
         }
         vm_address_t cur_addr = *address;
         vm_size_t cur_size = *size;
-        vm_prot_t prot = pt_extract_vm_region_prot(flavor, info, *infoCnt, NO);
-        BOOL path_hidden = NO;
-        if (pt_vm_region_should_probe_path(flavor, info, *infoCnt, NO) &&
-            dyld_image_header_containing_address((const void *)(uintptr_t)cur_addr) == NULL) {
-            path_hidden = pt_fs_probe_hidden_region_path((uintptr_t)cur_addr, caller);
-        }
-        if (!path_hidden &&
-            !pt_is_hidden_vm_region_range((uintptr_t)cur_addr, (uintptr_t)cur_size) &&
-            !pt_is_hidden_unregistered_macho_region((uintptr_t)cur_addr, (uintptr_t)cur_size, prot)) {
+        if (!pt_vm_region_should_hide_range((uintptr_t)cur_addr, (uintptr_t)cur_size, flavor, info, *infoCnt, NO, caller)) {
             return kr;
         }
         if (object_name != NULL && MACH_PORT_VALID(*object_name)) {
@@ -1171,13 +1266,25 @@ static kern_return_t pt_vm_region_64(vm_map_read_t target_task,
     return KERN_INVALID_ADDRESS;
 }
 
-static kern_return_t pt_vm_region_recurse_64(vm_map_read_t target_task,
-                                             vm_address_t *address,
-                                             vm_size_t *size,
-                                             natural_t *nesting_depth,
-                                             vm_region_recurse_info_t info,
-                                             mach_msg_type_number_t *infoCnt) {
-    const void *caller = __builtin_return_address(0);
+static kern_return_t pt_vm_region_64(vm_map_read_t target_task,
+                                     vm_address_t *address,
+                                     vm_size_t *size,
+                                     vm_region_flavor_t flavor,
+                                     vm_region_info_t info,
+                                     mach_msg_type_number_t *infoCnt,
+                                     mach_port_t *object_name) {
+    return pt_vm_region_64_with_caller(target_task, address, size, flavor, info, infoCnt, object_name,
+                                       __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
+kern_return_t pt_vm_region_recurse_64_with_caller(vm_map_read_t target_task,
+                                                  vm_address_t *address,
+                                                  vm_size_t *size,
+                                                  natural_t *nesting_depth,
+                                                  vm_region_recurse_info_t info,
+                                                  mach_msg_type_number_t *infoCnt,
+                                                  const void *caller) {
     BOOL filter = (address != NULL && size != NULL && infoCnt != NULL &&
                    target_task == mach_task_self() &&
                    pt_is_bypass_enabled() &&
@@ -1191,15 +1298,7 @@ static kern_return_t pt_vm_region_recurse_64(vm_map_read_t target_task,
         }
         vm_address_t cur_addr = *address;
         vm_size_t cur_size = *size;
-        vm_prot_t prot = pt_extract_vm_region_prot(0, info, *infoCnt, YES);
-        BOOL path_hidden = NO;
-        if (pt_vm_region_should_probe_path(0, info, *infoCnt, YES) &&
-            dyld_image_header_containing_address((const void *)(uintptr_t)cur_addr) == NULL) {
-            path_hidden = pt_fs_probe_hidden_region_path((uintptr_t)cur_addr, caller);
-        }
-        if (!path_hidden &&
-            !pt_is_hidden_vm_region_range((uintptr_t)cur_addr, (uintptr_t)cur_size) &&
-            !pt_is_hidden_unregistered_macho_region((uintptr_t)cur_addr, (uintptr_t)cur_size, prot)) {
+        if (!pt_vm_region_should_hide_range((uintptr_t)cur_addr, (uintptr_t)cur_size, 0, info, *infoCnt, YES, caller)) {
             return kr;
         }
         if (cur_size == 0 || cur_addr + cur_size <= cur_addr) {
@@ -1214,14 +1313,25 @@ static kern_return_t pt_vm_region_recurse_64(vm_map_read_t target_task,
     return KERN_INVALID_ADDRESS;
 }
 
-static kern_return_t pt_mach_vm_region(vm_map_read_t target_task,
-                                       mach_vm_address_t *address,
-                                       mach_vm_size_t *size,
-                                       vm_region_flavor_t flavor,
-                                       vm_region_info_t info,
-                                       mach_msg_type_number_t *infoCnt,
-                                       mach_port_t *object_name) {
-    const void *caller = __builtin_return_address(0);
+static kern_return_t pt_vm_region_recurse_64(vm_map_read_t target_task,
+                                             vm_address_t *address,
+                                             vm_size_t *size,
+                                             natural_t *nesting_depth,
+                                             vm_region_recurse_info_t info,
+                                             mach_msg_type_number_t *infoCnt) {
+    return pt_vm_region_recurse_64_with_caller(target_task, address, size, nesting_depth, info, infoCnt,
+                                               __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
+kern_return_t pt_mach_vm_region_with_caller(vm_map_read_t target_task,
+                                            mach_vm_address_t *address,
+                                            mach_vm_size_t *size,
+                                            vm_region_flavor_t flavor,
+                                            vm_region_info_t info,
+                                            mach_msg_type_number_t *infoCnt,
+                                            mach_port_t *object_name,
+                                            const void *caller) {
     BOOL filter = (address != NULL && size != NULL && infoCnt != NULL &&
                    target_task == mach_task_self() &&
                    pt_is_bypass_enabled() &&
@@ -1234,15 +1344,7 @@ static kern_return_t pt_mach_vm_region(vm_map_read_t target_task,
         }
         mach_vm_address_t cur_addr = *address;
         mach_vm_size_t cur_size = *size;
-        vm_prot_t prot = pt_extract_vm_region_prot(flavor, info, *infoCnt, NO);
-        BOOL path_hidden = NO;
-        if (pt_vm_region_should_probe_path(flavor, info, *infoCnt, NO) &&
-            dyld_image_header_containing_address((const void *)(uintptr_t)cur_addr) == NULL) {
-            path_hidden = pt_fs_probe_hidden_region_path((uintptr_t)cur_addr, caller);
-        }
-        if (!path_hidden &&
-            !pt_is_hidden_vm_region_range((uintptr_t)cur_addr, (uintptr_t)cur_size) &&
-            !pt_is_hidden_unregistered_macho_region((uintptr_t)cur_addr, (uintptr_t)cur_size, prot)) {
+        if (!pt_vm_region_should_hide_range((uintptr_t)cur_addr, (uintptr_t)cur_size, flavor, info, *infoCnt, NO, caller)) {
             return kr;
         }
         if (object_name != NULL && MACH_PORT_VALID(*object_name)) {
@@ -1258,13 +1360,25 @@ static kern_return_t pt_mach_vm_region(vm_map_read_t target_task,
     return KERN_INVALID_ADDRESS;
 }
 
-static kern_return_t pt_mach_vm_region_recurse(vm_map_read_t target_task,
-                                               mach_vm_address_t *address,
-                                               mach_vm_size_t *size,
-                                               natural_t *nesting_depth,
-                                               vm_region_recurse_info_t info,
-                                               mach_msg_type_number_t *infoCnt) {
-    const void *caller = __builtin_return_address(0);
+static kern_return_t pt_mach_vm_region(vm_map_read_t target_task,
+                                       mach_vm_address_t *address,
+                                       mach_vm_size_t *size,
+                                       vm_region_flavor_t flavor,
+                                       vm_region_info_t info,
+                                       mach_msg_type_number_t *infoCnt,
+                                       mach_port_t *object_name) {
+    return pt_mach_vm_region_with_caller(target_task, address, size, flavor, info, infoCnt, object_name,
+                                         __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
+kern_return_t pt_mach_vm_region_recurse_with_caller(vm_map_read_t target_task,
+                                                    mach_vm_address_t *address,
+                                                    mach_vm_size_t *size,
+                                                    natural_t *nesting_depth,
+                                                    vm_region_recurse_info_t info,
+                                                    mach_msg_type_number_t *infoCnt,
+                                                    const void *caller) {
     BOOL filter = (address != NULL && size != NULL && infoCnt != NULL &&
                    target_task == mach_task_self() &&
                    pt_is_bypass_enabled() &&
@@ -1278,15 +1392,7 @@ static kern_return_t pt_mach_vm_region_recurse(vm_map_read_t target_task,
         }
         mach_vm_address_t cur_addr = *address;
         mach_vm_size_t cur_size = *size;
-        vm_prot_t prot = pt_extract_vm_region_prot(0, info, *infoCnt, YES);
-        BOOL path_hidden = NO;
-        if (pt_vm_region_should_probe_path(0, info, *infoCnt, YES) &&
-            dyld_image_header_containing_address((const void *)(uintptr_t)cur_addr) == NULL) {
-            path_hidden = pt_fs_probe_hidden_region_path((uintptr_t)cur_addr, caller);
-        }
-        if (!path_hidden &&
-            !pt_is_hidden_vm_region_range((uintptr_t)cur_addr, (uintptr_t)cur_size) &&
-            !pt_is_hidden_unregistered_macho_region((uintptr_t)cur_addr, (uintptr_t)cur_size, prot)) {
+        if (!pt_vm_region_should_hide_range((uintptr_t)cur_addr, (uintptr_t)cur_size, 0, info, *infoCnt, YES, caller)) {
             return kr;
         }
         if (cur_size == 0 || cur_addr + cur_size <= cur_addr) {
@@ -1299,6 +1405,16 @@ static kern_return_t pt_mach_vm_region_recurse(vm_map_read_t target_task,
         }
     }
     return KERN_INVALID_ADDRESS;
+}
+
+static kern_return_t pt_mach_vm_region_recurse(vm_map_read_t target_task,
+                                               mach_vm_address_t *address,
+                                               mach_vm_size_t *size,
+                                               natural_t *nesting_depth,
+                                               vm_region_recurse_info_t info,
+                                               mach_msg_type_number_t *infoCnt) {
+    return pt_mach_vm_region_recurse_with_caller(target_task, address, size, nesting_depth, info, infoCnt,
+                                                 __builtin_return_address(0));
 }
 
 PT_INTERPOSE_NAMED(pt_vm_region_64, pt_orig_vm_region_64, "vm_region_64")

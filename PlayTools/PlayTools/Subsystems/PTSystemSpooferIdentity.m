@@ -287,6 +287,21 @@ static int pt_getgroups(int gidsetsize, gid_t grouplist[]) {
     return pt_getgroups_with_caller(gidsetsize, grouplist, __builtin_return_address(0));
 }
 
+static int pt_getgroups_darwin_extsn(int gidsetsize, gid_t grouplist[]) {
+    return pt_getgroups_with_caller(gidsetsize, grouplist, __builtin_return_address(0));
+}
+
+extern int32_t pt_orig_getgrouplist_2(const char *name, gid_t basegid, gid_t **groups) __asm__("_getgrouplist_2") __attribute__((weak_import));
+extern char *pt_orig_group_from_gid(gid_t gid, int nogroup) __asm__("_group_from_gid") __attribute__((weak_import));
+extern struct passwd *pt_orig_getpwent(void) __asm__("_getpwent") __attribute__((weak_import));
+extern struct group *pt_orig_getgrent(void) __asm__("_getgrent") __attribute__((weak_import));
+extern void pt_orig_setgrent(void) __asm__("_setgrent") __attribute__((weak_import));
+extern void pt_orig_endgrent(void) __asm__("_endgrent") __attribute__((weak_import));
+extern struct passwd *pt_orig_getpwuuid(uuid_t uu) __asm__("_getpwuuid") __attribute__((weak_import));
+extern int pt_orig_getpwuuid_r(uuid_t uu, struct passwd *pwd, char *buf, size_t bufsize, struct passwd **result) __asm__("_getpwuuid_r") __attribute__((weak_import));
+extern struct group *pt_orig_getgruuid(uuid_t uu) __asm__("_getgruuid") __attribute__((weak_import));
+extern int pt_orig_getgruuid_r(uuid_t uu, struct group *grp, char *buf, size_t bufsize, struct group **result) __asm__("_getgruuid_r") __attribute__((weak_import));
+
 static BOOL pt_is_hidden_macos_group_name(const char *name) {
     if (name == NULL || name[0] == '\0') {
         return NO;
@@ -443,20 +458,215 @@ static int pt_getgrouplist(const char *name, int basegid, int *groups, int *ngro
     return pt_orig_getgrouplist(name, basegid, groups, ngroups);
 }
 
+static int32_t pt_getgrouplist_2(const char *name, gid_t basegid, gid_t **groups) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (groups == NULL) {
+            errno = EINVAL;
+            return -1;
+        }
+        gid_t mapped = pt_map_spoofed_gid(basegid);
+        if (pt_is_desktop_supplemental_gid(mapped)) {
+            mapped = 501;
+        }
+        gid_t *out = (gid_t *)malloc(sizeof(gid_t));
+        if (out == NULL) {
+            errno = ENOMEM;
+            return -1;
+        }
+        out[0] = mapped;
+        *groups = out;
+        return 1;
+    }
+    if (&pt_orig_getgrouplist_2 != NULL) {
+        return pt_orig_getgrouplist_2(name, basegid, groups);
+    }
+    errno = ENOSYS;
+    return -1;
+}
+
+static char *pt_group_from_gid(gid_t gid, int nogroup) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (gid == 501) {
+            return (char *)"mobile";
+        }
+        if (gid == 20 || pt_is_desktop_supplemental_gid(gid)) {
+            if (nogroup != 0) {
+                return NULL;
+            }
+            static _Thread_local char tls_num[16];
+            snprintf(tls_num, sizeof(tls_num), "%u", (unsigned int)gid);
+            return tls_num;
+        }
+    }
+    return (&pt_orig_group_from_gid != NULL) ? pt_orig_group_from_gid(gid, nogroup) : NULL;
+}
+
+static struct passwd *pt_getpwent(void) {
+    if (&pt_orig_getpwent == NULL) {
+        return NULL;
+    }
+    if (!pt_is_bypass_enabled() ||
+        pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return pt_orig_getpwent();
+    }
+    uid_t self_uid = getuid();
+    for (int guard = 0; guard < 1024; guard++) {
+        struct passwd *pw = pt_orig_getpwent();
+        if (pw == NULL) {
+            return NULL;
+        }
+        if (pw->pw_uid == self_uid || pw->pw_uid == 501) {
+            return pt_get_mobile_tls_passwd(pw->pw_uid, pt_map_spoofed_gid(pw->pw_gid));
+        }
+        if (pt_matches_host_username(pw->pw_name) ||
+            (pw->pw_dir != NULL && strncmp(pw->pw_dir, "/Users/", 7) == 0)) {
+            continue;
+        }
+        return pw;
+    }
+    return NULL;
+}
+
+static _Thread_local bool s_tls_emitted_mobile_grent = false;
+
+static void pt_setgrent(void) {
+    s_tls_emitted_mobile_grent = false;
+    if (&pt_orig_setgrent != NULL) {
+        pt_orig_setgrent();
+    }
+}
+
+static void pt_endgrent(void) {
+    s_tls_emitted_mobile_grent = false;
+    if (&pt_orig_endgrent != NULL) {
+        pt_orig_endgrent();
+    }
+}
+
+static struct group *pt_getgrent(void) {
+    if (&pt_orig_getgrent == NULL) {
+        return NULL;
+    }
+    if (!pt_is_bypass_enabled() ||
+        pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return pt_orig_getgrent();
+    }
+    for (int guard = 0; guard < 1024; guard++) {
+        struct group *gr = pt_orig_getgrent();
+        if (gr == NULL) {
+            return NULL;
+        }
+        if (gr->gr_gid == 501) {
+            s_tls_emitted_mobile_grent = true;
+            return pt_tls_mobile_group();
+        }
+        if (gr->gr_gid == 20) {
+            if (!s_tls_emitted_mobile_grent) {
+                s_tls_emitted_mobile_grent = true;
+                return pt_tls_mobile_group();
+            }
+            continue;
+        }
+        if (pt_is_desktop_supplemental_gid(gr->gr_gid) ||
+            pt_is_hidden_macos_group_name(gr->gr_name)) {
+            continue;
+        }
+        return gr;
+    }
+    return NULL;
+}
+
+static struct passwd *pt_getpwuuid(uuid_t uu) {
+    if (&pt_orig_getpwuuid == NULL) {
+        return NULL;
+    }
+    struct passwd *pw = pt_orig_getpwuuid(uu);
+    if (pw != NULL &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (pw->pw_uid == getuid() || pw->pw_uid == 501) {
+            return pt_get_mobile_tls_passwd(pw->pw_uid, pt_map_spoofed_gid(pw->pw_gid));
+        }
+        if (pt_matches_host_username(pw->pw_name)) {
+            return NULL;
+        }
+    }
+    return pw;
+}
+
+static int pt_getpwuuid_r(uuid_t uu, struct passwd *pwd, char *buffer, size_t bufsize, struct passwd **result) {
+    if (&pt_orig_getpwuuid_r == NULL) {
+        return ENOSYS;
+    }
+    int rc = pt_orig_getpwuuid_r(uu, pwd, buffer, bufsize, result);
+    if (rc == 0 && pwd != NULL && result != NULL && *result != NULL &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (pwd->pw_uid == getuid() || pwd->pw_uid == 501) {
+            pt_fill_mobile_passwd_struct(pwd->pw_uid, pt_map_spoofed_gid(pwd->pw_gid), pwd, buffer, bufsize);
+        } else if (pt_matches_host_username(pwd->pw_name)) {
+            *result = NULL;
+        }
+    }
+    return rc;
+}
+
+static struct group *pt_getgruuid(uuid_t uu) {
+    if (&pt_orig_getgruuid == NULL) {
+        return NULL;
+    }
+    struct group *gr = pt_orig_getgruuid(uu);
+    if (gr != NULL &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (gr->gr_gid == 501) {
+            return pt_tls_mobile_group();
+        }
+        if (gr->gr_gid == 20 ||
+            pt_is_desktop_supplemental_gid(gr->gr_gid) ||
+            pt_is_hidden_macos_group_name(gr->gr_name)) {
+            return NULL;
+        }
+    }
+    return gr;
+}
+
+static int pt_getgruuid_r(uuid_t uu, struct group *grp, char *buffer, size_t bufsize, struct group **result) {
+    if (&pt_orig_getgruuid_r == NULL) {
+        return ENOSYS;
+    }
+    int rc = pt_orig_getgruuid_r(uu, grp, buffer, bufsize, result);
+    if (rc == 0 && grp != NULL && result != NULL && *result != NULL &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (grp->gr_gid == 501) {
+            return pt_fill_mobile_group_r(grp, buffer, bufsize, result);
+        }
+        if (grp->gr_gid == 20 ||
+            pt_is_desktop_supplemental_gid(grp->gr_gid) ||
+            pt_is_hidden_macos_group_name(grp->gr_name)) {
+            *result = NULL;
+        }
+    }
+    return rc;
+}
+
 struct utmpx;
+extern struct utmpx *pt_orig_getutxent(void) __asm__("_getutxent") __attribute__((weak_import));
+extern struct utmpx *pt_orig_getutxid(const struct utmpx *) __asm__("_getutxid") __attribute__((weak_import));
+extern struct utmpx *pt_orig_getutxline(const struct utmpx *) __asm__("_getutxline") __attribute__((weak_import));
+extern int pt_orig_gethostuuid(uuid_t, const struct timespec *) __asm__("_gethostuuid") __attribute__((weak_import));
+extern int pt_orig_getauid(void *) __asm__("_getauid") __attribute__((weak_import));
+extern int pt_orig_getaudit_addr(void *, int) __asm__("_getaudit_addr") __attribute__((weak_import));
 
 static struct utmpx *pt_getutxent(void) {
     if (pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return NULL;
     }
-    typedef struct utmpx *(*GetUtxEntFn)(void);
-    static GetUtxEntFn s_orig = NULL;
-    static dispatch_once_t s_once;
-    dispatch_once(&s_once, ^{
-        s_orig = (GetUtxEntFn)dlsym(RTLD_NEXT, "getutxent");
-    });
-    return (s_orig != NULL) ? s_orig() : NULL;
+    return (&pt_orig_getutxent != NULL) ? pt_orig_getutxent() : NULL;
 }
 
 static struct utmpx *pt_getutxid(const struct utmpx *ut) {
@@ -464,13 +674,7 @@ static struct utmpx *pt_getutxid(const struct utmpx *ut) {
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return NULL;
     }
-    typedef struct utmpx *(*GetUtxIdFn)(const struct utmpx *);
-    static GetUtxIdFn s_orig = NULL;
-    static dispatch_once_t s_once;
-    dispatch_once(&s_once, ^{
-        s_orig = (GetUtxIdFn)dlsym(RTLD_NEXT, "getutxid");
-    });
-    return (s_orig != NULL) ? s_orig(ut) : NULL;
+    return (&pt_orig_getutxid != NULL) ? pt_orig_getutxid(ut) : NULL;
 }
 
 static struct utmpx *pt_getutxline(const struct utmpx *ut) {
@@ -478,13 +682,7 @@ static struct utmpx *pt_getutxline(const struct utmpx *ut) {
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return NULL;
     }
-    typedef struct utmpx *(*GetUtxLineFn)(const struct utmpx *);
-    static GetUtxLineFn s_orig = NULL;
-    static dispatch_once_t s_once;
-    dispatch_once(&s_once, ^{
-        s_orig = (GetUtxLineFn)dlsym(RTLD_NEXT, "getutxline");
-    });
-    return (s_orig != NULL) ? s_orig(ut) : NULL;
+    return (&pt_orig_getutxline != NULL) ? pt_orig_getutxline(ut) : NULL;
 }
 
 __attribute__((visibility("hidden")))
@@ -493,14 +691,8 @@ int pt_gethostuuid_with_caller(uuid_t id, const struct timespec *wait, const voi
         errno = EPERM;
         return -1;
     }
-    typedef int (*GetHostUuidFn)(uuid_t, const struct timespec *);
-    static GetHostUuidFn s_orig = NULL;
-    static dispatch_once_t s_once;
-    dispatch_once(&s_once, ^{
-        s_orig = (GetHostUuidFn)dlsym(RTLD_NEXT, "gethostuuid");
-    });
-    if (s_orig != NULL) {
-        return s_orig(id, wait);
+    if (&pt_orig_gethostuuid != NULL) {
+        return pt_orig_gethostuuid(id, wait);
     }
     errno = ENOSYS;
     return -1;
@@ -516,14 +708,8 @@ int pt_getauid_with_caller(void *auid, const void *caller) {
         errno = EPERM;
         return -1;
     }
-    typedef int (*GetAuidFn)(void *);
-    static GetAuidFn s_orig = NULL;
-    static dispatch_once_t s_once;
-    dispatch_once(&s_once, ^{
-        s_orig = (GetAuidFn)dlsym(RTLD_NEXT, "getauid");
-    });
-    if (s_orig != NULL) {
-        return s_orig(auid);
+    if (&pt_orig_getauid != NULL) {
+        return pt_orig_getauid(auid);
     }
     errno = ENOSYS;
     return -1;
@@ -539,14 +725,8 @@ int pt_getaudit_addr_with_caller(void *auinfo, int length, const void *caller) {
         errno = EPERM;
         return -1;
     }
-    typedef int (*GetAuditAddrFn)(void *, int);
-    static GetAuditAddrFn s_orig = NULL;
-    static dispatch_once_t s_once;
-    dispatch_once(&s_once, ^{
-        s_orig = (GetAuditAddrFn)dlsym(RTLD_NEXT, "getaudit_addr");
-    });
-    if (s_orig != NULL) {
-        return s_orig(auinfo, length);
+    if (&pt_orig_getaudit_addr != NULL) {
+        return pt_orig_getaudit_addr(auinfo, length);
     }
     errno = ENOSYS;
     return -1;
@@ -754,6 +934,15 @@ static int pt_kevent64(int kq,
     return pt_kevent64_with_caller(kq, changelist, nchanges, eventlist, nevents, flags, timeout, __builtin_return_address(0));
 }
 
+extern int pt_orig_kevent_qos(int kq,
+                              const pt_kevent_qos_s *changelist,
+                              int nchanges,
+                              pt_kevent_qos_s *eventlist,
+                              int nevents,
+                              void *data_out,
+                              size_t *data_available,
+                              unsigned int flags) __asm__("_kevent_qos") __attribute__((weak_import));
+
 __attribute__((visibility("hidden"))) int pt_kevent_qos_with_caller(int kq,
                                      const pt_kevent_qos_s *changelist,
                                      int nchanges,
@@ -763,16 +952,11 @@ __attribute__((visibility("hidden"))) int pt_kevent_qos_with_caller(int kq,
                                      size_t *data_available,
                                      unsigned int flags,
                                      const void *caller) {
-    typedef int (*KeventQosFn)(int, const pt_kevent_qos_s *, int, pt_kevent_qos_s *, int, void *, size_t *, unsigned int);
-    static KeventQosFn s_orig = NULL;
-    static dispatch_once_t s_once;
-    dispatch_once(&s_once, ^{
-        s_orig = (KeventQosFn)dlsym(RTLD_NEXT, "kevent_qos");
-    });
-    if (s_orig == NULL) {
+    if (&pt_orig_kevent_qos == NULL) {
         errno = ENOSYS;
         return -1;
     }
+    int (*const s_orig)(int, const pt_kevent_qos_s *, int, pt_kevent_qos_s *, int, void *, size_t *, unsigned int) = pt_orig_kevent_qos;
     if (changelist != NULL && nchanges > 0 &&
         pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(caller)) {
@@ -865,6 +1049,149 @@ static int pt_kevent_qos(int kq,
                                      data_out, data_available, flags, __builtin_return_address(0));
 }
 
+extern int pt_orig_kevent_id(uint64_t id,
+                             const pt_kevent_qos_s *changelist,
+                             int nchanges,
+                             pt_kevent_qos_s *eventlist,
+                             int nevents,
+                             void *data_out,
+                             size_t *data_available,
+                             unsigned int flags) __asm__("_kevent_id") __attribute__((weak_import));
+
+__attribute__((visibility("hidden"))) int pt_kevent_id_with_caller(uint64_t id,
+                                                                   const pt_kevent_qos_s *changelist,
+                                                                   int nchanges,
+                                                                   pt_kevent_qos_s *eventlist,
+                                                                   int nevents,
+                                                                   void *data_out,
+                                                                   size_t *data_available,
+                                                                   unsigned int flags,
+                                                                   const void *caller) {
+    if (&pt_orig_kevent_id == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    int (*const s_orig)(uint64_t, const pt_kevent_qos_s *, int, pt_kevent_qos_s *, int, void *, size_t *, unsigned int) = pt_orig_kevent_id;
+    if (changelist != NULL && nchanges > 0 &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(caller)) {
+        uint64_t self_pid = (uint64_t)getpid();
+        int blocked = 0;
+        for (int i = 0; i < nchanges; i++) {
+            if (changelist[i].filter == EVFILT_PROC && changelist[i].ident != self_pid) {
+                blocked++;
+            }
+        }
+        if (blocked > 0) {
+            if (eventlist == NULL || nevents <= 0) {
+                errno = ESRCH;
+                return -1;
+            }
+            int reported = 0;
+            pt_kevent_qos_s stack_kept[32];
+            pt_kevent_qos_s *kept = stack_kept;
+            int kept_cnt = 0;
+            int need_kept = nchanges - blocked;
+            if (need_kept > (int)(sizeof(stack_kept) / sizeof(stack_kept[0]))) {
+                kept = (pt_kevent_qos_s *)malloc((size_t)need_kept * sizeof(pt_kevent_qos_s));
+                if (kept == NULL) {
+                    errno = ENOMEM;
+                    return -1;
+                }
+            }
+            for (int i = 0; i < nchanges; i++) {
+                if (changelist[i].filter == EVFILT_PROC && changelist[i].ident != self_pid) {
+                    if (reported < nevents) {
+                        eventlist[reported] = changelist[i];
+                        eventlist[reported].flags = EV_ERROR;
+                        eventlist[reported].data = ESRCH;
+                        reported++;
+                    }
+                } else {
+                    kept[kept_cnt++] = changelist[i];
+                }
+            }
+            int extra = 0;
+            if (kept_cnt > 0 && reported < nevents) {
+                int saved_errno = errno;
+                int r = s_orig(id, kept, kept_cnt, eventlist + reported, nevents - reported,
+                               data_out, data_available, flags | PT_KEVENT_FLAG_IMMEDIATE);
+                if (r < 0) {
+                    if (errno == EBADF) {
+                        if (kept != stack_kept) {
+                            free(kept);
+                        }
+                        errno = EBADF;
+                        return -1;
+                    }
+                    errno = saved_errno;
+                } else if (r > 0) {
+                    extra = r;
+                }
+            } else if (kept_cnt > 0) {
+                int saved_errno = errno;
+                int r = s_orig(id, kept, kept_cnt, NULL, 0, data_out, data_available,
+                               flags | PT_KEVENT_FLAG_IMMEDIATE);
+                if (r < 0) {
+                    if (errno == EBADF) {
+                        if (kept != stack_kept) {
+                            free(kept);
+                        }
+                        errno = EBADF;
+                        return -1;
+                    }
+                    errno = saved_errno;
+                }
+            }
+            if (kept != stack_kept) {
+                free(kept);
+            }
+            return reported + extra;
+        }
+    }
+    return s_orig(id, changelist, nchanges, eventlist, nevents, data_out, data_available, flags);
+}
+
+static int pt_kevent_id(uint64_t id,
+                        const pt_kevent_qos_s *changelist,
+                        int nchanges,
+                        pt_kevent_qos_s *eventlist,
+                        int nevents,
+                        void *data_out,
+                        size_t *data_available,
+                        unsigned int flags) {
+    return pt_kevent_id_with_caller(id, changelist, nchanges, eventlist, nevents,
+                                    data_out, data_available, flags, __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden"))) int pt_getrlimit_with_caller(int resource, struct rlimit *rlp, const void *caller) {
+    int r = getrlimit(resource, rlp);
+    if (r == 0 && rlp != NULL &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(caller)) {
+        if (resource == RLIMIT_NOFILE) {
+            if (rlp->rlim_cur > 10240ULL) {
+                rlp->rlim_cur = 10240ULL;
+            }
+            if (rlp->rlim_max != RLIM_INFINITY && rlp->rlim_max > 10240ULL) {
+                rlp->rlim_max = 10240ULL;
+            }
+        } else if (resource == RLIMIT_NPROC) {
+            if (rlp->rlim_cur > 1000ULL) {
+                rlp->rlim_cur = 1000ULL;
+            }
+            if (rlp->rlim_max != RLIM_INFINITY && rlp->rlim_max > 1000ULL) {
+                rlp->rlim_max = 1000ULL;
+            }
+        }
+    }
+    return r;
+}
+
+static int pt_getrlimit(int resource, struct rlimit *rlp) {
+    return pt_getrlimit_with_caller(resource, rlp, __builtin_return_address(0));
+}
+
 #define PT_THERMAL_NOTIFY_TOKEN_CAP 64U
 static os_unfair_lock s_thermal_notify_lock = OS_UNFAIR_LOCK_INIT;
 static int s_thermal_notify_tokens[PT_THERMAL_NOTIFY_TOKEN_CAP];
@@ -934,6 +1261,33 @@ static uint32_t pt_notify_register_dispatch(const char *name,
     return st;
 }
 
+static uint32_t pt_notify_register_signal(const char *name, int sig, int *out_token) {
+    uint32_t st = notify_register_signal(name, sig, out_token);
+    if (st == NOTIFY_STATUS_OK && out_token != NULL && name != NULL &&
+        strcmp(name, "com.apple.system.thermalpressurelevel") == 0) {
+        pt_record_thermal_notify_token(*out_token);
+    }
+    return st;
+}
+
+static uint32_t pt_notify_register_mach_port(const char *name, mach_port_t *notify_port, int flags, int *out_token) {
+    uint32_t st = notify_register_mach_port(name, notify_port, flags, out_token);
+    if (st == NOTIFY_STATUS_OK && out_token != NULL && name != NULL &&
+        strcmp(name, "com.apple.system.thermalpressurelevel") == 0) {
+        pt_record_thermal_notify_token(*out_token);
+    }
+    return st;
+}
+
+static uint32_t pt_notify_register_file_descriptor(const char *name, int *notify_fd, int flags, int *out_token) {
+    uint32_t st = notify_register_file_descriptor(name, notify_fd, flags, out_token);
+    if (st == NOTIFY_STATUS_OK && out_token != NULL && name != NULL &&
+        strcmp(name, "com.apple.system.thermalpressurelevel") == 0) {
+        pt_record_thermal_notify_token(*out_token);
+    }
+    return st;
+}
+
 static uint32_t pt_notify_cancel(int token) {
     pt_remove_thermal_notify_token(token);
     return notify_cancel(token);
@@ -962,6 +1316,10 @@ static long pt_sysconf(int name) {
                 return 16384L;
             case _SC_PHYS_PAGES:
                 return (long)(profile->ram_bytes / 16384ULL);
+            case _SC_OPEN_MAX:
+                return 10240L;
+            case _SC_CHILD_MAX:
+                return 1000L;
             default:
                 break;
         }
@@ -1288,6 +1646,8 @@ static int pt_usleep(useconds_t usec) {
 #endif
 
 extern kern_return_t bootstrap_look_up(mach_port_t bp, const char *service_name, mach_port_t *sp);
+extern kern_return_t bootstrap_check_in(mach_port_t bp, const char *service_name, mach_port_t *sp);
+extern kern_return_t bootstrap_status(mach_port_t bp, const char *service_name, int *service_active);
 
 static kern_return_t pt_bootstrap_look_up(mach_port_t bp, const char *service_name, mach_port_t *sp) {
     if (service_name != NULL &&
@@ -1301,6 +1661,39 @@ static kern_return_t pt_bootstrap_look_up(mach_port_t bp, const char *service_na
     }
     return bootstrap_look_up(bp, service_name, sp);
 }
+
+static kern_return_t pt_bootstrap_check_in(mach_port_t bp, const char *service_name, mach_port_t *sp) {
+    if (service_name != NULL &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_is_hidden_macos_mach_service(service_name)) {
+        if (sp != NULL) {
+            *sp = MACH_PORT_NULL;
+        }
+        return PT_BOOTSTRAP_UNKNOWN_SERVICE;
+    }
+    return bootstrap_check_in(bp, service_name, sp);
+}
+
+static kern_return_t pt_bootstrap_status(mach_port_t bp, const char *service_name, int *service_active) {
+    if (service_name != NULL &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_is_hidden_macos_mach_service(service_name)) {
+        if (service_active != NULL) {
+            *service_active = 0;
+        }
+        return PT_BOOTSTRAP_UNKNOWN_SERVICE;
+    }
+    return bootstrap_status(bp, service_name, service_active);
+}
+
+extern kern_return_t pt_orig_bootstrap_look_up2(mach_port_t, const char *, mach_port_t *, pid_t, uint64_t) __asm__("_bootstrap_look_up2") __attribute__((weak_import));
+extern kern_return_t pt_orig_bootstrap_look_up3(mach_port_t, const char *, mach_port_t *, pid_t, const uuid_t, uint64_t) __asm__("_bootstrap_look_up3") __attribute__((weak_import));
+extern kern_return_t pt_orig_bootstrap_look_up_per_user(mach_port_t, const char *, uid_t, mach_port_t *) __asm__("_bootstrap_look_up_per_user") __attribute__((weak_import));
+extern pid_t pt_orig_responsibility_get_pid_responsible_for_pid(pid_t) __asm__("_responsibility_get_pid_responsible_for_pid") __attribute__((weak_import));
+extern int pt_orig_responsibility_get_responsible_for_pid(pid_t pid, pid_t *out_pid, char *out_path, size_t *out_path_size) __asm__("_responsibility_get_responsible_for_pid") __attribute__((weak_import));
+extern int64_t pt_orig_responsibility_get_uniqueid_responsible_for_pid(pid_t) __asm__("_responsibility_get_uniqueid_responsible_for_pid") __attribute__((weak_import));
 
 static kern_return_t pt_bootstrap_look_up2(mach_port_t bp,
                                            const char *service_name,
@@ -1316,14 +1709,8 @@ static kern_return_t pt_bootstrap_look_up2(mach_port_t bp,
         }
         return PT_BOOTSTRAP_UNKNOWN_SERVICE;
     }
-    typedef kern_return_t (*BootstrapLookUp2Fn)(mach_port_t, const char *, mach_port_t *, pid_t, uint64_t);
-    static BootstrapLookUp2Fn s_orig = NULL;
-    static dispatch_once_t s_once;
-    dispatch_once(&s_once, ^{
-        s_orig = (BootstrapLookUp2Fn)dlsym(RTLD_NEXT, "bootstrap_look_up2");
-    });
-    if (s_orig != NULL) {
-        return s_orig(bp, service_name, sp, target_pid, flags);
+    if (&pt_orig_bootstrap_look_up2 != NULL) {
+        return pt_orig_bootstrap_look_up2(bp, service_name, sp, target_pid, flags);
     }
     if (sp != NULL) {
         *sp = MACH_PORT_NULL;
@@ -1346,14 +1733,8 @@ static kern_return_t pt_bootstrap_look_up3(mach_port_t bp,
         }
         return PT_BOOTSTRAP_UNKNOWN_SERVICE;
     }
-    typedef kern_return_t (*BootstrapLookUp3Fn)(mach_port_t, const char *, mach_port_t *, pid_t, const uuid_t, uint64_t);
-    static BootstrapLookUp3Fn s_orig = NULL;
-    static dispatch_once_t s_once;
-    dispatch_once(&s_once, ^{
-        s_orig = (BootstrapLookUp3Fn)dlsym(RTLD_NEXT, "bootstrap_look_up3");
-    });
-    if (s_orig != NULL) {
-        return s_orig(bp, service_name, sp, target_pid, instance_id, flags);
+    if (&pt_orig_bootstrap_look_up3 != NULL) {
+        return pt_orig_bootstrap_look_up3(bp, service_name, sp, target_pid, instance_id, flags);
     }
     if (sp != NULL) {
         *sp = MACH_PORT_NULL;
@@ -1371,18 +1752,136 @@ static pid_t pt_responsibility_get_pid_responsible_for_pid(pid_t pid) {
         errno = ESRCH;
         return -1;
     }
-    typedef pid_t (*RespFn)(pid_t);
-    static RespFn s_orig = NULL;
-    static dispatch_once_t s_once;
-    dispatch_once(&s_once, ^{
-        s_orig = (RespFn)dlsym(RTLD_NEXT, "responsibility_get_pid_responsible_for_pid");
-    });
-    if (s_orig != NULL) {
-        return s_orig(pid);
+    if (&pt_orig_responsibility_get_pid_responsible_for_pid != NULL) {
+        return pt_orig_responsibility_get_pid_responsible_for_pid(pid);
     }
     errno = ENOSYS;
     return -1;
 }
+
+static kern_return_t pt_bootstrap_look_up_per_user(mach_port_t bp,
+                                                   const char *service_name,
+                                                   uid_t target_user,
+                                                   mach_port_t *sp) {
+    if (service_name != NULL &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_is_hidden_macos_mach_service(service_name)) {
+        if (sp != NULL) {
+            *sp = MACH_PORT_NULL;
+        }
+        return PT_BOOTSTRAP_UNKNOWN_SERVICE;
+    }
+    if (&pt_orig_bootstrap_look_up_per_user != NULL) {
+        return pt_orig_bootstrap_look_up_per_user(bp, service_name, target_user, sp);
+    }
+    if (sp != NULL) {
+        *sp = MACH_PORT_NULL;
+    }
+    return PT_BOOTSTRAP_UNKNOWN_SERVICE;
+}
+
+static int pt_responsibility_get_responsible_for_pid(pid_t pid,
+                                                    pid_t *out_pid,
+                                                    char *out_path,
+                                                    size_t *out_path_size) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (out_path_size != NULL) {
+            if (!pt_is_valid_user_pointer(out_path_size) || *out_path_size == 0) {
+                errno = EINVAL;
+                return -1;
+            }
+        }
+        pid_t self_pid = getpid();
+        if (pid != 0 && pid != self_pid) {
+            errno = ESRCH;
+            return -1;
+        }
+        if (out_pid != NULL && pt_is_valid_user_pointer(out_pid)) {
+            *out_pid = self_pid;
+        }
+        if (out_path != NULL && out_path_size != NULL && *out_path_size > 0 && pt_is_valid_user_pointer(out_path)) {
+            const char *exe = pt_get_main_executable_path();
+            char vout[PATH_MAX];
+            const char *san = (exe != NULL) ? pt_virtualize_path_for_app(exe, vout, sizeof(vout), YES) : "/";
+            strlcpy(out_path, (san != NULL) ? san : "/", *out_path_size);
+        }
+        return 0;
+    }
+    if (&pt_orig_responsibility_get_responsible_for_pid != NULL) {
+        return pt_orig_responsibility_get_responsible_for_pid(pid, out_pid, out_path, out_path_size);
+    }
+    errno = ENOSYS;
+    return -1;
+}
+
+static int64_t pt_responsibility_get_uniqueid_responsible_for_pid(pid_t pid) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        pid_t self_pid = getpid();
+        if (pid == 0 || pid == self_pid) {
+            return (int64_t)self_pid;
+        }
+        errno = ESRCH;
+        return -1;
+    }
+    if (&pt_orig_responsibility_get_uniqueid_responsible_for_pid != NULL) {
+        return pt_orig_responsibility_get_uniqueid_responsible_for_pid(pid);
+    }
+    errno = ENOSYS;
+    return -1;
+}
+
+static void *pt_responsibility_get_attribution_for_audittoken(const audit_token_t *token,
+                                                              const void *a1,
+                                                              const void *a2,
+                                                              const void *a3,
+                                                              const void *a4) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        errno = ESRCH;
+        return NULL;
+    }
+    typedef void *(*fn_t)(const audit_token_t *, const void *, const void *, const void *, const void *);
+    fn_t orig = (fn_t)dlsym(RTLD_NEXT, "responsibility_get_attribution_for_audittoken");
+    return orig ? orig(token, a1, a2, a3, a4) : NULL;
+}
+
+static int pt_responsibility_get_responsible_audit_token_for_audit_token(const audit_token_t *in_token,
+                                                                         audit_token_t *out_token) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        pid_t self_pid = getpid();
+        if (in_token == NULL || out_token == NULL || (pid_t)in_token->val[5] != self_pid) {
+            errno = ESRCH;
+            return -1;
+        }
+        *out_token = *in_token;
+        if (out_token->val[2] == 20U) {
+            out_token->val[2] = 501U;
+        }
+        if (out_token->val[4] == 20U) {
+            out_token->val[4] = 501U;
+        }
+        return 0;
+    }
+    typedef int (*fn_t)(const audit_token_t *, audit_token_t *);
+    fn_t orig = (fn_t)dlsym(RTLD_NEXT, "responsibility_get_responsible_audit_token_for_audit_token");
+    return orig ? orig(in_token, out_token) : -1;
+}
+
+extern void pt_orig_u_getVersion(uint8_t[4]) __asm__("_u_getVersion") __attribute__((weak_import));
+extern void pt_orig_u_getUnicodeVersion(uint8_t[4]) __asm__("_u_getUnicodeVersion") __attribute__((weak_import));
+extern void pt_orig_u_charAge(int32_t, uint8_t[4]) __asm__("_u_charAge") __attribute__((weak_import));
+extern int8_t pt_orig_u_charType(int32_t) __asm__("_u_charType") __attribute__((weak_import));
+extern int8_t pt_orig_u_isdefined(int32_t) __asm__("_u_isdefined") __attribute__((weak_import));
+extern int8_t pt_orig_u_hasBinaryProperty(int32_t, int32_t) __asm__("_u_hasBinaryProperty") __attribute__((weak_import));
+extern int32_t pt_orig_u_getIntPropertyValue(int32_t, int32_t) __asm__("_u_getIntPropertyValue") __attribute__((weak_import));
+extern int32_t pt_orig_u_charName(int32_t, int32_t, char *, int32_t, int32_t *) __asm__("_u_charName") __attribute__((weak_import));
+extern int8_t pt_orig_u_isalpha(int32_t) __asm__("_u_isalpha") __attribute__((weak_import));
+extern int8_t pt_orig_u_isprint(int32_t) __asm__("_u_isprint") __attribute__((weak_import));
+extern double pt_orig_u_getNumericValue(int32_t) __asm__("_u_getNumericValue") __attribute__((weak_import));
 
 static void pt_u_getVersion(uint8_t versionArray[4]) {
     if (versionArray != NULL &&
@@ -1395,14 +1894,8 @@ static void pt_u_getVersion(uint8_t versionArray[4]) {
         versionArray[3] = 0U;
         return;
     }
-    typedef void (*UGetVerFn)(uint8_t[4]);
-    static UGetVerFn s_orig = NULL;
-    static dispatch_once_t s_once;
-    dispatch_once(&s_once, ^{
-        s_orig = (UGetVerFn)dlsym(RTLD_NEXT, "u_getVersion");
-    });
-    if (s_orig != NULL) {
-        s_orig(versionArray);
+    if (&pt_orig_u_getVersion != NULL) {
+        pt_orig_u_getVersion(versionArray);
     }
 }
 
@@ -1417,41 +1910,23 @@ static void pt_u_getUnicodeVersion(uint8_t versionArray[4]) {
         versionArray[3] = 0U;
         return;
     }
-    typedef void (*UGetUniVerFn)(uint8_t[4]);
-    static UGetUniVerFn s_orig = NULL;
-    static dispatch_once_t s_once;
-    dispatch_once(&s_once, ^{
-        s_orig = (UGetUniVerFn)dlsym(RTLD_NEXT, "u_getUnicodeVersion");
-    });
-    if (s_orig != NULL) {
-        s_orig(versionArray);
+    if (&pt_orig_u_getUnicodeVersion != NULL) {
+        pt_orig_u_getUnicodeVersion(versionArray);
     }
-}
-
-typedef void (*PTUCharAgeFn)(int32_t, uint8_t[4]);
-static PTUCharAgeFn pt_get_real_u_charAge(void) {
-    static PTUCharAgeFn s_orig = NULL;
-    static dispatch_once_t s_once;
-    dispatch_once(&s_once, ^{
-        s_orig = (PTUCharAgeFn)dlsym(RTLD_NEXT, "u_charAge");
-    });
-    return s_orig;
 }
 
 static BOOL pt_icu_codepoint_post_unicode_12_1(int32_t c) {
-    PTUCharAgeFn fn = pt_get_real_u_charAge();
-    if (fn == NULL) {
+    if (&pt_orig_u_charAge == NULL) {
         return NO;
     }
     uint8_t age[4] = {0, 0, 0, 0};
-    fn(c, age);
+    pt_orig_u_charAge(c, age);
     return (age[0] > 12U || (age[0] == 12U && age[1] > 1U));
 }
 
 static void pt_u_charAge(int32_t c, uint8_t versionArray[4]) {
-    PTUCharAgeFn fn = pt_get_real_u_charAge();
-    if (fn != NULL) {
-        fn(c, versionArray);
+    if (&pt_orig_u_charAge != NULL) {
+        pt_orig_u_charAge(c, versionArray);
     } else if (versionArray != NULL) {
         memset(versionArray, 0, 4U);
     }
@@ -1472,13 +1947,7 @@ static int8_t pt_u_charType(int32_t c) {
         pt_icu_codepoint_post_unicode_12_1(c)) {
         return 0; // U_UNASSIGNED
     }
-    typedef int8_t (*UCharTypeFn)(int32_t);
-    static UCharTypeFn s_orig = NULL;
-    static dispatch_once_t s_once;
-    dispatch_once(&s_once, ^{
-        s_orig = (UCharTypeFn)dlsym(RTLD_NEXT, "u_charType");
-    });
-    return (s_orig != NULL) ? s_orig(c) : 0;
+    return (&pt_orig_u_charType != NULL) ? pt_orig_u_charType(c) : 0;
 }
 
 static int8_t pt_u_isdefined(int32_t c) {
@@ -1488,13 +1957,7 @@ static int8_t pt_u_isdefined(int32_t c) {
         pt_icu_codepoint_post_unicode_12_1(c)) {
         return 0;
     }
-    typedef int8_t (*UIsDefinedFn)(int32_t);
-    static UIsDefinedFn s_orig = NULL;
-    static dispatch_once_t s_once;
-    dispatch_once(&s_once, ^{
-        s_orig = (UIsDefinedFn)dlsym(RTLD_NEXT, "u_isdefined");
-    });
-    return (s_orig != NULL) ? s_orig(c) : 0;
+    return (&pt_orig_u_isdefined != NULL) ? pt_orig_u_isdefined(c) : 0;
 }
 
 static int8_t pt_u_hasBinaryProperty(int32_t c, int32_t which) {
@@ -1504,13 +1967,7 @@ static int8_t pt_u_hasBinaryProperty(int32_t c, int32_t which) {
         pt_icu_codepoint_post_unicode_12_1(c)) {
         return 0;
     }
-    typedef int8_t (*UHasBinPropFn)(int32_t, int32_t);
-    static UHasBinPropFn s_orig = NULL;
-    static dispatch_once_t s_once;
-    dispatch_once(&s_once, ^{
-        s_orig = (UHasBinPropFn)dlsym(RTLD_NEXT, "u_hasBinaryProperty");
-    });
-    return (s_orig != NULL) ? s_orig(c, which) : 0;
+    return (&pt_orig_u_hasBinaryProperty != NULL) ? pt_orig_u_hasBinaryProperty(c, which) : 0;
 }
 
 static int32_t pt_u_getIntPropertyValue(int32_t c, int32_t which) {
@@ -1520,27 +1977,62 @@ static int32_t pt_u_getIntPropertyValue(int32_t c, int32_t which) {
         pt_icu_codepoint_post_unicode_12_1(c)) {
         return 0;
     }
-    typedef int32_t (*UGetIntPropFn)(int32_t, int32_t);
-    static UGetIntPropFn s_orig = NULL;
-    static dispatch_once_t s_once;
-    dispatch_once(&s_once, ^{
-        s_orig = (UGetIntPropFn)dlsym(RTLD_NEXT, "u_getIntPropertyValue");
-    });
-    return (s_orig != NULL) ? s_orig(c, which) : 0;
+    return (&pt_orig_u_getIntPropertyValue != NULL) ? pt_orig_u_getIntPropertyValue(c, which) : 0;
+}
+
+static int32_t pt_u_charName(int32_t code, int32_t nameChoice, char *buffer, int32_t bufferLength, int32_t *pErrorCode) {
+    if (pt_is_compat13_7_active() &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_icu_codepoint_post_unicode_12_1(code)) {
+        if (buffer != NULL && bufferLength > 0) {
+            buffer[0] = '\0';
+        }
+        if (pErrorCode != NULL) {
+            *pErrorCode = 0;
+        }
+        return 0;
+    }
+    return (&pt_orig_u_charName != NULL) ? pt_orig_u_charName(code, nameChoice, buffer, bufferLength, pErrorCode) : 0;
+}
+
+static int8_t pt_u_isalpha(int32_t c) {
+    if (pt_is_compat13_7_active() &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_icu_codepoint_post_unicode_12_1(c)) {
+        return 0;
+    }
+    return (&pt_orig_u_isalpha != NULL) ? pt_orig_u_isalpha(c) : 0;
+}
+
+static int8_t pt_u_isprint(int32_t c) {
+    if (pt_is_compat13_7_active() &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_icu_codepoint_post_unicode_12_1(c)) {
+        return 0;
+    }
+    return (&pt_orig_u_isprint != NULL) ? pt_orig_u_isprint(c) : 0;
+}
+
+static double pt_u_getNumericValue(int32_t c) {
+    if (pt_is_compat13_7_active() &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_icu_codepoint_post_unicode_12_1(c)) {
+        return -123456789.0; // U_NO_NUMERIC_VALUE
+    }
+    return (&pt_orig_u_getNumericValue != NULL) ? pt_orig_u_getNumericValue(c) : -123456789.0;
 }
 
 #define PT_DEFINE_OS_VARIANT_1ARG(name) \
+extern bool pt_orig_##name(const char *subsystem) __asm__("_" #name) __attribute__((weak_import)); \
 static bool pt_##name(const char *subsystem) { \
     if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) { \
         return false; \
     } \
-    typedef bool (*OsVarFn)(const char *); \
-    static OsVarFn s_orig = NULL; \
-    static dispatch_once_t s_once; \
-    dispatch_once(&s_once, ^{ \
-        s_orig = (OsVarFn)dlsym(RTLD_NEXT, #name); \
-    }); \
-    return (s_orig != NULL) ? s_orig(subsystem) : false; \
+    return (&pt_orig_##name != NULL) ? pt_orig_##name(subsystem) : false; \
 }
 
 PT_DEFINE_OS_VARIANT_1ARG(os_variant_has_internal_content)
@@ -1551,48 +2043,104 @@ PT_DEFINE_OS_VARIANT_1ARG(os_variant_has_factory_content)
 PT_DEFINE_OS_VARIANT_1ARG(os_variant_is_darwinos)
 PT_DEFINE_OS_VARIANT_1ARG(os_variant_is_recovery)
 
+extern bool pt_orig_os_variant_check(const char *subsystem, const char *variant) __asm__("_os_variant_check") __attribute__((weak_import));
+
 static bool pt_os_variant_check(const char *subsystem, const char *variant) {
     if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return false;
     }
-    typedef bool (*OsVarCheckFn)(const char *, const char *);
-    static OsVarCheckFn s_orig = NULL;
-    static dispatch_once_t s_once;
-    dispatch_once(&s_once, ^{
-        s_orig = (OsVarCheckFn)dlsym(RTLD_NEXT, "os_variant_check");
-    });
-    return (s_orig != NULL) ? s_orig(subsystem, variant) : false;
+    return (&pt_orig_os_variant_check != NULL) ? pt_orig_os_variant_check(subsystem, variant) : false;
 }
 
-PT_DLSYM_ONLY("u_getVersion", pt_u_getVersion)
-PT_DLSYM_ONLY("u_getUnicodeVersion", pt_u_getUnicodeVersion)
-PT_DLSYM_ONLY("u_charAge", pt_u_charAge)
-PT_DLSYM_ONLY("u_charType", pt_u_charType)
-PT_DLSYM_ONLY("u_isdefined", pt_u_isdefined)
-PT_DLSYM_ONLY("u_hasBinaryProperty", pt_u_hasBinaryProperty)
-PT_DLSYM_ONLY("u_getIntPropertyValue", pt_u_getIntPropertyValue)
-PT_DLSYM_ONLY("os_variant_has_internal_content", pt_os_variant_has_internal_content)
-PT_DLSYM_ONLY("os_variant_has_internal_diagnostics", pt_os_variant_has_internal_diagnostics)
-PT_DLSYM_ONLY("os_variant_has_internal_ui", pt_os_variant_has_internal_ui)
-PT_DLSYM_ONLY("os_variant_allows_internal_security_policies", pt_os_variant_allows_internal_security_policies)
-PT_DLSYM_ONLY("os_variant_has_factory_content", pt_os_variant_has_factory_content)
-PT_DLSYM_ONLY("os_variant_is_darwinos", pt_os_variant_is_darwinos)
-PT_DLSYM_ONLY("os_variant_is_recovery", pt_os_variant_is_recovery)
-PT_DLSYM_ONLY("os_variant_check", pt_os_variant_check)
-PT_DLSYM_ONLY("bootstrap_look_up2", pt_bootstrap_look_up2)
-PT_DLSYM_ONLY("bootstrap_look_up3", pt_bootstrap_look_up3)
-PT_DLSYM_ONLY("responsibility_get_pid_responsible_for_pid", pt_responsibility_get_pid_responsible_for_pid)
-PT_DLSYM_ONLY("getutxent", pt_getutxent)
-PT_DLSYM_ONLY("getutxid", pt_getutxid)
-PT_DLSYM_ONLY("getutxline", pt_getutxline)
-PT_DLSYM_ONLY("gethostuuid", pt_gethostuuid)
-PT_DLSYM_ONLY("getauid", pt_getauid)
-PT_DLSYM_ONLY("getaudit_addr", pt_getaudit_addr)
-PT_DLSYM_ONLY("kevent_qos", pt_kevent_qos)
+extern char *pt_orig_os_variant_copy_description(const char *subsystem) __asm__("_os_variant_copy_description") __attribute__((weak_import));
+extern bool pt_orig_os_variant_allows_security_research(const char *subsystem) __asm__("_os_variant_allows_security_research") __attribute__((weak_import));
+extern bool pt_orig_os_variant_uses_ephemeral_storage(const char *subsystem) __asm__("_os_variant_uses_ephemeral_storage") __attribute__((weak_import));
+
+static char *pt_os_variant_copy_description(const char *subsystem) {
+    if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return strdup("");
+    }
+    return (&pt_orig_os_variant_copy_description != NULL) ? pt_orig_os_variant_copy_description(subsystem) : NULL;
+}
+
+static bool pt_os_variant_allows_security_research(const char *subsystem) {
+    if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return false;
+    }
+    return (&pt_orig_os_variant_allows_security_research != NULL) ? pt_orig_os_variant_allows_security_research(subsystem) : false;
+}
+
+static bool pt_os_variant_uses_ephemeral_storage(const char *subsystem) {
+    if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return false;
+    }
+    return (&pt_orig_os_variant_uses_ephemeral_storage != NULL) ? pt_orig_os_variant_uses_ephemeral_storage(subsystem) : false;
+}
+
+static bool pt_os_variant_is_basesystem(const char *subsystem) {
+    if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return false;
+    }
+    typedef bool (*fn_t)(const char *);
+    fn_t orig = (fn_t)dlsym(RTLD_NEXT, "os_variant_is_basesystem");
+    return orig ? orig(subsystem) : false;
+}
+
+PT_INTERPOSE_WEAK_NAMED(pt_u_getVersion, pt_orig_u_getVersion, "u_getVersion")
+PT_INTERPOSE_WEAK_NAMED(pt_u_getUnicodeVersion, pt_orig_u_getUnicodeVersion, "u_getUnicodeVersion")
+PT_INTERPOSE_WEAK_NAMED(pt_u_charAge, pt_orig_u_charAge, "u_charAge")
+PT_INTERPOSE_WEAK_NAMED(pt_u_charType, pt_orig_u_charType, "u_charType")
+PT_INTERPOSE_WEAK_NAMED(pt_u_isdefined, pt_orig_u_isdefined, "u_isdefined")
+PT_INTERPOSE_WEAK_NAMED(pt_u_hasBinaryProperty, pt_orig_u_hasBinaryProperty, "u_hasBinaryProperty")
+PT_INTERPOSE_WEAK_NAMED(pt_u_getIntPropertyValue, pt_orig_u_getIntPropertyValue, "u_getIntPropertyValue")
+PT_INTERPOSE_WEAK_NAMED(pt_u_charName, pt_orig_u_charName, "u_charName")
+PT_INTERPOSE_WEAK_NAMED(pt_u_isalpha, pt_orig_u_isalpha, "u_isalpha")
+PT_INTERPOSE_WEAK_NAMED(pt_u_isprint, pt_orig_u_isprint, "u_isprint")
+PT_INTERPOSE_WEAK_NAMED(pt_u_getNumericValue, pt_orig_u_getNumericValue, "u_getNumericValue")
+PT_INTERPOSE_WEAK_NAMED(pt_os_variant_has_internal_content, pt_orig_os_variant_has_internal_content, "os_variant_has_internal_content")
+PT_INTERPOSE_WEAK_NAMED(pt_os_variant_has_internal_diagnostics, pt_orig_os_variant_has_internal_diagnostics, "os_variant_has_internal_diagnostics")
+PT_INTERPOSE_WEAK_NAMED(pt_os_variant_has_internal_ui, pt_orig_os_variant_has_internal_ui, "os_variant_has_internal_ui")
+PT_INTERPOSE_WEAK_NAMED(pt_os_variant_allows_internal_security_policies, pt_orig_os_variant_allows_internal_security_policies, "os_variant_allows_internal_security_policies")
+PT_INTERPOSE_WEAK_NAMED(pt_os_variant_has_factory_content, pt_orig_os_variant_has_factory_content, "os_variant_has_factory_content")
+PT_INTERPOSE_WEAK_NAMED(pt_os_variant_is_darwinos, pt_orig_os_variant_is_darwinos, "os_variant_is_darwinos")
+PT_INTERPOSE_WEAK_NAMED(pt_os_variant_is_recovery, pt_orig_os_variant_is_recovery, "os_variant_is_recovery")
+PT_INTERPOSE_WEAK_NAMED(pt_os_variant_check, pt_orig_os_variant_check, "os_variant_check")
+PT_INTERPOSE_WEAK_NAMED(pt_os_variant_copy_description, pt_orig_os_variant_copy_description, "os_variant_copy_description")
+PT_INTERPOSE_WEAK_NAMED(pt_os_variant_allows_security_research, pt_orig_os_variant_allows_security_research, "os_variant_allows_security_research")
+PT_INTERPOSE_WEAK_NAMED(pt_os_variant_uses_ephemeral_storage, pt_orig_os_variant_uses_ephemeral_storage, "os_variant_uses_ephemeral_storage")
+PT_DLSYM_ONLY("os_variant_is_basesystem", pt_os_variant_is_basesystem)
+PT_INTERPOSE_WEAK_NAMED(pt_bootstrap_look_up2, pt_orig_bootstrap_look_up2, "bootstrap_look_up2")
+PT_INTERPOSE_WEAK_NAMED(pt_bootstrap_look_up3, pt_orig_bootstrap_look_up3, "bootstrap_look_up3")
+PT_INTERPOSE_WEAK_NAMED(pt_bootstrap_look_up_per_user, pt_orig_bootstrap_look_up_per_user, "bootstrap_look_up_per_user")
+PT_INTERPOSE_WEAK_NAMED(pt_responsibility_get_pid_responsible_for_pid, pt_orig_responsibility_get_pid_responsible_for_pid, "responsibility_get_pid_responsible_for_pid")
+PT_INTERPOSE_WEAK_NAMED(pt_responsibility_get_responsible_for_pid, pt_orig_responsibility_get_responsible_for_pid, "responsibility_get_responsible_for_pid")
+PT_INTERPOSE_WEAK_NAMED(pt_responsibility_get_uniqueid_responsible_for_pid, pt_orig_responsibility_get_uniqueid_responsible_for_pid, "responsibility_get_uniqueid_responsible_for_pid")
+PT_DLSYM_ONLY("responsibility_get_attribution_for_audittoken", pt_responsibility_get_attribution_for_audittoken)
+PT_DLSYM_ONLY("responsibility_get_responsible_audit_token_for_audit_token", pt_responsibility_get_responsible_audit_token_for_audit_token)
+PT_INTERPOSE_WEAK_NAMED(pt_getutxent, pt_orig_getutxent, "getutxent")
+PT_INTERPOSE_WEAK_NAMED(pt_getutxid, pt_orig_getutxid, "getutxid")
+PT_INTERPOSE_WEAK_NAMED(pt_getutxline, pt_orig_getutxline, "getutxline")
+PT_INTERPOSE_WEAK_NAMED(pt_gethostuuid, pt_orig_gethostuuid, "gethostuuid")
+PT_INTERPOSE_WEAK_NAMED(pt_getauid, pt_orig_getauid, "getauid")
+PT_INTERPOSE_WEAK_NAMED(pt_getaudit_addr, pt_orig_getaudit_addr, "getaudit_addr")
+PT_INTERPOSE_WEAK_NAMED(pt_kevent_qos, pt_orig_kevent_qos, "kevent_qos")
+PT_INTERPOSE_WEAK_NAMED(pt_kevent_id, pt_orig_kevent_id, "kevent_id")
 PT_INTERPOSE(pt_gethostname, gethostname)
 PT_INTERPOSE(pt_getgid, getgid)
 PT_INTERPOSE(pt_getegid, getegid)
 PT_INTERPOSE(pt_getgroups, getgroups)
+PT_DLSYM_ONLY("getgroups$DARWIN_EXTSN", pt_getgroups_darwin_extsn)
+PT_INTERPOSE_WEAK_NAMED(pt_getgrouplist_2, pt_orig_getgrouplist_2, "getgrouplist_2")
+PT_INTERPOSE_WEAK_NAMED(pt_group_from_gid, pt_orig_group_from_gid, "group_from_gid")
+PT_INTERPOSE_WEAK_NAMED(pt_getpwent, pt_orig_getpwent, "getpwent")
+PT_INTERPOSE_WEAK_NAMED(pt_getgrent, pt_orig_getgrent, "getgrent")
+PT_INTERPOSE_WEAK_NAMED(pt_setgrent, pt_orig_setgrent, "setgrent")
+PT_INTERPOSE_WEAK_NAMED(pt_endgrent, pt_orig_endgrent, "endgrent")
+PT_INTERPOSE_WEAK_NAMED(pt_getpwuuid, pt_orig_getpwuuid, "getpwuuid")
+PT_INTERPOSE_WEAK_NAMED(pt_getpwuuid_r, pt_orig_getpwuuid_r, "getpwuuid_r")
+PT_INTERPOSE_WEAK_NAMED(pt_getgruuid, pt_orig_getgruuid, "getgruuid")
+PT_INTERPOSE_WEAK_NAMED(pt_getgruuid_r, pt_orig_getgruuid_r, "getgruuid_r")
+PT_INTERPOSE(pt_getrlimit, getrlimit)
 PT_INTERPOSE(pt_getpwuid, getpwuid)
 PT_INTERPOSE(pt_getpwuid_r, getpwuid_r)
 PT_INTERPOSE(pt_getpwnam, getpwnam)
@@ -1627,8 +2175,13 @@ PT_INTERPOSE(pt_getgrnam_r, getgrnam_r)
 PT_INTERPOSE_NAMED(pt_getgrouplist, pt_orig_getgrouplist, "getgrouplist")
 PT_INTERPOSE(pt_notify_register_check, notify_register_check)
 PT_INTERPOSE(pt_notify_register_dispatch, notify_register_dispatch)
+PT_INTERPOSE(pt_notify_register_signal, notify_register_signal)
+PT_INTERPOSE(pt_notify_register_mach_port, notify_register_mach_port)
+PT_INTERPOSE(pt_notify_register_file_descriptor, notify_register_file_descriptor)
 PT_INTERPOSE(pt_notify_cancel, notify_cancel)
 PT_INTERPOSE(pt_notify_get_state, notify_get_state)
 PT_INTERPOSE(pt_bootstrap_look_up, bootstrap_look_up)
+PT_INTERPOSE(pt_bootstrap_check_in, bootstrap_check_in)
+PT_INTERPOSE(pt_bootstrap_status, bootstrap_status)
 PT_INTERPOSE(pt_kevent, kevent)
 PT_INTERPOSE(pt_kevent64, kevent64)

@@ -10,6 +10,7 @@
 
 #import "PTCommon.h"
 #include <sys/event.h>
+#include <sys/resource.h>
 #include <time.h>
 #include <uuid/uuid.h>
 
@@ -28,6 +29,9 @@ typedef struct {
 _Static_assert(sizeof(pt_kevent_qos_s) == 72, "pt_kevent_qos_s ABI size mismatch");
 _Static_assert(offsetof(pt_kevent_qos_s, udata) == 16, "pt_kevent_qos_s udata offset mismatch");
 _Static_assert(offsetof(pt_kevent_qos_s, data) == 32, "pt_kevent_qos_s data offset mismatch");
+
+struct OpaqueAudioComponent;
+__attribute__((visibility("hidden"))) BOOL pt_is_hidden_audio_component(struct OpaqueAudioComponent *comp);
 
 #ifdef __cplusplus
 extern "C" {
@@ -51,6 +55,7 @@ __attribute__((visibility("hidden"))) const char *pt_get_oem_id_cstr(void);
 __attribute__((visibility("hidden"))) const char *pt_get_spoofed_ios_version_cstr(void);
 __attribute__((visibility("hidden"))) const pt_device_profile_t *pt_get_active_device_profile(void);
 __attribute__((visibility("hidden"))) const char *pt_get_reported_ios_version_override(const char **out_build);
+__attribute__((visibility("hidden"))) uint32_t pt_get_compat_version_clamp(void);
 __attribute__((visibility("hidden"))) BOOL pt_is_compat13_7_active(void);
 __attribute__((visibility("hidden"))) BOOL pt_is_availability_app_caller(const void *caller);
 __attribute__((visibility("hidden"))) bool pt_availability_version_check(uint32_t count, const pt_dyld_build_version_t versions[]);
@@ -139,10 +144,21 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_mach_thread(thread_act_t
 __attribute__((visibility("hidden"))) int pt_kevent_with_caller(int kq, const struct kevent *changelist, int nchanges, struct kevent *eventlist, int nevents, const struct timespec *timeout, const void *caller);
 __attribute__((visibility("hidden"))) int pt_kevent64_with_caller(int kq, const struct kevent64_s *changelist, int nchanges, struct kevent64_s *eventlist, int nevents, unsigned int flags, const struct timespec *timeout, const void *caller);
 __attribute__((visibility("hidden"))) int pt_kevent_qos_with_caller(int kq, const pt_kevent_qos_s *changelist, int nchanges, pt_kevent_qos_s *eventlist, int nevents, void *data_out, size_t *data_available, unsigned int flags, const void *caller);
+__attribute__((visibility("hidden"))) int pt_getrlimit_with_caller(int resource, struct rlimit *rlp, const void *caller);
+__attribute__((visibility("hidden"))) int pt_kevent_id_with_caller(uint64_t id, const pt_kevent_qos_s *changelist, int nchanges, pt_kevent_qos_s *eventlist, int nevents, void *data_out, size_t *data_available, unsigned int flags, const void *caller);
 
+__attribute__((visibility("hidden"))) BOOL pt_cstr_contains_macos_pref_leak(const char *s);
+__attribute__((visibility("hidden"))) void pt_get_effective_ios_version_and_build(const char **out_ver, const char **out_build);
+__attribute__((visibility("hidden"))) uint64_t pt_compute_spoofed_available_memory(void);
+__attribute__((visibility("hidden"))) void pt_sanitize_host_preferred_user_arch_buf(host_preferred_user_arch_data_t *info, size_t out_bytes);
 __attribute__((visibility("hidden"))) void pt_dyld_set_force_task_dyld_sanitize(BOOL active);
 __attribute__((visibility("hidden"))) BOOL pt_dyld_is_force_task_dyld_sanitize(void);
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_unregistered_macho_region(uintptr_t addr, uintptr_t size, vm_prot_t prot);
+__attribute__((visibility("hidden"))) BOOL pt_vm_region_should_hide_range(uintptr_t addr, uintptr_t size, vm_region_flavor_t flavor, const void *info, mach_msg_type_number_t infoCnt, BOOL is_recurse, const void *caller);
+__attribute__((visibility("hidden"))) kern_return_t pt_vm_region_64_with_caller(vm_map_read_t target_task, vm_address_t *address, vm_size_t *size, vm_region_flavor_t flavor, vm_region_info_t info, mach_msg_type_number_t *infoCnt, mach_port_t *object_name, const void *caller);
+__attribute__((visibility("hidden"))) kern_return_t pt_vm_region_recurse_64_with_caller(vm_map_read_t target_task, vm_address_t *address, vm_size_t *size, natural_t *nesting_depth, vm_region_recurse_info_t info, mach_msg_type_number_t *infoCnt, const void *caller);
+__attribute__((visibility("hidden"))) kern_return_t pt_mach_vm_region_with_caller(vm_map_read_t target_task, mach_vm_address_t *address, mach_vm_size_t *size, vm_region_flavor_t flavor, vm_region_info_t info, mach_msg_type_number_t *infoCnt, mach_port_t *object_name, const void *caller);
+__attribute__((visibility("hidden"))) kern_return_t pt_mach_vm_region_recurse_with_caller(vm_map_read_t target_task, mach_vm_address_t *address, mach_vm_size_t *size, natural_t *nesting_depth, vm_region_recurse_info_t info, mach_msg_type_number_t *infoCnt, const void *caller);
 __attribute__((visibility("hidden"))) void pt_sanitize_host_basic_info_buf(host_basic_info_data_t *info, size_t out_bytes);
 __attribute__((visibility("hidden"))) void pt_sanitize_host_vm_info_buf(vm_statistics_data_t *v, size_t out_bytes);
 __attribute__((visibility("hidden"))) void pt_sanitize_host_vm_info64_buf(vm_statistics64_data_t *v, size_t out_bytes, BOOL clear_swaps);
@@ -162,8 +178,11 @@ extern int pt_orig_kernel_sysctlbyname(const char *name,
 __attribute__((visibility("hidden"))) intptr_t pt_syscall_dispatch_with_caller(int number, const uintptr_t args[8], const void *caller, BOOL *out_handled);
 __attribute__((visibility("hidden"))) void pt_sanitize_legacy_user64_stat_in_place(void *ub, const void *caller);
 __attribute__((visibility("hidden"))) void pt_copy_stat64_to_legacy_user64_stat(const struct stat *src, void *dst_ub);
-__attribute__((visibility("hidden"))) bool pt_mig_prepare_trap_request(const void *req_buf, mach_msg_bits_t bits, mach_msg_size_t send_size, mach_port_t remote_port, mach_port_t local_port, int req_id, bool receiving, int32_t *out_flavor, bool *out_target_is_self);
-__attribute__((visibility("hidden"))) void pt_mig_finish_trap_reply(void *rcv_buf, size_t rcv_cap, mach_port_t rcv_name, bool sending, bool receiving, bool had_req, int req_id, int32_t req_flavor, bool target_is_self, mach_port_t reply_port, kern_return_t kr);
+__attribute__((visibility("hidden"))) bool pt_mig_prepare_trap_request(void *req_buf, mach_msg_bits_t bits, mach_msg_size_t send_size, mach_port_t remote_port, mach_port_t local_port, int req_id, bool receiving, int32_t *out_flavor, bool *out_target_is_self);
+__attribute__((visibility("hidden"))) void pt_mig_finish_trap_reply(void *rcv_buf, size_t rcv_cap, mach_port_t rcv_name, bool sending, bool receiving, bool had_req, int req_id, int32_t req_flavor, bool target_is_self, mach_port_t reply_port, kern_return_t kr, const void *caller);
+
+struct OpaqueAudioComponent;
+__attribute__((visibility("hidden"))) BOOL pt_is_hidden_audio_component(struct OpaqueAudioComponent *comp);
 
 #ifdef __cplusplus
 }

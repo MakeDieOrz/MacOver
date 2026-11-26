@@ -7,6 +7,7 @@
 #import "PTFSInternal.h"
 #import "PTDyldInternal.h"
 #import "PTNetworkInternal.h"
+#include <mach/machine.h>
 
 // Update output of sysctl for key values hw.machine, hw.product, hw.model and hw.target to match iOS output
 // This spoofs the device type to apps allowing us to report as any iOS device
@@ -34,11 +35,13 @@ static pt_sysctl_mib_entry_t s_sysctl_mibs[] = {
     { "hw.cpufamily", {0}, 0 },
     { "hw.cputype", {0}, 0 },
     { "hw.cpusubtype", {0}, 0 },
+    { "hw.cpusubfamily", {0}, 0 },
     { "hw.nperflevels", {0}, 0 },
     { "hw.perflevel0.physicalcpu", {0}, 0 },
     { "hw.perflevel0.physicalcpu_max", {0}, 0 },
     { "hw.perflevel0.logicalcpu", {0}, 0 },
     { "hw.perflevel0.logicalcpu_max", {0}, 0 },
+    { "hw.perflevel0.cpusperl2", {0}, 0 },
     { "hw.perflevel0.l1icachesize", {0}, 0 },
     { "hw.perflevel0.l1dcachesize", {0}, 0 },
     { "hw.perflevel0.l2cachesize", {0}, 0 },
@@ -47,6 +50,7 @@ static pt_sysctl_mib_entry_t s_sysctl_mibs[] = {
     { "hw.perflevel1.physicalcpu_max", {0}, 0 },
     { "hw.perflevel1.logicalcpu", {0}, 0 },
     { "hw.perflevel1.logicalcpu_max", {0}, 0 },
+    { "hw.perflevel1.cpusperl2", {0}, 0 },
     { "hw.perflevel1.l1icachesize", {0}, 0 },
     { "hw.perflevel1.l1dcachesize", {0}, 0 },
     { "hw.perflevel1.l2cachesize", {0}, 0 },
@@ -58,11 +62,21 @@ static pt_sysctl_mib_entry_t s_sysctl_mibs[] = {
     { "hw.cachesize", {0}, 0 },
     { "hw.packages", {0}, 0 },
     { "hw.use_kernelmanagerd", {0}, 0 },
+    { "hw.features.allows_security_research", {0}, 0 },
+    { "hw.ephemeral_storage", {0}, 0 },
+    { "hw.use_recovery_securityd", {0}, 0 },
     { "vm.swapusage", {0}, 0 },
     { "vm.swapfileprefix", {0}, 0 },
+    { "vm.swap_enabled", {0}, 0 },
+    { "vm.darkwake_mode", {0}, 0 },
     { "vm.compressor_mode", {0}, 0 },
+    { "vm.compressor.mode", {0}, 0 },
+    { "vm.compressor.config.swap_present", {0}, 0 },
+    { "vm.compressor.config.swap_active", {0}, 0 },
     { "kern.iossupportversion", {0}, 0 },
     { "kern.osproductversion", {0}, 0 },
+    { "kern.coredump", {0}, 0 },
+    { "kern.corefile", {0}, 0 },
     { "kern.bootargs", {0}, 0 },
     { "kern.wakereason", {0}, 0 },
     { "kern.hibernatefile", {0}, 0 },
@@ -218,14 +232,36 @@ static BOOL pt_is_hidden_sysctl_name(const char *name) {
         strcmp(name, "sysctl.proc_cputype") == 0 ||
         strcmp(name, "kern.iossupportversion") == 0 ||
         strncmp(name, "kern.hibernate", 14) == 0 ||
+        strncmp(name, "kern.hv.", 8) == 0 ||
+        strncmp(name, "kern.dtrace.", 12) == 0 ||
         strcmp(name, "kern.singleuser") == 0 ||
         strcmp(name, "kern.safeboot") == 0 ||
         strcmp(name, "kern.willshutdown") == 0 ||
         strcmp(name, "kern.waketime") == 0 ||
         strcmp(name, "kern.sleeptime") == 0 ||
+        strcmp(name, "kern.darkboot") == 0 ||
+        strcmp(name, "kern.minimalboot") == 0 ||
+        strcmp(name, "kern.aotmode") == 0 ||
+        strcmp(name, "kern.aotmodebits") == 0 ||
+        strcmp(name, "kern.lowpowerwake") == 0 ||
+        strcmp(name, "kern.bootsignature") == 0 ||
+        strcmp(name, "kern.system_version_compat") == 0 ||
+        strcmp(name, "kern.osproductversioncompat") == 0 ||
+        strcmp(name, "kern.drivercorefile") == 0 ||
+        strcmp(name, "kern.kdp_corefile") == 0 ||
         strcmp(name, "hw.use_kernelmanagerd") == 0 ||
+        strcmp(name, "hw.features.allows_security_research") == 0 ||
+        strcmp(name, "hw.ephemeral_storage") == 0 ||
+        strcmp(name, "hw.use_recovery_securityd") == 0 ||
         strcmp(name, "vm.swapusage") == 0 ||
+        strcmp(name, "vm.darkwake_mode") == 0 ||
+        strncmp(name, "vm.compressor.swapper.", 22) == 0 ||
+        strncmp(name, "vm.compressor_swapout", 21) == 0 ||
+        strncmp(name, "vm.compressor_swapper_", 22) == 0 ||
         strncmp(name, "security.mac.sandbox.", 21) == 0 ||
+        strncmp(name, "security.mac.asp.", 17) == 0 ||
+        strncmp(name, "security.mac.endpointsecurity.", 30) == 0 ||
+        strncmp(name, "security.mac.qtn.", 17) == 0 ||
         (strncmp(name, "security.mac.amfi.", 18) == 0 &&
          strcmp(name, "security.mac.amfi.developer_mode_status") != 0)) {
         return YES;
@@ -235,7 +271,7 @@ static BOOL pt_is_hidden_sysctl_name(const char *name) {
         return YES;
     }
     if (pt_is_compat13_7_active()) {
-        if (strncmp(name, "hw.optional.arm.FEAT_", 21) == 0 ||
+        if (strncmp(name, "hw.optional.arm.", 16) == 0 ||
             strcmp(name, "kern.osproductversioncompat") == 0 ||
             strcmp(name, "hw.nperflevels") == 0 ||
             strncmp(name, "hw.perflevel0.", 14) == 0 ||
@@ -246,25 +282,25 @@ static BOOL pt_is_hidden_sysctl_name(const char *name) {
     return NO;
 }
 
-static BOOL pt_handle_sysctl_name(const char *name,
-                                  void *oldp,
-                                  size_t *oldlenp,
-                                  void *newp,
-                                  size_t newlen,
-                                  const void *caller,
-                                  int *inout_is_sys_caller,
-                                  int *out_ret) {
-    if (name == NULL || out_ret == NULL) {
-        return NO;
+static int pt_get_spoofed_cpusubfamily(const pt_device_profile_t *profile) {
+    if (profile != NULL && profile->is_ipad &&
+        (strcmp(profile->model, "iPad13,8") == 0 ||
+         strcmp(profile->model, "iPad14,5") == 0 ||
+         strcmp(profile->model, "iPad16,6") == 0 ||
+         strcmp(profile->model, "iPad17,3") == 0)) {
+        return CPUSUBFAMILY_ARM_HG;
     }
-    if (pt_is_hidden_sysctl_name(name)) {
-        if (!pt_is_bypass_enabled() || pt_sysctl_resolve_is_sys(caller, inout_is_sys_caller)) {
-            return NO;
-        }
-        errno = ENOENT;
-        *out_ret = -1;
-        return YES;
-    }
+    return CPUSUBFAMILY_ARM_HP;
+}
+
+static BOOL pt_handle_sysctl_name_inner(const char *name,
+                                        void *oldp,
+                                        size_t *oldlenp,
+                                        void *newp,
+                                        size_t newlen,
+                                        const void *caller,
+                                        int *inout_is_sys_caller,
+                                        int *out_ret) {
     char c0 = name[0];
     if (c0 != 'h' && c0 != 'k' && c0 != 'm' && c0 != 's' && c0 != 'v') {
         return NO;
@@ -277,7 +313,36 @@ static BOOL pt_handle_sysctl_name(const char *name,
             *out_ret = pt_write_sysctl_string("/private/var/vm/swapfile", oldp, oldlenp);
             return YES;
         }
-        if (strcmp(name, "vm.compressor_mode") == 0) {
+        if (strcmp(name, "vm.swap_enabled") == 0 ||
+            strcmp(name, "vm.compressor.config.swap_present") == 0 ||
+            strcmp(name, "vm.compressor.config.swap_active") == 0 ||
+            strncmp(name, "vm.compressor.segment.swapped", 29) == 0) {
+            if (!pt_is_bypass_enabled() || pt_sysctl_resolve_is_sys(caller, inout_is_sys_caller)) {
+                return NO;
+            }
+            *out_ret = pt_write_sysctl_int(0, oldp, oldlenp);
+            return YES;
+        }
+        if (strncmp(name, "vm.compressor.compactor.swapout", 31) == 0) {
+            if (!pt_is_bypass_enabled() || pt_sysctl_resolve_is_sys(caller, inout_is_sys_caller)) {
+                return NO;
+            }
+            *out_ret = pt_write_sysctl_uint64(oldp, oldlenp, (newlen > 0) ? newp : NULL, 0ULL);
+            return YES;
+        }
+        if (strncmp(name, "vm.compressor.pages_swapped", 27) == 0 ||
+            strncmp(name, "vm.compressor.pages_swap", 24) == 0) {
+            if (!pt_is_bypass_enabled() || pt_sysctl_resolve_is_sys(caller, inout_is_sys_caller)) {
+                return NO;
+            }
+            if (oldp != NULL && oldlenp != NULL && *oldlenp == sizeof(int)) {
+                *out_ret = pt_write_sysctl_int(0, oldp, oldlenp);
+            } else {
+                *out_ret = pt_write_sysctl_uint64(oldp, oldlenp, (newlen > 0) ? newp : NULL, 0ULL);
+            }
+            return YES;
+        }
+        if (strcmp(name, "vm.compressor_mode") == 0 || strcmp(name, "vm.compressor.mode") == 0) {
             if (!pt_is_bypass_enabled() || pt_sysctl_resolve_is_sys(caller, inout_is_sys_caller)) {
                 return NO;
             }
@@ -307,7 +372,7 @@ static BOOL pt_handle_sysctl_name(const char *name,
             *out_ret = -1;
             return YES;
         }
-        if (strncmp(sub, "optional.arm.FEAT_", 18) == 0 && pt_is_compat13_7_active()) {
+        if (strncmp(sub, "optional.arm.", 13) == 0 && pt_is_compat13_7_active()) {
             errno = ENOENT;
             *out_ret = -1;
             return YES;
@@ -386,6 +451,10 @@ static BOOL pt_handle_sysctl_name(const char *name,
             *out_ret = pt_write_sysctl_int((int)CPU_SUBTYPE_ARM64_ALL, oldp, oldlenp);
             return YES;
         }
+        if (strcmp(sub, "cpusubfamily") == 0) {
+            *out_ret = pt_write_sysctl_int(pt_get_spoofed_cpusubfamily(profile), oldp, oldlenp);
+            return YES;
+        }
         if (strcmp(sub, "pagesize") == 0) {
             *out_ret = pt_write_sysctl_int(16384, oldp, oldlenp);
             return YES;
@@ -399,7 +468,8 @@ static BOOL pt_handle_sysctl_name(const char *name,
             if (strcmp(psub, "physicalcpu") == 0 ||
                 strcmp(psub, "physicalcpu_max") == 0 ||
                 strcmp(psub, "logicalcpu") == 0 ||
-                strcmp(psub, "logicalcpu_max") == 0) {
+                strcmp(psub, "logicalcpu_max") == 0 ||
+                strcmp(psub, "cpusperl2") == 0) {
                 *out_ret = pt_write_sysctl_int((int)profile->p_cores, oldp, oldlenp);
                 return YES;
             }
@@ -434,7 +504,8 @@ static BOOL pt_handle_sysctl_name(const char *name,
             if (strcmp(psub, "physicalcpu") == 0 ||
                 strcmp(psub, "physicalcpu_max") == 0 ||
                 strcmp(psub, "logicalcpu") == 0 ||
-                strcmp(psub, "logicalcpu_max") == 0) {
+                strcmp(psub, "logicalcpu_max") == 0 ||
+                strcmp(psub, "cpusperl2") == 0) {
                 *out_ret = pt_write_sysctl_int((int)profile->e_cores, oldp, oldlenp);
                 return YES;
             }
@@ -500,6 +571,14 @@ static BOOL pt_handle_sysctl_name(const char *name,
         }
         if (strcmp(sub, "osrevision") == 0) {
             *out_ret = pt_write_sysctl_int(199506, oldp, oldlenp);
+            return YES;
+        }
+        if (strcmp(sub, "coredump") == 0) {
+            *out_ret = pt_write_sysctl_int(0, oldp, oldlenp);
+            return YES;
+        }
+        if (strcmp(sub, "corefile") == 0) {
+            *out_ret = pt_write_sysctl_string("", oldp, oldlenp);
             return YES;
         }
         if (strcmp(sub, "iossupportversion") == 0 ||
@@ -574,6 +653,47 @@ static BOOL pt_handle_sysctl_name(const char *name,
         return YES;
     }
     return NO;
+}
+
+static BOOL pt_handle_sysctl_name(const char *name,
+                                  void *oldp,
+                                  size_t *oldlenp,
+                                  void *newp,
+                                  size_t newlen,
+                                  const void *caller,
+                                  int *inout_is_sys_caller,
+                                  int *out_ret) {
+    if (name == NULL || out_ret == NULL) {
+        return NO;
+    }
+    if (pt_is_hidden_sysctl_name(name)) {
+        if (!pt_is_bypass_enabled() || pt_sysctl_resolve_is_sys(caller, inout_is_sys_caller)) {
+            return NO;
+        }
+        errno = ENOENT;
+        *out_ret = -1;
+        return YES;
+    }
+    if (newp != NULL && newlen > 0) {
+        size_t probe_len = 0;
+        int probe_ret = 0;
+        int saved_errno = errno;
+        BOOL matched = pt_handle_sysctl_name_inner(name, NULL, &probe_len, NULL, 0,
+                                                   caller, inout_is_sys_caller, &probe_ret);
+        if (matched) {
+            if (probe_ret == -1 && errno == ENOENT) {
+                *out_ret = -1;
+                return YES;
+            }
+            errno = EPERM;
+            *out_ret = -1;
+            return YES;
+        }
+        errno = saved_errno;
+        return NO;
+    }
+    return pt_handle_sysctl_name_inner(name, oldp, oldlenp, newp, newlen,
+                                       caller, inout_is_sys_caller, out_ret);
 }
 
 static int pt_sysctlnametomib(const char *sname, int *mibp, size_t *sizep) {
@@ -1298,6 +1418,68 @@ static void pt_sanitize_kinfo_proc(struct kinfo_proc *info, BOOL is_sys) {
     info->kp_eproc.e_ucred.cr_ngroups = (short)filtered_n;
 }
 
+#define PT_OID_NAME_CACHE_CAP 256U
+
+typedef struct {
+    int oid[CTL_MAXNAME];
+    u_int len;
+    char name[128];
+    bool valid;
+} pt_oid_name_cache_entry_t;
+
+static os_unfair_lock s_oid_name_cache_lock = OS_UNFAIR_LOCK_INIT;
+static pt_oid_name_cache_entry_t s_oid_name_cache[PT_OID_NAME_CACHE_CAP];
+static uint32_t s_oid_name_cache_next = 0;
+
+static BOOL pt_reverse_resolve_oid_name(const int *name, u_int types, char *out_name, size_t out_cap) {
+    if (name == NULL || types == 0 || types > CTL_MAXNAME || out_name == NULL || out_cap == 0) {
+        return NO;
+    }
+    os_unfair_lock_lock(&s_oid_name_cache_lock);
+    for (uint32_t i = 0; i < PT_OID_NAME_CACHE_CAP; i++) {
+        const pt_oid_name_cache_entry_t *e = &s_oid_name_cache[i];
+        if (e->valid && e->len == types && memcmp(e->oid, name, (size_t)types * sizeof(int)) == 0) {
+            BOOL ok = (e->name[0] != '\0');
+            if (ok) {
+                strlcpy(out_name, e->name, out_cap);
+            }
+            os_unfair_lock_unlock(&s_oid_name_cache_lock);
+            return ok;
+        }
+    }
+    os_unfair_lock_unlock(&s_oid_name_cache_lock);
+
+    int q[CTL_MAXNAME + 2];
+    q[0] = 0;
+    q[1] = 1;
+    memcpy(q + 2, name, (size_t)types * sizeof(int));
+    char kbuf[256];
+    size_t klen = sizeof(kbuf) - 1U;
+    int saved_errno = errno;
+    int kr = pt_orig_kernel_sysctl(q, 2U + types, kbuf, &klen, NULL, 0);
+    errno = saved_errno;
+    if (kr == 0 && klen > 0 && klen < sizeof(kbuf)) {
+        kbuf[klen] = '\0';
+    } else {
+        kbuf[0] = '\0';
+    }
+
+    os_unfair_lock_lock(&s_oid_name_cache_lock);
+    uint32_t slot = s_oid_name_cache_next % PT_OID_NAME_CACHE_CAP;
+    s_oid_name_cache_next = (s_oid_name_cache_next + 1U) % PT_OID_NAME_CACHE_CAP;
+    memcpy(s_oid_name_cache[slot].oid, name, (size_t)types * sizeof(int));
+    s_oid_name_cache[slot].len = types;
+    strlcpy(s_oid_name_cache[slot].name, kbuf, sizeof(s_oid_name_cache[slot].name));
+    s_oid_name_cache[slot].valid = true;
+    os_unfair_lock_unlock(&s_oid_name_cache_lock);
+
+    if (kbuf[0] != '\0') {
+        strlcpy(out_name, kbuf, out_cap);
+        return YES;
+    }
+    return NO;
+}
+
 __attribute__((visibility("hidden")))
 int pt_sysctl_with_caller(int *name,
                           u_int types,
@@ -1339,7 +1521,7 @@ int pt_sysctl_with_caller(int *name,
                 int cur_q[CTL_MAXNAME + 2];
                 memcpy(cur_q, name, (size_t)types * sizeof(int));
                 u_int cur_qlen = types;
-                for (int skip = 0; skip < 128; skip++) {
+                for (int skip = 0; skip < 2048; skip++) {
                     int next_oid[CTL_MAXNAME];
                     size_t next_sz = sizeof(next_oid);
                     int r = pt_orig_kernel_sysctl(cur_q, cur_qlen, next_oid, &next_sz, NULL, 0);
@@ -1414,22 +1596,39 @@ int pt_sysctl_with_caller(int *name,
             if (pt_handle_sysctl_name(mapped_name, buf, size, arg0, arg1, ret_addr, &is_sys_caller, &sret)) {
                 return sret;
             }
+        } else if (name[0] != 0 &&
+                   name[0] != CTL_NET &&
+                   !(name[0] == CTL_KERN && types >= 2 &&
+                     (name[1] == KERN_PROC || name[1] == KERN_PROCARGS || name[1] == KERN_PROCARGS2)) &&
+                   types <= CTL_MAXNAME &&
+                   pt_is_bypass_enabled() &&
+                   !pt_sysctl_resolve_is_sys(ret_addr, &is_sys_caller)) {
+            char resolved_name[128];
+            if (pt_reverse_resolve_oid_name(name, types, resolved_name, sizeof(resolved_name))) {
+                int sret = 0;
+                if (pt_handle_sysctl_name(resolved_name, buf, size, arg0, arg1, ret_addr, &is_sys_caller, &sret)) {
+                    return sret;
+                }
+            }
         }
         if ((name[0] == CTL_KERN || name[0] == CTL_HW) && pt_is_bypass_enabled()) {
             if (name[0] == CTL_KERN) {
                 switch (name[1]) {
                     case KERN_OSTYPE:
                         if (!pt_sysctl_resolve_is_sys(ret_addr, &is_sys_caller)) {
+                            if (arg0 != NULL && arg1 > 0) { errno = EPERM; return -1; }
                             return pt_write_sysctl_string("Darwin", buf, size);
                         }
                         break;
                     case KERN_OSRELEASE:
                         if (!pt_sysctl_resolve_is_sys(ret_addr, &is_sys_caller)) {
+                            if (arg0 != NULL && arg1 > 0) { errno = EPERM; return -1; }
                             return pt_write_sysctl_string(pt_get_effective_kern_release(), buf, size);
                         }
                         break;
                     case KERN_OSVERSION:
                         if (!pt_sysctl_resolve_is_sys(ret_addr, &is_sys_caller)) {
+                            if (arg0 != NULL && arg1 > 0) { errno = EPERM; return -1; }
                             pt_ensure_host_kernel_info();
                             const char *ov_build = NULL;
                             (void)pt_get_reported_ios_version_override(&ov_build);
@@ -1438,6 +1637,7 @@ int pt_sysctl_with_caller(int *name,
                         break;
                     case KERN_VERSION:
                         if (!pt_sysctl_resolve_is_sys(ret_addr, &is_sys_caller)) {
+                            if (arg0 != NULL && arg1 > 0) { errno = EPERM; return -1; }
                             char kver[256];
                             pt_format_kernel_version(pt_get_active_device_profile(), kver, sizeof(kver));
                             return pt_write_sysctl_string(kver, buf, size);
@@ -1445,11 +1645,13 @@ int pt_sysctl_with_caller(int *name,
                         break;
                     case KERN_HOSTNAME:
                         if (!pt_sysctl_resolve_is_sys(ret_addr, &is_sys_caller)) {
+                            if (arg0 != NULL && arg1 > 0) { errno = EPERM; return -1; }
                             return pt_write_sysctl_string(pt_get_active_device_profile()->is_ipad ? "iPad" : "iPhone", buf, size);
                         }
                         break;
                     case KERN_OSREV:
                         if (!pt_sysctl_resolve_is_sys(ret_addr, &is_sys_caller)) {
+                            if (arg0 != NULL && arg1 > 0) { errno = EPERM; return -1; }
                             return pt_write_sysctl_int(199506, buf, size);
                         }
                         break;
@@ -1461,28 +1663,33 @@ int pt_sysctl_with_caller(int *name,
                     case HW_MACHINE:
                     case HW_PRODUCT:
                         if (!pt_sysctl_resolve_is_sys(ret_addr, &is_sys_caller)) {
+                            if (arg0 != NULL && arg1 > 0) { errno = EPERM; return -1; }
                             return pt_write_sysctl_string(DEVICE_MODEL, buf, size);
                         }
                         break;
                     case HW_MODEL:
                     case HW_TARGET:
                         if (!pt_sysctl_resolve_is_sys(ret_addr, &is_sys_caller)) {
+                            if (arg0 != NULL && arg1 > 0) { errno = EPERM; return -1; }
                             return pt_write_sysctl_string(OEM_ID, buf, size);
                         }
                         break;
                     case HW_NCPU:
                     case HW_AVAILCPU:
                         if (!pt_sysctl_resolve_is_sys(ret_addr, &is_sys_caller)) {
+                            if (arg0 != NULL && arg1 > 0) { errno = EPERM; return -1; }
                             return pt_write_sysctl_int((int)pt_get_active_device_profile()->cores, buf, size);
                         }
                         break;
                     case HW_MEMSIZE:
                         if (!pt_sysctl_resolve_is_sys(ret_addr, &is_sys_caller)) {
-                            return pt_write_sysctl_uint64(buf, size, (arg1 > 0) ? arg0 : NULL, pt_get_active_device_profile()->ram_bytes);
+                            if (arg0 != NULL && arg1 > 0) { errno = EPERM; return -1; }
+                            return pt_write_sysctl_uint64(buf, size, NULL, pt_get_active_device_profile()->ram_bytes);
                         }
                         break;
                     case HW_PHYSMEM:
                         if (!pt_sysctl_resolve_is_sys(ret_addr, &is_sys_caller)) {
+                            if (arg0 != NULL && arg1 > 0) { errno = EPERM; return -1; }
                             uint64_t ram = pt_get_active_device_profile()->ram_bytes;
                             uint32_t phys32 = (uint32_t)(ram > 0x80000000ULL ? 0x80000000U : ram);
                             return pt_write_sysctl_int((int)phys32, buf, size);
@@ -1490,6 +1697,7 @@ int pt_sysctl_with_caller(int *name,
                         break;
                     case HW_PAGESIZE:
                         if (!pt_sysctl_resolve_is_sys(ret_addr, &is_sys_caller)) {
+                            if (arg0 != NULL && arg1 > 0) { errno = EPERM; return -1; }
                             return pt_write_sysctl_int(16384, buf, size);
                         }
                         break;
@@ -1676,6 +1884,20 @@ const char *pt_get_spoofed_ios_version_cstr(void) {
 }
 
 __attribute__((visibility("hidden")))
+void pt_get_effective_ios_version_and_build(const char **out_ver, const char **out_build) {
+    const char *ov_build = NULL;
+    const char *ov_ver = pt_get_reported_ios_version_override(&ov_build);
+    if (ov_ver != NULL && ov_ver[0] != '\0' && ov_build != NULL && ov_build[0] != '\0') {
+        if (out_ver != NULL) *out_ver = ov_ver;
+        if (out_build != NULL) *out_build = ov_build;
+        return;
+    }
+    pt_ensure_host_kernel_info();
+    if (out_ver != NULL) *out_ver = s_spoofed_ios_version;
+    if (out_build != NULL) *out_build = s_spoofed_osversion;
+}
+
+__attribute__((visibility("hidden")))
 void pt_sanitize_system_version_dict(NSMutableDictionary *dict) {
     if (dict == nil) {
         return;
@@ -1808,25 +2030,6 @@ static CFDictionaryRef pt_CFCopySystemVersionDictionary(void) {
     return orig;
 }
 
-static NSMutableDictionary *pt_sanitize_code_resources_subdict(NSDictionary *sub) {
-    NSMutableDictionary *clean = nil;
-    for (id key in sub) {
-        if ([key isKindOfClass:[NSString class]]) {
-            NSString *k = (NSString *)key;
-            if ([k containsString:@"PlayTools"] ||
-                [k containsString:@"AKInterface"] ||
-                [k containsString:@"Playtools.strings"] ||
-                [k containsString:@"UserPlugins"]) {
-                if (clean == nil) {
-                    clean = [sub mutableCopy];
-                }
-                [clean removeObjectForKey:key];
-            }
-        }
-    }
-    return clean;
-}
-
 static NSMutableDictionary *pt_maybe_sanitize_info_plist_dict(NSDictionary *dict) {
     if (!pt_is_info_plist_dict(dict) || !pt_info_dict_needs_sanitize(dict)) {
         return nil;
@@ -1839,9 +2042,12 @@ static CFPropertyListRef pt_CFPropertyListCreateWithData(CFAllocatorRef allocato
     if (plist != NULL && CFGetTypeID(plist) == CFDictionaryGetTypeID()) {
         NSDictionary *dict = (__bridge NSDictionary *)plist;
         BOOL isSysVer = pt_is_system_version_plist_dict(dict);
-        BOOL isCodeRes = ([dict[@"files"] isKindOfClass:[NSDictionary class]] ||
-                          [dict[@"files2"] isKindOfClass:[NSDictionary class]]);
-        BOOL isInfoPlist = (dict[@"CFBundleIdentifier"] != nil || dict[@"CFBundleExecutable"] != nil);
+        BOOL isInfoPlist = (!isSysVer && (dict[@"CFBundleIdentifier"] != nil || dict[@"CFBundleExecutable"] != nil));
+        BOOL isCodeRes = (!isSysVer && !isInfoPlist &&
+                          ([dict[@"files"] isKindOfClass:[NSDictionary class]] ||
+                           [dict[@"files2"] isKindOfClass:[NSDictionary class]] ||
+                           [dict[@"rules"] isKindOfClass:[NSDictionary class]] ||
+                           [dict[@"rules2"] isKindOfClass:[NSDictionary class]]));
         if ((isSysVer || isCodeRes || isInfoPlist) &&
             pt_is_bypass_enabled() &&
             !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
@@ -1853,12 +2059,8 @@ static CFPropertyListRef pt_CFPropertyListCreateWithData(CFAllocatorRef allocato
                 return (__bridge_retained CFPropertyListRef)(immutable ? [modified copy] : modified);
             }
             if (isCodeRes) {
-                NSMutableDictionary *cleanFiles = [dict[@"files"] isKindOfClass:[NSDictionary class]] ? pt_sanitize_code_resources_subdict(dict[@"files"]) : nil;
-                NSMutableDictionary *cleanFiles2 = [dict[@"files2"] isKindOfClass:[NSDictionary class]] ? pt_sanitize_code_resources_subdict(dict[@"files2"]) : nil;
-                if (cleanFiles != nil || cleanFiles2 != nil) {
-                    NSMutableDictionary *modified = [dict mutableCopy];
-                    if (cleanFiles != nil) modified[@"files"] = immutable ? [cleanFiles copy] : cleanFiles;
-                    if (cleanFiles2 != nil) modified[@"files2"] = immutable ? [cleanFiles2 copy] : cleanFiles2;
+                NSMutableDictionary *modified = pt_sanitize_code_resources_dict(dict, !immutable);
+                if (modified != nil) {
                     CFRelease(plist);
                     return (__bridge_retained CFPropertyListRef)(immutable ? [modified copy] : modified);
                 }

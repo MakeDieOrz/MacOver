@@ -513,9 +513,7 @@ static CFURLRef pt_CFCopyHomeDirectoryURLForUser(CFStringRef uName) {
         const char *vh = pt_get_virtual_home_cstr();
         if (vh != NULL) {
             NSString *uStr = (__bridge NSString *)uName;
-            if (uStr == nil ||
-                [uStr isEqualToString:@"mobile"] ||
-                [uStr isEqualToString:NSUserName()]) {
+            if (uStr == nil || [uStr isEqualToString:@"mobile"]) {
                 return CFURLCreateFromFileSystemRepresentation(kCFAllocatorDefault,
                                                                (const UInt8 *)vh,
                                                                (CFIndex)strlen(vh),
@@ -548,9 +546,7 @@ static NSString *pt_NSHomeDirectoryForUser(NSString *userName) {
     if (!pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         const char *vh = pt_get_virtual_home_cstr();
         if (vh != NULL) {
-            if (userName == nil ||
-                [userName isEqualToString:@"mobile"] ||
-                [userName isEqualToString:NSUserName()]) {
+            if (userName == nil || [userName isEqualToString:@"mobile"]) {
                 return [NSString stringWithUTF8String:vh];
             }
             return nil;
@@ -623,7 +619,9 @@ __attribute__((visibility("hidden"))) CFURLRef pt_resolve_cfbundle_input_url(CFU
     const char *orig_path = (const char *)raw;
     if (pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(caller) &&
-        (pt_is_hidden_path(orig_path, caller) || pt_is_hidden_dyld_image_name(orig_path))) {
+        (pt_is_hidden_path(orig_path, caller) ||
+         pt_is_hidden_dyld_image_name(orig_path) ||
+         pt_is_post13_7_hidden_framework_path(orig_path))) {
         if (out_blocked != NULL) {
             *out_blocked = YES;
         }
@@ -975,6 +973,47 @@ __attribute__((visibility("hidden"))) BOOL pt_info_dict_needs_sanitize(NSDiction
         if ([dtSdkBuild isKindOfClass:[NSString class]] && ![(NSString *)dtSdkBuild isEqualToString:@"17H35"]) {
             return YES;
         }
+        id dtPlatBuild = dict[@"DTPlatformBuild"];
+        if ([dtPlatBuild isKindOfClass:[NSString class]] && ![(NSString *)dtPlatBuild isEqualToString:@"17H35"]) {
+            return YES;
+        }
+        id dtXcode = dict[@"DTXcode"];
+        if ([dtXcode isKindOfClass:[NSString class]] && ![(NSString *)dtXcode isEqualToString:@"1170"]) {
+            return YES;
+        }
+        id dtXcodeBuild = dict[@"DTXcodeBuild"];
+        if ([dtXcodeBuild isKindOfClass:[NSString class]] && ![(NSString *)dtXcodeBuild isEqualToString:@"11E801a"]) {
+            return YES;
+        }
+        id buildOs = dict[@"BuildMachineOSBuild"];
+        if ([buildOs isKindOfClass:[NSString class]] && ![(NSString *)buildOs isEqualToString:@"19G2021"]) {
+            return YES;
+        }
+    } else if (isApple) {
+        pt_ensure_host_kernel_info();
+        const char *ovBuild = NULL;
+        const char *ovVer = pt_get_reported_ios_version_override(&ovBuild);
+        const char *effVer = (ovVer != NULL && ovVer[0] != '\0') ? ovVer : s_spoofed_ios_version;
+        const char *effBuild = (ovBuild != NULL && ovBuild[0] != '\0') ? ovBuild : s_spoofed_osversion;
+        if (effVer != NULL && effVer[0] != '\0' && [dict[@"DTPlatformVersion"] isKindOfClass:[NSString class]]) {
+            NSString *expVer = [NSString stringWithUTF8String:effVer];
+            if (expVer != nil && ![(NSString *)dict[@"DTPlatformVersion"] isEqualToString:expVer]) {
+                return YES;
+            }
+        }
+        if (effBuild != NULL && effBuild[0] != '\0') {
+            NSString *expBuild = [NSString stringWithUTF8String:effBuild];
+            if (expBuild != nil) {
+                if ([dict[@"DTSDKBuild"] isKindOfClass:[NSString class]] &&
+                    ![(NSString *)dict[@"DTSDKBuild"] isEqualToString:expBuild]) {
+                    return YES;
+                }
+                if ([dict[@"DTPlatformBuild"] isKindOfClass:[NSString class]] &&
+                    ![(NSString *)dict[@"DTPlatformBuild"] isEqualToString:expBuild]) {
+                    return YES;
+                }
+            }
+        }
     }
     NSString *targetVer = pt_compat13_framework_bundle_version(bidStr);
     if (targetVer != nil &&
@@ -1045,6 +1084,41 @@ __attribute__((visibility("hidden"))) NSMutableDictionary *pt_build_sanitized_mu
         if ([m[@"DTSDKBuild"] isKindOfClass:[NSString class]]) {
             m[@"DTSDKBuild"] = @"17H35";
         }
+        if ([m[@"DTPlatformBuild"] isKindOfClass:[NSString class]]) {
+            m[@"DTPlatformBuild"] = @"17H35";
+        }
+        if ([m[@"DTXcode"] isKindOfClass:[NSString class]]) {
+            m[@"DTXcode"] = @"1170";
+        }
+        if ([m[@"DTXcodeBuild"] isKindOfClass:[NSString class]]) {
+            m[@"DTXcodeBuild"] = @"11E801a";
+        }
+        if ([m[@"BuildMachineOSBuild"] isKindOfClass:[NSString class]]) {
+            m[@"BuildMachineOSBuild"] = @"19G2021";
+        }
+    } else if (isApple) {
+        pt_ensure_host_kernel_info();
+        const char *ovBuild = NULL;
+        const char *ovVer = pt_get_reported_ios_version_override(&ovBuild);
+        const char *effVer = (ovVer != NULL && ovVer[0] != '\0') ? ovVer : s_spoofed_ios_version;
+        const char *effBuild = (ovBuild != NULL && ovBuild[0] != '\0') ? ovBuild : s_spoofed_osversion;
+        if (effVer != NULL && effVer[0] != '\0' && [m[@"DTPlatformVersion"] isKindOfClass:[NSString class]]) {
+            NSString *expVer = [NSString stringWithUTF8String:effVer];
+            if (expVer != nil) {
+                m[@"DTPlatformVersion"] = expVer;
+            }
+        }
+        if (effBuild != NULL && effBuild[0] != '\0') {
+            NSString *expBuild = [NSString stringWithUTF8String:effBuild];
+            if (expBuild != nil) {
+                if ([m[@"DTSDKBuild"] isKindOfClass:[NSString class]]) {
+                    m[@"DTSDKBuild"] = expBuild;
+                }
+                if ([m[@"DTPlatformBuild"] isKindOfClass:[NSString class]]) {
+                    m[@"DTPlatformBuild"] = expBuild;
+                }
+            }
+        }
     }
     NSString *targetVer = pt_compat13_framework_bundle_version(bidStr);
     if (targetVer != nil && [m[@"CFBundleVersion"] isKindOfClass:[NSString class]]) {
@@ -1090,7 +1164,8 @@ static BOOL pt_cfstr_to_cstr(CFStringRef s, char *buf, size_t cap, const char **
     return NO;
 }
 
-static BOOL pt_cstr_contains_macos_pref_leak(const char *s) {
+__attribute__((visibility("hidden")))
+BOOL pt_cstr_contains_macos_pref_leak(const char *s) {
     if (s == NULL || s[0] == '\0') {
         return NO;
     }
@@ -1348,6 +1423,61 @@ static CFDictionaryRef pt_CFPreferencesCopyMultiple(CFArrayRef keysToFetch,
     return (CFDictionaryRef)pt_sanitize_cfpref_value_retained(dict, 0);
 }
 
+static Boolean pt_CFPreferencesAppValueIsForced(CFStringRef key, CFStringRef applicationID) {
+    if (key == NULL) {
+        return false;
+    }
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        char kbuf[256];
+        const char *kstr = NULL;
+        if (pt_cfstr_to_cstr(key, kbuf, sizeof(kbuf), &kstr) && pt_is_hidden_macos_pref_key(kstr)) {
+            return false;
+        }
+    }
+    return CFPreferencesAppValueIsForced(key, applicationID);
+}
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+static CFArrayRef pt_CFPreferencesCopyApplicationList(CFStringRef userName,
+                                                      CFStringRef hostName) CF_RETURNS_RETAINED {
+    CFArrayRef list = CFPreferencesCopyApplicationList(userName, hostName);
+    if (list == NULL ||
+        !pt_is_bypass_enabled() ||
+        pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return list;
+    }
+    char mainBidBuf[256];
+    mainBidBuf[0] = '\0';
+    (void)pt_read_main_bundle_id_early(mainBidBuf, sizeof(mainBidBuf));
+    CFIndex n = CFArrayGetCount(list);
+    CFMutableArrayRef out = CFArrayCreateMutable(kCFAllocatorDefault, n, &kCFTypeArrayCallBacks);
+    if (out == NULL) {
+        return list;
+    }
+    for (CFIndex i = 0; i < n; i++) {
+        CFTypeRef item = CFArrayGetValueAtIndex(list, i);
+        if (item == NULL || CFGetTypeID(item) != CFStringGetTypeID()) {
+            continue;
+        }
+        char dbuf[256];
+        const char *dstr = NULL;
+        if (!pt_cfstr_to_cstr((CFStringRef)item, dbuf, sizeof(dbuf), &dstr) || dstr == NULL) {
+            continue;
+        }
+        BOOL keep = (strcmp(dstr, "Apple Global Domain") == 0 ||
+                     strcmp(dstr, "NSGlobalDomain") == 0 ||
+                     (mainBidBuf[0] != '\0' && strcmp(dstr, mainBidBuf) == 0));
+        if (keep) {
+            CFArrayAppendValue(out, item);
+        }
+    }
+    CFRelease(list);
+    return out;
+}
+#pragma clang diagnostic pop
+
 __attribute__((visibility("hidden"))) NSDictionary *pt_build_sanitized_info_dict(NSDictionary *dict) {
     NSMutableDictionary *m = pt_build_sanitized_mutable_info_dict(dict);
     if (m == nil) {
@@ -1432,7 +1562,7 @@ static CFDictionaryRef pt_sanitize_info_dict_cached_get(CFDictionaryRef rawDict,
             os_unfair_lock_unlock(&s_bundle_info_cache_lock);
             return race;
         }
-        if (CFDictionaryGetCount(s_bundle_info_cache) < 256) {
+        if (CFDictionaryGetCount(s_bundle_info_cache) < 2048) {
             CFDictionarySetValue(s_bundle_info_cache, rawDict, cleanRef);
             CFDictionaryRef kept = (CFDictionaryRef)CFDictionaryGetValue(s_bundle_info_cache, rawDict);
             os_unfair_lock_unlock(&s_bundle_info_cache_lock);
@@ -1440,7 +1570,9 @@ static CFDictionaryRef pt_sanitize_info_dict_cached_get(CFDictionaryRef rawDict,
         }
     }
     os_unfair_lock_unlock(&s_bundle_info_cache_lock);
-    return rawDict;
+    // Keep clean alive for the current autorelease pool instead of failing open or evicting live entries.
+    (void)[clean self];
+    return cleanRef;
 }
 
 static CFBundleRef pt_CFBundleCreate(CFAllocatorRef allocator, CFURLRef bundleURL) {
@@ -1453,6 +1585,13 @@ static CFBundleRef pt_CFBundleCreate(CFAllocatorRef allocator, CFURLRef bundleUR
     CFBundleRef bundle = CFBundleCreate(allocator, resolvedURL != NULL ? resolvedURL : bundleURL);
     if (resolvedURL != NULL) {
         CFRelease(resolvedURL);
+    }
+    if (bundle != NULL &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(caller) &&
+        pt_bundle_is_hidden(bundle, caller)) {
+        CFRelease(bundle);
+        return NULL;
     }
     return bundle;
 }
@@ -2018,6 +2157,11 @@ PT_INTERPOSE(pt_CFPreferencesCopyValue, CFPreferencesCopyValue)
 PT_INTERPOSE(pt_CFPreferencesCopyKeyList, CFPreferencesCopyKeyList)
 PT_INTERPOSE(pt_CFPreferencesGetAppBooleanValue, CFPreferencesGetAppBooleanValue)
 PT_INTERPOSE(pt_CFPreferencesGetAppIntegerValue, CFPreferencesGetAppIntegerValue)
+PT_INTERPOSE(pt_CFPreferencesAppValueIsForced, CFPreferencesAppValueIsForced)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+PT_INTERPOSE(pt_CFPreferencesCopyApplicationList, CFPreferencesCopyApplicationList)
+#pragma clang diagnostic pop
 PT_INTERPOSE(pt_CFBundleGetFunctionPointerForName, CFBundleGetFunctionPointerForName)
 PT_INTERPOSE(pt_CFBundleGetFunctionPointersForNames, CFBundleGetFunctionPointersForNames)
 PT_INTERPOSE(pt_CFBundleGetDataPointerForName, CFBundleGetDataPointerForName)

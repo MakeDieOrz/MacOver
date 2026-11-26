@@ -14,6 +14,7 @@
 #include <mach/arm/thread_status.h>
 #include <mach/exc.h>
 #include <mach/mach.h>
+#include <mach_debug/ipc_info.h>
 #include <os/lock.h>
 #include <pthread.h>
 #include <stddef.h>
@@ -80,6 +81,23 @@ extern kern_return_t pt_orig_thread_get_exception_ports(thread_act_t thread,
                                                        exception_flavor_array_t old_flavors)
     __asm("_thread_get_exception_ports");
 
+extern kern_return_t pt_orig_task_get_exception_ports_info(mach_port_t port,
+                                                           exception_mask_t exception_mask,
+                                                           exception_mask_array_t masks,
+                                                           mach_msg_type_number_t *masksCnt,
+                                                           exception_handler_info_array_t old_handlers_info,
+                                                           exception_behavior_array_t old_behaviors,
+                                                           exception_flavor_array_t old_flavors)
+    __asm__("_task_get_exception_ports_info") __attribute__((weak_import));
+extern kern_return_t pt_orig_thread_get_exception_ports_info(mach_port_t port,
+                                                             exception_mask_t exception_mask,
+                                                             exception_mask_array_t masks,
+                                                             mach_msg_type_number_t *masksCnt,
+                                                             exception_handler_info_array_t old_handlers_info,
+                                                             exception_behavior_array_t old_behaviors,
+                                                             exception_flavor_array_t old_flavors)
+    __asm__("_thread_get_exception_ports_info") __attribute__((weak_import));
+
 #define PT_ARM64_SVC80_INSN 0xD4001001U
 #define PT_ARM64_BRK_SVC_INSN 0xD42A0E80U
 #define PT_ARM64_CPSR_C (1U << 29)
@@ -90,9 +108,11 @@ extern kern_return_t pt_orig_thread_get_exception_ports(thread_act_t thread,
 
 #if __DARWIN_UNIX03
 #define PT_TS_X(s) ((s).__x)
+#define PT_TS_SP(s) ((s).__sp)
 #define PT_TS_CPSR(s) ((s).__cpsr)
 #else
 #define PT_TS_X(s) ((s).x)
+#define PT_TS_SP(s) ((s).sp)
 #define PT_TS_CPSR(s) ((s).cpsr)
 #endif
 
@@ -123,6 +143,8 @@ static size_t s_registered_pc_cap = 0;
 
 static _Atomic mach_port_t s_svc_exc_port = MACH_PORT_NULL;
 static pthread_t s_svc_exc_thread;
+static ipc_info_port_t s_svc_exc_iip = {0, 0};
+static _Atomic bool s_svc_exc_iip_valid = false;
 
 typedef struct {
     BOOL valid;
@@ -1697,7 +1719,7 @@ static BOOL pt_svc_handle_exception_msg(const pt_mach_exc_req_t *req, pt_mach_ex
                        !pt_is_bypass_enabled() ||
                        (x16 < 0);
     if (passthrough) {
-        BOOL intercept_mach_msg = ((x16 == -31 || x16 == -47) &&
+        BOOL intercept_mach_msg = ((x16 == -31 || x16 == -32 || x16 == -47) &&
                                    !atomic_load_explicit(&s_svc_safe_mode_passthrough, memory_order_acquire) &&
                                    pt_is_bypass_enabled() &&
                                    !pt_is_effective_system_or_playtools_caller((const void *)pc));
@@ -1713,8 +1735,8 @@ static BOOL pt_svc_handle_exception_msg(const pt_mach_exc_req_t *req, pt_mach_ex
         mach_port_t mig_rcv_name = MACH_PORT_NULL;
 
         if (intercept_mach_msg && in_x[0] != 0 && pt_is_valid_user_pointer((const void *)(uintptr_t)in_x[0])) {
-            if (x16 == -31) {
-                // mach_msg_trap(msg, option, send_size, rcv_size, rcv_name, timeout, notify)
+            if (x16 == -31 || x16 == -32) {
+                // mach_msg_trap / mach_msg_overwrite_trap(msg, option, send_size, rcv_size, rcv_name, timeout, notify[, rcv_msg, rcv_limit@[sp]])
                 mach_msg_header_t *hdr = (mach_msg_header_t *)(uintptr_t)in_x[0];
                 mach_msg_option_t option = (mach_msg_option_t)in_x[1];
                 mach_msg_size_t send_size = (mach_msg_size_t)in_x[2];
@@ -1724,6 +1746,15 @@ static BOOL pt_svc_handle_exception_msg(const pt_mach_exc_req_t *req, pt_mach_ex
                 mig_receiving = (option & MACH_RCV_MSG) != 0;
                 mig_rcv_buf = hdr;
                 mig_rcv_cap = (size_t)rcv_size;
+                if (x16 == -32 && in_x[7] != 0 && pt_is_valid_user_pointer((const void *)(uintptr_t)in_x[7])) {
+                    mig_rcv_buf = (void *)(uintptr_t)in_x[7];
+                    uint64_t sp = PT_TS_SP(state);
+                    if (sp != 0 && pt_is_valid_user_pointer((const void *)(uintptr_t)sp)) {
+                        uint32_t rcv_limit = 0;
+                        memcpy(&rcv_limit, (const void *)(uintptr_t)sp, sizeof(rcv_limit));
+                        mig_rcv_cap = (size_t)rcv_limit;
+                    }
+                }
                 if (mig_sending) {
                     mach_msg_size_t eff_sz = (send_size > 0) ? send_size : hdr->msgh_size;
                     mig_req_id = hdr->msgh_id;
@@ -1795,7 +1826,8 @@ static BOOL pt_svc_handle_exception_msg(const pt_mach_exc_req_t *req, pt_mach_ex
                                      mig_req_flavor,
                                      mig_target_is_self,
                                      mig_reply_port,
-                                     (kern_return_t)(int32_t)out_x[0]);
+                                     (kern_return_t)(int32_t)out_x[0],
+                                     (const void *)pc);
         }
         if (x16 > 0) {
             if (carry) {
@@ -1805,13 +1837,27 @@ static BOOL pt_svc_handle_exception_msg(const pt_mach_exc_req_t *req, pt_mach_ex
             }
         }
     } else {
-        uintptr_t args[8];
-        for (size_t i = 0; i < 8U; i++) {
-            args[i] = (uintptr_t)in_x[i];
+        uintptr_t args[8] = {0};
+        int sys_num = (int)x16;
+        if (sys_num == 0 || sys_num == 198) {
+            sys_num = (int)in_x[0];
+            for (size_t i = 0; i < 7U; i++) {
+                args[i] = (uintptr_t)in_x[i + 1U];
+            }
+            uint64_t sp = PT_TS_SP(state);
+            if (sp != 0 && pt_is_valid_user_pointer((const void *)(uintptr_t)sp)) {
+                uintptr_t sp_arg7 = 0;
+                memcpy(&sp_arg7, (const void *)(uintptr_t)sp, sizeof(sp_arg7));
+                args[7] = sp_arg7;
+            }
+        } else {
+            for (size_t i = 0; i < 8U; i++) {
+                args[i] = (uintptr_t)in_x[i];
+            }
         }
         BOOL handled = NO;
         errno = 0;
-        intptr_t ret = pt_syscall_dispatch_with_caller((int)x16, args, (const void *)pc, &handled);
+        intptr_t ret = pt_syscall_dispatch_with_caller(sys_num, args, (const void *)pc, &handled);
         if (handled) {
             if (ret == -1 && errno != 0) {
                 PT_TS_X(state)[0] = (uint64_t)(unsigned int)errno;
@@ -1959,6 +2005,29 @@ static BOOL pt_svc_install_exception_handler(void) {
     pt_svc_release_send_right(s_saved_task_bp_handler.port);
     s_saved_task_bp_handler = pre_bp;
     os_unfair_lock_unlock(&s_svc_exc_snapshot_lock);
+    if (&pt_orig_task_get_exception_ports_info != NULL) {
+        exception_mask_t q_masks[EXC_TYPES_COUNT] = {0};
+        mach_msg_type_number_t q_cnt = EXC_TYPES_COUNT;
+        ipc_info_port_t q_info[EXC_TYPES_COUNT] = {{0, 0}};
+        exception_behavior_t q_beh[EXC_TYPES_COUNT] = {0};
+        thread_state_flavor_t q_flav[EXC_TYPES_COUNT] = {0};
+        if (pt_orig_task_get_exception_ports_info(mach_task_self(),
+                                                  EXC_MASK_BREAKPOINT,
+                                                  q_masks,
+                                                  &q_cnt,
+                                                  q_info,
+                                                  q_beh,
+                                                  q_flav) == KERN_SUCCESS) {
+            for (mach_msg_type_number_t i = 0; i < q_cnt && i < EXC_TYPES_COUNT; i++) {
+                if ((q_masks[i] & (exception_mask_t)EXC_MASK_BREAKPOINT) != 0 &&
+                    q_info[i].iip_port_object != 0U) {
+                    s_svc_exc_iip = q_info[i];
+                    atomic_store_explicit(&s_svc_exc_iip_valid, true, memory_order_release);
+                    break;
+                }
+            }
+        }
+    }
     return YES;
 }
 
@@ -2283,12 +2352,138 @@ static kern_return_t pt_thread_get_exception_ports(thread_act_t thread,
     return kr;
 }
 
+__attribute__((visibility("hidden")))
+BOOL pt_svc_record_bp_handler_from_mig(BOOL is_thread,
+                                       mach_port_t target_port,
+                                       exception_mask_t orig_mask,
+                                       mach_port_t new_port,
+                                       exception_behavior_t behavior,
+                                       thread_state_flavor_t flavor) {
+    if (!atomic_load_explicit(&s_svc_interceptor_active, memory_order_acquire) ||
+        (orig_mask & (exception_mask_t)EXC_MASK_BREAKPOINT) == 0) {
+        return NO;
+    }
+    mach_port_t retained_new = pt_svc_retain_send_right(new_port);
+    if (is_thread) {
+        pt_svc_update_thread_bp(target_port, orig_mask, retained_new, behavior, flavor, NULL);
+    } else {
+        os_unfair_lock_lock(&s_svc_exc_snapshot_lock);
+        pt_svc_swap_saved_slot_locked(&s_saved_task_bp_handler, orig_mask, retained_new, behavior, flavor, NULL);
+        os_unfair_lock_unlock(&s_svc_exc_snapshot_lock);
+    }
+    return YES;
+}
+
+__attribute__((visibility("hidden")))
+void pt_svc_redact_exc_ports_info_arrays(BOOL is_thread,
+                                         mach_port_t target_port,
+                                         exception_mask_t *masks,
+                                         mach_msg_type_number_t *masksCnt,
+                                         ipc_info_port_t *handlers_info,
+                                         exception_behavior_t *behaviors,
+                                         thread_state_flavor_t *flavors) {
+    if (!atomic_load_explicit(&s_svc_interceptor_active, memory_order_acquire) ||
+        masks == NULL || masksCnt == NULL || handlers_info == NULL ||
+        behaviors == NULL || flavors == NULL) {
+        return;
+    }
+    mach_msg_type_number_t count = (*masksCnt < (mach_msg_type_number_t)EXC_TYPES_COUNT)
+        ? *masksCnt
+        : (mach_msg_type_number_t)EXC_TYPES_COUNT;
+    bool iip_known = atomic_load_explicit(&s_svc_exc_iip_valid, memory_order_acquire);
+    pt_svc_saved_exc_handler_t saved = is_thread
+        ? pt_svc_copy_retained_thread_bp(target_port)
+        : pt_svc_copy_retained_task_bp();
+    BOOL has_saved = (saved.valid && MACH_PORT_VALID(saved.port));
+    mach_msg_type_number_t write_idx = 0;
+    for (mach_msg_type_number_t i = 0; i < count; i++) {
+        BOOL matches_svc = NO;
+        if ((masks[i] & (exception_mask_t)EXC_MASK_BREAKPOINT) != 0) {
+            if (iip_known && s_svc_exc_iip.iip_port_object != 0U) {
+                matches_svc = (handlers_info[i].iip_port_object == s_svc_exc_iip.iip_port_object);
+            } else {
+                matches_svc = (behaviors[i] == (exception_behavior_t)((unsigned int)EXCEPTION_STATE_IDENTITY | (unsigned int)MACH_EXCEPTION_CODES) &&
+                               flavors[i] == ARM_THREAD_STATE64);
+            }
+        }
+        if (matches_svc) {
+            exception_mask_t rem = masks[i] & ~((exception_mask_t)EXC_MASK_BREAKPOINT);
+            if (rem != 0) {
+                masks[write_idx] = rem;
+                handlers_info[write_idx] = handlers_info[i];
+                behaviors[write_idx] = behaviors[i];
+                flavors[write_idx] = flavors[i];
+                write_idx++;
+            }
+            continue;
+        }
+        if (write_idx != i) {
+            masks[write_idx] = masks[i];
+            handlers_info[write_idx] = handlers_info[i];
+            behaviors[write_idx] = behaviors[i];
+            flavors[write_idx] = flavors[i];
+        }
+        write_idx++;
+    }
+    if (has_saved && write_idx < (mach_msg_type_number_t)EXC_TYPES_COUNT) {
+        masks[write_idx] = (exception_mask_t)EXC_MASK_BREAKPOINT;
+        handlers_info[write_idx] = (ipc_info_port_t){ 0U, 0U };
+        behaviors[write_idx] = saved.behavior;
+        flavors[write_idx] = saved.flavor;
+        write_idx++;
+    }
+    pt_svc_release_send_right(saved.port);
+    *masksCnt = write_idx;
+}
+
+static kern_return_t pt_task_get_exception_ports_info(mach_port_t port,
+                                                      exception_mask_t exception_mask,
+                                                      exception_mask_array_t masks,
+                                                      mach_msg_type_number_t *masksCnt,
+                                                      exception_handler_info_array_t old_handlers_info,
+                                                      exception_behavior_array_t old_behaviors,
+                                                      exception_flavor_array_t old_flavors) {
+    if (&pt_orig_task_get_exception_ports_info == NULL) {
+        return KERN_NOT_SUPPORTED;
+    }
+    kern_return_t kr = pt_orig_task_get_exception_ports_info(
+        port, exception_mask, masks, masksCnt, old_handlers_info, old_behaviors, old_flavors);
+    if (kr == KERN_SUCCESS &&
+        atomic_load_explicit(&s_svc_interceptor_active, memory_order_acquire) &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        pt_svc_redact_exc_ports_info_arrays(NO, port, masks, masksCnt, old_handlers_info, old_behaviors, old_flavors);
+    }
+    return kr;
+}
+
+static kern_return_t pt_thread_get_exception_ports_info(mach_port_t port,
+                                                        exception_mask_t exception_mask,
+                                                        exception_mask_array_t masks,
+                                                        mach_msg_type_number_t *masksCnt,
+                                                        exception_handler_info_array_t old_handlers_info,
+                                                        exception_behavior_array_t old_behaviors,
+                                                        exception_flavor_array_t old_flavors) {
+    if (&pt_orig_thread_get_exception_ports_info == NULL) {
+        return KERN_NOT_SUPPORTED;
+    }
+    kern_return_t kr = pt_orig_thread_get_exception_ports_info(
+        port, exception_mask, masks, masksCnt, old_handlers_info, old_behaviors, old_flavors);
+    if (kr == KERN_SUCCESS &&
+        atomic_load_explicit(&s_svc_interceptor_active, memory_order_acquire) &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        pt_svc_redact_exc_ports_info_arrays(YES, port, masks, masksCnt, old_handlers_info, old_behaviors, old_flavors);
+    }
+    return kr;
+}
+
 PT_INTERPOSE(pt_task_set_exception_ports, task_set_exception_ports)
 PT_INTERPOSE(pt_task_swap_exception_ports, task_swap_exception_ports)
 PT_INTERPOSE(pt_task_get_exception_ports, task_get_exception_ports)
+PT_INTERPOSE_WEAK_NAMED(pt_task_get_exception_ports_info, pt_orig_task_get_exception_ports_info, "task_get_exception_ports_info")
 PT_INTERPOSE(pt_thread_set_exception_ports, thread_set_exception_ports)
 PT_INTERPOSE(pt_thread_swap_exception_ports, thread_swap_exception_ports)
 PT_INTERPOSE(pt_thread_get_exception_ports, thread_get_exception_ports)
+PT_INTERPOSE_WEAK_NAMED(pt_thread_get_exception_ports_info, pt_orig_thread_get_exception_ports_info, "thread_get_exception_ports_info")
 
 __attribute__((visibility("hidden")))
 BOOL pt_svc_get_redaction_info(mach_port_t *out_svc_port,

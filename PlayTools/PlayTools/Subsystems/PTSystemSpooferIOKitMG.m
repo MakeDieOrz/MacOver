@@ -6,6 +6,7 @@
 #import "PTSystemSpooferInternal.h"
 #import "PTFSInternal.h"
 #import "PTDyldInternal.h"
+#include <CommonCrypto/CommonDigest.h>
 @import AudioToolbox;
 @import CoreServices;
 @import IOKit;
@@ -36,7 +37,7 @@ static NSArray<NSString *> *pt_spoofed_ioreg_keys_list(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         s_keys = @[
-            @"model", @"target-type", @"target-sub-type", @"compatible",
+            @"model", @"target-type", @"target-sub-type", @"compatible", @"chip-id",
             @"model-number", @"regulatory-model-number", @"region-info", @"platform-name",
             @"product-name", @"product-description", @"product-soc-name", @"manufacturer",
             @"gpu-core-count", @"metal-plugin-name", @"MetalPluginName", @"MetalPluginClassName",
@@ -72,6 +73,8 @@ static BOOL pt_is_spoofed_ioreg_key(CFStringRef key) {
     return NO;
 }
 
+static CFTypeRef pt_create_sanitized_ioreg_cfvalue_if_changed(CFTypeRef val, CFAllocatorRef allocator, int depth) CF_RETURNS_RETAINED;
+
 static CFTypeRef pt_create_ioreg_cstr_like(const char *cstr, CFTypeRef orig_val, CFAllocatorRef allocator) CF_RETURNS_RETAINED {
     if (cstr == NULL) {
         return NULL;
@@ -99,6 +102,27 @@ static CFTypeRef pt_spoof_ioreg_value_for_key(CFStringRef key, CFTypeRef orig_va
             return CFStringCreateWithCString(allocator, profile->oem_id, kCFStringEncodingUTF8);
         }
         return pt_create_compatible_cfdata(allocator);
+    }
+    if (CFStringCompare(key, CFSTR("chip-id"), 0) == kCFCompareEqualTo) {
+        uint32_t chip = 0x8103U;
+        if (profile != NULL && profile->soc_code != NULL &&
+            (profile->soc_code[0] == 't' || profile->soc_code[0] == 's')) {
+            chip = (uint32_t)strtoul(profile->soc_code + 1, NULL, 16);
+        }
+        if (CFGetTypeID(orig_val) == CFNumberGetTypeID()) {
+            int32_t s32 = (int32_t)chip;
+            return CFNumberCreate(allocator, kCFNumberSInt32Type, &s32);
+        }
+        if (CFGetTypeID(orig_val) == CFDataGetTypeID()) {
+            CFIndex dlen = CFDataGetLength((CFDataRef)orig_val);
+            if (dlen == 8) {
+                uint64_t chip64 = OSSwapHostToLittleInt64((uint64_t)chip);
+                return CFDataCreate(allocator, (const UInt8 *)&chip64, sizeof(chip64));
+            }
+            uint32_t chip32 = OSSwapHostToLittleInt32(chip);
+            return CFDataCreate(allocator, (const UInt8 *)&chip32, sizeof(chip32));
+        }
+        return NULL;
     }
     if (CFStringCompare(key, CFSTR("model-number"), 0) == kCFCompareEqualTo) {
         return pt_create_ioreg_cstr_like(profile->model_number, orig_val, allocator);
@@ -224,19 +248,24 @@ static CFTypeRef pt_IORegistryEntryCreateCFProperty(mach_port_t entry, CFStringR
     if (entry == MACH_PORT_NULL) {
         return NULL;
     }
-    if (key != NULL && pt_is_blocked_ioreg_key(key) &&
-        pt_is_bypass_enabled() &&
-        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    BOOL app_caller = (pt_is_bypass_enabled() &&
+                       !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
+    if (key != NULL && app_caller && pt_is_blocked_ioreg_key(key)) {
         return NULL;
     }
     CFTypeRef orig = IORegistryEntryCreateCFProperty(entry, key, allocator, options);
-    if (orig != NULL && key != NULL && pt_is_spoofed_ioreg_key(key) &&
-        pt_is_bypass_enabled() &&
-        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        CFTypeRef spoofed = pt_spoof_ioreg_value_for_key(key, orig, allocator);
-        if (spoofed != NULL) {
+    if (orig != NULL && app_caller) {
+        if (key != NULL && pt_is_spoofed_ioreg_key(key)) {
+            CFTypeRef spoofed = pt_spoof_ioreg_value_for_key(key, orig, allocator);
+            if (spoofed != NULL) {
+                CFRelease(orig);
+                return spoofed;
+            }
+        }
+        CFTypeRef sanitized = pt_create_sanitized_ioreg_cfvalue_if_changed(orig, allocator, 0);
+        if (sanitized != NULL) {
             CFRelease(orig);
-            return spoofed;
+            return sanitized;
         }
     }
     return orig;
@@ -247,19 +276,24 @@ static CFTypeRef pt_IORegistryEntrySearchCFProperty(mach_port_t entry, const cha
     if (entry == MACH_PORT_NULL) {
         return NULL;
     }
-    if (key != NULL && pt_is_blocked_ioreg_key(key) &&
-        pt_is_bypass_enabled() &&
-        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    BOOL app_caller = (pt_is_bypass_enabled() &&
+                       !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
+    if (key != NULL && app_caller && pt_is_blocked_ioreg_key(key)) {
         return NULL;
     }
     CFTypeRef orig = IORegistryEntrySearchCFProperty(entry, plane, key, allocator, options);
-    if (orig != NULL && key != NULL && pt_is_spoofed_ioreg_key(key) &&
-        pt_is_bypass_enabled() &&
-        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        CFTypeRef spoofed = pt_spoof_ioreg_value_for_key(key, orig, allocator);
-        if (spoofed != NULL) {
+    if (orig != NULL && app_caller) {
+        if (key != NULL && pt_is_spoofed_ioreg_key(key)) {
+            CFTypeRef spoofed = pt_spoof_ioreg_value_for_key(key, orig, allocator);
+            if (spoofed != NULL) {
+                CFRelease(orig);
+                return spoofed;
+            }
+        }
+        CFTypeRef sanitized = pt_create_sanitized_ioreg_cfvalue_if_changed(orig, allocator, 0);
+        if (sanitized != NULL) {
             CFRelease(orig);
-            return spoofed;
+            return sanitized;
         }
     }
     return orig;
@@ -288,37 +322,9 @@ static void pt_sanitize_ioreg_cfproperties_dict(NSMutableDictionary *dict, CFAll
         }
         NSString *keyStr = (NSString *)keyObj;
         id cur = dict[keyStr];
-        if ([cur isKindOfClass:[NSString class]]) {
-            const char *raw = [(NSString *)cur UTF8String];
-            if (raw != NULL && raw[0] != '\0') {
-                char buf[512];
-                strlcpy(buf, raw, sizeof(buf));
-                char orig[512];
-                strlcpy(orig, buf, sizeof(orig));
-                if (strstr(buf, "Mac") != NULL || strstr(buf, "AppleACPI") != NULL ||
-                    strstr(buf, "AppleSMC") != NULL || strstr(buf, "Thunderbolt") != NULL) {
-                    strlcpy(buf, pt_get_active_device_profile()->model, sizeof(buf));
-                } else {
-                    pt_sanitize_io_hardware_name(buf, sizeof(buf));
-                }
-                if (strcmp(buf, orig) != 0) {
-                    NSString *replStr = [NSString stringWithUTF8String:buf];
-                    if (replStr != nil) {
-                        dict[keyStr] = replStr;
-                    }
-                }
-            }
-        } else if ([cur isKindOfClass:[NSData class]]) {
-            NSData *dataObj = (NSData *)cur;
-            if (dataObj.length > 0 && dataObj.length <= 8192U) {
-                CFDataRef repl = pt_sanitize_io_nul_delimited_bytes(
-                    (const uint8_t *)dataObj.bytes,
-                    (size_t)dataObj.length,
-                    allocator);
-                if (repl != NULL) {
-                    dict[keyStr] = (__bridge_transfer id)repl;
-                }
-            }
+        CFTypeRef repl = pt_create_sanitized_ioreg_cfvalue_if_changed((__bridge CFTypeRef)cur, allocator, 1);
+        if (repl != NULL) {
+            dict[keyStr] = (__bridge_transfer id)repl;
         }
     }
 }
@@ -376,6 +382,19 @@ static BOOL pt_is_hidden_io_path(const char *path) {
     return NO;
 }
 
+static void pt_format_hidden_io_plane_path(const char *plane, char *out_buf, size_t out_size) {
+    if (out_buf == NULL || out_size == 0) {
+        return;
+    }
+    if (plane != NULL && strcmp(plane, "IODeviceTree") == 0) {
+        strlcpy(out_buf, "IODeviceTree:/arm-io", out_size);
+    } else if (plane != NULL && plane[0] != '\0') {
+        snprintf(out_buf, out_size, "%s:/AppleARMPE", plane);
+    } else {
+        strlcpy(out_buf, "IOService:/AppleARMPE", out_size);
+    }
+}
+
 extern kern_return_t IORegistryEntryGetPath(mach_port_t entry, const char *plane, char *path);
 static kern_return_t pt_IORegistryEntryGetPath(mach_port_t entry, const char *plane, char *path) {
     kern_return_t kr = IORegistryEntryGetPath(entry, plane, path);
@@ -383,7 +402,7 @@ static kern_return_t pt_IORegistryEntryGetPath(mach_port_t entry, const char *pl
         pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         if (pt_is_hidden_io_path(path)) {
-            strlcpy(path, "IOService:/AppleARMPE", 512);
+            pt_format_hidden_io_plane_path(plane, path, 512U);
         } else {
             pt_sanitize_io_hardware_name(path, 512U);
         }
@@ -422,15 +441,31 @@ static BOOL pt_is_blocked_ioservice_matching(CFDictionaryRef matching) {
     return NO;
 }
 
+static BOOL pt_io_entry_is_hidden(io_registry_entry_t entry);
+
 extern mach_port_t IOServiceGetMatchingService(mach_port_t mainPort, CFDictionaryRef matching);
 static mach_port_t pt_IOServiceGetMatchingService(mach_port_t mainPort, CFDictionaryRef matching) {
-    if (matching != NULL && pt_is_bypass_enabled() &&
-        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
-        pt_is_blocked_ioservice_matching(matching)) {
+    BOOL app_caller = (pt_is_bypass_enabled() &&
+                       !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
+    if (matching != NULL && app_caller && pt_is_blocked_ioservice_matching(matching)) {
         CFRelease(matching);
         return MACH_PORT_NULL;
     }
-    return IOServiceGetMatchingService(mainPort, matching);
+    mach_port_t entry = IOServiceGetMatchingService(mainPort, matching);
+    if (app_caller && entry != MACH_PORT_NULL) {
+        BOOL hide = pt_io_entry_is_hidden(entry);
+        if (!hide) {
+            io_string_t path = {0};
+            if (IORegistryEntryGetPath(entry, "IOService", path) == KERN_SUCCESS && pt_is_hidden_io_path(path)) {
+                hide = YES;
+            }
+        }
+        if (hide) {
+            IOObjectRelease(entry);
+            return MACH_PORT_NULL;
+        }
+    }
+    return entry;
 }
 
 extern kern_return_t IOServiceGetMatchingServices(mach_port_t mainPort, CFDictionaryRef matching, uint32_t *existing);
@@ -598,21 +633,23 @@ __attribute__((visibility("hidden"))) void pt_sanitize_io_hardware_name(char *bu
         memcpy(gpu_short, gpu_gen, gl);
         gpu_short[gl] = '\0';
     }
-    const char *isp_gen = (strcmp(upper_soc, "T8027") == 0 || strcmp(upper_soc, "T8000") == 0)
-        ? "H11"
-        : (strcmp(upper_soc, "T8030") == 0 ? "H12" : "H13");
+    const char *isp_gen = (strcmp(upper_soc, "S8001") == 0)
+        ? "H8"
+        : ((strcmp(upper_soc, "T8027") == 0 || strcmp(upper_soc, "T8000") == 0)
+               ? "H11"
+               : (strcmp(upper_soc, "T8030") == 0 ? "H12" : "H13"));
 
     static const char *const kHostSocs[] = {
-        "T8010", "T8015", "T8020", "T8027", "T8100", "T8110", "T8120", "T8130", "T8140",
+        "S8001", "T8000", "T8010", "T8015", "T8020", "T8027", "T8100", "T8110", "T8120", "T8130", "T8140",
         "T8103", "T8101", "T8102", "T810x", "T8112", "T8122", "T8132", "T8142",
         "T6000", "T6001", "T6002", "T6020", "T6021", "T6022",
-        "T6030", "T6031", "T6034", "T6040", "T6041"
+        "T6030", "T6031", "T6032", "T6034", "T6040", "T6041", "T6042"
     };
     static const char *const kHostSocsLower[] = {
-        "t8010", "t8015", "t8020", "t8027", "t8100", "t8110", "t8120", "t8130", "t8140",
+        "s8001", "t8000", "t8010", "t8015", "t8020", "t8027", "t8100", "t8110", "t8120", "t8130", "t8140",
         "t8103", "t8101", "t8102", "t810x", "t8112", "t8122", "t8132", "t8142",
         "t6000", "t6001", "t6002", "t6020", "t6021", "t6022",
-        "t6030", "t6031", "t6034", "t6040", "t6041"
+        "t6030", "t6031", "t6032", "t6034", "t6040", "t6041", "t6042"
     };
     for (size_t i = 0; i < sizeof(kHostSocs) / sizeof(kHostSocs[0]); i++) {
         if (strcmp(kHostSocs[i], upper_soc) != 0) {
@@ -649,14 +686,14 @@ __attribute__((visibility("hidden"))) void pt_sanitize_io_hardware_name(char *bu
     }
 
     static const char *const kMacBoardIDs[] = {
-        "J274", "J275", "J293", "J313", "J314", "J316", "J323", "J375",
+        "J180", "J274", "J275", "J293", "J313", "J314", "J316", "J323", "J375",
         "J413", "J414", "J415", "J416", "J433", "J434", "J456", "J457",
         "J473", "J474", "J475", "J493", "J504", "J514", "J516", "J575",
-        "J604", "J614", "J616", "J623", "J624", "J673", "J773", "J775",
-        "j274", "j275", "j293", "j313", "j314", "j316", "j323", "j375",
+        "J604", "J613", "J614", "J615", "J616", "J623", "J624", "J673", "J713", "J715", "J773", "J775",
+        "j180", "j274", "j275", "j293", "j313", "j314", "j316", "j323", "j375",
         "j413", "j414", "j415", "j416", "j433", "j434", "j456", "j457",
         "j473", "j474", "j475", "j493", "j504", "j514", "j516", "j575",
-        "j604", "j614", "j616", "j623", "j624", "j673", "j773", "j775"
+        "j604", "j613", "j614", "j615", "j616", "j623", "j624", "j673", "j713", "j715", "j773", "j775"
     };
     const char *oem = (profile != NULL && profile->oem_id != NULL && profile->oem_id[0] != '\0')
         ? profile->oem_id
@@ -664,32 +701,58 @@ __attribute__((visibility("hidden"))) void pt_sanitize_io_hardware_name(char *bu
     char board_repl[16] = {0};
     strlcpy(board_repl, oem, sizeof(board_repl));
     size_t blen = strlen(board_repl);
-    if (blen > 2U && strcmp(board_repl + blen - 2U, "AP") == 0) {
+    if (blen > 2U && strcasecmp(board_repl + blen - 2U, "AP") == 0) {
         board_repl[blen - 2U] = '\0';
     }
+    char board_repl_lower[16] = {0};
+    for (size_t i = 0; i + 1U < sizeof(board_repl_lower) && board_repl[i] != '\0'; i++) {
+        char c = board_repl[i];
+        board_repl_lower[i] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+    }
     for (size_t i = 0; i < sizeof(kMacBoardIDs) / sizeof(kMacBoardIDs[0]); i++) {
-        if (strcasecmp(kMacBoardIDs[i], board_repl) != 0 &&
+        BOOL is_lower = (kMacBoardIDs[i][0] >= 'a' && kMacBoardIDs[i][0] <= 'z');
+        const char *target_board = is_lower ? board_repl_lower : board_repl;
+        if (strcasecmp(kMacBoardIDs[i], target_board) != 0 &&
             strstr(buf, kMacBoardIDs[i]) != NULL) {
-            pt_replace_substr_in_buf(buf, cap, kMacBoardIDs[i], board_repl);
+            pt_replace_substr_in_buf(buf, cap, kMacBoardIDs[i], target_board);
         }
     }
 
     const char *target_gpu_arch = (profile != NULL && profile->gpu_arch != NULL && profile->gpu_arch[0] != '\0')
         ? profile->gpu_arch
         : "applegpu_g13g";
-    if (strstr(buf, "applegpu_") != NULL) {
-        static const char *const kAppleGpuTokens[] = {
-            "applegpu_g13g", "applegpu_g13p", "applegpu_g13s", "applegpu_g13c", "applegpu_g13d",
-            "applegpu_g14g", "applegpu_g14p", "applegpu_g14s", "applegpu_g14c", "applegpu_g14d",
-            "applegpu_g15g", "applegpu_g15p", "applegpu_g15s", "applegpu_g15c", "applegpu_g15d",
-            "applegpu_g16g", "applegpu_g16p", "applegpu_g16s", "applegpu_g16c", "applegpu_g16d",
-            "applegpu_g17p", "applegpu_g18g", "applegpu_g18p"
-        };
-        for (size_t i = 0; i < sizeof(kAppleGpuTokens) / sizeof(kAppleGpuTokens[0]); i++) {
-            if (strcmp(kAppleGpuTokens[i], target_gpu_arch) != 0 &&
-                strstr(buf, kAppleGpuTokens[i]) != NULL) {
-                pt_replace_substr_in_buf(buf, cap, kAppleGpuTokens[i], target_gpu_arch);
+    size_t target_gpu_len = strlen(target_gpu_arch);
+    size_t gpu_pos = 0;
+    for (int guard = 0; guard < 16; guard++) {
+        char *hit = strstr(buf + gpu_pos, "applegpu_g");
+        if (hit == NULL) {
+            break;
+        }
+        if (hit[10] < '0' || hit[10] > '9') {
+            gpu_pos = (size_t)(hit - buf) + 10U;
+            continue;
+        }
+        char *endp = hit + 10U;
+        while (*endp >= '0' && *endp <= '9') {
+            endp++;
+        }
+        if (*endp >= 'a' && *endp <= 'z') {
+            endp++;
+        }
+        size_t span = (size_t)(endp - hit);
+        size_t off = (size_t)(hit - buf);
+        if (span != target_gpu_len || strncmp(hit, target_gpu_arch, span) != 0) {
+            size_t cur_len = strlen(buf);
+            if (cur_len - span + target_gpu_len >= cap) {
+                break;
             }
+            if (target_gpu_len != span) {
+                memmove(hit + target_gpu_len, endp, cur_len - off - span + 1U);
+            }
+            memcpy(hit, target_gpu_arch, target_gpu_len);
+            gpu_pos = off + target_gpu_len;
+        } else {
+            gpu_pos = off + span;
         }
     }
 }
@@ -769,6 +832,95 @@ __attribute__((visibility("hidden"))) CFDataRef pt_sanitize_io_nul_delimited_byt
         return NULL;
     }
     return out;
+}
+
+static CFTypeRef pt_create_sanitized_ioreg_cfvalue_if_changed(CFTypeRef val, CFAllocatorRef allocator, int depth) CF_RETURNS_RETAINED {
+    if (val == NULL || depth > 8) {
+        return NULL;
+    }
+    CFTypeID tid = CFGetTypeID(val);
+    if (tid == CFStringGetTypeID()) {
+        const char *raw = [(__bridge NSString *)val UTF8String];
+        if (raw == NULL || raw[0] == '\0') {
+            return NULL;
+        }
+        char buf[512];
+        strlcpy(buf, raw, sizeof(buf));
+        char orig[512];
+        strlcpy(orig, buf, sizeof(orig));
+        if (strcmp(buf, "macOS") == 0) {
+            strlcpy(buf, "iPhone OS", sizeof(buf));
+        } else if (strstr(buf, "Mac") != NULL ||
+                   strstr(buf, "AppleACPI") != NULL ||
+                   strstr(buf, "AppleSMC") != NULL ||
+                   strstr(buf, "Thunderbolt") != NULL) {
+            strlcpy(buf, pt_get_active_device_profile()->model, sizeof(buf));
+        } else {
+            pt_sanitize_io_hardware_name(buf, sizeof(buf));
+        }
+        if (strcmp(buf, orig) != 0) {
+            return CFStringCreateWithCString(allocator, buf, kCFStringEncodingUTF8);
+        }
+        return NULL;
+    }
+    if (tid == CFDataGetTypeID()) {
+        CFIndex dlen = CFDataGetLength((CFDataRef)val);
+        if (dlen > 0 && dlen <= 8192) {
+            return pt_sanitize_io_nul_delimited_bytes(
+                CFDataGetBytePtr((CFDataRef)val), (size_t)dlen, allocator);
+        }
+        return NULL;
+    }
+    if (tid == CFDictionaryGetTypeID()) {
+        NSDictionary *dict = (__bridge NSDictionary *)val;
+        NSMutableDictionary *mut = nil;
+        NSArray *keys = [dict allKeys];
+        for (id keyObj in keys) {
+            if (![keyObj isKindOfClass:[NSString class]]) {
+                continue;
+            }
+            NSString *keyStr = (NSString *)keyObj;
+            CFStringRef kcf = (__bridge CFStringRef)keyStr;
+            if (pt_is_blocked_ioreg_key(kcf)) {
+                if (mut == nil) mut = [dict mutableCopy];
+                [mut removeObjectForKey:keyStr];
+                continue;
+            }
+            id curVal = dict[keyStr];
+            if (curVal == nil) {
+                continue;
+            }
+            if (pt_is_spoofed_ioreg_key(kcf)) {
+                CFTypeRef sp = pt_spoof_ioreg_value_for_key(kcf, (__bridge CFTypeRef)curVal, allocator);
+                if (sp != NULL) {
+                    if (mut == nil) mut = [dict mutableCopy];
+                    mut[keyStr] = (__bridge_transfer id)sp;
+                    continue;
+                }
+            }
+            CFTypeRef childRepl = pt_create_sanitized_ioreg_cfvalue_if_changed(
+                (__bridge CFTypeRef)curVal, allocator, depth + 1);
+            if (childRepl != NULL) {
+                if (mut == nil) mut = [dict mutableCopy];
+                mut[keyStr] = (__bridge_transfer id)childRepl;
+            }
+        }
+        return (mut != nil) ? CFBridgingRetain([mut copy]) : NULL;
+    }
+    if (tid == CFArrayGetTypeID()) {
+        NSArray *arr = (__bridge NSArray *)val;
+        NSMutableArray *mut = nil;
+        for (NSUInteger i = 0; i < arr.count; i++) {
+            CFTypeRef childRepl = pt_create_sanitized_ioreg_cfvalue_if_changed(
+                (__bridge CFTypeRef)arr[i], allocator, depth + 1);
+            if (childRepl != NULL) {
+                if (mut == nil) mut = [arr mutableCopy];
+                mut[i] = (__bridge_transfer id)childRepl;
+            }
+        }
+        return (mut != nil) ? CFBridgingRetain([mut copy]) : NULL;
+    }
+    return NULL;
 }
 
 static kern_return_t pt_IOObjectGetClass(io_object_t object, io_name_t className) {
@@ -978,6 +1130,14 @@ static kern_return_t pt_IORegistryEntryGetProperty(io_registry_entry_t entry,
             if (rlen > 0 && (uint32_t)rlen <= cap) {
                 memcpy(buffer, CFDataGetBytePtr(replData), (size_t)rlen);
                 *size = (uint32_t)rlen;
+            } else if ((uint32_t)rlen > cap) {
+                memset(buffer, 0, cap);
+                *size = (uint32_t)rlen;
+                CFRelease(replData);
+                if (key != NULL) {
+                    CFRelease(key);
+                }
+                return kIOReturnNoSpace;
             }
             CFRelease(replData);
         }
@@ -998,7 +1158,7 @@ static CFStringRef pt_IORegistryEntryCopyPath(io_registry_entry_t entry, const i
             char orig[512];
             strlcpy(orig, buf, sizeof(orig));
             if (pt_is_hidden_io_path(buf)) {
-                strlcpy(buf, "IOService:/AppleARMPE", sizeof(buf));
+                pt_format_hidden_io_plane_path(plane, buf, sizeof(buf));
             } else {
                 pt_sanitize_io_hardware_name(buf, sizeof(buf));
             }
@@ -1146,7 +1306,7 @@ static kern_return_t pt_IORegistryEntryGetParentEntry(io_registry_entry_t entry,
     return kr;
 }
 
-static BOOL pt_is_hidden_audio_component(AudioComponent comp) {
+__attribute__((visibility("hidden"))) BOOL pt_is_hidden_audio_component(AudioComponent comp) {
     if (comp == NULL) {
         return NO;
     }
@@ -1227,6 +1387,49 @@ static UInt32 pt_AudioComponentCount(const AudioComponentDescription * _Nullable
         }
     }
     return count;
+}
+
+extern OSStatus pt_orig_AudioComponentInstanceNew(AudioComponent inComponent, AudioComponentInstance _Nullable *outInstance)
+    __asm__("_AudioComponentInstanceNew") __attribute__((weak_import));
+extern void pt_orig_AudioComponentInstantiate(AudioComponent inComponent,
+                                              AudioComponentInstantiationOptions inOptions,
+                                              void (^inCompletionHandler)(AudioComponentInstance _Nullable, OSStatus))
+    __asm__("_AudioComponentInstantiate") __attribute__((weak_import));
+
+static OSStatus pt_AudioComponentInstanceNew(AudioComponent inComponent, AudioComponentInstance _Nullable *outInstance) {
+    if (&pt_orig_AudioComponentInstanceNew == NULL) {
+        if (outInstance != NULL) {
+            *outInstance = NULL;
+        }
+        return -3000; // kAudio_ParamError / component not found
+    }
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_is_hidden_audio_component(inComponent)) {
+        if (outInstance != NULL) {
+            *outInstance = NULL;
+        }
+        return -3000;
+    }
+    return pt_orig_AudioComponentInstanceNew(inComponent, outInstance);
+}
+
+static void pt_AudioComponentInstantiate(AudioComponent inComponent,
+                                         AudioComponentInstantiationOptions inOptions,
+                                         void (^inCompletionHandler)(AudioComponentInstance _Nullable, OSStatus)) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_is_hidden_audio_component(inComponent)) {
+        if (inCompletionHandler != nil) {
+            inCompletionHandler(NULL, -3000);
+        }
+        return;
+    }
+    if (&pt_orig_AudioComponentInstantiate != NULL) {
+        pt_orig_AudioComponentInstantiate(inComponent, inOptions, inCompletionHandler);
+    } else if (inCompletionHandler != nil) {
+        inCompletionHandler(NULL, -3000);
+    }
 }
 
 static OSStatus pt_AudioUnitGetProperty(AudioUnit inUnit,
@@ -1520,13 +1723,91 @@ static CFDictionaryRef pt_IOPSGetPowerSourceDescription(CFTypeRef blob, CFTypeRe
     return IOPSGetPowerSourceDescription(blob, ps);
 }
 
+extern CFStringRef IOPSGetProvidingPowerSourceType(CFTypeRef snapshot);
+static CFStringRef pt_IOPSGetProvidingPowerSourceType(CFTypeRef snapshot) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return CFSTR("Battery Power");
+    }
+    return IOPSGetProvidingPowerSourceType(snapshot);
+}
+
+extern CFTimeInterval IOPSGetTimeRemainingEstimate(void);
+static CFTimeInterval pt_IOPSGetTimeRemainingEstimate(void) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return 18000.0;
+    }
+    return IOPSGetTimeRemainingEstimate();
+}
+
+extern Boolean IOPSDrawingUnlimitedPower(void);
+static Boolean pt_IOPSDrawingUnlimitedPower(void) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return false;
+    }
+    return IOPSDrawingUnlimitedPower();
+}
+
+extern CFDictionaryRef IOPSCopyExternalPowerAdapterDetails(void);
+static CFDictionaryRef pt_IOPSCopyExternalPowerAdapterDetails(void) CF_RETURNS_RETAINED {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return NULL;
+    }
+    return IOPSCopyExternalPowerAdapterDetails();
+}
+
+extern CFArrayRef IOPSCopyPowerSourcesByType(int type);
+static CFArrayRef pt_IOPSCopyPowerSourcesByType(int type) CF_RETURNS_RETAINED {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        CFDictionaryRef batt = pt_get_spoofed_iops_battery_dict();
+        if (batt != NULL) {
+            const void *items[1] = { batt };
+            return CFArrayCreate(kCFAllocatorDefault, items, 1, &kCFTypeArrayCallBacks);
+        }
+        return CFArrayCreate(kCFAllocatorDefault, NULL, 0, &kCFTypeArrayCallBacks);
+    }
+    return IOPSCopyPowerSourcesByType(type);
+}
+
+extern IOReturn pt_orig_IOPSGetPercentRemaining(int *percent, bool *isCharging, bool *isFinisher)
+    __asm__("_IOPSGetPercentRemaining") __attribute__((weak_import));
+static IOReturn pt_IOPSGetPercentRemaining(int *percent, bool *isCharging, bool *isFinisher) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        int cur_cap = (int)lroundf(pt_get_shared_spoofed_battery_level() * 100.0f);
+        if (cur_cap < 68) cur_cap = 68;
+        if (cur_cap > 87) cur_cap = 87;
+        if (percent != NULL) {
+            *percent = cur_cap;
+        }
+        if (isCharging != NULL) {
+            *isCharging = false;
+        }
+        if (isFinisher != NULL) {
+            *isFinisher = false;
+        }
+        return kIOReturnSuccess;
+    }
+    if (&pt_orig_IOPSGetPercentRemaining != NULL) {
+        return pt_orig_IOPSGetPercentRemaining(percent, isCharging, isFinisher);
+    }
+    return kIOReturnUnsupported;
+}
+
 extern CFTypeRef MGCopyAnswer(CFStringRef question, CFDictionaryRef options) __attribute__((weak_import));
 extern CFTypeRef MGCopyAnswerWithError(CFStringRef question, CFDictionaryRef options, int *outError) __attribute__((weak_import));
 extern CFDictionaryRef MGCopyMultipleAnswers(CFArrayRef questions, CFDictionaryRef options) __attribute__((weak_import));
 extern bool MGGetBoolAnswer(CFStringRef question) __attribute__((weak_import));
 extern int32_t MGGetSInt32Answer(CFStringRef question, int32_t defaultVal) __attribute__((weak_import));
-extern CFStringRef MGGetStringAnswer(CFStringRef question) __attribute__((weak_import));
+extern int64_t MGGetSInt64Answer(CFStringRef question, int64_t defaultVal) __attribute__((weak_import));
+extern float MGGetFloat32Answer(CFStringRef question, float defaultVal) __attribute__((weak_import));
+extern CFStringRef MGGetStringAnswer(CFStringRef question) __attribute__((weak_import)) CF_RETURNS_RETAINED;
 extern int32_t MGGetProductType(void) __attribute__((weak_import));
+extern bool MGIsQuestionValid(CFStringRef question) __attribute__((weak_import));
 
 static void pt_mg_format_deterministic_ids(char *out_serial, size_t ser_sz, char *out_udid, size_t udid_sz) {
     pt_ensure_bundle_path_map();
@@ -1554,7 +1835,7 @@ static void pt_mg_format_deterministic_ids(char *out_serial, size_t ser_sz, char
     if (out_udid != NULL && udid_sz > 0) {
         uint32_t chip_prefix = 0x8103U;
         const pt_device_profile_t *prof = pt_get_active_device_profile();
-        if (prof->soc_code != NULL && prof->soc_code[0] == 't') {
+        if (prof->soc_code != NULL && (prof->soc_code[0] == 't' || prof->soc_code[0] == 's')) {
             chip_prefix = (uint32_t)strtoul(prof->soc_code + 1, NULL, 16);
         }
         snprintf(out_udid, udid_sz, "0000%04X-%016llX", (unsigned int)chip_prefix, (unsigned long long)h2);
@@ -1562,10 +1843,66 @@ static void pt_mg_format_deterministic_ids(char *out_serial, size_t ser_sz, char
 }
 
 static uint32_t pt_mg_chip_id(const pt_device_profile_t *profile) {
-    if (profile != NULL && profile->soc_code != NULL && profile->soc_code[0] == 't') {
+    if (profile != NULL && profile->soc_code != NULL &&
+        (profile->soc_code[0] == 't' || profile->soc_code[0] == 's')) {
         return (uint32_t)strtoul(profile->soc_code + 1, NULL, 16);
     }
     return 0x8103U;
+}
+
+static int32_t pt_mg_board_id(const pt_device_profile_t *profile) {
+    if (profile == NULL || profile->model == NULL) {
+        return 0x06;
+    }
+    if (strcmp(profile->model, "iPad6,7") == 0) return 0x10;
+    if (strcmp(profile->model, "iPad8,6") == 0) return 0x0C;
+    if (strcmp(profile->model, "iPad13,8") == 0) return 0x06;
+    if (strcmp(profile->model, "iPad14,5") == 0) return 0x0E;
+    if (strcmp(profile->model, "iPad16,6") == 0) return 0x14;
+    if (strcmp(profile->model, "iPad17,3") == 0) return 0x16;
+    if (strcmp(profile->model, "iPhone12,5") == 0) return 0x06;
+    if (strcmp(profile->model, "iPhone14,3") == 0) return 0x0A;
+    if (strcmp(profile->model, "iPhone15,3") == 0) return 0x0C;
+    if (strcmp(profile->model, "iPhone16,2") == 0) return 0x0E;
+    if (strcmp(profile->model, "iPhone17,2") == 0) return 0x10;
+    if (strcmp(profile->model, "iPhone18,2") == 0) return 0x12;
+    return 0x08;
+}
+
+static BOOL pt_mg_is_faceid_model(const char *m) {
+    if (m == NULL || m[0] == '\0') {
+        return NO;
+    }
+    if (strcmp(m, "iPhone12,8") == 0 || strcmp(m, "iPhone14,6") == 0 ||
+        strcmp(m, "iPad16,1") == 0 || strcmp(m, "iPad16,2") == 0) {
+        return NO;
+    }
+    if (strncmp(m, "iPad8,", 6) == 0 ||
+        strncmp(m, "iPad16,", 7) == 0 ||
+        strncmp(m, "iPad17,", 7) == 0 ||
+        strcmp(m, "iPhone10,3") == 0 ||
+        strcmp(m, "iPhone10,6") == 0 ||
+        strncmp(m, "iPhone11,", 9) == 0 ||
+        strncmp(m, "iPhone12,", 9) == 0 ||
+        strncmp(m, "iPhone13,", 9) == 0 ||
+        strncmp(m, "iPhone14,", 9) == 0 ||
+        strncmp(m, "iPhone15,", 9) == 0 ||
+        strncmp(m, "iPhone16,", 9) == 0 ||
+        strncmp(m, "iPhone17,", 9) == 0 ||
+        strncmp(m, "iPhone18,", 9) == 0) {
+        return YES;
+    }
+    static const char *const kExtraFaceID[] = {
+        "iPad13,4", "iPad13,5", "iPad13,6", "iPad13,7",
+        "iPad13,8", "iPad13,9", "iPad13,10", "iPad13,11",
+        "iPad14,3", "iPad14,4", "iPad14,5", "iPad14,6"
+    };
+    for (size_t i = 0; i < sizeof(kExtraFaceID) / sizeof(kExtraFaceID[0]); i++) {
+        if (strcmp(m, kExtraFaceID[i]) == 0) {
+            return YES;
+        }
+    }
+    return NO;
 }
 
 static int32_t pt_mg_product_type_enum(const pt_device_profile_t *profile) {
@@ -1622,12 +1959,64 @@ static CFStringRef pt_mg_cached_cfstring(const char *key_tag, const char *cstr) 
     return val;
 }
 
+static NSDictionary<NSString *, NSString *> *pt_mg_obfuscated_key_map(void) {
+    static NSDictionary<NSString *, NSString *> *s_map = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        static NSString *const kCanonicalKeys[] = {
+            @"ProductType", @"ThinningProductType", @"HWModelStr", @"HardwarePlatform",
+            @"DeviceClass", @"DeviceName", @"UserAssignedDeviceName", @"ComputerName",
+            @"ProductName", @"ProductVersion", @"BuildVersion", @"ProductBuildVersion",
+            @"ModelNumber", @"RegulatoryModelNumber", @"marketing-name",
+            @"SerialNumber", @"UniqueDeviceID", @"ChipID", @"BoardId",
+            @"DeviceFamily", @"SupportedDeviceFamilies", @"DeviceClassNumber",
+            @"UserInterfaceIdiom", @"ipad", @"iphone",
+            @"HasBattery", @"BatteryCurrentCapacity", @"BatteryIsCharging", @"ExternalPowerSourceConnected",
+            @"TouchIDCapability", @"HasMesa", @"PearlIDCapability", @"HasPearl",
+            @"main-screen-width", @"main-screen-height", @"main-screen-scale", @"ScreenDimensions",
+            @"HasBaseband", @"VibratorCapability", @"CPUArchitecture",
+            @"apple-internal-install", @"has-si-dev-tree", @"InternalBuild",
+            @"ArtworkTraits", @"CompatibleDeviceFallback", @"DieId", @"UniqueChipID", @"SysCfgDict"
+        };
+        NSMutableDictionary<NSString *, NSString *> *map =
+            [NSMutableDictionary dictionaryWithCapacity:(sizeof(kCanonicalKeys) / sizeof(kCanonicalKeys[0]))];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        for (size_t i = 0; i < sizeof(kCanonicalKeys) / sizeof(kCanonicalKeys[0]); i++) {
+            NSString *canonical = kCanonicalKeys[i];
+            NSString *prefixed = [@"MGCopyAnswer" stringByAppendingString:canonical];
+            const char *utf8 = [prefixed UTF8String];
+            if (utf8 == NULL) {
+                continue;
+            }
+            uint8_t digest[CC_MD5_DIGEST_LENGTH];
+            CC_MD5(utf8, (CC_LONG)strlen(utf8), digest);
+            NSString *b64 = [[NSData dataWithBytes:digest length:sizeof(digest)] base64EncodedStringWithOptions:0];
+            while ([b64 hasSuffix:@"="]) {
+                b64 = [b64 substringToIndex:b64.length - 1];
+            }
+            if (b64.length == 22) {
+                map[b64] = canonical;
+            }
+        }
+#pragma clang diagnostic pop
+        s_map = [map copy];
+    });
+    return s_map;
+}
+
 static BOOL pt_mg_lookup_spoofed_internal(CFStringRef question, CFTypeRef *out_val, BOOL retain_result) {
     if (question == NULL || out_val == NULL) {
         return NO;
     }
     *out_val = NULL;
     NSString *key = (__bridge NSString *)question;
+    if (key.length == 22) {
+        NSString *unhashed = pt_mg_obfuscated_key_map()[key];
+        if (unhashed != nil) {
+            key = unhashed;
+        }
+    }
     const pt_device_profile_t *profile = pt_get_active_device_profile();
 
     if ([key isEqualToString:@"ProductType"] || [key isEqualToString:@"ThinningProductType"]) {
@@ -1640,9 +2029,16 @@ static BOOL pt_mg_lookup_spoofed_internal(CFStringRef question, CFTypeRef *out_v
         *out_val = (retain_result && s != NULL) ? CFRetain(s) : s;
         return YES;
     }
+    if ([key isEqualToString:@"HardwarePlatform"]) {
+        const char *soc = (profile->soc_code != NULL) ? profile->soc_code : "t8103";
+        CFStringRef s = pt_mg_cached_cfstring(soc, soc);
+        *out_val = (retain_result && s != NULL) ? CFRetain(s) : s;
+        return YES;
+    }
     if ([key isEqualToString:@"DeviceClass"] ||
         [key isEqualToString:@"DeviceName"] ||
-        [key isEqualToString:@"UserAssignedDeviceName"]) {
+        [key isEqualToString:@"UserAssignedDeviceName"] ||
+        [key isEqualToString:@"ComputerName"]) {
         CFStringRef s = profile->is_ipad ? CFSTR("iPad") : CFSTR("iPhone");
         *out_val = retain_result ? CFRetain(s) : s;
         return YES;
@@ -1700,9 +2096,58 @@ static BOOL pt_mg_lookup_spoofed_internal(CFStringRef question, CFTypeRef *out_v
         *out_val = (retain_result && s != NULL) ? CFRetain(s) : s;
         return YES;
     }
+    if ([key isEqualToString:@"CPUArchitecture"]) {
+        const char *arch = (strcmp(profile->model, "iPad6,7") == 0) ? "arm64" : "arm64e";
+        CFStringRef s = pt_mg_cached_cfstring(arch, arch);
+        *out_val = (retain_result && s != NULL) ? CFRetain(s) : s;
+        return YES;
+    }
     if ([key isEqualToString:@"ChipID"]) {
         int32_t chip = (int32_t)pt_mg_chip_id(profile);
         *out_val = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &chip);
+        return YES;
+    }
+    if ([key isEqualToString:@"BoardId"]) {
+        int32_t bid = pt_mg_board_id(profile);
+        *out_val = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &bid);
+        return YES;
+    }
+    if ([key isEqualToString:@"DeviceClassNumber"]) {
+        int32_t clsNum = profile->is_ipad ? 3 : 1;
+        *out_val = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &clsNum);
+        return YES;
+    }
+    if ([key isEqualToString:@"UserInterfaceIdiom"]) {
+        int32_t idiom = profile->is_ipad ? 1 : 0;
+        *out_val = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &idiom);
+        return YES;
+    }
+    if ([key isEqualToString:@"BatteryCurrentCapacity"]) {
+        int32_t capPct = (int32_t)lroundf(pt_get_shared_spoofed_battery_level() * 100.0f);
+        *out_val = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &capPct);
+        return YES;
+    }
+    if ([key isEqualToString:@"main-screen-width"]) {
+        int32_t w = (int32_t)profile->native_width;
+        *out_val = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &w);
+        return YES;
+    }
+    if ([key isEqualToString:@"main-screen-height"]) {
+        int32_t h = (int32_t)profile->native_height;
+        *out_val = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &h);
+        return YES;
+    }
+    if ([key isEqualToString:@"main-screen-scale"]) {
+        double sc = profile->native_scale;
+        *out_val = CFNumberCreate(kCFAllocatorDefault, kCFNumberDoubleType, &sc);
+        return YES;
+    }
+    if ([key isEqualToString:@"ScreenDimensions"]) {
+        NSDictionary *dims = @{
+            @"Width": @((int32_t)profile->native_width),
+            @"Height": @((int32_t)profile->native_height),
+        };
+        *out_val = CFBridgingRetain(dims);
         return YES;
     }
     if ([key isEqualToString:@"DeviceFamily"] ||
@@ -1721,16 +2166,42 @@ static BOOL pt_mg_lookup_spoofed_internal(CFStringRef question, CFTypeRef *out_v
         *out_val = retain_result ? CFRetain(b) : b;
         return YES;
     }
+    if ([key isEqualToString:@"HasBattery"]) {
+        *out_val = retain_result ? CFRetain(kCFBooleanTrue) : kCFBooleanTrue;
+        return YES;
+    }
+    if ([key isEqualToString:@"BatteryIsCharging"] ||
+        [key isEqualToString:@"ExternalPowerSourceConnected"]) {
+        *out_val = retain_result ? CFRetain(kCFBooleanFalse) : kCFBooleanFalse;
+        return YES;
+    }
+    if ([key isEqualToString:@"TouchIDCapability"] || [key isEqualToString:@"HasMesa"]) {
+        CFBooleanRef b = pt_mg_is_faceid_model(profile->model) ? kCFBooleanFalse : kCFBooleanTrue;
+        *out_val = retain_result ? CFRetain(b) : b;
+        return YES;
+    }
+    if ([key isEqualToString:@"PearlIDCapability"] || [key isEqualToString:@"HasPearl"]) {
+        CFBooleanRef b = pt_mg_is_faceid_model(profile->model) ? kCFBooleanTrue : kCFBooleanFalse;
+        *out_val = retain_result ? CFRetain(b) : b;
+        return YES;
+    }
+    if ([key isEqualToString:@"HasBaseband"] || [key isEqualToString:@"VibratorCapability"]) {
+        CFBooleanRef b = profile->is_ipad ? kCFBooleanFalse : kCFBooleanTrue;
+        *out_val = retain_result ? CFRetain(b) : b;
+        return YES;
+    }
     if ([key isEqualToString:@"apple-internal-install"] ||
-        [key isEqualToString:@"has-si-dev-tree"]) {
+        [key isEqualToString:@"has-si-dev-tree"] ||
+        [key isEqualToString:@"InternalBuild"]) {
         *out_val = retain_result ? CFRetain(kCFBooleanFalse) : kCFBooleanFalse;
         return YES;
     }
     if ([key isEqualToString:@"ArtworkTraits"]) {
+        NSString *gamut = (strcmp(profile->model, "iPad6,7") == 0) ? @"sRGB" : @"P3";
         NSDictionary *traits = @{
             @"ArtworkDeviceIdiom": profile->is_ipad ? @"ipad" : @"iphone",
             @"ArtworkDeviceProductDescription": [NSString stringWithUTF8String:profile->marketing_name],
-            @"ArtworkDisplayGamut": @"P3",
+            @"ArtworkDisplayGamut": gamut,
             @"ArtworkScaleFactor": @((int)profile->native_scale),
         };
         *out_val = CFBridgingRetain(traits);
@@ -1751,19 +2222,29 @@ static BOOL pt_mg_lookup_spoofed(CFStringRef question, CFTypeRef *out_retained) 
 }
 
 __attribute__((visibility("hidden"))) CFTypeRef pt_MGCopyAnswer(CFStringRef question, CFDictionaryRef options) {
-    if (pt_is_bypass_enabled() &&
-        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    BOOL app_caller = (pt_is_bypass_enabled() &&
+                       !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
+    if (app_caller) {
         CFTypeRef spoofed = NULL;
         if (pt_mg_lookup_spoofed(question, &spoofed)) {
             return spoofed;
         }
     }
-    return (MGCopyAnswer != NULL) ? MGCopyAnswer(question, options) : NULL;
+    CFTypeRef orig = (MGCopyAnswer != NULL) ? MGCopyAnswer(question, options) : NULL;
+    if (app_caller && orig != NULL) {
+        CFTypeRef san = pt_create_sanitized_ioreg_cfvalue_if_changed(orig, kCFAllocatorDefault, 0);
+        if (san != NULL) {
+            CFRelease(orig);
+            return san;
+        }
+    }
+    return orig;
 }
 
 __attribute__((visibility("hidden"))) CFTypeRef pt_MGCopyAnswerWithError(CFStringRef question, CFDictionaryRef options, int *outError) {
-    if (pt_is_bypass_enabled() &&
-        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    BOOL app_caller = (pt_is_bypass_enabled() &&
+                       !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
+    if (app_caller) {
         CFTypeRef spoofed = NULL;
         if (pt_mg_lookup_spoofed(question, &spoofed)) {
             if (outError != NULL) {
@@ -1773,7 +2254,15 @@ __attribute__((visibility("hidden"))) CFTypeRef pt_MGCopyAnswerWithError(CFStrin
         }
     }
     if (MGCopyAnswerWithError != NULL) {
-        return MGCopyAnswerWithError(question, options, outError);
+        CFTypeRef orig = MGCopyAnswerWithError(question, options, outError);
+        if (app_caller && orig != NULL) {
+            CFTypeRef san = pt_create_sanitized_ioreg_cfvalue_if_changed(orig, kCFAllocatorDefault, 0);
+            if (san != NULL) {
+                CFRelease(orig);
+                return san;
+            }
+        }
+        return orig;
     }
     if (outError != NULL) {
         *outError = -1;
@@ -1803,6 +2292,12 @@ __attribute__((visibility("hidden"))) CFDictionaryRef pt_MGCopyMultipleAnswers(C
                     result[q] = (__bridge_transfer id)spoofed;
                 } else {
                     [result removeObjectForKey:q];
+                }
+            } else if (result[q] != nil) {
+                CFTypeRef san = pt_create_sanitized_ioreg_cfvalue_if_changed(
+                    (__bridge CFTypeRef)result[q], kCFAllocatorDefault, 0);
+                if (san != NULL) {
+                    result[q] = (__bridge_transfer id)san;
                 }
             }
         }
@@ -1846,9 +2341,46 @@ __attribute__((visibility("hidden"))) int32_t pt_MGGetSInt32Answer(CFStringRef q
     return (MGGetSInt32Answer != NULL) ? MGGetSInt32Answer(question, defaultVal) : defaultVal;
 }
 
-__attribute__((visibility("hidden"))) CFStringRef pt_MGGetStringAnswer(CFStringRef question) {
+__attribute__((visibility("hidden"))) int64_t pt_MGGetSInt64Answer(CFStringRef question, int64_t defaultVal) {
     if (pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        CFTypeRef spoofed = NULL;
+        if (pt_mg_lookup_spoofed(question, &spoofed)) {
+            int64_t res = defaultVal;
+            if (spoofed != NULL) {
+                if (CFGetTypeID(spoofed) == CFNumberGetTypeID()) {
+                    CFNumberGetValue((CFNumberRef)spoofed, kCFNumberSInt64Type, &res);
+                }
+                CFRelease(spoofed);
+            }
+            return res;
+        }
+    }
+    return (MGGetSInt64Answer != NULL) ? MGGetSInt64Answer(question, defaultVal) : defaultVal;
+}
+
+__attribute__((visibility("hidden"))) float pt_MGGetFloat32Answer(CFStringRef question, float defaultVal) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        CFTypeRef spoofed = NULL;
+        if (pt_mg_lookup_spoofed(question, &spoofed)) {
+            float res = defaultVal;
+            if (spoofed != NULL) {
+                if (CFGetTypeID(spoofed) == CFNumberGetTypeID()) {
+                    CFNumberGetValue((CFNumberRef)spoofed, kCFNumberFloat32Type, &res);
+                }
+                CFRelease(spoofed);
+            }
+            return res;
+        }
+    }
+    return (MGGetFloat32Answer != NULL) ? MGGetFloat32Answer(question, defaultVal) : defaultVal;
+}
+
+__attribute__((visibility("hidden"))) CFStringRef pt_MGGetStringAnswer(CFStringRef question) CF_RETURNS_RETAINED {
+    BOOL app_caller = (pt_is_bypass_enabled() &&
+                       !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
+    if (app_caller) {
         CFTypeRef spoofed = NULL;
         if (pt_mg_lookup_spoofed_internal(question, &spoofed, YES)) {
             if (spoofed != NULL && CFGetTypeID(spoofed) != CFStringGetTypeID()) {
@@ -1858,7 +2390,19 @@ __attribute__((visibility("hidden"))) CFStringRef pt_MGGetStringAnswer(CFStringR
             return (CFStringRef)spoofed;
         }
     }
-    return (MGGetStringAnswer != NULL) ? MGGetStringAnswer(question) : NULL;
+    CFStringRef orig = (MGGetStringAnswer != NULL) ? MGGetStringAnswer(question) : NULL;
+    if (app_caller && orig != NULL) {
+        CFTypeRef san = pt_create_sanitized_ioreg_cfvalue_if_changed(orig, kCFAllocatorDefault, 0);
+        if (san != NULL) {
+            CFRelease(orig);
+            if (CFGetTypeID(san) == CFStringGetTypeID()) {
+                return (CFStringRef)san;
+            }
+            CFRelease(san);
+            return NULL;
+        }
+    }
+    return orig;
 }
 
 __attribute__((visibility("hidden"))) int32_t pt_MGGetProductType(void) {
@@ -1867,6 +2411,21 @@ __attribute__((visibility("hidden"))) int32_t pt_MGGetProductType(void) {
         return pt_mg_product_type_enum(pt_get_active_device_profile());
     }
     return (MGGetProductType != NULL) ? MGGetProductType() : 0;
+}
+
+__attribute__((visibility("hidden"))) bool pt_MGIsQuestionValid(CFStringRef question) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        CFTypeRef spoofed = NULL;
+        if (pt_mg_lookup_spoofed(question, &spoofed)) {
+            bool valid = (spoofed != NULL);
+            if (spoofed != NULL) {
+                CFRelease(spoofed);
+            }
+            return valid;
+        }
+    }
+    return (MGIsQuestionValid != NULL) ? MGIsQuestionValid(question) : false;
 }
 
 PT_INTERPOSE(pt_IORegistryEntryCreateCFProperty, IORegistryEntryCreateCFProperty)
@@ -1884,6 +2443,8 @@ PT_INTERPOSE(pt_IOObjectCopyBundleIdentifierForClass, IOObjectCopyBundleIdentifi
 PT_INTERPOSE(pt_IOIteratorNext, IOIteratorNext)
 PT_INTERPOSE(pt_AudioComponentFindNext, AudioComponentFindNext)
 PT_INTERPOSE(pt_AudioComponentCount, AudioComponentCount)
+PT_INTERPOSE_WEAK_NAMED(pt_AudioComponentInstanceNew, pt_orig_AudioComponentInstanceNew, "AudioComponentInstanceNew")
+PT_INTERPOSE_WEAK_NAMED(pt_AudioComponentInstantiate, pt_orig_AudioComponentInstantiate, "AudioComponentInstantiate")
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 PT_INTERPOSE(pt_UTTypeCopyDeclaringBundleURL, UTTypeCopyDeclaringBundleURL)
@@ -1892,13 +2453,22 @@ PT_INTERPOSE(pt_UTTypeCopyDeclaration, UTTypeCopyDeclaration)
 PT_INTERPOSE(pt_IOPSCopyPowerSourcesInfo, IOPSCopyPowerSourcesInfo)
 PT_INTERPOSE(pt_IOPSCopyPowerSourcesList, IOPSCopyPowerSourcesList)
 PT_INTERPOSE(pt_IOPSGetPowerSourceDescription, IOPSGetPowerSourceDescription)
+PT_INTERPOSE(pt_IOPSGetProvidingPowerSourceType, IOPSGetProvidingPowerSourceType)
+PT_INTERPOSE(pt_IOPSGetTimeRemainingEstimate, IOPSGetTimeRemainingEstimate)
+PT_INTERPOSE(pt_IOPSDrawingUnlimitedPower, IOPSDrawingUnlimitedPower)
+PT_INTERPOSE(pt_IOPSCopyExternalPowerAdapterDetails, IOPSCopyExternalPowerAdapterDetails)
+PT_INTERPOSE(pt_IOPSCopyPowerSourcesByType, IOPSCopyPowerSourcesByType)
+PT_INTERPOSE_WEAK_NAMED(pt_IOPSGetPercentRemaining, pt_orig_IOPSGetPercentRemaining, "IOPSGetPercentRemaining")
 PT_INTERPOSE(pt_MGCopyAnswer, MGCopyAnswer)
 PT_INTERPOSE(pt_MGCopyAnswerWithError, MGCopyAnswerWithError)
 PT_INTERPOSE(pt_MGCopyMultipleAnswers, MGCopyMultipleAnswers)
 PT_INTERPOSE(pt_MGGetBoolAnswer, MGGetBoolAnswer)
 PT_INTERPOSE(pt_MGGetSInt32Answer, MGGetSInt32Answer)
+PT_INTERPOSE(pt_MGGetSInt64Answer, MGGetSInt64Answer)
+PT_INTERPOSE(pt_MGGetFloat32Answer, MGGetFloat32Answer)
 PT_INTERPOSE(pt_MGGetStringAnswer, MGGetStringAnswer)
 PT_INTERPOSE(pt_MGGetProductType, MGGetProductType)
+PT_INTERPOSE(pt_MGIsQuestionValid, MGIsQuestionValid)
 PT_INTERPOSE(pt_IORegistryEntryGetName, IORegistryEntryGetName)
 PT_INTERPOSE(pt_IORegistryEntryGetNameInPlane, IORegistryEntryGetNameInPlane)
 PT_INTERPOSE(pt_IOObjectConformsTo, IOObjectConformsTo)
