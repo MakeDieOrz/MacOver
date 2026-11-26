@@ -740,9 +740,19 @@ public struct PTFrameRateRangeValues: Equatable {
 }
 
 public enum PTPlayChainPersistentRef {
-    public static let binaryLength = 20
+    public static let iosBinaryLength = 12
+    public static let binaryLength = 12
+    public static let legacyBinaryLength = 20
     private static let binaryHeader: [UInt8] = [0x8A, 0x9F, 0xC4]
     private static let legacyPrefix = "PCPR1:"
+
+    private static let iosTagToTable: [String: String] = [
+        kSecClassGenericPassword as String: kSecClassGenericPassword as String,
+        kSecClassInternetPassword as String: kSecClassInternetPassword as String,
+        kSecClassCertificate as String: kSecClassCertificate as String,
+        kSecClassKey as String: kSecClassKey as String,
+        kSecClassIdentity as String: kSecClassIdentity as String
+    ]
 
     private static let tableToTag: [String: UInt8] = [
         kSecClassGenericPassword as String: 0x91,
@@ -760,19 +770,52 @@ public enum PTPlayChainPersistentRef {
         0x95: kSecClassIdentity as String
     ]
 
-    public static func encode(tableName: String, uuid: UUID = UUID()) -> Data {
+    private static func decodeIOSRowID(from data: Data) -> Int64? {
+        guard data.count == iosBinaryLength else { return nil }
+        let base = data.startIndex
+        var rawLE: Int64 = 0
+        _ = withUnsafeMutableBytes(of: &rawLE) { dst in
+            data[(base + 4)..<(base + iosBinaryLength)].copyBytes(to: dst)
+        }
+        let rowID = Int64(littleEndian: rawLE)
+        return rowID > 0 ? rowID : nil
+    }
+
+    public static func encode(tableName: String, rowID: Int64 = 1) -> Data {
+        let effectiveRowID = rowID > 0 ? rowID : 1
+        let tagUTF8 = Array(tableName.utf8)
+        if iosTagToTable[tableName] != nil && tagUTF8.count == 4 {
+            var bytes = [UInt8]()
+            bytes.reserveCapacity(iosBinaryLength)
+            bytes.append(contentsOf: tagUTF8)
+            var leRowID = effectiveRowID.littleEndian
+            withUnsafeBytes(of: &leRowID) { buf in
+                bytes.append(contentsOf: buf)
+            }
+            return Data(bytes)
+        }
         var bytes = [UInt8]()
-        bytes.reserveCapacity(binaryLength)
+        bytes.reserveCapacity(legacyBinaryLength)
         bytes.append(contentsOf: binaryHeader)
         bytes.append(tableToTag[tableName] ?? 0x90)
-        withUnsafeBytes(of: uuid.uuid) { uuidBuf in
-            bytes.append(contentsOf: uuidBuf)
+        var leRowID = effectiveRowID.littleEndian
+        withUnsafeBytes(of: &leRowID) { buf in
+            bytes.append(contentsOf: buf)
         }
+        bytes.append(contentsOf: [UInt8](repeating: 0, count: 8))
         return Data(bytes)
     }
 
     public static func decodeTableName(from data: Data) -> String? {
-        if data.count == binaryLength {
+        if data.count == iosBinaryLength {
+            let base = data.startIndex
+            if let prefix = String(bytes: data[base..<(base + 4)], encoding: .ascii),
+               let table = iosTagToTable[prefix],
+               decodeIOSRowID(from: data) != nil {
+                return table
+            }
+        }
+        if data.count == legacyBinaryLength {
             let base = data.startIndex
             if data[base] == binaryHeader[0],
                data[base + 1] == binaryHeader[1],
@@ -793,7 +836,10 @@ public enum PTPlayChainPersistentRef {
     }
 
     public static func isPersistentRef(_ data: Data) -> Bool {
-        if data.count == binaryLength {
+        if decodeTableName(from: data) != nil {
+            return true
+        }
+        if data.count == legacyBinaryLength {
             let base = data.startIndex
             if data[base] == binaryHeader[0],
                data[base + 1] == binaryHeader[1],
@@ -977,9 +1023,14 @@ public enum PTStrictViewportFocusPolicy {
 
 @objc public final class PTPlayChainSecureEnclaveRegistry: NSObject {
     private static let seTagObject = NSObject()
+    private static let seAttrsTagObject = NSObject()
 
     private static var associationKey: UnsafeRawPointer {
         UnsafeRawPointer(Unmanaged.passUnretained(seTagObject).toOpaque())
+    }
+
+    private static var persistedAssociationKey: UnsafeRawPointer {
+        UnsafeRawPointer(Unmanaged.passUnretained(seAttrsTagObject).toOpaque())
     }
 
     @objc public static func parametersRequestSecureEnclave(_ parameters: NSDictionary?) -> Bool {
@@ -1015,5 +1066,18 @@ public enum PTStrictViewportFocusPolicy {
             return false
         }
         return !isPublicKey(key)
+    }
+
+    @objc(setPersistedAttributes:forKey:)
+    public static func setPersistedAttributes(_ attributes: NSDictionary?, for key: SecKey?) {
+        guard let key else { return }
+        let copied = attributes?.copy() as? NSDictionary
+        objc_setAssociatedObject(key, persistedAssociationKey, copied, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+
+    @objc(persistedAttributesForKey:)
+    public static func persistedAttributes(for key: SecKey?) -> NSDictionary? {
+        guard let key else { return nil }
+        return objc_getAssociatedObject(key, persistedAssociationKey) as? NSDictionary
     }
 }

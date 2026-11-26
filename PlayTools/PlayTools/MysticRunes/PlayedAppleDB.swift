@@ -23,6 +23,21 @@ class PlayKeychainDB: NSObject {
     private var cachedEnvCFHome: String?
     private var cachedEnvHome: String?
     private var cachedResolvedDBPath: String?
+    private var defaultAccessGroup: String?
+
+    func setDefaultAccessGroup(_ group: String?) {
+        let trimmed = group?.trimmingCharacters(in: .whitespacesAndNewlines)
+        os_unfair_lock_lock(dbLock)
+        defaultAccessGroup = (trimmed?.isEmpty == false) ? trimmed : nil
+        os_unfair_lock_unlock(dbLock)
+    }
+
+    func currentDefaultAccessGroup() -> String? {
+        os_unfair_lock_lock(dbLock)
+        let group = defaultAccessGroup
+        os_unfair_lock_unlock(dbLock)
+        return group
+    }
 
     private static let maxCachedStatements = 64
 
@@ -341,8 +356,8 @@ class PlayKeychainDB: NSObject {
         return dict
     }
 
-    private static func makePersistentRef(tableName: String) -> Data {
-        return PTPlayChainPersistentRef.encode(tableName: tableName)
+    private static func makePersistentRef(tableName: String, rowID: Int64) -> Data {
+        return PTPlayChainPersistentRef.encode(tableName: tableName, rowID: rowID)
     }
 
     private static func resolveCandidateTables(for attributes: NSDictionary) -> [String] {
@@ -362,7 +377,8 @@ class PlayKeychainDB: NSObject {
     private func filterClauseAndValues(
         tableName: String,
         primaryColumns: [CFString],
-        attributes: NSDictionary
+        attributes: NSDictionary,
+        defaultAccessGroup: String? = nil
     ) -> (clause: String, values: [CFTypeRef])? {
         guard let allowedCols = Self.allowedColumnsByTable[tableName] else {
             return nil
@@ -393,6 +409,14 @@ class PlayKeychainDB: NSObject {
                         values.append(false as CFBoolean)
                     }
                 }
+                return
+            }
+            if key == (kSecAttrAccessGroup as String),
+               let strAttr = attr as? String,
+               let defGroup = defaultAccessGroup,
+               strAttr == defGroup {
+                clauses.append("(\(key) = ? OR \(key) IS NULL)")
+                values.append(strAttr as CFTypeRef)
                 return
             }
             if attr is NSNull {
@@ -473,6 +497,7 @@ class PlayKeychainDB: NSObject {
         }
         let selectLimit = (explicitLimit < 0) ? Int.max : Int(explicitLimit)
 
+        let defaultGroup = currentDefaultAccessGroup()
         var dictArr: [NSMutableDictionary] = []
         guard usingDB({ sqlite3DB in
             for tableName in candidateTables {
@@ -483,7 +508,8 @@ class PlayKeychainDB: NSObject {
                       let whereInfo = filterClauseAndValues(
                           tableName: tableName,
                           primaryColumns: primaryColumns,
-                          attributes: normalized
+                          attributes: normalized,
+                          defaultAccessGroup: defaultGroup
                       ) else {
                     continue
                 }
@@ -529,8 +555,11 @@ class PlayKeychainDB: NSObject {
                         if newDict[kSecAttrSynchronizable as String] == nil {
                             newDict[kSecAttrSynchronizable as String] = false as CFBoolean
                         }
+                        if newDict[kSecAttrAccessGroup as String] == nil, let defGroup = defaultGroup {
+                            newDict[kSecAttrAccessGroup as String] = defGroup
+                        }
                         if newDict[kSecValuePersistentRef as String] == nil {
-                            let pRef = Self.makePersistentRef(tableName: tableName)
+                            let pRef = Self.makePersistentRef(tableName: tableName, rowID: rowID)
                             newDict[kSecValuePersistentRef as String] = pRef
                             missingPersistentRefs.append((rowID, pRef))
                         }
@@ -561,6 +590,14 @@ class PlayKeychainDB: NSObject {
     }
 
     func insertWithStatus(_ attributes: NSDictionary) -> (status: OSStatus, item: NSMutableDictionary?) {
+        if let rawToken = attributes[kSecAttrTokenID as String] as? String,
+           rawToken == (kSecAttrTokenIDSecureEnclave as String),
+           attributes[Self.internalTokenIDColumn] == nil,
+           attributes[kSecValueData] != nil {
+            return (errSecParam, nil)
+        }
+
+        let effectiveDefaultAccessGroup = currentDefaultAccessGroup()
         let normalized = Self.normalizeAttributes(
             attributes,
             forPersistence: true,
@@ -578,6 +615,10 @@ class PlayKeychainDB: NSObject {
         } else {
             normalized[syncKey] = false as CFBoolean
         }
+        let agrpKey = kSecAttrAccessGroup as String
+        if normalized[agrpKey] == nil, let defGroup = effectiveDefaultAccessGroup {
+            normalized[agrpKey] = defGroup
+        }
 
         let now = Date()
         let cdatKey = kSecAttrCreationDate as String
@@ -589,9 +630,7 @@ class PlayKeychainDB: NSObject {
             normalized[mdatKey] = now
         }
         let pRefKey = kSecValuePersistentRef as String
-        if normalized[pRefKey] == nil {
-            normalized[pRefKey] = Self.makePersistentRef(tableName: tableName)
-        }
+        let needsGeneratedPersistentRef = (normalized[pRefKey] == nil)
 
         var columnsQuery = primaryColumns.map { "\($0)" }
         columnsQuery.append(contentsOf: secondaryColumns.compactMap { col in
@@ -698,6 +737,21 @@ class PlayKeychainDB: NSObject {
             let errCode = sqlite3_errcode(sqlite3DB)
             sqlite3_reset(stmt)
             if stepRc == SQLITE_DONE {
+                if needsGeneratedPersistentRef {
+                    let rowID = sqlite3_last_insert_rowid(sqlite3DB)
+                    let generatedRef = Self.makePersistentRef(tableName: tableName, rowID: rowID)
+                    let refSQL = "UPDATE \(tableName) SET \(pRefKey) = ? WHERE rowid = ?"
+                    guard let refStmt = preparedStatement(for: refSQL, in: sqlite3DB),
+                          encodeData(stmt: refStmt, index: 1, value: generatedRef as CFData),
+                          sqlite3_bind_int64(refStmt, 2, rowID) == SQLITE_OK,
+                          sqlite3_step(refStmt) == SQLITE_DONE else {
+                        sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
+                        finalStatus = errSecIO
+                        return false
+                    }
+                    sqlite3_reset(refStmt)
+                    newDict[pRefKey] = generatedRef
+                }
                 guard sqlite3_exec(sqlite3DB, "COMMIT", nil, nil, nil) == SQLITE_OK else {
                     sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
                     finalStatus = errSecIO
@@ -740,6 +794,7 @@ class PlayKeychainDB: NSObject {
             return errSecParam
         }
 
+        let defaultGroup = currentDefaultAccessGroup()
         var finalStatus: OSStatus = errSecItemNotFound
         _ = usingDB { sqlite3DB in
             guard sqlite3_exec(sqlite3DB, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else {
@@ -753,7 +808,8 @@ class PlayKeychainDB: NSObject {
                       let whereInfo = filterClauseAndValues(
                           tableName: tableName,
                           primaryColumns: primaryColumns,
-                          attributes: normalizedQuery
+                          attributes: normalizedQuery,
+                          defaultAccessGroup: defaultGroup
                       ) else {
                     continue
                 }
@@ -963,6 +1019,7 @@ class PlayKeychainDB: NSObject {
             explicitDeleteLimit = nil
         }
 
+        let defaultGroup = currentDefaultAccessGroup()
         var finalStatus: OSStatus = errSecIO
         _ = usingDB { sqlite3DB in
             var totalChanged: Int64 = 0
@@ -974,7 +1031,8 @@ class PlayKeychainDB: NSObject {
                       let whereInfo = filterClauseAndValues(
                           tableName: tableName,
                           primaryColumns: primaryColumns,
-                          attributes: normalized
+                          attributes: normalized,
+                          defaultAccessGroup: defaultGroup
                       ) else {
                     continue
                 }

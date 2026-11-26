@@ -93,7 +93,7 @@ __attribute__((visibility("hidden"))) BOOL pt_fd_is_sensitive(int fd, const void
 __attribute__((visibility("hidden"))) pt_fs_path_disposition_t pt_prepare_fs_path_cached_caller(const char *raw_path, const void *caller, char *vbuf, size_t vbuf_size, const char **out_path, int *inout_is_sys_caller);
 __attribute__((visibility("hidden"))) pt_fs_path_disposition_t pt_prepare_fs_path_at_cached_caller(int dirfd, const char *raw_path, const void *caller, char *vbuf, size_t vbuf_size, const char **out_path, int *inout_is_sys_caller, BOOL for_readonly);
 __attribute__((visibility("hidden"))) BOOL pt_prepare_fs_path_for_modify(int dirfd, const char *raw_path, const void *caller, char *vbuf, size_t vbuf_size, const char **out_path, int ancestor_errno);
-__attribute__((visibility("hidden"))) int pt_stat_virtual_ancestor(struct stat *buf);
+__attribute__((visibility("hidden"))) int pt_stat_virtual_ancestor(const char *virtual_path, struct stat *buf, const void *caller);
 __attribute__((visibility("hidden"))) void pt_disable_app_backups_for_safe_mode(void);
 __attribute__((visibility("hidden"))) BOOL pt_has_backup_mobileprovision(void);
 __attribute__((visibility("hidden"))) const char *pt_copy_virtual_mobileprovision_path(char *buf, size_t bufsize);
@@ -102,9 +102,16 @@ __attribute__((visibility("hidden"))) const uint8_t *pt_get_cached_backup_main_m
 __attribute__((visibility("hidden"))) BOOL pt_is_active_app_backup_file_path(const char *p);
 __attribute__((visibility("hidden"))) const char *pt_virtualize_app_backup_path(const char *p, char *buf, size_t bufsize, BOOL use_private_prefix);
 __attribute__((visibility("hidden"))) BOOL pt_is_synth_system_version_path(const char *p);
+__attribute__((visibility("hidden"))) BOOL pt_is_synth_system_version_stat(dev_t dev, ino_t ino);
+__attribute__((visibility("hidden"))) void pt_normalize_synth_sysver_stat(struct stat *buf);
 __attribute__((visibility("hidden"))) BOOL pt_is_sensitive_host_fd_path(const char *path, const void *caller);
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_normalized_path_cached_caller(const char *norm, const void *caller, int *inout_is_sys_caller);
 __attribute__((visibility("hidden"))) BOOL pt_is_synth_code_resources_path(const char *p);
+__attribute__((visibility("hidden"))) BOOL pt_is_synth_info_plist_path(const char *p);
+__attribute__((visibility("hidden"))) NSMutableDictionary *pt_sanitize_code_resources_dict(NSDictionary *dict, BOOL wantMutableContainers);
+__attribute__((visibility("hidden"))) void pt_record_stat_dpclass(dev_t dev, ino_t ino, int dpclass);
+__attribute__((visibility("hidden"))) int pt_lookup_stat_dpclass(dev_t dev, ino_t ino);
+__attribute__((visibility("hidden"))) int pt_lookup_fd_dpclass(int fd);
 __attribute__((visibility("hidden"))) BOOL pt_is_sensitive_unix_socket_path(const char *sun_path, const void *caller);
 __attribute__((visibility("hidden"))) BOOL pt_path_equals_real_data_root(const char *path);
 __attribute__((visibility("hidden"))) void pt_sanitize_statfs_entry(struct statfs *buf, const void *caller, int *inout_is_sys);
@@ -188,28 +195,29 @@ static inline BOOL pt_is_hidden_dirent_name(const char *d_name) {
     if (d_name == NULL || d_name[0] == '\0') {
         return NO;
     }
-    if (strncmp(d_name, "discord-ipc-", 12) == 0 ||
-        strncmp(d_name, ".pt_sysver_", 11) == 0 ||
-        strncmp(d_name, ".pt_coderes_", 12) == 0) {
+    if (strncasecmp(d_name, "discord-ipc-", 12) == 0 ||
+        strncasecmp(d_name, ".pt_sysver_", 11) == 0 ||
+        strncasecmp(d_name, ".pt_coderes_", 12) == 0 ||
+        strncasecmp(d_name, ".pt_info_", 9) == 0) {
         return YES;
     }
-    if (strstr(d_name, "Play") != NULL &&
-        (strstr(d_name, "PlayTools") != NULL ||
-         strstr(d_name, "Playtools.strings") != NULL ||
-         strstr(d_name, "io.playcover.PlayCover") != NULL)) {
+    if (strcasestr(d_name, "Play") != NULL &&
+        (strcasestr(d_name, "PlayTools") != NULL ||
+         strcasestr(d_name, "Playtools.strings") != NULL ||
+         strcasestr(d_name, "io.playcover.PlayCover") != NULL)) {
         return YES;
     }
-    if (strstr(d_name, "app.makedie.MacOver") != NULL ||
-        strstr(d_name, "MacOver.app") != NULL ||
-        strstr(d_name, "AKInterface") != NULL ||
-        strstr(d_name, "UserPlugins") != NULL ||
+    if (strcasestr(d_name, "app.makedie.MacOver") != NULL ||
+        strcasestr(d_name, "MacOver.app") != NULL ||
+        strcasestr(d_name, "AKInterface") != NULL ||
+        strcasestr(d_name, "UserPlugins") != NULL ||
         pt_is_registered_hidden_module(d_name)) {
         return YES;
     }
     if (pt_is_bypass_enabled() &&
-        (strcmp(d_name, ".CFUserTextEncoding") == 0 ||
-         strcmp(d_name, "Saved Application State") == 0 ||
-         strstr(d_name, "~iosmac.savedState") != NULL)) {
+        (strcasecmp(d_name, ".CFUserTextEncoding") == 0 ||
+         strcasecmp(d_name, "Saved Application State") == 0 ||
+         strcasestr(d_name, "~iosmac.savedState") != NULL)) {
         return YES;
     }
     return NO;
@@ -219,18 +227,29 @@ static inline BOOL pt_is_macos_data_root_symlink_name(const char *d_name) {
     if (d_name == NULL || d_name[0] == '\0') {
         return NO;
     }
-    return (strcmp(d_name, "Desktop") == 0 ||
-            strcmp(d_name, "Downloads") == 0 ||
-            strcmp(d_name, "Movies") == 0 ||
-            strcmp(d_name, "Music") == 0 ||
-            strcmp(d_name, "Pictures") == 0);
+    return (strcasecmp(d_name, "Desktop") == 0 ||
+            strcasecmp(d_name, "Downloads") == 0 ||
+            strcasecmp(d_name, "Movies") == 0 ||
+            strcasecmp(d_name, "Music") == 0 ||
+            strcasecmp(d_name, "Pictures") == 0);
 }
 
 static inline void pt_sanitize_stat_buf(struct stat *buf, const void *caller) {
-    if (buf != NULL && buf->st_gid == 20 &&
+    if (buf != NULL &&
         pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(caller)) {
-        buf->st_gid = 501;
+        if (buf->st_gid == 20) {
+            buf->st_gid = 501;
+        }
+#ifdef SF_RESTRICTED
+        buf->st_flags &= ~(uint32_t)SF_RESTRICTED;
+#endif
+#ifdef SF_FIRMLINK
+        buf->st_flags &= ~(uint32_t)SF_FIRMLINK;
+#endif
+        if (pt_is_synth_system_version_stat(buf->st_dev, buf->st_ino)) {
+            pt_normalize_synth_sysver_stat(buf);
+        }
     }
 }
 
@@ -245,6 +264,7 @@ __attribute__((visibility("hidden"))) int pt_fs_open_extended_with_caller(const 
 __attribute__((visibility("hidden"))) int pt_fs_chdir_with_caller(const char *path, const void *caller);
 __attribute__((visibility("hidden"))) int pt_fs_fchdir_with_caller(int fd, const void *caller);
 __attribute__((visibility("hidden"))) int pt_fs_clonefileat_with_caller(int src_dirfd, const char *src, int dst_dirfd, const char *dst, uint32_t flags, const void *caller);
+__attribute__((visibility("hidden"))) int pt_fs_fclonefileat_with_caller(int src_fd, int dst_dirfd, const char *dst, uint32_t flags, const void *caller);
 __attribute__((visibility("hidden"))) int pt_fs_stat_with_caller(const char *path, struct stat *buf, BOOL follow_symlinks, const void *caller);
 __attribute__((visibility("hidden"))) int pt_fs_fstat_with_caller(int fd, struct stat *buf, const void *caller);
 __attribute__((visibility("hidden"))) int pt_fs_fstatat_with_caller(int fd, const char *path, struct stat *buf, int flag, const void *caller);

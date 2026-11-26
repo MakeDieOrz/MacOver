@@ -36,6 +36,10 @@ static inline uint8_t pt_classify_caller_addr(const void *ret_addr) {
     if (ret_addr == NULL) {
         return PT_CALLER_SYS_NON_WRAPPER;
     }
+    ret_addr = pt_strip_return_addr((uintptr_t)ret_addr);
+    if (ret_addr == NULL) {
+        return PT_CALLER_SYS_NON_WRAPPER;
+    }
     uint64_t key = (uint64_t)(uintptr_t)ret_addr;
     size_t slot = pt_caller_addr_cache_slot(key);
     if (__builtin_expect(pt_caller_addr_is_cacheable_aligned(key), 1)) {
@@ -302,6 +306,11 @@ static _Atomic bool s_has_synth_code_res = false;
 static char s_synth_code_res_path[PATH_MAX];
 static dev_t s_synth_code_res_dev = 0;
 static ino_t s_synth_code_res_ino = 0;
+static os_unfair_lock s_synth_info_plist_lock = OS_UNFAIR_LOCK_INIT;
+static _Atomic bool s_has_synth_info_plist = false;
+static char s_synth_info_plist_path[PATH_MAX];
+static dev_t s_synth_info_plist_dev = 0;
+static ino_t s_synth_info_plist_ino = 0;
 static char s_backup_executable_path[PATH_MAX];
 static size_t s_backup_executable_len = 0;
 static dev_t s_backup_executable_dev = 0;
@@ -321,7 +330,7 @@ static inline BOOL pt_match_path_component_token(const char *start,
     if (q != start && q[-1] != '/') {
         return NO;
     }
-    if (strncmp(q, tok, tok_len) != 0) {
+    if (strncasecmp(q, tok, tok_len) != 0) {
         return NO;
     }
     char endc = q[tok_len];
@@ -339,9 +348,10 @@ static inline BOOL pt_rel_subpath_has_hidden_plugin_component(const char *rel) {
         if (q != rel && q[-1] != '/') {
             continue;
         }
-        switch (*q) {
-            case 'P':
-                if (q[1] == 'l' && q[2] == 'a' && q[3] == 'y') {
+        unsigned char uc = (unsigned char)tolower((unsigned char)*q);
+        switch (uc) {
+            case 'p':
+                if (strncasecmp(q, "play", 4) == 0) {
                     if (pt_match_path_component_token(rel, q, "PlayTools.framework", 19, NO) ||
                         pt_match_path_component_token(rel, q, "PlayTools.dylib", 15, NO) ||
                         pt_match_path_component_token(rel, q, "Playtools.strings", 17, NO)) {
@@ -355,17 +365,20 @@ static inline BOOL pt_rel_subpath_has_hidden_plugin_component(const char *rel) {
                 }
                 break;
             case 'a':
-                if (pt_match_path_component_token(rel, q, "app.makedie.MacOver", 19, YES)) {
+                if (pt_match_path_component_token(rel, q, "app.makedie.MacOver", 19, YES) ||
+                    pt_match_path_component_token(rel, q, "AKInterface.bundle", 18, NO)) {
                     return YES;
                 }
                 break;
-            case 'A':
-                if (pt_match_path_component_token(rel, q, "AKInterface.bundle", 18, NO)) {
-                    return YES;
-                }
-                break;
-            case 'U':
+            case 'u':
                 if (pt_match_path_component_token(rel, q, "UserPlugins", 11, NO)) {
+                    return YES;
+                }
+                break;
+            case '.':
+                if (strncasecmp(q, ".pt_sysver_", 11) == 0 ||
+                    strncasecmp(q, ".pt_coderes_", 12) == 0 ||
+                    strncasecmp(q, ".pt_info_", 9) == 0) {
                     return YES;
                 }
                 break;
@@ -392,7 +405,7 @@ static inline BOOL pt_rel_data_subpath_is_macos_artifact(const char *rel) {
     };
     for (size_t i = 0; i < sizeof(kArtifacts) / sizeof(kArtifacts[0]); ++i) {
         size_t len = kArtifacts[i].len;
-        if (strncmp(s, kArtifacts[i].prefix, len) == 0 &&
+        if (strncasecmp(s, kArtifacts[i].prefix, len) == 0 &&
             (s[len] == '\0' || s[len] == '/')) {
             return YES;
         }
@@ -417,7 +430,7 @@ static BOOL pt_rel_data_subpath_is_host_user_symlink(const char *rel) {
     const char *matched_name = NULL;
     for (size_t i = 0; i < sizeof(kSymlinkNames) / sizeof(kSymlinkNames[0]); i++) {
         size_t len = kSymlinkNames[i].len;
-        if (strncmp(s, kSymlinkNames[i].name, len) == 0 &&
+        if (strncasecmp(s, kSymlinkNames[i].name, len) == 0 &&
             (s[len] == '\0' || s[len] == '/')) {
             matched_name = kSymlinkNames[i].name;
             break;
@@ -460,19 +473,19 @@ static BOOL pt_rel_data_subpath_is_host_user_symlink(const char *rel) {
             resolved = collapsed;
         }
     }
-    if (strncmp(resolved, "/System/Volumes/Data/", 21) == 0) {
+    if (strncasecmp(resolved, "/System/Volumes/Data/", 21) == 0) {
         resolved += 20;
     }
     if (pt_match_prefix_modulo_private(resolved, s_real_data_container_dir, s_real_data_container_len) != NULL) {
         return NO;
     }
-    if (strncmp(resolved, "/Users/", 7) == 0) {
+    if (strncasecmp(resolved, "/Users/", 7) == 0) {
         return YES;
     }
     const char *user_root = pt_get_host_user_root_cstr();
     if (user_root != NULL) {
         size_t ur_len = strlen(user_root);
-        if (ur_len > 1U && strncmp(resolved, user_root, ur_len) == 0 &&
+        if (ur_len > 1U && strncasecmp(resolved, user_root, ur_len) == 0 &&
             (resolved[ur_len] == '/' || resolved[ur_len] == '\0')) {
             return YES;
         }
@@ -484,14 +497,14 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_normalized_path_cached_c
     if (norm == NULL || norm[0] == '\0') {
         return NO;
     }
-    if (strncmp(norm, "/System/Volumes/Data/", 21) == 0) {
-        norm += 20;
-    }
+    BOOL had_data_vol_prefix = (strncasecmp(norm, "/System/Volumes/Data", 20) == 0 &&
+                                (norm[20] == '\0' || norm[20] == '/'));
+    const char *stripped = (strncasecmp(norm, "/System/Volumes/Data/", 21) == 0) ? (norm + 20) : norm;
 
-    if (norm[0] == '/') {
+    if (stripped[0] == '/') {
         if (atomic_load_explicit(&s_bundle_map_ready, memory_order_acquire) &&
             s_real_app_bundle_len > 0) {
-            const char *rel = pt_match_prefix_modulo_private(norm, s_real_app_bundle_dir, s_real_app_bundle_len);
+            const char *rel = pt_match_prefix_modulo_private(stripped, s_real_app_bundle_dir, s_real_app_bundle_len);
             if (rel != NULL) {
                 if (!pt_rel_subpath_has_hidden_plugin_component(rel)) {
                     return NO;
@@ -503,13 +516,13 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_normalized_path_cached_c
             }
         }
         int data_state = atomic_load_explicit(&s_data_map_state, memory_order_acquire);
-        if (data_state == 0 && strstr(norm, "/Library/Containers/") != NULL) {
+        if (data_state == 0 && strcasestr(stripped, "/Library/Containers/") != NULL) {
             if (pt_ensure_data_container_map()) {
                 data_state = 1;
             }
         }
         if (data_state == 1 && s_real_data_container_len > 0) {
-            const char *rel = pt_match_prefix_modulo_private(norm, s_real_data_container_dir, s_real_data_container_len);
+            const char *rel = pt_match_prefix_modulo_private(stripped, s_real_data_container_dir, s_real_data_container_len);
             if (rel != NULL) {
                 if (!pt_rel_subpath_has_hidden_plugin_component(rel) &&
                     !pt_rel_data_subpath_is_macos_artifact(rel) &&
@@ -522,8 +535,8 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_normalized_path_cached_c
                 return (*inout_is_sys_caller == 0);
             }
         }
-        if (pt_norm_is_inside_group_container(norm)) {
-            if (!pt_rel_subpath_has_hidden_plugin_component(norm)) {
+        if (pt_norm_is_inside_group_container(stripped)) {
+            if (!pt_rel_subpath_has_hidden_plugin_component(stripped)) {
                 return NO;
             }
             if (*inout_is_sys_caller < 0) {
@@ -531,22 +544,30 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_normalized_path_cached_c
             }
             return (*inout_is_sys_caller == 0);
         }
+        if (had_data_vol_prefix && pt_is_bypass_enabled()) {
+            if (*inout_is_sys_caller < 0) {
+                *inout_is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
+            }
+            if (*inout_is_sys_caller == 0) {
+                return YES;
+            }
+        }
         if (!atomic_load_explicit(&s_app_backup_ready, memory_order_acquire) &&
-            strstr(norm, "AppBackups") != NULL &&
+            strcasestr(stripped, "AppBackups") != NULL &&
             !pt_is_in_internal_scope() &&
             atomic_load_explicit(&s_libsystem_ready, memory_order_acquire)) {
             pt_ensure_app_backup_map();
         }
         if (atomic_load_explicit(&s_app_backup_ready, memory_order_acquire) &&
             s_app_backup_dir_len > 0 &&
-            pt_match_prefix_modulo_private(norm, s_app_backup_dir, s_app_backup_dir_len) != NULL) {
+            pt_match_prefix_modulo_private(stripped, s_app_backup_dir, s_app_backup_dir_len) != NULL) {
             if (*inout_is_sys_caller < 0) {
                 *inout_is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
             }
             return (*inout_is_sys_caller == 0);
         }
-        if (strstr(norm, "/app.makedie.MacOver/SVCPatches") != NULL ||
-            strstr(norm, "/io.playcover.PlayCover/SVCPatches") != NULL) {
+        if (strcasestr(stripped, "/app.makedie.MacOver/SVCPatches") != NULL ||
+            strcasestr(stripped, "/io.playcover.PlayCover/SVCPatches") != NULL) {
             if (*inout_is_sys_caller < 0) {
                 *inout_is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
             }
@@ -554,9 +575,9 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_normalized_path_cached_c
         }
     }
 
-    if (norm[0] == '/') {
-        char c1 = norm[1];
-        if (c1 == 'A' || c1 == 'L' || c1 == 'p' || c1 == 'v' || c1 == 'u' || c1 == 'e' || c1 == 'c' || c1 == '.') {
+    if (stripped[0] == '/') {
+        char c1 = (char)tolower((unsigned char)stripped[1]);
+        if (c1 == 'a' || c1 == 'l' || c1 == 'p' || c1 == 'v' || c1 == 'u' || c1 == 'e' || c1 == 'c' || c1 == '.') {
             typedef struct {
                 const char *prefix;
                 size_t len;
@@ -640,9 +661,9 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_normalized_path_cached_c
             };
             for (size_t i = 0; i < sizeof(always_blocked) / sizeof(always_blocked[0]); ++i) {
                 size_t len = always_blocked[i].len;
-                if (norm[1] == always_blocked[i].prefix[1] &&
-                    strncmp(norm, always_blocked[i].prefix, len) == 0 &&
-                    (norm[len] == '\0' || norm[len] == '/')) {
+                if (c1 == (char)tolower((unsigned char)always_blocked[i].prefix[1]) &&
+                    strncasecmp(stripped, always_blocked[i].prefix, len) == 0 &&
+                    (stripped[len] == '\0' || stripped[len] == '/')) {
                     return YES;
                 }
             }
@@ -651,149 +672,213 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_normalized_path_cached_c
 
     BOOL check_bypass_artifacts = pt_is_bypass_enabled();
     BOOL is_candidate = NO;
-    if (norm[0] == '/') {
-        switch (norm[1]) {
-            case 'A':
+    if (stripped[0] == '/') {
+        switch (tolower((unsigned char)stripped[1])) {
+            case 'a':
                 if (check_bypass_artifacts &&
-                    strncmp(norm, "/Applications", 13) == 0 &&
-                    (norm[13] == '\0' || norm[13] == '/')) {
+                    strncasecmp(stripped, "/Applications", 13) == 0 &&
+                    (stripped[13] == '\0' || stripped[13] == '/')) {
                     is_candidate = YES;
                 }
                 break;
-            case 'L':
+            case 'c':
                 if (check_bypass_artifacts &&
-                    ((strncmp(norm, "/Library/Application Support", 28) == 0 &&
-                      (norm[28] == '\0' || norm[28] == '/')) ||
-                     (strncmp(norm, "/Library/Desktop Pictures", 25) == 0 &&
-                      (norm[25] == '\0' || norm[25] == '/')) ||
-                     (strncmp(norm, "/Library/LaunchDaemons", 22) == 0 &&
-                      (norm[22] == '\0' || norm[22] == '/')) ||
-                     (strncmp(norm, "/Library/LaunchAgents", 21) == 0 &&
-                      (norm[21] == '\0' || norm[21] == '/')) ||
-                     (strncmp(norm, "/Library/Frameworks", 19) == 0 &&
-                      (norm[19] == '\0' || norm[19] == '/')) ||
-                     (strncmp(norm, "/Library/Extensions", 19) == 0 &&
-                      (norm[19] == '\0' || norm[19] == '/')) ||
-                     strcmp(norm, "/Library/Preferences/SystemConfiguration/preferences.plist") == 0 ||
-                     strcmp(norm, "/Library/Preferences/com.apple.TimeMachine.plist") == 0 ||
-                     strncmp(norm, "/Library/Preferences/com.apple.windowserver", 43) == 0 ||
-                     strcmp(norm, "/Library/Preferences/com.apple.loginwindow.plist") == 0)) {
+                    strncasecmp(stripped, "/cores", 6) == 0 &&
+                    (stripped[6] == '\0' || stripped[6] == '/')) {
                     is_candidate = YES;
                 }
                 break;
-            case 'S':
+            case 'h':
+                if (check_bypass_artifacts &&
+                    strncasecmp(stripped, "/home", 5) == 0 &&
+                    (stripped[5] == '\0' || stripped[5] == '/')) {
+                    is_candidate = YES;
+                }
+                break;
+            case '.':
+                if (check_bypass_artifacts &&
+                    (strcasecmp(stripped, "/.VolumeIcon.icns") == 0 ||
+                     strcasecmp(stripped, "/.file") == 0 ||
+                     (strncasecmp(stripped, "/.vol", 5) == 0 && (stripped[5] == '\0' || stripped[5] == '/')))) {
+                    is_candidate = YES;
+                }
+                break;
+            case 'l':
+                if (check_bypass_artifacts &&
+                    ((strncasecmp(stripped, "/Library/Application Support", 28) == 0 &&
+                      (stripped[28] == '\0' || stripped[28] == '/')) ||
+                     (strncasecmp(stripped, "/Library/Desktop Pictures", 25) == 0 &&
+                      (stripped[25] == '\0' || stripped[25] == '/')) ||
+                     (strncasecmp(stripped, "/Library/LaunchDaemons", 22) == 0 &&
+                      (stripped[22] == '\0' || stripped[22] == '/')) ||
+                     (strncasecmp(stripped, "/Library/LaunchAgents", 21) == 0 &&
+                      (stripped[21] == '\0' || stripped[21] == '/')) ||
+                     (strncasecmp(stripped, "/Library/Frameworks", 19) == 0 &&
+                      (stripped[19] == '\0' || stripped[19] == '/')) ||
+                     (strncasecmp(stripped, "/Library/Extensions", 19) == 0 &&
+                      (stripped[19] == '\0' || stripped[19] == '/')) ||
+                     (strncasecmp(stripped, "/Library/Printers", 17) == 0 &&
+                      (stripped[17] == '\0' || stripped[17] == '/')) ||
+                     (strncasecmp(stripped, "/Library/PreferencePanes", 24) == 0 &&
+                      (stripped[24] == '\0' || stripped[24] == '/')) ||
+                     (strncasecmp(stripped, "/Library/Screen Savers", 22) == 0 &&
+                      (stripped[22] == '\0' || stripped[22] == '/')) ||
+                     (strncasecmp(stripped, "/Library/PrivilegedHelperTools", 30) == 0 &&
+                      (stripped[30] == '\0' || stripped[30] == '/')) ||
+                     (strncasecmp(stripped, "/Library/Input Methods", 22) == 0 &&
+                      (stripped[22] == '\0' || stripped[22] == '/')) ||
+                     (strncasecmp(stripped, "/Library/Internet Plug-Ins", 26) == 0 &&
+                      (stripped[26] == '\0' || stripped[26] == '/')) ||
+                     (strncasecmp(stripped, "/Library/QuickLook", 18) == 0 &&
+                      (stripped[18] == '\0' || stripped[18] == '/')) ||
+                     (strncasecmp(stripped, "/Library/ScriptingAdditions", 27) == 0 &&
+                      (stripped[27] == '\0' || stripped[27] == '/')) ||
+                     (strncasecmp(stripped, "/Library/StartupItems", 21) == 0 &&
+                      (stripped[21] == '\0' || stripped[21] == '/')) ||
+                     (strncasecmp(stripped, "/Library/SystemExtensions", 25) == 0 &&
+                      (stripped[25] == '\0' || stripped[25] == '/')) ||
+                     (strncasecmp(stripped, "/Library/DriverExtensions", 25) == 0 &&
+                      (stripped[25] == '\0' || stripped[25] == '/')) ||
+                     (strncasecmp(stripped, "/Library/KernelCollections", 26) == 0 &&
+                      (stripped[26] == '\0' || stripped[26] == '/')) ||
+                     (strncasecmp(stripped, "/Library/Receipts", 17) == 0 &&
+                      (stripped[17] == '\0' || stripped[17] == '/')) ||
+                     (strncasecmp(stripped, "/Library/User Pictures", 22) == 0 &&
+                      (stripped[22] == '\0' || stripped[22] == '/')) ||
+                     (strncasecmp(stripped, "/Library/User Template", 22) == 0 &&
+                      (stripped[22] == '\0' || stripped[22] == '/')) ||
+                     (strncasecmp(stripped, "/Library/Sandbox", 16) == 0 &&
+                      (stripped[16] == '\0' || stripped[16] == '/')) ||
+                     strcasecmp(stripped, "/Library/Preferences/SystemConfiguration/preferences.plist") == 0 ||
+                     strcasecmp(stripped, "/Library/Preferences/com.apple.TimeMachine.plist") == 0 ||
+                     strncasecmp(stripped, "/Library/Preferences/com.apple.windowserver", 43) == 0 ||
+                     strcasecmp(stripped, "/Library/Preferences/com.apple.loginwindow.plist") == 0)) {
+                    is_candidate = YES;
+                }
+                break;
             case 's':
-                if ((strncmp(norm, "/System/iOSSupport", 18) == 0 &&
-                     (norm[18] == '\0' || norm[18] == '/')) ||
+                if ((strncasecmp(stripped, "/System/iOSSupport", 18) == 0 &&
+                     (stripped[18] == '\0' || stripped[18] == '/')) ||
                     (check_bypass_artifacts &&
-                     ((strncmp(norm, "/System/Applications", 20) == 0 &&
-                       (norm[20] == '\0' || norm[20] == '/')) ||
-                      (strncmp(norm, "/System/Library/Extensions", 26) == 0 &&
-                       (norm[26] == '\0' || norm[26] == '/')) ||
-                      (strncasecmp(norm, "/System/Library/CoreServices/Finder.app", 39) == 0 &&
-                       (norm[39] == '\0' || norm[39] == '/')) ||
-                      (strncasecmp(norm, "/System/Library/CoreServices/Dock.app", 37) == 0 &&
-                       (norm[37] == '\0' || norm[37] == '/')) ||
-                      (strncasecmp(norm, "/System/Library/CoreServices/SystemUIServer.app", 47) == 0 &&
-                       (norm[47] == '\0' || norm[47] == '/')) ||
-                      (strncasecmp(norm, "/System/Library/CoreServices/ControlCenter.app", 46) == 0 &&
-                       (norm[46] == '\0' || norm[46] == '/')) ||
-                      (strncasecmp(norm, "/System/Library/CoreServices/WindowManager.app", 46) == 0 &&
-                       (norm[46] == '\0' || norm[46] == '/')) ||
-                      (strncasecmp(norm, "/System/Library/CoreServices/NotificationCenter.app", 51) == 0 &&
-                       (norm[51] == '\0' || norm[51] == '/')) ||
-                      strcasecmp(norm, "/System/Library/CoreServices/iOSSystemVersion.plist") == 0 ||
-                      strcmp(norm, "/System/Volumes") == 0 ||
-                      strcmp(norm, "/System/Volumes/Data") == 0 ||
-                      (strncmp(norm, "/System/Volumes/VM", 18) == 0 &&
-                       (norm[18] == '\0' || norm[18] == '/')) ||
-                      (strncmp(norm, "/System/Volumes/Preboot", 23) == 0 &&
-                       (norm[23] == '\0' || norm[23] == '/')) ||
-                      (strncmp(norm, "/System/Volumes/Update", 22) == 0 &&
-                       (norm[22] == '\0' || norm[22] == '/')) ||
-                      (strncmp(norm, "/System/Volumes/Hardware", 24) == 0 &&
-                       (norm[24] == '\0' || norm[24] == '/'))))) {
+                     ((strncasecmp(stripped, "/System/Applications", 20) == 0 &&
+                       (stripped[20] == '\0' || stripped[20] == '/')) ||
+                      (strncasecmp(stripped, "/System/Cryptexes", 17) == 0 &&
+                       (stripped[17] == '\0' || stripped[17] == '/')) ||
+                      (strncasecmp(stripped, "/System/DriverKit", 17) == 0 &&
+                       (stripped[17] == '\0' || stripped[17] == '/')) ||
+                      (strncasecmp(stripped, "/System/KernelKit", 17) == 0 &&
+                       (stripped[17] == '\0' || stripped[17] == '/')) ||
+                      (strncasecmp(stripped, "/System/x86Support", 18) == 0 &&
+                       (stripped[18] == '\0' || stripped[18] == '/')) ||
+                      (strncasecmp(stripped, "/System/Developer", 17) == 0 &&
+                       (stripped[17] == '\0' || stripped[17] == '/')) ||
+                      (strncasecmp(stripped, "/System/Library/Extensions", 26) == 0 &&
+                       (stripped[26] == '\0' || stripped[26] == '/')) ||
+                      (strncasecmp(stripped, "/System/Library/CoreServices/Finder.app", 39) == 0 &&
+                       (stripped[39] == '\0' || stripped[39] == '/')) ||
+                      (strncasecmp(stripped, "/System/Library/CoreServices/Dock.app", 37) == 0 &&
+                       (stripped[37] == '\0' || stripped[37] == '/')) ||
+                      (strncasecmp(stripped, "/System/Library/CoreServices/SystemUIServer.app", 47) == 0 &&
+                       (stripped[47] == '\0' || stripped[47] == '/')) ||
+                      (strncasecmp(stripped, "/System/Library/CoreServices/ControlCenter.app", 46) == 0 &&
+                       (stripped[46] == '\0' || stripped[46] == '/')) ||
+                      (strncasecmp(stripped, "/System/Library/CoreServices/WindowManager.app", 46) == 0 &&
+                       (stripped[46] == '\0' || stripped[46] == '/')) ||
+                      (strncasecmp(stripped, "/System/Library/CoreServices/NotificationCenter.app", 51) == 0 &&
+                       (stripped[51] == '\0' || stripped[51] == '/')) ||
+                      strcasecmp(stripped, "/System/Library/CoreServices/iOSSystemVersion.plist") == 0 ||
+                      (strncasecmp(stripped, "/System/Volumes", 15) == 0 &&
+                       (stripped[15] == '\0' || stripped[15] == '/'))))) {
                     is_candidate = YES;
                 }
                 break;
             case 'e':
                 if (check_bypass_artifacts &&
-                    (strcmp(norm, "/etc/resolv.conf") == 0 ||
-                     strcmp(norm, "/etc/synthetic.conf") == 0)) {
+                    (strcasecmp(stripped, "/etc/resolv.conf") == 0 ||
+                     strcasecmp(stripped, "/etc/synthetic.conf") == 0 ||
+                     strcasecmp(stripped, "/etc/paths") == 0 ||
+                     (strncasecmp(stripped, "/etc/paths.d", 12) == 0 &&
+                      (stripped[12] == '\0' || stripped[12] == '/')))) {
                     is_candidate = YES;
                 }
                 break;
-            case 'V':
+            case 'v':
                 if (check_bypass_artifacts &&
-                    strncmp(norm, "/Volumes", 8) == 0 &&
-                    (norm[8] == '\0' || norm[8] == '/')) {
+                    strncasecmp(stripped, "/Volumes", 8) == 0 &&
+                    (stripped[8] == '\0' || stripped[8] == '/')) {
                     is_candidate = YES;
-                }
-                break;
-            case 'U':
-                if (check_bypass_artifacts) {
-                    if (strcmp(norm, "/Users") == 0 ||
-                        strcmp(norm, "/Users/Shared") == 0 ||
-                        strncmp(norm, "/Users/Shared/", 14) == 0) {
-                        is_candidate = YES;
-                    }
-                }
-                break;
-            case 'b':
-                if (strcmp(norm, "/bin/bash") == 0 ||
-                    strcmp(norm, "/bin/sh") == 0 ||
-                    strcmp(norm, "/bin/zsh") == 0) {
+                } else if (strcasecmp(stripped, "/var/select/sh") == 0 ||
+                           (check_bypass_artifacts &&
+                            ((strncasecmp(stripped, "/var/vm", 7) == 0 &&
+                              (stripped[7] == '\0' || stripped[7] == '/')) ||
+                             strcasecmp(stripped, "/var/run/utmpx") == 0 ||
+                             strcasecmp(stripped, "/var/run/resolv.conf") == 0 ||
+                             (strncasecmp(stripped, "/var/db/dslocal", 15) == 0 &&
+                              (stripped[15] == '\0' || stripped[15] == '/')) ||
+                             (strncasecmp(stripped, "/var/db/receipts", 16) == 0 &&
+                              (stripped[16] == '\0' || stripped[16] == '/')) ||
+                             (strncasecmp(stripped, "/var/db/SystemPolicy", 20) == 0 &&
+                              (stripped[20] == '\0' || stripped[20] == '/'))))) {
                     is_candidate = YES;
                 }
                 break;
             case 'u':
-                if (strcmp(norm, "/usr/bin/sudo") == 0 ||
-                    strncmp(norm, "/usr/local/Homebrew", 19) == 0 ||
-                    strncmp(norm, "/usr/local/bin/brew", 19) == 0 ||
-                    (check_bypass_artifacts &&
-                     ((strncmp(norm, "/usr/local", 10) == 0 &&
-                       (norm[10] == '\0' || norm[10] == '/')) ||
-                      strcmp(norm, "/usr/share/firmlinks") == 0 ||
-                      strcmp(norm, "/usr/bin/osascript") == 0 ||
-                      strcmp(norm, "/usr/bin/sw_vers") == 0 ||
-                      strcmp(norm, "/usr/bin/open") == 0 ||
-                      strcmp(norm, "/usr/bin/mdls") == 0 ||
-                      strcmp(norm, "/usr/bin/xcrun") == 0 ||
-                      strcmp(norm, "/usr/bin/xcode-select") == 0 ||
-                      strcmp(norm, "/usr/sbin/screencapture") == 0))) {
+                if (check_bypass_artifacts &&
+                    strncasecmp(stripped, "/Users", 6) == 0 &&
+                    (stripped[6] == '\0' || stripped[6] == '/')) {
+                    is_candidate = YES;
+                } else if (strcasecmp(stripped, "/usr/bin/sudo") == 0 ||
+                           strcasecmp(stripped, "/usr/bin/ssh") == 0 ||
+                           strcasecmp(stripped, "/usr/bin/sshd") == 0 ||
+                           strncasecmp(stripped, "/usr/local/Homebrew", 19) == 0 ||
+                           strncasecmp(stripped, "/usr/local/bin/brew", 19) == 0 ||
+                           (check_bypass_artifacts &&
+                            ((strncasecmp(stripped, "/usr/local", 10) == 0 &&
+                              (stripped[10] == '\0' || stripped[10] == '/')) ||
+                             strcasecmp(stripped, "/usr/share/firmlinks") == 0 ||
+                             strcasecmp(stripped, "/usr/bin/osascript") == 0 ||
+                             strcasecmp(stripped, "/usr/bin/sw_vers") == 0 ||
+                             strcasecmp(stripped, "/usr/bin/open") == 0 ||
+                             strcasecmp(stripped, "/usr/bin/mdls") == 0 ||
+                             strcasecmp(stripped, "/usr/bin/xcrun") == 0 ||
+                             strcasecmp(stripped, "/usr/bin/xcode-select") == 0 ||
+                             strcasecmp(stripped, "/usr/sbin/screencapture") == 0))) {
+                    is_candidate = YES;
+                }
+                break;
+            case 'b':
+                if (strcasecmp(stripped, "/bin/bash") == 0 ||
+                    strcasecmp(stripped, "/bin/sh") == 0 ||
+                    strcasecmp(stripped, "/bin/zsh") == 0) {
                     is_candidate = YES;
                 }
                 break;
             case 'o':
                 if (check_bypass_artifacts
-                        ? (strncmp(norm, "/opt", 4) == 0 && (norm[4] == '\0' || norm[4] == '/'))
-                        : (strncmp(norm, "/opt/homebrew", 13) == 0)) {
-                    is_candidate = YES;
-                }
-                break;
-            case 'v':
-                if (strcmp(norm, "/var/select/sh") == 0 ||
-                    (check_bypass_artifacts &&
-                     ((strncmp(norm, "/var/vm", 7) == 0 &&
-                       (norm[7] == '\0' || norm[7] == '/')) ||
-                      strcmp(norm, "/var/run/utmpx") == 0 ||
-                      strcmp(norm, "/var/run/resolv.conf") == 0 ||
-                      (strncmp(norm, "/var/db/dslocal", 15) == 0 &&
-                       (norm[15] == '\0' || norm[15] == '/'))))) {
+                        ? (strncasecmp(stripped, "/opt", 4) == 0 && (stripped[4] == '\0' || stripped[4] == '/'))
+                        : (strncasecmp(stripped, "/opt/homebrew", 13) == 0 &&
+                           (stripped[13] == '\0' || stripped[13] == '/'))) {
                     is_candidate = YES;
                 }
                 break;
             case 'p':
-                if (strcmp(norm, "/private/var/select/sh") == 0 ||
+                if (strcasecmp(stripped, "/private/var/select/sh") == 0 ||
                     (check_bypass_artifacts &&
-                     ((strncmp(norm, "/private/var/vm", 15) == 0 &&
-                       (norm[15] == '\0' || norm[15] == '/')) ||
-                      strcmp(norm, "/private/var/run/utmpx") == 0 ||
-                      strcmp(norm, "/private/var/run/resolv.conf") == 0 ||
-                      strcmp(norm, "/private/etc/resolv.conf") == 0 ||
-                      strcmp(norm, "/private/etc/synthetic.conf") == 0 ||
-                      (strncmp(norm, "/private/var/db/dslocal", 23) == 0 &&
-                       (norm[23] == '\0' || norm[23] == '/'))))) {
+                     ((strncasecmp(stripped, "/private/var/vm", 15) == 0 &&
+                       (stripped[15] == '\0' || stripped[15] == '/')) ||
+                      strcasecmp(stripped, "/private/var/run/utmpx") == 0 ||
+                      strcasecmp(stripped, "/private/var/run/resolv.conf") == 0 ||
+                      strcasecmp(stripped, "/private/etc/resolv.conf") == 0 ||
+                      strcasecmp(stripped, "/private/etc/synthetic.conf") == 0 ||
+                      strcasecmp(stripped, "/private/etc/paths") == 0 ||
+                      (strncasecmp(stripped, "/private/etc/paths.d", 20) == 0 &&
+                       (stripped[20] == '\0' || stripped[20] == '/')) ||
+                      (strncasecmp(stripped, "/private/var/db/dslocal", 23) == 0 &&
+                       (stripped[23] == '\0' || stripped[23] == '/')) ||
+                      (strncasecmp(stripped, "/private/var/db/receipts", 24) == 0 &&
+                       (stripped[24] == '\0' || stripped[24] == '/')) ||
+                      (strncasecmp(stripped, "/private/var/db/SystemPolicy", 28) == 0 &&
+                       (stripped[28] == '\0' || stripped[28] == '/'))))) {
                     is_candidate = YES;
                 }
                 break;
@@ -801,66 +886,67 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_normalized_path_cached_c
                 break;
         }
     }
-    if (!is_candidate && pt_is_registered_hidden_module(norm)) {
+    if (!is_candidate && pt_is_registered_hidden_module(stripped)) {
         is_candidate = YES;
     }
     if (!is_candidate) {
-        for (const char *q = norm; *q != '\0' && !is_candidate; q++) {
-            switch (*q) {
+        for (const char *q = stripped; *q != '\0' && !is_candidate; q++) {
+            switch (tolower((unsigned char)*q)) {
                 case 'd':
-                    if ((q == norm || q[-1] == '/') && strncmp(q, "discord-ipc-", 12) == 0) {
+                    if ((q == stripped || q[-1] == '/') && strncasecmp(q, "discord-ipc-", 12) == 0) {
                         is_candidate = YES;
                     }
                     break;
-                case 'P':
-                    if ((q == norm || q[-1] == '/') && q[1] == 'l' && q[2] == 'a' && q[3] == 'y') {
-                        if (pt_match_path_component_token(norm, q, "PlayTools.framework", 19, NO) ||
-                            pt_match_path_component_token(norm, q, "PlayTools.dylib", 15, NO) ||
-                            pt_match_path_component_token(norm, q, "Playtools.strings", 17, NO)) {
+                case 'p':
+                    if ((q == stripped || q[-1] == '/') && strncasecmp(q, "play", 4) == 0) {
+                        if (pt_match_path_component_token(stripped, q, "PlayTools.framework", 19, NO) ||
+                            pt_match_path_component_token(stripped, q, "PlayTools.dylib", 15, NO) ||
+                            pt_match_path_component_token(stripped, q, "Playtools.strings", 17, NO)) {
                             is_candidate = YES;
                         }
                     }
                     break;
                 case 'i':
-                    if (pt_match_path_component_token(norm, q, "io.playcover.PlayCover", 22, YES)) {
-                        if (strstr(norm, "/io.playcover.PlayCover/Applications/") == NULL) {
-                            is_candidate = YES;
-                        }
-                    }
-                    break;
-                case 'a':
-                    if (pt_match_path_component_token(norm, q, "app.makedie.MacOver", 19, YES)) {
-                        if (strstr(norm, "/app.makedie.MacOver/Applications/") == NULL) {
-                            is_candidate = YES;
-                        }
-                    }
-                    break;
-                case 'A':
-                    if (pt_match_path_component_token(norm, q, "AKInterface.bundle", 18, NO)) {
+                    if (pt_match_path_component_token(stripped, q, "io.playcover.PlayCover", 22, YES)) {
                         is_candidate = YES;
                     }
                     break;
-                case 'U':
-                    if (pt_match_path_component_token(norm, q, "UserPlugins", 11, NO)) {
+                case 'a':
+                    if (pt_match_path_component_token(stripped, q, "app.makedie.MacOver", 19, YES) ||
+                        pt_match_path_component_token(stripped, q, "AKInterface.bundle", 18, NO)) {
+                        is_candidate = YES;
+                    }
+                    break;
+                case 'u':
+                    if (pt_match_path_component_token(stripped, q, "UserPlugins", 11, NO)) {
+                        is_candidate = YES;
+                    }
+                    break;
+                case '.':
+                    if ((q == stripped || q[-1] == '/') &&
+                        (strncasecmp(q, ".pt_sysver_", 11) == 0 ||
+                         strncasecmp(q, ".pt_coderes_", 12) == 0 ||
+                         strncasecmp(q, ".pt_info_", 9) == 0)) {
                         is_candidate = YES;
                     }
                     break;
                 case '~':
                     if (check_bypass_artifacts &&
-                        strncmp(q, "~iosmac.savedState", 18) == 0 &&
+                        strncasecmp(q, "~iosmac.savedState", 18) == 0 &&
                         (q[18] == '\0' || q[18] == '/')) {
                         is_candidate = YES;
                     }
                     break;
                 case '/':
                     if (check_bypass_artifacts) {
-                        if (q[1] == 'S' &&
-                            strncmp(q, "/Saved Application State", 24) == 0 &&
+                        unsigned char q1 = (unsigned char)tolower((unsigned char)q[1]);
+                        if (q1 == 's' &&
+                            strncasecmp(q, "/Saved Application State", 24) == 0 &&
                             (q[24] == '\0' || q[24] == '/')) {
                             is_candidate = YES;
-                        } else if (q[1] == '.' &&
-                                   strncmp(q, "/.CFUserTextEncoding", 21) == 0 &&
-                                   (q[21] == '\0' || q[21] == '/')) {
+                        } else if (q1 == '.' &&
+                                   strncasecmp(q, "/.CFUserTextEncoding", 20) == 0 &&
+                                   (q[20] == '\0' || q[20] == '/')) {
                             is_candidate = YES;
                         }
                     }
@@ -1379,18 +1465,79 @@ const char *pt_copy_virtual_mobileprovision_path(char *buf, size_t bufsize) {
                              "/embedded.mobileprovision");
 }
 
+static BOOL pt_bundle_relpath_is_swift_reexport_proxy(NSString *relPath) {
+    if (relPath == nil || s_real_app_bundle_len == 0 ||
+        ![relPath hasPrefix:@"Frameworks/libswift"] ||
+        ![relPath hasSuffix:@".dylib"]) {
+        return NO;
+    }
+    const char *crel = [relPath UTF8String];
+    if (crel == NULL || crel[0] == '\0') {
+        return NO;
+    }
+    char diskPath[PATH_MAX];
+    int dn = snprintf(diskPath, sizeof(diskPath), "%s/%s", s_real_app_bundle_dir, crel);
+    int fd = (dn > 0 && (size_t)dn < sizeof(diskPath)) ? pt_orig_open_nocancel(diskPath, O_RDONLY | O_CLOEXEC) : -1;
+    if (fd < 0) {
+        dn = snprintf(diskPath, sizeof(diskPath), "%s/Contents/%s", s_real_app_bundle_dir, crel);
+        if (dn > 0 && (size_t)dn < sizeof(diskPath)) {
+            fd = pt_orig_open_nocancel(diskPath, O_RDONLY | O_CLOEXEC);
+        }
+    }
+    if (fd < 0) {
+        return NO;
+    }
+    uint8_t hdr[4096];
+    ssize_t nread = pread(fd, hdr, sizeof(hdr), 0);
+    close(fd);
+    if (nread < (ssize_t)sizeof(struct mach_header_64)) {
+        return NO;
+    }
+    const struct mach_header_64 *mh = (const struct mach_header_64 *)hdr;
+    if (mh->magic != MH_MAGIC_64) {
+        return NO;
+    }
+    size_t max_off = ((size_t)nread < sizeof(*mh) + (size_t)mh->sizeofcmds)
+        ? (size_t)nread
+        : (sizeof(*mh) + (size_t)mh->sizeofcmds);
+    size_t off = sizeof(*mh);
+    for (uint32_t i = 0; i < mh->ncmds && off + sizeof(struct load_command) <= max_off; i++) {
+        const struct load_command *lc = (const struct load_command *)(hdr + off);
+        if (lc->cmdsize < sizeof(struct load_command) || off + lc->cmdsize > max_off) {
+            break;
+        }
+        if (lc->cmd == LC_REEXPORT_DYLIB && lc->cmdsize >= sizeof(struct dylib_command)) {
+            const struct dylib_command *dc = (const struct dylib_command *)lc;
+            uint32_t noff = dc->dylib.name.offset;
+            if (noff >= sizeof(struct dylib_command) && noff < lc->cmdsize) {
+                size_t maxn = lc->cmdsize - noff;
+                size_t slen = strnlen((const char *)lc + noff, maxn);
+                if (slen >= 33 &&
+                    strncmp((const char *)lc + noff, "/System/iOSSupport/usr/lib/swift/", 33) == 0) {
+                    return YES;
+                }
+            }
+        }
+        off += lc->cmdsize;
+    }
+    return NO;
+}
+
 static NSMutableDictionary *pt_clean_code_resources_subdict(NSDictionary *sub) {
     NSMutableDictionary *clean = nil;
     for (id key in sub) {
         if ([key isKindOfClass:[NSString class]]) {
             NSString *k = (NSString *)key;
+            const char *kutf = [k UTF8String];
             if ([k localizedCaseInsensitiveContainsString:@"PlayTools"] ||
                 [k localizedCaseInsensitiveContainsString:@"PlayCover"] ||
                 [k localizedCaseInsensitiveContainsString:@"MacOver"] ||
                 [k localizedCaseInsensitiveContainsString:@"AKInterface"] ||
                 [k localizedCaseInsensitiveContainsString:@"SVCPatches"] ||
                 [k localizedCaseInsensitiveContainsString:@"Playtools.strings"] ||
-                [k localizedCaseInsensitiveContainsString:@"UserPlugins"]) {
+                [k localizedCaseInsensitiveContainsString:@"UserPlugins"] ||
+                (kutf != NULL && pt_is_registered_hidden_module(kutf)) ||
+                pt_bundle_relpath_is_swift_reexport_proxy(k)) {
                 if (clean == nil) {
                     clean = [sub mutableCopy];
                 }
@@ -1399,6 +1546,97 @@ static NSMutableDictionary *pt_clean_code_resources_subdict(NSDictionary *sub) {
         }
     }
     return clean;
+}
+
+__attribute__((visibility("hidden")))
+NSMutableDictionary *pt_sanitize_code_resources_dict(NSDictionary *dict, BOOL wantMutableContainers) {
+    if (![dict isKindOfClass:[NSDictionary class]]) {
+        return nil;
+    }
+    NSArray<NSString *> *subkeys = @[@"files", @"files2", @"rules", @"rules2"];
+    NSMutableDictionary *cleanDict = nil;
+    for (NSString *sk in subkeys) {
+        id sub = dict[sk];
+        if ([sub isKindOfClass:[NSDictionary class]]) {
+            NSMutableDictionary *csub = pt_clean_code_resources_subdict((NSDictionary *)sub);
+            if (csub != nil) {
+                if (cleanDict == nil) {
+                    cleanDict = [dict mutableCopy];
+                }
+                cleanDict[sk] = wantMutableContainers ? csub : [csub copy];
+            }
+        }
+    }
+    return cleanDict;
+}
+
+static BOOL pt_write_synth_plist_temp_file(NSData *xmlOut,
+                                          const char *tmpl_prefix,
+                                          char *out_created_path,
+                                          size_t out_created_cap,
+                                          dev_t *out_dev,
+                                          ino_t *out_ino) {
+    if (xmlOut == nil || xmlOut.length == 0 || tmpl_prefix == NULL ||
+        out_created_path == NULL || out_created_cap == 0) {
+        return NO;
+    }
+    out_created_path[0] = '\0';
+    char container_tmp[PATH_MAX];
+    const char *dirs[3] = { NULL, NULL, "/tmp" };
+    if (s_real_data_container_len > 0) {
+        int dn = snprintf(container_tmp, sizeof(container_tmp), "%s/tmp", s_real_data_container_dir);
+        if (dn > 0 && (size_t)dn < sizeof(container_tmp)) {
+            dirs[0] = container_tmp;
+        }
+    }
+    const char *env_tmp = pt_raw_getenv("TMPDIR");
+    char env_tmp_buf[PATH_MAX];
+    if (env_tmp != NULL && env_tmp[0] == '/') {
+        strlcpy(env_tmp_buf, env_tmp, sizeof(env_tmp_buf));
+        size_t el = strlen(env_tmp_buf);
+        while (el > 1 && env_tmp_buf[el - 1] == '/') {
+            env_tmp_buf[--el] = '\0';
+        }
+        dirs[1] = env_tmp_buf;
+    }
+    for (size_t i = 0; i < 3; i++) {
+        if (dirs[i] == NULL || dirs[i][0] != '/') {
+            continue;
+        }
+        char tmpl[PATH_MAX];
+        int tn = snprintf(tmpl, sizeof(tmpl), "%s/%sXXXXXX", dirs[i], tmpl_prefix);
+        if (tn <= 0 || (size_t)tn >= sizeof(tmpl)) {
+            continue;
+        }
+        int fd = mkstemp(tmpl);
+        if (fd < 0) {
+            continue;
+        }
+        (void)fchmod(fd, 0444);
+        const uint8_t *wptr = (const uint8_t *)xmlOut.bytes;
+        size_t rem = xmlOut.length;
+        BOOL wrote = YES;
+        while (rem > 0) {
+            ssize_t w = write(fd, wptr, rem);
+            if (w <= 0) {
+                wrote = NO;
+                break;
+            }
+            wptr += (size_t)w;
+            rem -= (size_t)w;
+        }
+        struct stat st;
+        if (wrote && fstat(fd, &st) == 0) {
+            close(fd);
+            strlcpy(out_created_path, tmpl, out_created_cap);
+            if (out_dev != NULL) *out_dev = st.st_dev;
+            if (out_ino != NULL) *out_ino = st.st_ino;
+            return YES;
+        }
+        close(fd);
+        unlink(tmpl);
+    }
+    return NO;
 }
 
 __attribute__((visibility("hidden"))) BOOL pt_is_synth_code_resources_path(const char *p) {
@@ -1413,6 +1651,21 @@ __attribute__((visibility("hidden"))) BOOL pt_is_synth_code_resources_path(const
         match = (rem != NULL && rem[0] == '\0');
     }
     os_unfair_lock_unlock(&s_synth_code_res_lock);
+    return match;
+}
+
+__attribute__((visibility("hidden"))) BOOL pt_is_synth_info_plist_path(const char *p) {
+    if (p == NULL || !atomic_load_explicit(&s_has_synth_info_plist, memory_order_acquire) ||
+        strstr(p, ".pt_info_") == NULL) {
+        return NO;
+    }
+    BOOL match = NO;
+    os_unfair_lock_lock(&s_synth_info_plist_lock);
+    if (s_synth_info_plist_path[0] != '\0') {
+        const char *rem = pt_match_prefix_modulo_private(p, s_synth_info_plist_path, strlen(s_synth_info_plist_path));
+        match = (rem != NULL && rem[0] == '\0');
+    }
+    os_unfair_lock_unlock(&s_synth_info_plist_lock);
     return match;
 }
 
@@ -1473,21 +1726,7 @@ static const char *pt_get_or_build_sanitized_code_resources_path(char *out_buf, 
                                                                       format:nil
                                                                        error:nil];
                 if ([plist isKindOfClass:[NSDictionary class]]) {
-                    NSDictionary *dict = (NSDictionary *)plist;
-                    NSArray<NSString *> *subkeys = @[@"files", @"files2", @"rules", @"rules2"];
-                    NSMutableDictionary *cleanDict = nil;
-                    for (NSString *sk in subkeys) {
-                        id sub = dict[sk];
-                        if ([sub isKindOfClass:[NSDictionary class]]) {
-                            NSMutableDictionary *csub = pt_clean_code_resources_subdict((NSDictionary *)sub);
-                            if (csub != nil) {
-                                if (cleanDict == nil) {
-                                    cleanDict = [dict mutableCopy];
-                                }
-                                cleanDict[sk] = [csub copy];
-                            }
-                        }
-                    }
+                    NSMutableDictionary *cleanDict = pt_sanitize_code_resources_dict((NSDictionary *)plist, NO);
                     if (cleanDict != nil) {
                         xmlOut = [NSPropertyListSerialization dataWithPropertyList:cleanDict
                                                                             format:NSPropertyListXMLFormat_v1_0
@@ -1500,73 +1739,10 @@ static const char *pt_get_or_build_sanitized_code_resources_path(char *out_buf, 
             }
         }
     }
-    if (xmlOut == nil || xmlOut.length == 0) {
-        pt_leave_internal_scope();
-        errno = saved_errno;
-        return NULL;
-    }
-
-    char container_tmp[PATH_MAX];
-    const char *dirs[3] = { NULL, NULL, "/tmp" };
-    if (s_real_data_container_len > 0) {
-        int dn = snprintf(container_tmp, sizeof(container_tmp), "%s/tmp", s_real_data_container_dir);
-        if (dn > 0 && (size_t)dn < sizeof(container_tmp)) {
-            dirs[0] = container_tmp;
-        }
-    }
-    const char *env_tmp = pt_raw_getenv("TMPDIR");
-    char env_tmp_buf[PATH_MAX];
-    if (env_tmp != NULL && env_tmp[0] == '/') {
-        strlcpy(env_tmp_buf, env_tmp, sizeof(env_tmp_buf));
-        size_t el = strlen(env_tmp_buf);
-        while (el > 1 && env_tmp_buf[el - 1] == '/') {
-            env_tmp_buf[--el] = '\0';
-        }
-        dirs[1] = env_tmp_buf;
-    }
-
     char created_path[PATH_MAX];
-    created_path[0] = '\0';
     dev_t created_dev = 0;
     ino_t created_ino = 0;
-    for (size_t i = 0; i < 3 && created_path[0] == '\0'; i++) {
-        if (dirs[i] == NULL || dirs[i][0] != '/') {
-            continue;
-        }
-        char tmpl[PATH_MAX];
-        int tn = snprintf(tmpl, sizeof(tmpl), "%s/.pt_coderes_XXXXXX", dirs[i]);
-        if (tn <= 0 || (size_t)tn >= sizeof(tmpl)) {
-            continue;
-        }
-        int fd = mkstemp(tmpl);
-        if (fd < 0) {
-            continue;
-        }
-        (void)fchmod(fd, 0444);
-        const uint8_t *wptr = (const uint8_t *)xmlOut.bytes;
-        size_t rem = xmlOut.length;
-        BOOL wrote = YES;
-        while (rem > 0) {
-            ssize_t w = write(fd, wptr, rem);
-            if (w <= 0) {
-                wrote = NO;
-                break;
-            }
-            wptr += (size_t)w;
-            rem -= (size_t)w;
-        }
-        struct stat st;
-        if (wrote && fstat(fd, &st) == 0) {
-            close(fd);
-            strlcpy(created_path, tmpl, sizeof(created_path));
-            created_dev = st.st_dev;
-            created_ino = st.st_ino;
-            break;
-        }
-        close(fd);
-        unlink(tmpl);
-    }
-    if (created_path[0] == '\0') {
+    if (!pt_write_synth_plist_temp_file(xmlOut, ".pt_coderes_", created_path, sizeof(created_path), &created_dev, &created_ino)) {
         pt_leave_internal_scope();
         errno = saved_errno;
         return NULL;
@@ -1596,26 +1772,135 @@ static const char *pt_get_or_build_sanitized_code_resources_path(char *out_buf, 
     return (copied_len < out_size && out_buf[0] != '\0') ? out_buf : NULL;
 }
 
+static const char *pt_get_or_build_sanitized_info_plist_path(char *out_buf, size_t out_size) {
+    if (s_real_app_bundle_len == 0 || out_buf == NULL || out_size == 0) {
+        return NULL;
+    }
+    int saved_errno = errno;
+    char cached_path[PATH_MAX];
+    cached_path[0] = '\0';
+    dev_t cached_dev = 0;
+    ino_t cached_ino = 0;
+    os_unfair_lock_lock(&s_synth_info_plist_lock);
+    if (s_synth_info_plist_path[0] != '\0') {
+        strlcpy(cached_path, s_synth_info_plist_path, sizeof(cached_path));
+        cached_dev = s_synth_info_plist_dev;
+        cached_ino = s_synth_info_plist_ino;
+    }
+    os_unfair_lock_unlock(&s_synth_info_plist_lock);
+
+    if (cached_path[0] != '\0') {
+        pt_enter_internal_scope();
+        struct stat st;
+        BOOL alive = (stat(cached_path, &st) == 0 &&
+                      st.st_dev == cached_dev &&
+                      st.st_ino == cached_ino);
+        pt_leave_internal_scope();
+        if (alive) {
+            size_t n = strlcpy(out_buf, cached_path, out_size);
+            errno = saved_errno;
+            return (n < out_size) ? out_buf : NULL;
+        }
+    }
+
+    pt_ensure_data_container_map();
+    pt_enter_internal_scope();
+    NSData *xmlOut = nil;
+    @autoreleasepool {
+        char src_path[PATH_MAX];
+        int sn = snprintf(src_path, sizeof(src_path), "%s/Info.plist", s_real_app_bundle_dir);
+        int rfd = (sn > 0 && (size_t)sn < sizeof(src_path)) ? pt_orig_open_nocancel(src_path, O_RDONLY) : -1;
+        if (rfd < 0) {
+            sn = snprintf(src_path, sizeof(src_path), "%s/Contents/Info.plist", s_real_app_bundle_dir);
+            if (sn > 0 && (size_t)sn < sizeof(src_path)) {
+                rfd = pt_orig_open_nocancel(src_path, O_RDONLY);
+            }
+        }
+        if (rfd >= 0) {
+            size_t raw_len = 0;
+            size_t map_size = 0;
+            uint8_t *raw_bytes = pt_read_fd_plist_bytes(rfd, &raw_len, &map_size);
+            close(rfd);
+            if (raw_bytes != NULL && raw_len > 0) {
+                NSData *rawData = [NSData dataWithBytes:raw_bytes length:raw_len];
+                munmap(raw_bytes, map_size);
+                id plist = [NSPropertyListSerialization propertyListWithData:rawData
+                                                                     options:NSPropertyListImmutable
+                                                                      format:nil
+                                                                       error:nil];
+                if ([plist isKindOfClass:[NSDictionary class]] && pt_info_dict_needs_sanitize((NSDictionary *)plist)) {
+                    NSMutableDictionary *cleanDict = pt_build_sanitized_mutable_info_dict((NSDictionary *)plist);
+                    if (cleanDict != nil) {
+                        xmlOut = [NSPropertyListSerialization dataWithPropertyList:cleanDict
+                                                                            format:NSPropertyListXMLFormat_v1_0
+                                                                           options:0
+                                                                             error:nil];
+                    }
+                }
+            } else if (raw_bytes != NULL) {
+                munmap(raw_bytes, map_size);
+            }
+        }
+    }
+    char created_path[PATH_MAX];
+    dev_t created_dev = 0;
+    ino_t created_ino = 0;
+    if (!pt_write_synth_plist_temp_file(xmlOut, ".pt_info_", created_path, sizeof(created_path), &created_dev, &created_ino)) {
+        pt_leave_internal_scope();
+        errno = saved_errno;
+        return NULL;
+    }
+
+    BOOL discard_created = NO;
+    size_t copied_len = out_size;
+    os_unfair_lock_lock(&s_synth_info_plist_lock);
+    if (s_synth_info_plist_path[0] != '\0' &&
+        (s_synth_info_plist_dev != cached_dev || s_synth_info_plist_ino != cached_ino)) {
+        copied_len = strlcpy(out_buf, s_synth_info_plist_path, out_size);
+        discard_created = YES;
+    }
+    if (!discard_created) {
+        strlcpy(s_synth_info_plist_path, created_path, sizeof(s_synth_info_plist_path));
+        s_synth_info_plist_dev = created_dev;
+        s_synth_info_plist_ino = created_ino;
+        atomic_store_explicit(&s_has_synth_info_plist, true, memory_order_release);
+        copied_len = strlcpy(out_buf, created_path, out_size);
+    }
+    os_unfair_lock_unlock(&s_synth_info_plist_lock);
+    if (discard_created) {
+        unlink(created_path);
+    }
+    pt_leave_internal_scope();
+    errno = saved_errno;
+    return (copied_len < out_size && out_buf[0] != '\0') ? out_buf : NULL;
+}
+
 static const char *pt_lookup_app_backup_redirect_unlocked(const char *p, const char *bundle_rel, char *vbuf, size_t vbuf_size) {
     if (s_has_backup_mobileprovision && bundle_rel != NULL &&
-        (strcmp(bundle_rel, "/embedded.mobileprovision") == 0 ||
-         strcmp(bundle_rel, "/Contents/embedded.mobileprovision") == 0)) {
+        (strcasecmp(bundle_rel, "/embedded.mobileprovision") == 0 ||
+         strcasecmp(bundle_rel, "/Contents/embedded.mobileprovision") == 0)) {
         return pt_verify_pinned_backup_file(
             s_backup_mobileprovision_path, s_backup_mobileprovision_dev, s_backup_mobileprovision_ino)
             ? s_backup_mobileprovision_path
             : NULL;
     }
-    if (s_has_backup_info_plist && bundle_rel != NULL &&
-        (strcmp(bundle_rel, "/Info.plist") == 0 ||
-         strcmp(bundle_rel, "/Contents/Info.plist") == 0)) {
-        return pt_verify_pinned_backup_file(
-            s_backup_info_plist_path, s_backup_info_plist_dev, s_backup_info_plist_ino)
-            ? s_backup_info_plist_path
-            : NULL;
+    if (bundle_rel != NULL &&
+        (strcasecmp(bundle_rel, "/Info.plist") == 0 ||
+         strcasecmp(bundle_rel, "/Contents/Info.plist") == 0)) {
+        if (s_has_backup_info_plist) {
+            const char *pinned = pt_verify_pinned_backup_file(
+                s_backup_info_plist_path, s_backup_info_plist_dev, s_backup_info_plist_ino)
+                ? s_backup_info_plist_path
+                : NULL;
+            if (pinned != NULL) {
+                return pinned;
+            }
+        }
+        return pt_get_or_build_sanitized_info_plist_path(vbuf, vbuf_size);
     }
     if (bundle_rel != NULL &&
-        (strcmp(bundle_rel, "/_CodeSignature/CodeResources") == 0 ||
-         strcmp(bundle_rel, "/Contents/_CodeSignature/CodeResources") == 0)) {
+        (strcasecmp(bundle_rel, "/_CodeSignature/CodeResources") == 0 ||
+         strcasecmp(bundle_rel, "/Contents/_CodeSignature/CodeResources") == 0)) {
         if (s_has_backup_code_resources) {
             const char *pinned = pt_verify_pinned_backup_file(
                 s_backup_code_resources_path, s_backup_code_resources_dev, s_backup_code_resources_ino)
@@ -1655,7 +1940,7 @@ const char *pt_lookup_app_backup_redirect_for_caller(const char *raw_path,
         return NULL;
     }
     const char *p = raw_path;
-    if (strncmp(p, "/System/Volumes/Data/", 21) == 0) {
+    if (strncasecmp(p, "/System/Volumes/Data/", 21) == 0) {
         p += 20;
     }
     const char *rel = pt_match_prefix_modulo_private(p, s_real_app_bundle_dir, s_real_app_bundle_len);
@@ -1819,7 +2104,7 @@ __attribute__((visibility("hidden"))) BOOL pt_is_active_app_backup_file_path(con
             return YES;
         }
     }
-    if (pt_is_synth_code_resources_path(p)) {
+    if (pt_is_synth_code_resources_path(p) || pt_is_synth_info_plist_path(p)) {
         return YES;
     }
     if (s_has_backup_executable && s_backup_executable_len > 0) {
@@ -1863,6 +2148,9 @@ __attribute__((visibility("hidden"))) const char *pt_virtualize_app_backup_path(
     }
     if (pt_is_synth_code_resources_path(p)) {
         return pt_join_path_fast(buf, bufsize, prefix, plen, "/_CodeSignature/CodeResources");
+    }
+    if (pt_is_synth_info_plist_path(p)) {
+        return pt_join_path_fast(buf, bufsize, prefix, plen, "/Info.plist");
     }
     if (s_has_backup_executable && s_backup_executable_len > 0 && s_real_main_exec_rel_path[0] == '/') {
         const char *rel = pt_match_prefix_modulo_private(p, s_backup_executable_path, s_backup_executable_len);
@@ -1910,23 +2198,21 @@ static ssize_t pt_fsgetpath(char *buf, size_t bufsize, fsid_t *fsid, uint64_t ob
 }
 
 __attribute__((visibility("hidden")))
+extern ssize_t pt_orig_fsgetpath_ext(char *, size_t, fsid_t *, uint64_t, uint64_t) __asm__("_fsgetpath_ext") __attribute__((weak_import));
+extern int pt_orig_searchfs(const char *, void *, unsigned long *, unsigned int, unsigned int, void *) __asm__("_searchfs") __attribute__((weak_import));
+
+__attribute__((visibility("hidden")))
 ssize_t pt_fs_fsgetpath_ext_with_caller(char *buf,
                                         size_t bufsize,
                                         fsid_t *fsid,
                                         uint64_t objid,
                                         uint64_t flags,
                                         const void *caller) {
-    typedef ssize_t (*FsGetPathExtFn)(char *, size_t, fsid_t *, uint64_t, uint64_t);
-    static FsGetPathExtFn s_orig = NULL;
-    static dispatch_once_t s_once;
-    dispatch_once(&s_once, ^{
-        s_orig = (FsGetPathExtFn)dlsym(RTLD_NEXT, "fsgetpath_ext");
-    });
-    if (s_orig == NULL) {
+    if (&pt_orig_fsgetpath_ext == NULL) {
         errno = ENOSYS;
         return -1;
     }
-    ssize_t ret = s_orig(buf, bufsize, fsid, objid, flags);
+    ssize_t ret = pt_orig_fsgetpath_ext(buf, bufsize, fsid, objid, flags);
     if (ret <= 0 || buf == NULL || bufsize == 0 ||
         !pt_is_bypass_enabled() ||
         pt_is_effective_system_or_playtools_caller(caller)) {
@@ -1967,14 +2253,8 @@ int pt_fs_searchfs_with_caller(const char *path,
         errno = ENOTSUP;
         return -1;
     }
-    typedef int (*SearchFsFn)(const char *, void *, unsigned long *, unsigned int, unsigned int, void *);
-    static SearchFsFn s_orig = NULL;
-    static dispatch_once_t s_once;
-    dispatch_once(&s_once, ^{
-        s_orig = (SearchFsFn)dlsym(RTLD_NEXT, "searchfs");
-    });
-    if (s_orig != NULL) {
-        return s_orig(path, searchblock, nummatches, scriptcode, options, state);
+    if (&pt_orig_searchfs != NULL) {
+        return pt_orig_searchfs(path, searchblock, nummatches, scriptcode, options, state);
     }
     errno = ENOSYS;
     return -1;
@@ -1991,5 +2271,5 @@ static int pt_searchfs(const char *path,
 }
 
 PT_INTERPOSE(pt_fsgetpath, fsgetpath)
-PT_DLSYM_ONLY("fsgetpath_ext", pt_fsgetpath_ext)
-PT_DLSYM_ONLY("searchfs", pt_searchfs)
+PT_INTERPOSE_WEAK_NAMED(pt_fsgetpath_ext, pt_orig_fsgetpath_ext, "fsgetpath_ext")
+PT_INTERPOSE_WEAK_NAMED(pt_searchfs, pt_orig_searchfs, "searchfs")

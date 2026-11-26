@@ -280,8 +280,8 @@ static BOOL pt_lookup_virtual_group_container(const char *work,
     if (work == NULL) {
         return NO;
     }
-    BOOL is_priv = (strncmp(work, "/private/var/mobile/Containers/Shared/AppGroup/", 47) == 0);
-    BOOL is_var = (!is_priv && strncmp(work, "/var/mobile/Containers/Shared/AppGroup/", 39) == 0);
+    BOOL is_priv = (strncasecmp(work, "/private/var/mobile/Containers/Shared/AppGroup/", 47) == 0);
+    BOOL is_var = (!is_priv && strncasecmp(work, "/var/mobile/Containers/Shared/AppGroup/", 39) == 0);
     if (!is_priv && !is_var) {
         return NO;
     }
@@ -292,7 +292,7 @@ static BOOL pt_lookup_virtual_group_container(const char *work,
             const pt_group_container_entry_t *e = &s_group_map[i];
             const char *vprefix = is_priv ? e->virt_priv : e->virt_var;
             size_t vlen = is_priv ? e->virt_priv_len : e->virt_var_len;
-            if (strncmp(work, vprefix, vlen) == 0 &&
+            if (strncasecmp(work, vprefix, vlen) == 0 &&
                 (work[vlen] == '/' || work[vlen] == '\0')) {
                 if (out_real_dir != NULL && out_real_dir_size > 0) {
                     strlcpy(out_real_dir, e->real_dir, out_real_dir_size);
@@ -378,10 +378,10 @@ static BOOL pt_is_clean_virtual_ancestor_dir(const char *p) {
     if (p == NULL || p[0] != '/') {
         return NO;
     }
-    if (strncmp(p, "/private/", 9) == 0) {
+    if (strncasecmp(p, "/private/", 9) == 0) {
         p += 8;
     }
-    if (strncmp(p, "/var/", 5) != 0) {
+    if (strncasecmp(p, "/var/", 5) != 0) {
         return NO;
     }
     size_t len = strlen(p);
@@ -395,21 +395,21 @@ static BOOL pt_is_clean_virtual_ancestor_dir(const char *p) {
     memcpy(clean, p, len);
     clean[len] = '\0';
 
-    if (strcmp(clean, "/var/mobile") == 0 ||
-        strcmp(clean, "/var/mobile/Containers") == 0 ||
-        strcmp(clean, "/var/mobile/Containers/Data") == 0 ||
-        strcmp(clean, "/var/mobile/Containers/Data/Application") == 0 ||
-        strcmp(clean, "/var/mobile/Containers/Shared") == 0 ||
-        strcmp(clean, "/var/mobile/Containers/Shared/AppGroup") == 0 ||
-        strcmp(clean, "/var/containers") == 0 ||
-        strcmp(clean, "/var/containers/Bundle") == 0 ||
-        strcmp(clean, "/var/containers/Bundle/Application") == 0) {
+    if (strcasecmp(clean, "/var/mobile") == 0 ||
+        strcasecmp(clean, "/var/mobile/Containers") == 0 ||
+        strcasecmp(clean, "/var/mobile/Containers/Data") == 0 ||
+        strcasecmp(clean, "/var/mobile/Containers/Data/Application") == 0 ||
+        strcasecmp(clean, "/var/mobile/Containers/Shared") == 0 ||
+        strcasecmp(clean, "/var/mobile/Containers/Shared/AppGroup") == 0 ||
+        strcasecmp(clean, "/var/containers") == 0 ||
+        strcasecmp(clean, "/var/containers/Bundle") == 0 ||
+        strcasecmp(clean, "/var/containers/Bundle/Application") == 0) {
         return YES;
     }
-    if (strncmp(clean, "/var/containers/Bundle/Application/", 35) == 0) {
+    if (strncasecmp(clean, "/var/containers/Bundle/Application/", 35) == 0) {
         pt_ensure_bundle_path_map();
         if (s_virtual_bundle_uuid_parent_var[0] != '\0' &&
-            strcmp(clean, s_virtual_bundle_uuid_parent_var) == 0) {
+            strcasecmp(clean, s_virtual_bundle_uuid_parent_var) == 0) {
             return YES;
         }
     }
@@ -455,6 +455,85 @@ __attribute__((visibility("hidden"))) BOOL pt_is_synth_system_version_path(const
     return match;
 }
 
+__attribute__((visibility("hidden"))) BOOL pt_is_synth_system_version_stat(dev_t dev, ino_t ino) {
+    if (!atomic_load_explicit(&s_has_synth_sysver, memory_order_acquire) || ino == 0) {
+        return NO;
+    }
+    BOOL match = NO;
+    os_unfair_lock_lock(&s_synth_sysver_lock);
+    match = (s_synth_sysver_path[0] != '\0' &&
+             dev == s_synth_sysver_dev &&
+             ino == s_synth_sysver_ino);
+    os_unfair_lock_unlock(&s_synth_sysver_lock);
+    return match;
+}
+
+__attribute__((visibility("hidden"))) void pt_normalize_synth_sysver_stat(struct stat *buf) {
+    if (buf == NULL) {
+        return;
+    }
+    static dev_t s_root_dev = 0;
+    static dispatch_once_t s_root_once;
+    dispatch_once(&s_root_once, ^{
+        struct stat rst;
+        if (stat("/", &rst) == 0) {
+            s_root_dev = rst.st_dev;
+        }
+    });
+    buf->st_uid = 0;
+    buf->st_gid = 0;
+    buf->st_mode = (buf->st_mode & ~(mode_t)07777) | (mode_t)0444;
+    if (s_root_dev != 0) {
+        buf->st_dev = s_root_dev;
+    }
+}
+
+static BOOL pt_collapse_macos_framework_versions_in_place(char *work, size_t cap) {
+    if (work == NULL || cap == 0) {
+        return NO;
+    }
+    BOOL changed = NO;
+    for (int iter = 0; iter < 8; iter++) {
+        const char *fw_ver = strcasestr(work, ".framework/Versions/");
+        const char *bdl_ver = strcasestr(work, ".bundle/Versions/");
+        const char *bdl_mac = strcasestr(work, ".bundle/Contents/MacOS/");
+        const char *hit = fw_ver;
+        size_t keep_ext_len = 10U;
+        size_t skip_prefix_len = 20U;
+        if (bdl_ver != NULL && (hit == NULL || bdl_ver < hit)) {
+            hit = bdl_ver;
+            keep_ext_len = 7U;
+            skip_prefix_len = 17U;
+        }
+        if (bdl_mac != NULL && (hit == NULL || bdl_mac < hit)) {
+            hit = bdl_mac;
+            keep_ext_len = 7U;
+            skip_prefix_len = 22U;
+        }
+        if (hit == NULL) {
+            break;
+        }
+        const char *rest = NULL;
+        if (hit == bdl_mac) {
+            rest = hit + skip_prefix_len;
+        } else {
+            const char *after_versions = hit + skip_prefix_len;
+            rest = strchr(after_versions, '/');
+        }
+        if (rest == NULL) {
+            break;
+        }
+        size_t prefix_len = (size_t)(hit - work) + keep_ext_len;
+        size_t rest_len = strlen(rest);
+        if (prefix_len + rest_len >= cap) {
+            break;
+        }
+        memmove(work + prefix_len, rest, rest_len + 1U);
+        changed = YES;
+    }
+    return changed;
+}
+
 __attribute__((visibility("hidden")))
 const char *pt_virtualize_path_for_app(const char *path, char *buf, size_t bufsize, BOOL use_private_prefix) {
     if (path == NULL || buf == NULL || bufsize == 0) {
@@ -463,10 +542,10 @@ const char *pt_virtualize_path_for_app(const char *path, char *buf, size_t bufsi
     pt_ensure_bundle_path_map();
     pt_ensure_data_container_map();
     const char *p = path;
-    if (strncmp(p, "/System/Volumes/Data/", 21) == 0) {
+    if (strncasecmp(p, "/System/Volumes/Data/", 21) == 0) {
         p += 20;
     }
-    if (strncmp(p, "/System/iOSSupport/", 19) == 0) {
+    if (strncasecmp(p, "/System/iOSSupport/", 19) == 0) {
         p += 18;
     }
     if (pt_is_synth_system_version_path(p)) {
@@ -478,6 +557,16 @@ const char *pt_virtualize_path_for_app(const char *path, char *buf, size_t bufsi
         size_t bplen = use_private_prefix ? s_virtual_private_bundle_len : s_virtual_var_bundle_len;
         if (bplen > 0) {
             const char *joined = pt_join_path_fast(buf, bufsize, bprefix, bplen, "/_CodeSignature/CodeResources");
+            if (joined != NULL) {
+                return joined;
+            }
+        }
+    }
+    if (pt_is_synth_info_plist_path(p)) {
+        const char *bprefix = use_private_prefix ? s_virtual_private_bundle_dir : s_virtual_var_bundle_dir;
+        size_t bplen = use_private_prefix ? s_virtual_private_bundle_len : s_virtual_var_bundle_len;
+        if (bplen > 0) {
+            const char *joined = pt_join_path_fast(buf, bufsize, bprefix, bplen, "/Info.plist");
             if (joined != NULL) {
                 return joined;
             }
@@ -513,6 +602,16 @@ const char *pt_virtualize_path_for_app(const char *path, char *buf, size_t bufsi
         size_t n = strlcpy(buf, "/System/Library/CoreServices/SystemVersion.plist", bufsize);
         return (n < bufsize) ? buf : path;
     }
+    if (strncasecmp(p, "/System/", 8) == 0 || strncasecmp(p, "/Library/", 9) == 0) {
+        size_t plen = strlen(p);
+        if (plen < bufsize) {
+            memcpy(buf, p, plen + 1U);
+            if (pt_collapse_macos_framework_versions_in_place(buf, bufsize) || p != path) {
+                return buf;
+            }
+            return path;
+        }
+    }
     if (p != path) {
         size_t n = strlcpy(buf, p, bufsize);
         return (n < bufsize) ? buf : path;
@@ -525,12 +624,17 @@ __attribute__((visibility("hidden"))) BOOL pt_is_sensitive_host_fd_path(const ch
         return NO;
     }
     const char *p = path;
-    if (strncmp(p, "/System/Volumes/Data/", 21) == 0) {
+    if (strncasecmp(p, "/System/Volumes/Data/", 21) == 0) {
         p += 20;
+    }
+    if (strncasecmp(p, "/System/iOSSupport/System/Library/", 34) == 0 ||
+        strncasecmp(p, "/System/iOSSupport/usr/", 23) == 0) {
+        p += 18;
     }
     if (pt_is_active_app_backup_file_path(p) ||
         pt_is_synth_system_version_path(p) ||
         pt_is_synth_code_resources_path(p) ||
+        pt_is_synth_info_plist_path(p) ||
         strcasecmp(p, "/System/Library/CoreServices/iOSSystemVersion.plist") == 0) {
         return NO;
     }
@@ -551,18 +655,18 @@ __attribute__((visibility("hidden"))) BOOL pt_is_sensitive_host_fd_path(const ch
         pt_match_prefix_modulo_private(p, s_real_app_bundle_dir, s_real_app_bundle_len) != NULL) {
         return NO;
     }
-    if (strncmp(p, "/Library/Application Support/MacOver", 36) == 0 ||
-        strncmp(p, "/Library/Application Support/PlayCover", 38) == 0 ||
-        strstr(p, "/Library/Containers/app.makedie.") != NULL ||
-        strstr(p, "/Library/Preferences/app.makedie.") != NULL ||
-        strstr(p, "/Library/Containers/io.playcover.") != NULL ||
-        strstr(p, "/Library/Preferences/io.playcover.") != NULL) {
+    if (strncasecmp(p, "/Library/Application Support/MacOver", 36) == 0 ||
+        strncasecmp(p, "/Library/Application Support/PlayCover", 38) == 0 ||
+        strcasestr(p, "/Library/Containers/app.makedie.") != NULL ||
+        strcasestr(p, "/Library/Preferences/app.makedie.") != NULL ||
+        strcasestr(p, "/Library/Containers/io.playcover.") != NULL ||
+        strcasestr(p, "/Library/Preferences/io.playcover.") != NULL) {
         return YES;
     }
     const char *user_root = pt_get_host_user_root_cstr();
     if (user_root != NULL) {
         size_t ur_len = strlen(user_root);
-        if (ur_len > 1 && strncmp(p, user_root, ur_len) == 0 && (p[ur_len] == '/' || p[ur_len] == '\0')) {
+        if (ur_len > 1 && strncasecmp(p, user_root, ur_len) == 0 && (p[ur_len] == '/' || p[ur_len] == '\0')) {
             char tmp[PATH_MAX];
             if (pt_group_try_virtualize_known_or_root(p, tmp, sizeof(tmp), YES) != NULL) {
                 return NO;
@@ -622,10 +726,18 @@ static const char *pt_sanitize_image_path_internal(const char *raw_path, BOOL al
     }
 
     const char *p = raw_path;
-    if (strncmp(p, "/System/iOSSupport/", 19) == 0) {
-        p += 18;
-    } else if (strncmp(p, "/System/Volumes/Data/", 21) == 0) {
-        p += 20;
+    for (int pass = 0; pass < 4; pass++) {
+        if (strncmp(p, "/System/Volumes/Preboot/Cryptexes/OS/", 37) == 0) {
+            p += 36;
+        } else if (strncmp(p, "/System/Cryptexes/OS/", 21) == 0) {
+            p += 20;
+        } else if (strncmp(p, "/System/Volumes/Data/", 21) == 0) {
+            p += 20;
+        } else if (strncmp(p, "/System/iOSSupport/", 19) == 0) {
+            p += 18;
+        } else {
+            break;
+        }
     }
 
     char transformed[PATH_MAX];
@@ -650,46 +762,7 @@ static const char *pt_sanitize_image_path_internal(const char *raw_path, BOOL al
         if (plen < sizeof(transformed)) {
             char work[PATH_MAX];
             memcpy(work, p, plen + 1U);
-            BOOL changed = NO;
-            for (int iter = 0; iter < 8; iter++) {
-                const char *fw_ver = strstr(work, ".framework/Versions/");
-                const char *bdl_ver = strstr(work, ".bundle/Versions/");
-                const char *bdl_mac = strstr(work, ".bundle/Contents/MacOS/");
-                const char *hit = fw_ver;
-                size_t keep_ext_len = 10U;
-                size_t skip_prefix_len = 20U;
-                if (bdl_ver != NULL && (hit == NULL || bdl_ver < hit)) {
-                    hit = bdl_ver;
-                    keep_ext_len = 7U;
-                    skip_prefix_len = 17U;
-                }
-                if (bdl_mac != NULL && (hit == NULL || bdl_mac < hit)) {
-                    hit = bdl_mac;
-                    keep_ext_len = 7U;
-                    skip_prefix_len = 22U;
-                }
-                if (hit == NULL) {
-                    break;
-                }
-                const char *rest = NULL;
-                if (hit == bdl_mac) {
-                    rest = hit + skip_prefix_len;
-                } else {
-                    const char *after_versions = hit + skip_prefix_len;
-                    rest = strchr(after_versions, '/');
-                }
-                if (rest == NULL) {
-                    break;
-                }
-                size_t prefix_len = (size_t)(hit - work) + keep_ext_len;
-                size_t rest_len = strlen(rest);
-                if (prefix_len + rest_len >= sizeof(work)) {
-                    break;
-                }
-                memmove(work + prefix_len, rest, rest_len + 1U);
-                changed = YES;
-            }
-            if (changed) {
+            if (pt_collapse_macos_framework_versions_in_place(work, sizeof(work))) {
                 memcpy(transformed, work, strlen(work) + 1U);
                 candidate = transformed;
             }
@@ -759,31 +832,31 @@ BOOL pt_is_virtual_container_path(const char *path) {
             work = collapsed;
         }
     }
-    if (strncmp(work, "/var/", 5) != 0 && strncmp(work, "/private/var/", 13) != 0) {
+    if (strncasecmp(work, "/var/", 5) != 0 && strncasecmp(work, "/private/var/", 13) != 0) {
         return NO;
     }
     pt_ensure_bundle_path_map();
     pt_ensure_data_container_map();
     if (s_real_data_container_len > 0) {
         if (s_virtual_var_data_len > 0 &&
-            strncmp(work, s_virtual_var_data_dir, s_virtual_var_data_len) == 0 &&
+            strncasecmp(work, s_virtual_var_data_dir, s_virtual_var_data_len) == 0 &&
             (work[s_virtual_var_data_len] == '/' || work[s_virtual_var_data_len] == '\0')) {
             return YES;
         }
         if (s_virtual_private_data_len > 0 &&
-            strncmp(work, s_virtual_private_data_dir, s_virtual_private_data_len) == 0 &&
+            strncasecmp(work, s_virtual_private_data_dir, s_virtual_private_data_len) == 0 &&
             (work[s_virtual_private_data_len] == '/' || work[s_virtual_private_data_len] == '\0')) {
             return YES;
         }
     }
     if (s_real_app_bundle_len > 0) {
         if (s_virtual_private_bundle_len > 0 &&
-            strncmp(work, s_virtual_private_bundle_dir, s_virtual_private_bundle_len) == 0 &&
+            strncasecmp(work, s_virtual_private_bundle_dir, s_virtual_private_bundle_len) == 0 &&
             (work[s_virtual_private_bundle_len] == '/' || work[s_virtual_private_bundle_len] == '\0')) {
             return YES;
         }
         if (s_virtual_var_bundle_len > 0 &&
-            strncmp(work, s_virtual_var_bundle_dir, s_virtual_var_bundle_len) == 0 &&
+            strncasecmp(work, s_virtual_var_bundle_dir, s_virtual_var_bundle_len) == 0 &&
             (work[s_virtual_var_bundle_len] == '/' || work[s_virtual_var_bundle_len] == '\0')) {
             return YES;
         }
@@ -802,12 +875,12 @@ static const char *pt_try_map_clean_virtual_container_path(const char *work, cha
     pt_ensure_data_container_map();
     if (s_real_data_container_len > 0) {
         if (s_virtual_var_data_len > 0 &&
-            strncmp(work, s_virtual_var_data_dir, s_virtual_var_data_len) == 0 &&
+            strncasecmp(work, s_virtual_var_data_dir, s_virtual_var_data_len) == 0 &&
             (work[s_virtual_var_data_len] == '/' || work[s_virtual_var_data_len] == '\0')) {
             return pt_join_path_fast(buf, bufsize, s_real_data_container_dir, s_real_data_container_len, work + s_virtual_var_data_len);
         }
         if (s_virtual_private_data_len > 0 &&
-            strncmp(work, s_virtual_private_data_dir, s_virtual_private_data_len) == 0 &&
+            strncasecmp(work, s_virtual_private_data_dir, s_virtual_private_data_len) == 0 &&
             (work[s_virtual_private_data_len] == '/' || work[s_virtual_private_data_len] == '\0')) {
             return pt_join_path_fast(buf, bufsize, s_real_data_container_dir, s_real_data_container_len, work + s_virtual_private_data_len);
         }
@@ -815,16 +888,16 @@ static const char *pt_try_map_clean_virtual_container_path(const char *work, cha
     if (s_real_app_bundle_len > 0) {
         const char *bundle_rel = NULL;
         if (s_virtual_private_bundle_len > 0 &&
-            strncmp(work, s_virtual_private_bundle_dir, s_virtual_private_bundle_len) == 0 &&
+            strncasecmp(work, s_virtual_private_bundle_dir, s_virtual_private_bundle_len) == 0 &&
             (work[s_virtual_private_bundle_len] == '/' || work[s_virtual_private_bundle_len] == '\0')) {
             bundle_rel = work + s_virtual_private_bundle_len;
         } else if (s_virtual_var_bundle_len > 0 &&
-                   strncmp(work, s_virtual_var_bundle_dir, s_virtual_var_bundle_len) == 0 &&
+                   strncasecmp(work, s_virtual_var_bundle_dir, s_virtual_var_bundle_len) == 0 &&
                    (work[s_virtual_var_bundle_len] == '/' || work[s_virtual_var_bundle_len] == '\0')) {
             bundle_rel = work + s_virtual_var_bundle_len;
         }
         if (bundle_rel != NULL) {
-            if (s_app_info_plist_in_contents && strcmp(bundle_rel, "/Info.plist") == 0) {
+            if (s_app_info_plist_in_contents && strcasecmp(bundle_rel, "/Info.plist") == 0) {
                 return pt_join_path_fast(buf, bufsize, s_real_app_bundle_dir, s_real_app_bundle_len, "/Contents/Info.plist");
             }
             return pt_join_path_fast(buf, bufsize, s_real_app_bundle_dir, s_real_app_bundle_len, bundle_rel);
@@ -843,8 +916,8 @@ __attribute__((visibility("hidden"))) BOOL pt_is_reverse_mapped_iossupport(const
     if (orig_path == NULL || resolved_path == NULL || orig_path == resolved_path) {
         return NO;
     }
-    return (strncmp(resolved_path, "/System/iOSSupport/System/Library/", 34) == 0 &&
-            strncmp(orig_path, "/System/iOSSupport", 18) != 0);
+    return (strncasecmp(resolved_path, "/System/iOSSupport/System/Library/", 34) == 0 &&
+            strncasecmp(orig_path, "/System/iOSSupport", 18) != 0);
 }
 
 __attribute__((visibility("hidden")))
@@ -862,7 +935,7 @@ const char *pt_resolve_virtual_path(const char *path, char *buf, size_t bufsize)
             was_normalized = YES;
         }
     }
-    if (strncmp(work, "/var/", 5) == 0 || strncmp(work, "/private/var/", 13) == 0) {
+    if (strncasecmp(work, "/var/", 5) == 0 || strncasecmp(work, "/private/var/", 13) == 0) {
         const char *mapped = pt_try_map_clean_virtual_container_path(work, buf, bufsize);
         if (mapped != NULL) {
             return mapped;
@@ -876,8 +949,8 @@ const char *pt_resolve_virtual_path(const char *path, char *buf, size_t bufsize)
         }
         return path;
     }
-    if ((strncmp(work, "/System/Library/Frameworks/", 27) == 0 ||
-         strncmp(work, "/System/Library/PrivateFrameworks/", 34) == 0) &&
+    if ((strncasecmp(work, "/System/Library/Frameworks/", 27) == 0 ||
+         strncasecmp(work, "/System/Library/PrivateFrameworks/", 34) == 0) &&
         access(work, F_OK) != 0) {
         int n = snprintf(buf, bufsize, "/System/iOSSupport%s", work);
         if (n > 0 && (size_t)n < bufsize && access(buf, F_OK) == 0) {
@@ -1131,6 +1204,7 @@ static BOOL pt_ensure_synthesized_system_version_plist(const char *ver,
             continue;
         }
         BOOL wrote = pt_write_all_fd(fd, xml, (size_t)xml_len);
+        (void)fchmod(fd, 0444);
         (void)close(fd);
         if (wrote && rename(staging, target) == 0 && stat(target, &chosen_st) == 0) {
             strlcpy(chosen_path, target, sizeof(chosen_path));
@@ -1184,23 +1258,44 @@ static pt_fs_path_disposition_t pt_prepare_fs_path_abs_cached_caller(const char 
 
     if (was_normalized) {
         const char *raw_work = cleaned;
-        if (strncmp(raw_work, "/System/Volumes/Data/", 21) == 0) {
+        if (strncasecmp(raw_work, "/System/Volumes/Data/", 21) == 0) {
             raw_work += 20;
         }
         BOOL started_in_real_data = (s_real_data_container_len > 0 &&
                                      pt_match_prefix_modulo_private(raw_work, s_real_data_container_dir, s_real_data_container_len) != NULL);
         BOOL started_in_real_bundle = (s_real_app_bundle_len > 0 &&
                                        pt_match_prefix_modulo_private(raw_work, s_real_app_bundle_dir, s_real_app_bundle_len) != NULL);
-        if (started_in_real_data || started_in_real_bundle) {
+        char grp_real[PATH_MAX];
+        char grp_virt[136];
+        grp_real[0] = '\0';
+        grp_virt[0] = '\0';
+        BOOL started_in_group = NO;
+        if (!started_in_real_data && !started_in_real_bundle &&
+            atomic_load_explicit(&s_group_map_nonempty, memory_order_acquire)) {
+            os_unfair_lock_lock(&s_group_map_lock);
+            for (size_t i = 0; i < s_group_map_count; i++) {
+                if (s_group_map[i].real_len > 0 &&
+                    pt_match_prefix_modulo_private(raw_work, s_group_map[i].real_dir, s_group_map[i].real_len) != NULL) {
+                    strlcpy(grp_real, s_group_map[i].real_dir, sizeof(grp_real));
+                    strlcpy(grp_virt, s_group_map[i].virt_priv, sizeof(grp_virt));
+                    started_in_group = YES;
+                    break;
+                }
+            }
+            os_unfair_lock_unlock(&s_group_map_lock);
+        }
+        if (started_in_real_data || started_in_real_bundle || started_in_group) {
             const char *norm_work = norm;
-            if (strncmp(norm_work, "/System/Volumes/Data/", 21) == 0) {
+            if (strncasecmp(norm_work, "/System/Volumes/Data/", 21) == 0) {
                 norm_work += 20;
             }
             BOOL escaped_data = (started_in_real_data &&
                                  pt_match_prefix_modulo_private(norm_work, s_real_data_container_dir, s_real_data_container_len) == NULL);
             BOOL escaped_bundle = (started_in_real_bundle &&
                                    pt_match_prefix_modulo_private(norm_work, s_real_app_bundle_dir, s_real_app_bundle_len) == NULL);
-            if ((escaped_data || escaped_bundle) && pt_is_bypass_enabled()) {
+            BOOL escaped_group = (started_in_group &&
+                                  pt_match_prefix_modulo_private(norm_work, grp_real, strlen(grp_real)) == NULL);
+            if ((escaped_data || escaped_bundle || escaped_group) && pt_is_bypass_enabled()) {
                 if (*inout_is_sys_caller < 0) {
                     *inout_is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
                 }
@@ -1210,9 +1305,13 @@ static pt_fs_path_disposition_t pt_prepare_fs_path_abs_cached_caller(const char 
                             pt_compute_escaped_virtual_ancestor(s_real_data_container_dir,
                                                                 s_virtual_private_data_dir,
                                                                 norm_work, vbuf, vbuf_size);
-                        } else {
+                        } else if (escaped_bundle) {
                             pt_compute_escaped_virtual_ancestor(s_real_app_bundle_dir,
                                                                 s_virtual_private_bundle_dir,
+                                                                norm_work, vbuf, vbuf_size);
+                        } else {
+                            pt_compute_escaped_virtual_ancestor(grp_real,
+                                                                grp_virt,
                                                                 norm_work, vbuf, vbuf_size);
                         }
                         *out_path = vbuf;
@@ -1224,7 +1323,7 @@ static pt_fs_path_disposition_t pt_prepare_fs_path_abs_cached_caller(const char 
     }
 
     if (norm[0] == '/' &&
-        (strncmp(norm, "/var/", 5) == 0 || strncmp(norm, "/private/var/", 13) == 0)) {
+        (strncasecmp(norm, "/var/", 5) == 0 || strncasecmp(norm, "/private/var/", 13) == 0)) {
         const char *mapped = pt_try_map_clean_virtual_container_path(norm, vbuf, vbuf_size);
         if (mapped != NULL) {
             *out_path = mapped;
@@ -1269,10 +1368,11 @@ static pt_fs_path_disposition_t pt_prepare_fs_path_abs_cached_caller(const char 
                 *inout_is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
             }
             if (*inout_is_sys_caller == 0) {
-                const char *ov_build = NULL;
-                const char *ov_ver = pt_get_reported_ios_version_override(&ov_build);
-                if (ov_ver != NULL && ov_build != NULL &&
-                    pt_ensure_synthesized_system_version_plist(ov_ver, ov_build, vbuf, vbuf_size)) {
+                const char *eff_ver = NULL;
+                const char *eff_build = NULL;
+                pt_get_effective_ios_version_and_build(&eff_ver, &eff_build);
+                if (eff_ver != NULL && eff_build != NULL &&
+                    pt_ensure_synthesized_system_version_plist(eff_ver, eff_build, vbuf, vbuf_size)) {
                     *out_path = vbuf;
                     return PT_FS_PATH_NORMAL;
                 }
@@ -1285,7 +1385,7 @@ static pt_fs_path_disposition_t pt_prepare_fs_path_abs_cached_caller(const char 
         }
     }
 
-    if (norm[0] == '/' && norm[1] == 'S' && strncmp(norm, "/System/Library/", 16) == 0) {
+    if (norm[0] == '/' && tolower((unsigned char)norm[1]) == 's' && strncasecmp(norm, "/System/Library/", 16) == 0) {
         BOOL is_fw = (strncmp(norm + 16, "Frameworks/", 11) == 0);
         BOOL is_pfw = (!is_fw && strncmp(norm + 16, "PrivateFrameworks/", 18) == 0);
         if (is_fw || is_pfw) {
@@ -1338,8 +1438,13 @@ __attribute__((visibility("hidden"))) pt_fs_path_disposition_t pt_prepare_fs_pat
                                                                      BOOL for_readonly) {
     const char *cleaned = pt_fs_ue_fix_filename(raw_path);
     *out_path = cleaned;
-    if (cleaned == NULL || cleaned[0] == '\0' ||
-        !atomic_load_explicit(&s_libsystem_ready, memory_order_acquire)) {
+    if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire)) {
+        return PT_FS_PATH_NORMAL;
+    }
+    if (cleaned == NULL || cleaned[0] == '\0') {
+        if (dirfd != AT_FDCWD && dirfd >= 0 && pt_is_bypass_enabled() && pt_fd_is_sensitive(dirfd, caller)) {
+            return PT_FS_PATH_HIDDEN;
+        }
         return PT_FS_PATH_NORMAL;
     }
     if (cleaned[0] != '/') {
@@ -1374,7 +1479,7 @@ __attribute__((visibility("hidden"))) pt_fs_path_disposition_t pt_prepare_fs_pat
             }
             if (base_dir[0] == '/') {
                 const char *base_use = base_dir;
-                if (strncmp(base_use, "/System/Volumes/Data/", 21) == 0) {
+                if (strncasecmp(base_use, "/System/Volumes/Data/", 21) == 0) {
                     base_use += 20;
                 }
                 char rel_abs[PATH_MAX];
@@ -1418,13 +1523,37 @@ __attribute__((visibility("hidden"))) pt_fs_path_disposition_t pt_prepare_fs_pat
 }
 
 
-__attribute__((visibility("hidden"))) int pt_stat_virtual_ancestor(struct stat *buf) {
+__attribute__((visibility("hidden"))) int pt_stat_virtual_ancestor(const char *virtual_path,
+                                                                   struct stat *buf,
+                                                                   const void *caller) {
     pt_ensure_data_container_map();
     const char *backing = (s_real_data_container_len > 0) ? s_real_data_container_dir : "/private/var";
     int rc = stat(backing, buf);
     if (rc == 0 && buf != NULL) {
+        pt_sanitize_stat_buf(buf, caller);
         buf->st_mode = (buf->st_mode & ~S_IFMT) | S_IFDIR;
         buf->st_mode &= ~(S_IWUSR | S_IWGRP | S_IWOTH);
+        const char *vp = (virtual_path != NULL && virtual_path[0] == '/') ? virtual_path : "/var/mobile";
+        if (strncasecmp(vp, "/private/", 9) == 0) {
+            vp += 8;
+        }
+        size_t vlen = strlen(vp);
+        while (vlen > 1 && vp[vlen - 1] == '/') {
+            vlen--;
+        }
+        uint64_t h = 14695981039346656037ULL;
+        for (size_t i = 0; i < vlen; i++) {
+            h ^= (uint64_t)(unsigned char)tolower((unsigned char)vp[i]);
+            h *= 1099511628211ULL;
+        }
+        buf->st_ino = (ino_t)(0x7000000000000000ULL | (h & 0x0FFFFFFFFFFFFFFFULL));
+        if (strncasecmp(vp, "/var/containers", 15) == 0 && (vlen == 15 || vp[15] == '/')) {
+            buf->st_uid = 0;
+            buf->st_gid = 0;
+        } else {
+            buf->st_uid = 501;
+            buf->st_gid = 501;
+        }
     }
     return rc;
 }

@@ -332,10 +332,14 @@ int pt_fs_guarded_open_dprotected_np_with_caller(const char *path,
         errno = (flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC)) ? EACCES : EPERM;
         return -1;
     }
-    if (flags & O_CREAT) {
-        return guarded_open_dprotected_np(path, (const pt_guardid_t *)guard, guardflags, flags, dpclass, dpflags, mode);
+    int ret = (flags & O_CREAT)
+        ? guarded_open_dprotected_np(path, (const pt_guardid_t *)guard, guardflags, flags, dpclass, dpflags, (int)mode)
+        : guarded_open_dprotected_np(path, (const pt_guardid_t *)guard, guardflags, flags, dpclass, dpflags);
+    if (ret >= 0 && dpclass >= 1 && dpclass <= 7 &&
+        pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller)) {
+        pt_record_fd_dpclass(ret, dpclass);
     }
-    return guarded_open_dprotected_np(path, (const pt_guardid_t *)guard, guardflags, flags, dpclass, dpflags);
+    return ret;
 }
 
 static int pt_guarded_open_dprotected_np(const char *path, const pt_guardid_t *guard, u_int guardflags, int flags, int dpclass, int dpflags, ...) {
@@ -461,7 +465,7 @@ int pt_fs_stat_with_caller(const char *path, struct stat *buf, BOOL follow_symli
     }
     if (disp == PT_FS_PATH_VIRTUAL_ANCESTOR) {
         PT_DEBUG_TRACE("fs", "virtual-ancestor %s path=%s", follow_symlinks ? "stat" : "lstat", path != NULL ? path : "<null>");
-        return pt_stat_virtual_ancestor(buf);
+        return pt_stat_virtual_ancestor(resolved, buf, caller);
     }
     if (resolved == NULL) {
         errno = EFAULT;
@@ -497,8 +501,8 @@ int pt_fs_fstat_with_caller(int fd, struct stat *buf, const void *caller) {
         return -1;
     }
     int ret = fstat(fd, buf);
-    if (ret == 0 && !is_sys && buf != NULL && buf->st_gid == 20 && pt_is_bypass_enabled()) {
-        buf->st_gid = 501;
+    if (ret == 0) {
+        pt_sanitize_stat_buf(buf, caller);
     }
     return ret;
 }
@@ -558,7 +562,7 @@ int pt_fs_fstatat_with_caller(int fd, const char *path, struct stat *buf, int fl
         return -1;
     }
     if (disp == PT_FS_PATH_VIRTUAL_ANCESTOR) {
-        return pt_stat_virtual_ancestor(buf);
+        return pt_stat_virtual_ancestor(path, buf, caller);
     }
     int ret = fstatat(fd, path, buf, flag);
     if (ret == 0) {
@@ -580,7 +584,7 @@ static int pt_statx_np(const char *path, struct stat *buf, filesec_t fsec) {
         return -1;
     }
     if (disp == PT_FS_PATH_VIRTUAL_ANCESTOR) {
-        return pt_stat_virtual_ancestor(buf);
+        return pt_stat_virtual_ancestor(path, buf, caller);
     }
     int ret = statx_np(path, buf, fsec);
     if (ret == 0) {
@@ -598,13 +602,109 @@ static int pt_lstatx_np(const char *path, struct stat *buf, filesec_t fsec) {
         return -1;
     }
     if (disp == PT_FS_PATH_VIRTUAL_ANCESTOR) {
-        return pt_stat_virtual_ancestor(buf);
+        return pt_stat_virtual_ancestor(path, buf, caller);
     }
     int ret = lstatx_np(path, buf, fsec);
     if (ret == 0) {
         pt_sanitize_stat_buf(buf, caller);
     }
     return ret;
+}
+
+static int pt_fstatx_np(int fd, struct stat *buf, filesec_t fsec) {
+    const void *caller = __builtin_return_address(0);
+    if (fd < 0) {
+        errno = EBADF;
+        return -1;
+    }
+    if (!pt_is_effective_system_or_playtools_caller(caller) && pt_fd_is_sensitive(fd, caller)) {
+        errno = EBADF;
+        return -1;
+    }
+    int ret = fstatx_np(fd, buf, fsec);
+    if (ret == 0) {
+        pt_sanitize_stat_buf(buf, caller);
+    }
+    return ret;
+}
+
+_Static_assert(sizeof(struct stat) == 144, "arm64 struct stat must be 144 bytes");
+#if !__DARWIN_ONLY_64_BIT_INO_T
+_Static_assert(sizeof(struct stat) == sizeof(struct stat64), "arm64 struct stat and stat64 must match");
+#endif
+
+extern int pt_orig_stat64(const char *, struct stat *) __asm__("_stat64") __attribute__((weak_import));
+extern int pt_orig_lstat64(const char *, struct stat *) __asm__("_lstat64") __attribute__((weak_import));
+extern int pt_orig_fstat64(int, struct stat *) __asm__("_fstat64") __attribute__((weak_import));
+extern int pt_orig_fstatat64(int, const char *, struct stat *, int) __asm__("_fstatat64") __attribute__((weak_import));
+
+static int pt_stat64(const char *path, struct stat *buf) {
+    return pt_fs_stat_with_caller(path, buf, YES, __builtin_return_address(0));
+}
+
+static int pt_lstat64(const char *path, struct stat *buf) {
+    return pt_fs_stat_with_caller(path, buf, NO, __builtin_return_address(0));
+}
+
+static int pt_fstat64(int fd, struct stat *buf) {
+    return pt_fs_fstat_with_caller(fd, buf, __builtin_return_address(0));
+}
+
+static int pt_fstatat64(int fd, const char *path, struct stat *buf, int flag) {
+    return pt_fs_fstatat_with_caller(fd, path, buf, flag, __builtin_return_address(0));
+}
+
+static int pt_accessx_np(const struct accessx_descriptor *descs, size_t size, int *results, uid_t uid) {
+    return pt_fs_access_extended_with_caller((void *)descs, size, results, uid, __builtin_return_address(0));
+}
+
+extern int pt_orig_openbyid_np(fsid_t *fsid, fsobj_id_t *objid, int oflags) __asm__("_openbyid_np") __attribute__((weak_import));
+extern int pt_orig_openat_authenticated_np(int dirfd, const char *path, int oflags, int authfd) __asm__("_openat_authenticated_np") __attribute__((weak_import));
+
+static int pt_openbyid_np(fsid_t *fsid, fsobj_id_t *objid, int oflags) {
+    if (&pt_orig_openbyid_np == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    const void *caller = __builtin_return_address(0);
+    BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
+    if (!is_sys && pt_is_bypass_enabled() && fsid != NULL && objid != NULL) {
+        char pbuf[PATH_MAX];
+        int saved_errno = errno;
+        ssize_t r = pt_fs_fsgetpath_with_caller(pbuf, sizeof(pbuf), fsid, *(const uint64_t *)objid, caller);
+        if (r < 0 && errno == ENOENT) {
+            return -1;
+        }
+        errno = saved_errno;
+    }
+    int fd = pt_orig_openbyid_np(fsid, objid, oflags);
+    if (fd >= 0 && !is_sys && pt_is_bypass_enabled() && pt_fd_is_sensitive(fd, caller)) {
+        close(fd);
+        errno = ENOENT;
+        return -1;
+    }
+    return fd;
+}
+
+static int pt_openat_authenticated_np(int dirfd, const char *path, int oflags, int authfd) {
+    if (&pt_orig_openat_authenticated_np == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    const void *caller = __builtin_return_address(0);
+    char vbuf[PATH_MAX];
+    const char *resolved = NULL;
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_at_mode(
+        dirfd, path, caller, vbuf, sizeof(vbuf), &resolved, pt_open_flags_are_readonly(oflags));
+    if (disp == PT_FS_PATH_HIDDEN) {
+        errno = ENOENT;
+        return -1;
+    }
+    if (disp == PT_FS_PATH_VIRTUAL_ANCESTOR) {
+        errno = (oflags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC)) ? EACCES : EPERM;
+        return -1;
+    }
+    return pt_orig_openat_authenticated_np(dirfd, resolved, oflags, authfd);
 }
 
 __attribute__((visibility("hidden")))
@@ -1053,8 +1153,7 @@ static char *pt_realpath_legacy(const char * restrict file_name, char * restrict
     return pt_realpath_common(file_name, resolved_name, __builtin_return_address(0), pt_orig_realpath_legacy);
 }
 
-static char *pt_getcwd(char *buf, size_t size) {
-    const void *caller = __builtin_return_address(0);
+static char *pt_getcwd_with_caller(char *buf, size_t size, const void *caller) {
     if (buf != NULL && size == 0) {
         errno = EINVAL;
         return NULL;
@@ -1065,8 +1164,12 @@ static char *pt_getcwd(char *buf, size_t size) {
     }
     const char *out_path = raw_buf;
     char vout[PATH_MAX];
-    if (!pt_is_effective_system_or_playtools_caller(caller)) {
+    if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller)) {
         out_path = pt_virtualize_path_for_app(raw_buf, vout, sizeof(vout), YES);
+        if (pt_is_hidden_path(out_path, caller)) {
+            const char *vh = pt_get_virtual_home_cstr();
+            out_path = (vh != NULL && vh[0] != '\0') ? vh : "/";
+        }
     }
     size_t need = strlen(out_path) + 1;
     if (buf != NULL) {
@@ -1091,6 +1194,21 @@ static char *pt_getcwd(char *buf, size_t size) {
     memcpy(alloc, out_path, need);
     return alloc;
 }
+
+static char *pt_getcwd(char *buf, size_t size) {
+    return pt_getcwd_with_caller(buf, size, __builtin_return_address(0));
+}
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+static char *pt_getwd(char *buf) {
+    if (buf == NULL) {
+        errno = EFAULT;
+        return NULL;
+    }
+    return pt_getcwd_with_caller(buf, PATH_MAX, __builtin_return_address(0));
+}
+#pragma clang diagnostic pop
 
 __attribute__((visibility("hidden")))
 int pt_fs_chdir_with_caller(const char *path, const void *caller) {
@@ -1151,7 +1269,7 @@ static int pt_handle_fcntl_getpath(int ret, int cmd, void *parg, const void *cal
     return ret;
 }
 
-#define PT_DPCLASS_CACHE_CAP 128U
+#define PT_DPCLASS_CACHE_CAP 256U
 
 typedef struct {
     dev_t dev;
@@ -1164,6 +1282,47 @@ static os_unfair_lock s_dpclass_lock = OS_UNFAIR_LOCK_INIT;
 static pt_dpclass_entry_t s_dpclass_cache[PT_DPCLASS_CACHE_CAP];
 static size_t s_dpclass_next = 0;
 
+__attribute__((visibility("hidden"))) void pt_record_stat_dpclass(dev_t dev, ino_t ino, int dpclass) {
+    if (ino == 0 || dpclass <= 0) {
+        return;
+    }
+    os_unfair_lock_lock(&s_dpclass_lock);
+    for (size_t i = 0; i < PT_DPCLASS_CACHE_CAP; i++) {
+        if (s_dpclass_cache[i].valid &&
+            s_dpclass_cache[i].dev == dev &&
+            s_dpclass_cache[i].ino == ino) {
+            s_dpclass_cache[i].dpclass = dpclass;
+            os_unfair_lock_unlock(&s_dpclass_lock);
+            return;
+        }
+    }
+    size_t slot = s_dpclass_next % PT_DPCLASS_CACHE_CAP;
+    s_dpclass_next = (s_dpclass_next + 1U) % PT_DPCLASS_CACHE_CAP;
+    s_dpclass_cache[slot].dev = dev;
+    s_dpclass_cache[slot].ino = ino;
+    s_dpclass_cache[slot].dpclass = dpclass;
+    s_dpclass_cache[slot].valid = YES;
+    os_unfair_lock_unlock(&s_dpclass_lock);
+}
+
+__attribute__((visibility("hidden"))) int pt_lookup_stat_dpclass(dev_t dev, ino_t ino) {
+    if (ino == 0) {
+        return 0;
+    }
+    int found = 0;
+    os_unfair_lock_lock(&s_dpclass_lock);
+    for (size_t i = 0; i < PT_DPCLASS_CACHE_CAP; i++) {
+        if (s_dpclass_cache[i].valid &&
+            s_dpclass_cache[i].dev == dev &&
+            s_dpclass_cache[i].ino == ino) {
+            found = s_dpclass_cache[i].dpclass;
+            break;
+        }
+    }
+    os_unfair_lock_unlock(&s_dpclass_lock);
+    return found;
+}
+
 static void pt_record_fd_dpclass(int fd, int dpclass) {
     if (fd < 0 || dpclass <= 0) {
         return;
@@ -1175,26 +1334,10 @@ static void pt_record_fd_dpclass(int fd, int dpclass) {
         return;
     }
     errno = saved_errno;
-    os_unfair_lock_lock(&s_dpclass_lock);
-    for (size_t i = 0; i < PT_DPCLASS_CACHE_CAP; i++) {
-        if (s_dpclass_cache[i].valid &&
-            s_dpclass_cache[i].dev == st.st_dev &&
-            s_dpclass_cache[i].ino == st.st_ino) {
-            s_dpclass_cache[i].dpclass = dpclass;
-            os_unfair_lock_unlock(&s_dpclass_lock);
-            return;
-        }
-    }
-    size_t slot = s_dpclass_next % PT_DPCLASS_CACHE_CAP;
-    s_dpclass_next = (s_dpclass_next + 1U) % PT_DPCLASS_CACHE_CAP;
-    s_dpclass_cache[slot].dev = st.st_dev;
-    s_dpclass_cache[slot].ino = st.st_ino;
-    s_dpclass_cache[slot].dpclass = dpclass;
-    s_dpclass_cache[slot].valid = YES;
-    os_unfair_lock_unlock(&s_dpclass_lock);
+    pt_record_stat_dpclass(st.st_dev, st.st_ino, dpclass);
 }
 
-static int pt_lookup_fd_dpclass(int fd) {
+__attribute__((visibility("hidden"))) int pt_lookup_fd_dpclass(int fd) {
     if (fd < 0) {
         return 0;
     }
@@ -1205,18 +1348,7 @@ static int pt_lookup_fd_dpclass(int fd) {
         return 0;
     }
     errno = saved_errno;
-    int found = 0;
-    os_unfair_lock_lock(&s_dpclass_lock);
-    for (size_t i = 0; i < PT_DPCLASS_CACHE_CAP; i++) {
-        if (s_dpclass_cache[i].valid &&
-            s_dpclass_cache[i].dev == st.st_dev &&
-            s_dpclass_cache[i].ino == st.st_ino) {
-            found = s_dpclass_cache[i].dpclass;
-            break;
-        }
-    }
-    os_unfair_lock_unlock(&s_dpclass_lock);
-    return found;
+    return pt_lookup_stat_dpclass(st.st_dev, st.st_ino);
 }
 
 static int pt_handle_fcntl_get_dpclass(int fd, int ret, int saved_errno, const void *caller) {
@@ -1574,12 +1706,25 @@ PT_INTERPOSE(pt_faccessat, faccessat)
 PT_INTERPOSE(pt_readlink, readlink)
 PT_INTERPOSE(pt_readlinkat, readlinkat)
 PT_INTERPOSE(pt_realpath, realpath)
+PT_DLSYM_ONLY("realpath$DARWIN_EXTSN", pt_realpath)
 PT_INTERPOSE_ONLY(pt_realpath_legacy, pt_orig_realpath_legacy)
 PT_INTERPOSE(pt_getcwd, getcwd)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+PT_INTERPOSE(pt_getwd, getwd)
+#pragma clang diagnostic pop
 PT_INTERPOSE(pt_chdir, chdir)
 PT_INTERPOSE(pt_fchdir, fchdir)
 PT_INTERPOSE(pt_fcntl, fcntl)
 PT_INTERPOSE_NAMED(pt_fcntl_nocancel, pt_orig_fcntl_nocancel, "fcntl$NOCANCEL")
 PT_INTERPOSE(pt_proc_pidpath, proc_pidpath)
 PT_INTERPOSE(pt_fstat, fstat)
+PT_INTERPOSE(pt_fstatx_np, fstatx_np)
+PT_INTERPOSE(pt_accessx_np, accessx_np)
+PT_INTERPOSE_WEAK_NAMED(pt_stat64, pt_orig_stat64, "stat64")
+PT_INTERPOSE_WEAK_NAMED(pt_lstat64, pt_orig_lstat64, "lstat64")
+PT_INTERPOSE_WEAK_NAMED(pt_fstat64, pt_orig_fstat64, "fstat64")
+PT_INTERPOSE_WEAK_NAMED(pt_fstatat64, pt_orig_fstatat64, "fstatat64")
+PT_INTERPOSE_WEAK_NAMED(pt_openbyid_np, pt_orig_openbyid_np, "openbyid_np")
+PT_INTERPOSE_WEAK_NAMED(pt_openat_authenticated_np, pt_orig_openat_authenticated_np, "openat_authenticated_np")
 PT_INTERPOSE_WEAK_NAMED_FLAGS(pt_freadlink, pt_orig_freadlink, "freadlink", PT_DLSYM_FLAG_HIDE_IN_COMPAT13_7)

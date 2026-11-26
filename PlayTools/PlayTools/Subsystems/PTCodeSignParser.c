@@ -71,9 +71,82 @@ __attribute__((visibility("hidden"))) void pt_der_buf_wrap_tlv(pt_der_buf_t *out
     pt_der_buf_append(out, body, body_len);
 }
 
+static bool pt_der_read_tlv(const uint8_t *buf, size_t len, size_t *out_hdr_len, size_t *out_body_len,
+                            uint8_t *out_tag) {
+    if (buf == NULL || len < 2U) {
+        return false;
+    }
+    uint8_t tag = buf[0];
+    uint8_t l0 = buf[1];
+    size_t hdr_len = 2U;
+    size_t body_len = 0U;
+    if (l0 < 0x80U) {
+        body_len = (size_t)l0;
+    } else {
+        size_t nbytes = (size_t)(l0 & 0x7fU);
+        if (nbytes == 0U || nbytes > 4U || len < 2U + nbytes) {
+            return false;
+        }
+        hdr_len = 2U + nbytes;
+        for (size_t i = 0; i < nbytes; i++) {
+            body_len = (body_len << 8) | (size_t)buf[2U + i];
+        }
+    }
+    if (body_len > len - hdr_len) {
+        return false;
+    }
+    if (out_hdr_len != NULL) {
+        *out_hdr_len = hdr_len;
+    }
+    if (out_body_len != NULL) {
+        *out_body_len = body_len;
+    }
+    if (out_tag != NULL) {
+        *out_tag = tag;
+    }
+    return true;
+}
+
+static bool pt_der_extract_pair_key(const uint8_t *buf, size_t len, const uint8_t **out_key, size_t *out_key_len) {
+    uint8_t seq_tag = 0;
+    size_t seq_hdr = 0, seq_body = 0;
+    if (!pt_der_read_tlv(buf, len, &seq_hdr, &seq_body, &seq_tag) || seq_tag != 0x30U) {
+        return false;
+    }
+    const uint8_t *inner = buf + seq_hdr;
+    uint8_t key_tag = 0;
+    size_t key_hdr = 0, key_body = 0;
+    if (!pt_der_read_tlv(inner, seq_body, &key_hdr, &key_body, &key_tag) || key_tag != 0x0cU) {
+        return false;
+    }
+    if (out_key != NULL) {
+        *out_key = inner + key_hdr;
+    }
+    if (out_key_len != NULL) {
+        *out_key_len = key_body;
+    }
+    return true;
+}
+
 __attribute__((visibility("hidden"))) int pt_der_item_cmp(const void *a, const void *b) {
     const pt_der_item_t *ia = (const pt_der_item_t *)a;
     const pt_der_item_t *ib = (const pt_der_item_t *)b;
+    const uint8_t *ka = NULL;
+    const uint8_t *kb = NULL;
+    size_t ka_len = 0;
+    size_t kb_len = 0;
+    if (pt_der_extract_pair_key(ia->bytes, ia->len, &ka, &ka_len) &&
+        pt_der_extract_pair_key(ib->bytes, ib->len, &kb, &kb_len)) {
+        size_t min_k = (ka_len < kb_len) ? ka_len : kb_len;
+        int c = (min_k > 0) ? memcmp(ka, kb, min_k) : 0;
+        if (c != 0) {
+            return c;
+        }
+        if (ka_len < kb_len) {
+            return -1;
+        }
+        return (ka_len > kb_len) ? 1 : 0;
+    }
     size_t min_len = (ia->len < ib->len) ? ia->len : ib->len;
     int c = (min_len > 0) ? memcmp(ia->bytes, ib->bytes, min_len) : 0;
     if (c != 0) {
@@ -167,6 +240,59 @@ __attribute__((visibility("hidden"))) void pt_patch_code_directory_entitlement_h
                 memcpy(cd_buf + off7, use_der, (size_t)hash_size);
             } else {
                 memset(cd_buf + off7, 0, (size_t)hash_size);
+            }
+        }
+    }
+}
+
+__attribute__((visibility("hidden"))) uint32_t pt_code_directory_special_slot_count(const uint8_t *cd_buf,
+                                                                                    size_t cd_len) {
+    if (cd_buf == NULL || cd_len < 40U) {
+        return 0U;
+    }
+    uint32_t cd_magic = 0, cd_declared_len = 0, n_special = 0;
+    memcpy(&cd_magic, cd_buf + 0U, sizeof(cd_magic));
+    memcpy(&cd_declared_len, cd_buf + 4U, sizeof(cd_declared_len));
+    memcpy(&n_special, cd_buf + 24U, sizeof(n_special));
+    cd_magic = ntohl(cd_magic);
+    cd_declared_len = ntohl(cd_declared_len);
+    n_special = ntohl(n_special);
+    if (cd_magic != PT_CSMAGIC_CODEDIRECTORY || cd_declared_len > cd_len) {
+        return 0U;
+    }
+    return n_special;
+}
+
+__attribute__((visibility("hidden"))) void pt_patch_code_directory_metadata(uint8_t *cd_buf, size_t cd_len,
+                                                                            uint32_t clear_flags_mask,
+                                                                            const char *replacement_team_id) {
+    if (cd_buf == NULL || cd_len < 40U) {
+        return;
+    }
+    uint32_t cd_magic = 0, cd_declared_len = 0, cd_version = 0, cd_flags = 0;
+    memcpy(&cd_magic, cd_buf + 0U, sizeof(cd_magic));
+    memcpy(&cd_declared_len, cd_buf + 4U, sizeof(cd_declared_len));
+    memcpy(&cd_version, cd_buf + 8U, sizeof(cd_version));
+    memcpy(&cd_flags, cd_buf + 12U, sizeof(cd_flags));
+    cd_magic = ntohl(cd_magic);
+    cd_declared_len = ntohl(cd_declared_len);
+    cd_version = ntohl(cd_version);
+    cd_flags = ntohl(cd_flags);
+    if (cd_magic != PT_CSMAGIC_CODEDIRECTORY || cd_declared_len > cd_len) {
+        return;
+    }
+    cd_flags &= ~clear_flags_mask;
+    uint32_t be_flags = htonl(cd_flags);
+    memcpy(cd_buf + 12U, &be_flags, sizeof(be_flags));
+
+    if (cd_len >= 52U && cd_version >= 0x20200U && replacement_team_id != NULL && strlen(replacement_team_id) == 10U) {
+        uint32_t team_off = 0;
+        memcpy(&team_off, cd_buf + 48U, sizeof(team_off));
+        team_off = ntohl(team_off);
+        if (team_off > 0U && (size_t)team_off + 11U <= cd_len) {
+            const char *cur_team = (const char *)(cd_buf + team_off);
+            if (memcmp(cur_team, "FAKETEAMID", 10U) == 0 && cur_team[10] == '\0') {
+                memcpy(cd_buf + team_off, replacement_team_id, 10U);
             }
         }
     }

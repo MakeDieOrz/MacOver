@@ -58,6 +58,11 @@ __attribute__((visibility("hidden"))) void pt_patch_code_directory_entitlement_h
     uint8_t *cd_buf, size_t cd_len, bool has_xml, const uint8_t xml_hash[CC_SHA256_DIGEST_LENGTH],
     const uint8_t xml_sha1[CC_SHA1_DIGEST_LENGTH], bool has_der, const uint8_t der_hash[CC_SHA256_DIGEST_LENGTH],
     const uint8_t der_sha1[CC_SHA1_DIGEST_LENGTH]);
+__attribute__((visibility("hidden"))) uint32_t pt_code_directory_special_slot_count(const uint8_t *cd_buf,
+                                                                                    size_t cd_len);
+__attribute__((visibility("hidden"))) void pt_patch_code_directory_metadata(uint8_t *cd_buf, size_t cd_len,
+                                                                            uint32_t clear_flags_mask,
+                                                                            const char *replacement_team_id);
 
 #ifdef __cplusplus
 }

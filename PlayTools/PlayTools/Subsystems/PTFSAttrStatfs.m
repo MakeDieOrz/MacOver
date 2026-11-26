@@ -94,6 +94,7 @@ static size_t pt_attr_offset_in_record(const struct attrlist *req,
     }
 
     static const pt_attr_bit_size_t kCmnLayout[] = {
+        { ATTR_CMN_ERROR,              sizeof(uint32_t) },
         { ATTR_CMN_NAME,               sizeof(attrreference_t) },
         { ATTR_CMN_DEVID,              sizeof(dev_t) },
         { ATTR_CMN_FSID,               sizeof(fsid_t) },
@@ -123,7 +124,6 @@ static size_t pt_attr_offset_in_record(const struct attrlist *req,
         { ATTR_CMN_PARENTID,           sizeof(uint64_t) },
         { ATTR_CMN_FULLPATH,           sizeof(attrreference_t) },
         { ATTR_CMN_ADDEDTIME,          sizeof(struct timespec) },
-        { ATTR_CMN_ERROR,              sizeof(uint32_t) },
         { ATTR_CMN_DATA_PROTECT_FLAGS, sizeof(uint32_t) },
     };
     static const pt_attr_bit_size_t kVolLayout[] = {
@@ -486,6 +486,36 @@ static void pt_sanitize_attr_path_ref(const struct attrlist *alist,
         return;
     }
 
+    if (group == PT_ATTR_GROUP_FORK && bit == ATTR_CMNEXT_RELPATH) {
+        char with_slash[PATH_MAX];
+        const char *probe = orig_copy;
+        if (orig_copy[0] != '/') {
+            snprintf(with_slash, sizeof(with_slash), "/%s", orig_copy);
+            probe = with_slash;
+        }
+        if (pt_is_sensitive_host_fd_path(probe, caller)) {
+            if (avail_str > 0) {
+                size_t old_len = (size_t)ref->attr_length;
+                if (old_len > avail_str) old_len = avail_str;
+                if (old_len > 0) {
+                    memset((void *)str_start, 0, old_len);
+                } else {
+                    *(char *)str_start = '\0';
+                }
+                ref->attr_length = 1;
+            }
+            return;
+        }
+        char vout[PATH_MAX];
+        const char *virt = pt_virtualize_path_for_app(probe, vout, sizeof(vout), YES);
+        if (virt != probe) {
+            const char *rel_virt = (virt[0] == '/') ? (virt + 1) : virt;
+            pt_write_attr_ref_replacement(rec_ptr, max_rec_cap, ref, str_start, avail_str,
+                                          can_grow_record, rel_virt, NO);
+        }
+        return;
+    }
+
     if (pt_is_sensitive_host_fd_path(orig_copy, caller)) {
         if (avail_str > 0) {
             size_t old_len = (size_t)ref->attr_length;
@@ -512,13 +542,25 @@ static void pt_sanitize_attr_path_ref(const struct attrlist *alist,
 static void pt_sanitize_attr_scalars_in_record(const struct attrlist *alist,
                                                char *rec_ptr,
                                                size_t max_rec_cap,
-                                               uint64_t options) {
+                                               uint64_t options,
+                                               int fd_for_dp,
+                                               const char *path_for_dp,
+                                               BOOL is_synth_sysver) {
     if (alist == NULL || rec_ptr == NULL || max_rec_cap < sizeof(uint32_t) || !pt_is_bypass_enabled()) {
         return;
     }
     uint32_t rec_len = *(uint32_t *)rec_ptr;
     if (rec_len < sizeof(uint32_t) || (size_t)rec_len > max_rec_cap) {
         return;
+    }
+    if ((alist->commonattr & ATTR_CMN_OWNERID) != 0 && is_synth_sysver) {
+        BOOL present = NO;
+        size_t off = pt_attr_offset_in_record(alist, rec_ptr, rec_len, options,
+                                              PT_ATTR_GROUP_COMMON, ATTR_CMN_OWNERID, &present);
+        if (present && off + sizeof(uid_t) <= rec_len) {
+            uid_t u = 0;
+            memcpy(rec_ptr + off, &u, sizeof(u));
+        }
     }
     if ((alist->commonattr & ATTR_CMN_GRPID) != 0) {
         BOOL present = NO;
@@ -527,10 +569,29 @@ static void pt_sanitize_attr_scalars_in_record(const struct attrlist *alist,
         if (present && off + sizeof(gid_t) <= rec_len) {
             gid_t g = 0;
             memcpy(&g, rec_ptr + off, sizeof(g));
-            if (g == 20) {
+            if (is_synth_sysver) {
+                g = 0;
+                memcpy(rec_ptr + off, &g, sizeof(g));
+            } else if (g == 20) {
                 g = 501;
                 memcpy(rec_ptr + off, &g, sizeof(g));
             }
+        }
+    }
+    if ((alist->commonattr & ATTR_CMN_FLAGS) != 0) {
+        BOOL present = NO;
+        size_t off = pt_attr_offset_in_record(alist, rec_ptr, rec_len, options,
+                                              PT_ATTR_GROUP_COMMON, ATTR_CMN_FLAGS, &present);
+        if (present && off + sizeof(uint32_t) <= rec_len) {
+            uint32_t fl = 0;
+            memcpy(&fl, rec_ptr + off, sizeof(fl));
+#ifdef SF_RESTRICTED
+            fl &= ~(uint32_t)SF_RESTRICTED;
+#endif
+#ifdef SF_FIRMLINK
+            fl &= ~(uint32_t)SF_FIRMLINK;
+#endif
+            memcpy(rec_ptr + off, &fl, sizeof(fl));
         }
     }
     if ((alist->commonattr & ATTR_CMN_FNDRINFO) != 0) {
@@ -549,7 +610,18 @@ static void pt_sanitize_attr_scalars_in_record(const struct attrlist *alist,
             uint32_t dp = 0;
             memcpy(&dp, rec_ptr + off, sizeof(dp));
             if (dp == 0U) {
-                dp = 3U;
+                int recorded = 0;
+                if (fd_for_dp >= 0) {
+                    recorded = pt_lookup_fd_dpclass(fd_for_dp);
+                } else if (path_for_dp != NULL && path_for_dp[0] != '\0') {
+                    struct stat st;
+                    int saved_errno = errno;
+                    if (((options & FSOPT_NOFOLLOW) ? lstat(path_for_dp, &st) : stat(path_for_dp, &st)) == 0) {
+                        recorded = pt_lookup_stat_dpclass(st.st_dev, st.st_ino);
+                    }
+                    errno = saved_errno;
+                }
+                dp = (recorded > 0) ? (uint32_t)recorded : 3U;
                 memcpy(rec_ptr + off, &dp, sizeof(dp));
             }
         }
@@ -575,34 +647,48 @@ static void pt_sanitize_attr_fullpath_in_record(const struct attrlist *alist,
                                                 size_t max_rec_cap,
                                                 uint64_t options,
                                                 BOOL can_grow_record,
+                                                int fd_for_dp,
+                                                const char *path_for_dp,
+                                                BOOL is_synth_sysver,
                                                 const void *caller) {
     if (alist == NULL || rec_ptr == NULL || max_rec_cap < sizeof(uint32_t)) {
         return;
     }
-    pt_sanitize_attr_scalars_in_record(alist, rec_ptr, max_rec_cap, options);
+    pt_sanitize_attr_scalars_in_record(alist, rec_ptr, max_rec_cap, options, fd_for_dp, path_for_dp, is_synth_sysver);
     if ((alist->commonattr & ATTR_CMN_NAME) != 0) {
         pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
-                                  PT_ATTR_GROUP_COMMON, ATTR_CMN_NAME, NO, NULL, caller);
+                                  PT_ATTR_GROUP_COMMON, ATTR_CMN_NAME, NO,
+                                  is_synth_sysver ? "SystemVersion.plist" : NULL, caller);
     }
     if ((alist->commonattr & ATTR_CMN_FULLPATH) != 0) {
         pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
-                                  PT_ATTR_GROUP_COMMON, ATTR_CMN_FULLPATH, NO, NULL, caller);
+                                  PT_ATTR_GROUP_COMMON, ATTR_CMN_FULLPATH, NO,
+                                  is_synth_sysver ? "/System/Library/CoreServices/SystemVersion.plist" : NULL, caller);
     }
     if ((alist->volattr & ATTR_VOL_MOUNTPOINT) != 0) {
         pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
-                                  PT_ATTR_GROUP_VOL, ATTR_VOL_MOUNTPOINT, YES, NULL, caller);
+                                  PT_ATTR_GROUP_VOL, ATTR_VOL_MOUNTPOINT, YES,
+                                  is_synth_sysver ? "/" : NULL, caller);
     }
     if ((alist->volattr & ATTR_VOL_NAME) != 0) {
         pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
-                                  PT_ATTR_GROUP_VOL, ATTR_VOL_NAME, NO, NULL, caller);
+                                  PT_ATTR_GROUP_VOL, ATTR_VOL_NAME, NO,
+                                  is_synth_sysver ? "System" : NULL, caller);
     }
     if ((alist->volattr & ATTR_VOL_MOUNTEDDEVICE) != 0) {
         pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
-                                  PT_ATTR_GROUP_VOL, ATTR_VOL_MOUNTEDDEVICE, NO, NULL, caller);
+                                  PT_ATTR_GROUP_VOL, ATTR_VOL_MOUNTEDDEVICE, NO,
+                                  is_synth_sysver ? "/dev/disk0s1s1" : NULL, caller);
+    }
+    if ((alist->forkattr & ATTR_CMNEXT_RELPATH) != 0) {
+        pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
+                                  PT_ATTR_GROUP_FORK, ATTR_CMNEXT_RELPATH, NO,
+                                  is_synth_sysver ? "System/Library/CoreServices/SystemVersion.plist" : NULL, caller);
     }
     if ((alist->forkattr & ATTR_CMNEXT_NOFIRMLINKPATH) != 0) {
         pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
-                                  PT_ATTR_GROUP_FORK, ATTR_CMNEXT_NOFIRMLINKPATH, NO, NULL, caller);
+                                  PT_ATTR_GROUP_FORK, ATTR_CMNEXT_NOFIRMLINKPATH, NO,
+                                  is_synth_sysver ? "/System/Library/CoreServices/SystemVersion.plist" : NULL, caller);
     }
 }
 
@@ -616,7 +702,7 @@ static void pt_sanitize_attr_virtual_ancestor_record(const struct attrlist *alis
     if (alist == NULL || rec_ptr == NULL || max_rec_cap < sizeof(uint32_t) || ancestor_path == NULL) {
         return;
     }
-    pt_sanitize_attr_scalars_in_record(alist, rec_ptr, max_rec_cap, options);
+    pt_sanitize_attr_scalars_in_record(alist, rec_ptr, max_rec_cap, options, -1, NULL, NO);
     const char *base = strrchr(ancestor_path, '/');
     const char *name_override = (base != NULL && base[1] != '\0') ? (base + 1) : "/";
     if ((alist->commonattr & ATTR_CMN_NAME) != 0) {
@@ -639,6 +725,11 @@ static void pt_sanitize_attr_virtual_ancestor_record(const struct attrlist *alis
         pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
                                   PT_ATTR_GROUP_VOL, ATTR_VOL_MOUNTEDDEVICE, NO, "/dev/disk0s1s2", caller);
     }
+    if ((alist->forkattr & ATTR_CMNEXT_RELPATH) != 0) {
+        const char *rel_anc = (ancestor_path[0] == '/') ? (ancestor_path + 1) : ancestor_path;
+        pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
+                                  PT_ATTR_GROUP_FORK, ATTR_CMNEXT_RELPATH, NO, rel_anc, caller);
+    }
     if ((alist->forkattr & ATTR_CMNEXT_NOFIRMLINKPATH) != 0) {
         pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
                                   PT_ATTR_GROUP_FORK, ATTR_CMNEXT_NOFIRMLINKPATH, NO, ancestor_path, caller);
@@ -654,7 +745,7 @@ int pt_fs_getattrlist_with_caller(const char *path,
                                   const void *caller) {
     char vbuf[PATH_MAX];
     const char *resolved = NULL;
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path(path, caller, vbuf, sizeof(vbuf), &resolved);
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_ro(path, caller, vbuf, sizeof(vbuf), &resolved);
     if (disp == PT_FS_PATH_HIDDEN) {
         errno = ENOENT;
         return -1;
@@ -678,11 +769,15 @@ int pt_fs_getattrlist_with_caller(const char *path,
                                                      ancestor_override,
                                                      caller);
         } else {
+            BOOL is_sysver = pt_is_synth_system_version_path(query_path);
             pt_sanitize_attr_fullpath_in_record((const struct attrlist *)attrList,
                                                 (char *)attrBuf,
                                                 attrBufSize,
                                                 (uint64_t)options,
                                                 (options & FSOPT_REPORT_FULLSIZE) == 0,
+                                                -1,
+                                                query_path,
+                                                is_sysver,
                                                 caller);
         }
     }
@@ -707,11 +802,21 @@ int pt_fs_fgetattrlist_with_caller(int fd,
     }
     int ret = fgetattrlist(fd, attrList, attrBuf, attrBufSize, options);
     if (ret == 0 && attrList != NULL && attrBuf != NULL && attrBufSize >= sizeof(uint32_t) && !is_sys) {
+        BOOL is_sysver = NO;
+        struct stat st;
+        int saved_errno = errno;
+        if (fstat(fd, &st) == 0 && pt_is_synth_system_version_stat(st.st_dev, st.st_ino)) {
+            is_sysver = YES;
+        }
+        errno = saved_errno;
         pt_sanitize_attr_fullpath_in_record((const struct attrlist *)attrList,
                                             (char *)attrBuf,
                                             attrBufSize,
                                             (uint64_t)options,
                                             (options & FSOPT_REPORT_FULLSIZE) == 0,
+                                            fd,
+                                            NULL,
+                                            is_sysver,
                                             caller);
     }
     return ret;
@@ -735,7 +840,7 @@ int pt_fs_getattrlistat_with_caller(int fd,
     }
     char vbuf[PATH_MAX];
     const char *resolved = NULL;
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path_at(fd, path, caller, vbuf, sizeof(vbuf), &resolved);
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_at_ro(fd, path, caller, vbuf, sizeof(vbuf), &resolved);
     if (disp == PT_FS_PATH_HIDDEN) {
         errno = ENOENT;
         return -1;
@@ -761,11 +866,15 @@ int pt_fs_getattrlistat_with_caller(int fd,
                                                      ancestor_override,
                                                      caller);
         } else {
+            BOOL is_sysver = pt_is_synth_system_version_path(resolved);
             pt_sanitize_attr_fullpath_in_record((const struct attrlist *)attrList,
                                                 (char *)attrBuf,
                                                 attrBufSize,
                                                 (uint64_t)options,
                                                 (options & FSOPT_REPORT_FULLSIZE) == 0,
+                                                -1,
+                                                (resolved != NULL && resolved[0] == '/') ? resolved : NULL,
+                                                is_sysver,
                                                 caller);
         }
     }
@@ -832,7 +941,7 @@ int pt_fs_getattrlistbulk_with_caller(int dirfd,
                 }
             }
             if (!hide) {
-                pt_sanitize_attr_fullpath_in_record(alist, read_ptr, rec_len, options, NO, caller);
+                pt_sanitize_attr_fullpath_in_record(alist, read_ptr, rec_len, options, NO, -1, NULL, NO, caller);
                 if (write_ptr != read_ptr) {
                     memmove(write_ptr, read_ptr, rec_len);
                 }
@@ -865,6 +974,47 @@ static int pt_fsetattrlist(int fd, void *attrList, void *attrBuf, size_t attrBuf
         return -1;
     }
     return fsetattrlist(fd, attrList, attrBuf, attrBufSize, options);
+}
+
+static int pt_setattrlistat(int dirfd,
+                            const char *path,
+                            void *attrList,
+                            void *attrBuf,
+                            size_t attrBufSize,
+                            uint32_t options) {
+    const void *caller = __builtin_return_address(0);
+    if (pt_fd_is_sensitive(dirfd, caller)) {
+        errno = EACCES;
+        return -1;
+    }
+    char vbuf[PATH_MAX];
+    if (!pt_prepare_fs_path_for_modify(dirfd, path, caller, vbuf, sizeof(vbuf), &path, EACCES)) {
+        return -1;
+    }
+    return setattrlistat(dirfd, path, attrList, attrBuf, attrBufSize, options);
+}
+
+extern int pt_orig_getdirentriesattr(int, void *, void *, size_t, void *, void *, void *, unsigned long)
+    __asm__("_getdirentriesattr") __attribute__((weak_import));
+
+static int pt_getdirentriesattr(int fd,
+                                 void *attrlist,
+                                 void *attrbuf,
+                                 size_t attrbufsize,
+                                 void *count,
+                                 void *basep,
+                                 void *newstate,
+                                 unsigned long options) {
+    const void *caller = __builtin_return_address(0);
+    if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller)) {
+        errno = ENOTSUP;
+        return -1;
+    }
+    if (&pt_orig_getdirentriesattr != NULL) {
+        return pt_orig_getdirentriesattr(fd, attrlist, attrbuf, attrbufsize, count, basep, newstate, options);
+    }
+    errno = ENOSYS;
+    return -1;
 }
 
 __attribute__((visibility("hidden")))
@@ -983,18 +1133,31 @@ __attribute__((visibility("hidden")))
 int pt_fs_statfs_with_caller(const char *path, struct statfs *buf, const void *caller) {
     int is_sys_caller = -1;
     char vbuf[PATH_MAX];
-    pt_fs_path_disposition_t disp = pt_prepare_fs_path_cached_caller(path, caller, vbuf, sizeof(vbuf), &path, &is_sys_caller);
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_cached_caller_ro(path, caller, vbuf, sizeof(vbuf), &path, &is_sys_caller);
     if (disp == PT_FS_PATH_HIDDEN) {
         errno = ENOENT;
         return -1;
     }
+    const char *query_path = path;
+    BOOL is_synth_sysver = NO;
     if (disp == PT_FS_PATH_VIRTUAL_ANCESTOR) {
         pt_ensure_data_container_map();
-        path = (s_real_data_container_len > 0) ? s_real_data_container_dir : "/private/var";
+        query_path = (s_real_data_container_len > 0) ? s_real_data_container_dir : "/private/var";
+    } else if (pt_is_synth_system_version_path(path)) {
+        if (is_sys_caller < 0) {
+            is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
+        }
+        if (is_sys_caller == 0 && pt_is_bypass_enabled()) {
+            query_path = "/";
+            is_synth_sysver = YES;
+        }
     }
-    int ret = statfs(path, buf);
+    int ret = statfs(query_path, buf);
     if (ret == 0 && buf != NULL) {
         pt_sanitize_statfs_entry(buf, caller, &is_sys_caller);
+        if (is_synth_sysver && is_sys_caller == 0) {
+            buf->f_flags |= (uint32_t)(MNT_RDONLY | MNT_ROOTFS);
+        }
     }
     return ret;
 }
@@ -1005,5 +1168,7 @@ PT_INTERPOSE(pt_getattrlistat, getattrlistat)
 PT_INTERPOSE(pt_getattrlistbulk, getattrlistbulk)
 PT_INTERPOSE(pt_setattrlist, setattrlist)
 PT_INTERPOSE(pt_fsetattrlist, fsetattrlist)
+PT_INTERPOSE(pt_setattrlistat, setattrlistat)
+PT_INTERPOSE_WEAK_NAMED(pt_getdirentriesattr, pt_orig_getdirentriesattr, "getdirentriesattr")
 PT_INTERPOSE(pt_pathconf, pathconf)
 PT_INTERPOSE(pt_fpathconf, fpathconf)

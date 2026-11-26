@@ -227,6 +227,83 @@ static const char *pt_get_effective_team_id_cstr(void) {
     return s_team_id;
 }
 
+static id pt_sanitize_entitlement_value_for_key(NSString *key, id val) {
+    if (key == nil || val == nil) {
+        return val;
+    }
+    const char *team = pt_get_effective_team_id_cstr();
+    char bid[256];
+    pt_get_effective_bundle_id_cstr(bid, sizeof(bid));
+    NSString *teamStr = (team != NULL && strlen(team) == 10U) ? [NSString stringWithUTF8String:team] : nil;
+    NSString *bidStr = (bid[0] != '\0') ? [NSString stringWithUTF8String:bid] : nil;
+    if (teamStr.length != 10) {
+        return val;
+    }
+    if ([key isEqualToString:@"com.apple.developer.team-identifier"]) {
+        if ([val isKindOfClass:[NSString class]]) {
+            return teamStr;
+        }
+        return val;
+    }
+    if ([key isEqualToString:@"application-identifier"] ||
+        [key isEqualToString:@"com.apple.application-identifier"]) {
+        if ([val isKindOfClass:[NSString class]] && bidStr.length > 0) {
+            return [NSString stringWithFormat:@"%@.%@", teamStr, bidStr];
+        }
+        return val;
+    }
+    if ([key isEqualToString:@"keychain-access-groups"] && [val isKindOfClass:[NSArray class]]) {
+        NSMutableArray *mapped = nil;
+        NSArray *arr = (NSArray *)val;
+        NSString *expectedAppGroup = (bidStr.length > 0)
+            ? [NSString stringWithFormat:@"%@.%@", teamStr, bidStr]
+            : nil;
+        for (NSUInteger i = 0; i < arr.count; i++) {
+            id entry = arr[i];
+            if (![entry isKindOfClass:[NSString class]]) {
+                continue;
+            }
+            NSString *s = (NSString *)entry;
+            NSString *replacement = s;
+            if ([s hasPrefix:@"$(AppIdentifierPrefix)"]) {
+                NSString *rest = [s substringFromIndex:22];
+                if ([rest hasPrefix:@"."]) {
+                    replacement = [teamStr stringByAppendingString:rest];
+                } else if (rest.length > 0) {
+                    replacement = [NSString stringWithFormat:@"%@.%@", teamStr, rest];
+                } else if (expectedAppGroup != nil) {
+                    replacement = expectedAppGroup;
+                }
+            } else if ([s hasPrefix:@"FAKETEAMID."]) {
+                NSString *rest = [s substringFromIndex:11];
+                replacement = (rest.length > 0)
+                    ? [NSString stringWithFormat:@"%@.%@", teamStr, rest]
+                    : (expectedAppGroup ?: s);
+            } else if ([s rangeOfString:@"PlayCover" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                       [s rangeOfString:@"MacOver" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                       [s rangeOfString:@"app.makedie" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                replacement = expectedAppGroup ?: s;
+            } else if (expectedAppGroup != nil && bidStr.length > 0) {
+                NSRange dot = [s rangeOfString:@"."];
+                if (dot.location == 10) {
+                    NSString *suffix = [s substringFromIndex:11];
+                    if ([suffix isEqualToString:bidStr] && ![s isEqualToString:expectedAppGroup]) {
+                        replacement = expectedAppGroup;
+                    }
+                }
+            }
+            if (![replacement isEqualToString:s]) {
+                if (mapped == nil) {
+                    mapped = [arr mutableCopy];
+                }
+                mapped[i] = replacement;
+            }
+        }
+        return (mapped != nil) ? [mapped copy] : val;
+    }
+    return val;
+}
+
 static NSDictionary *pt_get_synthesized_app_entitlements_dict(void) {
     static NSDictionary *s_synth_ent = nil;
     static dispatch_once_t s_synth_once;
@@ -235,7 +312,7 @@ static NSDictionary *pt_get_synthesized_app_entitlements_dict(void) {
         NSDictionary *fb = pt_get_fallback_entitlements_dict();
         for (NSString *k in fb) {
             if ([k isKindOfClass:[NSString class]] && !pt_is_hidden_entitlement_key(k)) {
-                m[k] = fb[k];
+                m[k] = pt_sanitize_entitlement_value_for_key(k, fb[k]);
             }
         }
         const char *team = pt_get_effective_team_id_cstr();
@@ -244,17 +321,12 @@ static NSDictionary *pt_get_synthesized_app_entitlements_dict(void) {
         NSString *teamStr = [NSString stringWithUTF8String:team];
         NSString *bidStr = [NSString stringWithUTF8String:bid];
         if (teamStr.length == 10) {
-            if (m[@"com.apple.developer.team-identifier"] == nil) {
-                m[@"com.apple.developer.team-identifier"] = teamStr;
-            }
-            id curAppId = m[@"application-identifier"];
-            if (![curAppId isKindOfClass:[NSString class]] ||
-                [(NSString *)curAppId hasPrefix:@"FAKETEAMID."] ||
-                [(NSString *)curAppId length] == 0) {
+            m[@"com.apple.developer.team-identifier"] = teamStr;
+            if (bidStr.length > 0) {
                 m[@"application-identifier"] = [NSString stringWithFormat:@"%@.%@", teamStr, bidStr];
-            }
-            if (m[@"keychain-access-groups"] == nil) {
-                m[@"keychain-access-groups"] = @[ [NSString stringWithFormat:@"%@.%@", teamStr, bidStr] ];
+                if (m[@"keychain-access-groups"] == nil) {
+                    m[@"keychain-access-groups"] = @[ [NSString stringWithFormat:@"%@.%@", teamStr, bidStr] ];
+                }
             }
         }
         s_synth_ent = [m copy];
@@ -389,33 +461,38 @@ static BOOL pt_der_encode_objc_value(id val, pt_der_buf_t *out) {
         return !out->failed;
     }
     if ([val isKindOfClass:[NSDictionary class]]) {
-        pt_der_encode_dict_pairs((NSDictionary *)val, 0x31U, out);
+        pt_der_encode_dict_pairs((NSDictionary *)val, 0xB0U, out);
         return !out->failed;
     }
     return NO;
+}
+
+static NSData *pt_encode_entitlements_der(NSDictionary *ent) {
+    if (ent == nil) {
+        return nil;
+    }
+    pt_der_buf_t root_body = {0};
+    uint8_t ver_tlv[3] = { 0x02U, 0x01U, 0x01U };
+    pt_der_buf_append(&root_body, ver_tlv, sizeof(ver_tlv));
+    pt_der_encode_dict_pairs(ent, 0xB0U, &root_body);
+    pt_der_buf_t root = {0};
+    if (!root_body.failed && root_body.data != NULL) {
+        pt_der_buf_wrap_tlv(&root, 0x70U, root_body.data, root_body.len);
+    }
+    free(root_body.data);
+    NSData *derData = nil;
+    if (!root.failed && root.data != NULL && root.len > 0) {
+        derData = [NSData dataWithBytes:root.data length:root.len];
+    }
+    free(root.data);
+    return derData;
 }
 
 static NSData *pt_get_synthesized_entitlements_der_data(void) {
     static NSData *s_der_data = nil;
     static dispatch_once_t s_der_once;
     dispatch_once(&s_der_once, ^{
-        NSDictionary *ent = pt_get_synthesized_app_entitlements_dict();
-        if (ent == nil) {
-            return;
-        }
-        pt_der_buf_t root_body = {0};
-        uint8_t ver_tlv[3] = { 0x02U, 0x01U, 0x01U };
-        pt_der_buf_append(&root_body, ver_tlv, sizeof(ver_tlv));
-        pt_der_encode_dict_pairs(ent, 0x31U, &root_body);
-        pt_der_buf_t root = {0};
-        if (!root_body.failed && root_body.data != NULL) {
-            pt_der_buf_wrap_tlv(&root, 0x70U, root_body.data, root_body.len);
-        }
-        free(root_body.data);
-        if (!root.failed && root.data != NULL && root.len > 0) {
-            s_der_data = [NSData dataWithBytes:root.data length:root.len];
-        }
-        free(root.data);
+        s_der_data = pt_encode_entitlements_der(pt_get_synthesized_app_entitlements_dict());
     });
     return s_der_data;
 }
@@ -467,6 +544,13 @@ static CFTypeRef pt_SecTaskCopyValueForEntitlement(SecTaskRef task, CFStringRef 
     }
     CFErrorRef localErr = NULL;
     CFTypeRef val = SecTaskCopyValueForEntitlement(task, entitlement, error != NULL ? &localErr : NULL);
+    if (val != NULL && bypass && !is_sys && key != nil) {
+        id sanVal = pt_sanitize_entitlement_value_for_key(key, (__bridge id)val);
+        if (sanVal != (__bridge id)val && ![sanVal isEqual:(__bridge id)val]) {
+            CFRelease(val);
+            val = CFBridgingRetain(sanVal);
+        }
+    }
     if (val == NULL && key != nil && !is_sys && (!bypass || !pt_is_hidden_entitlement_key(key))) {
         id fallback = bypass ? pt_get_synthesized_app_entitlements_dict()[key]
                              : pt_get_fallback_entitlements_dict()[key];
@@ -499,11 +583,23 @@ static CFDictionaryRef pt_SecTaskCopyValuesForEntitlements(SecTaskRef task, CFAr
         NSMutableDictionary *clean = nil;
         if (bypass && dict != nil) {
             for (NSString *key in dict) {
-                if ([key isKindOfClass:[NSString class]] && pt_is_hidden_entitlement_key(key)) {
+                if (![key isKindOfClass:[NSString class]]) {
+                    continue;
+                }
+                if (pt_is_hidden_entitlement_key(key)) {
                     if (clean == nil) {
                         clean = [dict mutableCopy];
                     }
                     [clean removeObjectForKey:key];
+                } else {
+                    id cur = dict[key];
+                    id san = pt_sanitize_entitlement_value_for_key(key, cur);
+                    if (san != cur && ![san isEqual:cur]) {
+                        if (clean == nil) {
+                            clean = [dict mutableCopy];
+                        }
+                        clean[key] = san;
+                    }
                 }
             }
         }
@@ -708,19 +804,72 @@ static OSStatus pt_SecCodeCopySigningInformation(SecStaticCodeRef code, SecCSFla
             if ([entDict isKindOfClass:[NSDictionary class]]) {
                 NSMutableDictionary *cleanEnt = nil;
                 for (NSString *ek in (NSDictionary *)entDict) {
-                    if ([ek isKindOfClass:[NSString class]] && pt_is_hidden_entitlement_key(ek)) {
+                    if (![ek isKindOfClass:[NSString class]]) {
+                        continue;
+                    }
+                    if (pt_is_hidden_entitlement_key(ek)) {
                         if (cleanEnt == nil) {
                             cleanEnt = [(NSDictionary *)entDict mutableCopy];
                         }
                         [cleanEnt removeObjectForKey:ek];
+                    } else {
+                        id rawVal = ((NSDictionary *)entDict)[ek];
+                        id sanVal = pt_sanitize_entitlement_value_for_key(ek, rawVal);
+                        if (sanVal != rawVal && ![sanVal isEqual:rawVal]) {
+                            if (cleanEnt == nil) {
+                                cleanEnt = [(NSDictionary *)entDict mutableCopy];
+                            }
+                            cleanEnt[ek] = sanVal;
+                        }
                     }
                 }
                 if (cleanEnt != nil) {
                     clean[@"entitlements-dict"] = [cleanEnt copy];
                 }
             }
-            [clean removeObjectForKey:@"entitlements"];
-            [clean removeObjectForKey:@"entitlements-DER"];
+            if (in_app_bundle) {
+                NSDictionary *entForBlob = [clean[@"entitlements-dict"] isKindOfClass:[NSDictionary class]]
+                    ? clean[@"entitlements-dict"]
+                    : (((flags & 2U) != 0U || clean[@"entitlements"] != nil || clean[@"entitlements-DER"] != nil)
+                           ? pt_get_synthesized_app_entitlements_dict()
+                           : nil);
+                if (entForBlob != nil) {
+                    clean[@"entitlements-dict"] = entForBlob;
+                    NSData *xmlPayload = [NSPropertyListSerialization dataWithPropertyList:entForBlob
+                                                                                    format:NSPropertyListXMLFormat_v1_0
+                                                                                   options:0
+                                                                                     error:nil];
+                    if (xmlPayload.length > 0 && xmlPayload.length <= (size_t)UINT32_MAX - 8U) {
+                        NSMutableData *xmlBlob = [NSMutableData dataWithLength:8U + xmlPayload.length];
+                        uint32_t hdr[2] = { htonl(PT_CSMAGIC_EMBEDDED_ENTITLEMENTS), htonl((uint32_t)(8U + xmlPayload.length)) };
+                        memcpy(xmlBlob.mutableBytes, hdr, sizeof(hdr));
+                        memcpy((uint8_t *)xmlBlob.mutableBytes + 8U, xmlPayload.bytes, xmlPayload.length);
+                        clean[@"entitlements"] = [xmlBlob copy];
+                    } else {
+                        [clean removeObjectForKey:@"entitlements"];
+                    }
+                    if (!pt_is_compat13_7_active()) {
+                        NSData *derPayload = pt_encode_entitlements_der(entForBlob);
+                        if (derPayload.length > 0 && derPayload.length <= (size_t)UINT32_MAX - 8U) {
+                            NSMutableData *derBlob = [NSMutableData dataWithLength:8U + derPayload.length];
+                            uint32_t hdr[2] = { htonl(PT_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS), htonl((uint32_t)(8U + derPayload.length)) };
+                            memcpy(derBlob.mutableBytes, hdr, sizeof(hdr));
+                            memcpy((uint8_t *)derBlob.mutableBytes + 8U, derPayload.bytes, derPayload.length);
+                            clean[@"entitlements-DER"] = [derBlob copy];
+                        } else {
+                            [clean removeObjectForKey:@"entitlements-DER"];
+                        }
+                    } else {
+                        [clean removeObjectForKey:@"entitlements-DER"];
+                    }
+                } else {
+                    [clean removeObjectForKey:@"entitlements"];
+                    [clean removeObjectForKey:@"entitlements-DER"];
+                }
+            } else {
+                [clean removeObjectForKey:@"entitlements"];
+                [clean removeObjectForKey:@"entitlements-DER"];
+            }
             [clean removeObjectForKey:@"changed-files"];
             id flagsObj = clean[@"flags"];
             if ([flagsObj isKindOfClass:[NSNumber class]]) {
@@ -766,10 +915,17 @@ static OSStatus pt_SecCodeCopySigningInformation(SecStaticCodeRef code, SecCSFla
                     clean[@"identifier"] = mainBid;
                 }
             }
-            if (clean[@"teamid"] == nil) {
+            {
                 const char *team = pt_get_effective_team_id_cstr();
-                if (team != NULL && team[0] != '\0') {
-                    clean[@"teamid"] = [NSString stringWithUTF8String:team];
+                if (team != NULL && strlen(team) == 10U) {
+                    NSString *teamStr = [NSString stringWithUTF8String:team];
+                    id curTeam = clean[@"teamid"];
+                    if (in_app_bundle ||
+                        curTeam == nil ||
+                        ![curTeam isKindOfClass:[NSString class]] ||
+                        [(NSString *)curTeam length] == 0) {
+                        clean[@"teamid"] = teamStr;
+                    }
                 }
             }
             CFRelease(*information);
@@ -1037,9 +1193,36 @@ static int pt_handle_spoofed_csops_blob(pid_t pid,
             : csops(pid, PT_CS_OPS_BLOB, useraddr, usersize);
     }
 
+    uint32_t max_cd_special_slots = 0;
+    for (uint32_t i = 0; i < slot_count; i++) {
+        uint32_t stype = 0, soff = 0;
+        memcpy(&stype, raw_buf + 12U + i * 8U, sizeof(stype));
+        memcpy(&soff, raw_buf + 16U + i * 8U, sizeof(soff));
+        stype = ntohl(stype);
+        soff = ntohl(soff);
+        if (soff < 12U + slot_count * 8U || soff + 8U > raw_len) {
+            continue;
+        }
+        uint32_t clen = 0;
+        memcpy(&clen, raw_buf + soff + 4U, sizeof(clen));
+        clen = ntohl(clen);
+        if (clen < 8U || clen > raw_len - soff) {
+            continue;
+        }
+        if (stype == PT_CSSLOT_CODEDIRECTORY ||
+            (stype >= PT_CSSLOT_ALTERNATE_CODEDIRECTORIES &&
+             stype < PT_CSSLOT_ALTERNATE_CODEDIRECTORIES + PT_CSSLOT_ALTERNATE_CODEDIRECTORY_MAX)) {
+            uint32_t sc = pt_code_directory_special_slot_count(raw_buf + soff, (size_t)clen);
+            if (sc > max_cd_special_slots) {
+                max_cd_special_slots = sc;
+            }
+        }
+    }
+
     BOOL compat13 = pt_is_compat13_7_active();
+    BOOL allow_der_slot = (!compat13 && max_cd_special_slots >= PT_CSSLOT_DER_ENTITLEMENTS);
     NSData *xmlData = pt_get_synthesized_entitlements_xml_data();
-    NSData *derData = compat13 ? nil : pt_get_synthesized_entitlements_der_data();
+    NSData *derData = allow_der_slot ? pt_get_synthesized_entitlements_der_data() : nil;
     typedef struct {
         uint32_t type;
         uint32_t magic_override;
@@ -1089,7 +1272,7 @@ static int pt_handle_spoofed_csops_blob(pid_t pid,
             out_count++;
         } else if (stype == PT_CSSLOT_DER_ENTITLEMENTS) {
             saw_der_slot = YES;
-            if (compat13 || derData == nil || derData.length == 0) {
+            if (!allow_der_slot || derData == nil || derData.length == 0) {
                 continue;
             }
             slots[out_count] = (pt_sb_slot_t){
@@ -1124,7 +1307,7 @@ static int pt_handle_spoofed_csops_blob(pid_t pid,
         payload_total += 8U + xmlData.length;
         out_count++;
     }
-    if (!saw_der_slot && !compat13 && derData != nil && derData.length > 0) {
+    if (!saw_der_slot && allow_der_slot && derData != nil && derData.length > 0) {
         slots[out_count] = (pt_sb_slot_t){
             .type = PT_CSSLOT_DER_ENTITLEMENTS,
             .magic_override = PT_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS,
@@ -1141,7 +1324,7 @@ static int pt_handle_spoofed_csops_blob(pid_t pid,
     uint8_t xml_sha1[CC_SHA1_DIGEST_LENGTH] = {0};
     uint8_t der_sha1[CC_SHA1_DIGEST_LENGTH] = {0};
     BOOL has_xml = (xmlData != nil && xmlData.length > 0);
-    BOOL has_der = (!compat13 && derData != nil && derData.length > 0);
+    BOOL has_der = (allow_der_slot && derData != nil && derData.length > 0);
     if (has_xml) {
         pt_sha256_cs_blob(PT_CSMAGIC_EMBEDDED_ENTITLEMENTS, (const uint8_t *)xmlData.bytes, xmlData.length, xml_hash);
         pt_sha1_cs_blob(PT_CSMAGIC_EMBEDDED_ENTITLEMENTS, (const uint8_t *)xmlData.bytes, xmlData.length, xml_sha1);
@@ -1150,6 +1333,9 @@ static int pt_handle_spoofed_csops_blob(pid_t pid,
         pt_sha256_cs_blob(PT_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS, (const uint8_t *)derData.bytes, derData.length, der_hash);
         pt_sha1_cs_blob(PT_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS, (const uint8_t *)derData.bytes, derData.length, der_sha1);
     }
+    uint8_t **heap_cd_bufs = (uint8_t **)calloc(out_count > 0 ? out_count : 1U, sizeof(uint8_t *));
+    size_t heap_cd_count = 0;
+    const char *effective_team_id = pt_get_effective_team_id_cstr();
     const uint8_t *best_cd_bytes = NULL;
     size_t best_cd_len = 0;
     BOOL best_cd_is_sha256 = NO;
@@ -1159,6 +1345,35 @@ static int pt_handle_spoofed_csops_blob(pid_t pid,
             (stype == PT_CSSLOT_CODEDIRECTORY ||
              (stype >= PT_CSSLOT_ALTERNATE_CODEDIRECTORIES &&
               stype < PT_CSSLOT_ALTERNATE_CODEDIRECTORIES + PT_CSSLOT_ALTERNATE_CODEDIRECTORY_MAX))) {
+            if (heap_cd_bufs != NULL &&
+                slots[i].len >= 52U &&
+                effective_team_id != NULL &&
+                strlen(effective_team_id) == 10U) {
+                uint32_t cd_ver = 0, team_off = 0;
+                memcpy(&cd_ver, slots[i].mutable_bytes + 8U, sizeof(cd_ver));
+                memcpy(&team_off, slots[i].mutable_bytes + 48U, sizeof(team_off));
+                cd_ver = ntohl(cd_ver);
+                team_off = ntohl(team_off);
+                if (cd_ver >= 0x20200U && team_off == 0U && slots[i].len <= (size_t)UINT32_MAX - 11U) {
+                    size_t new_len = slots[i].len + 11U;
+                    uint8_t *grown = (uint8_t *)malloc(new_len);
+                    if (grown != NULL) {
+                        memcpy(grown, slots[i].mutable_bytes, slots[i].len);
+                        memcpy(grown + slots[i].len, effective_team_id, 11U);
+                        uint32_t be_new_len = htonl((uint32_t)new_len);
+                        uint32_t be_team_off = htonl((uint32_t)slots[i].len);
+                        memcpy(grown + 4U, &be_new_len, sizeof(be_new_len));
+                        memcpy(grown + 48U, &be_team_off, sizeof(be_team_off));
+                        payload_total += 11U;
+                        slots[i].mutable_bytes = grown;
+                        slots[i].bytes = grown;
+                        slots[i].len = new_len;
+                        heap_cd_bufs[heap_cd_count++] = grown;
+                    }
+                }
+            }
+            pt_patch_code_directory_metadata(
+                slots[i].mutable_bytes, slots[i].len, PT_CS_DESKTOP_CLEAR_MASK, effective_team_id);
             pt_patch_code_directory_entitlement_hashes(
                 slots[i].mutable_bytes, slots[i].len, has_xml, xml_hash, xml_sha1, has_der, der_hash, der_sha1);
             if (slots[i].len >= 40U) {
@@ -1179,6 +1394,10 @@ static int pt_handle_spoofed_csops_blob(pid_t pid,
 
     size_t header_len = 12U + (size_t)out_count * 8U;
     if (payload_total > (size_t)UINT32_MAX - header_len) {
+        for (size_t hi = 0; hi < heap_cd_count; hi++) {
+            free(heap_cd_bufs[hi]);
+        }
+        free(heap_cd_bufs);
         free(slots);
         free(raw_buf);
         errno = EOVERFLOW;
@@ -1186,6 +1405,10 @@ static int pt_handle_spoofed_csops_blob(pid_t pid,
     }
     size_t out_total = header_len + payload_total;
     if (usersize < 8U) {
+        for (size_t hi = 0; hi < heap_cd_count; hi++) {
+            free(heap_cd_bufs[hi]);
+        }
+        free(heap_cd_bufs);
         free(slots);
         free(raw_buf);
         errno = ERANGE;
@@ -1194,6 +1417,10 @@ static int pt_handle_spoofed_csops_blob(pid_t pid,
     uint32_t out_hdr[2] = { htonl(PT_CSMAGIC_EMBEDDED_SIGNATURE), htonl((uint32_t)out_total) };
     memcpy(useraddr, out_hdr, sizeof(out_hdr));
     if (usersize < out_total) {
+        for (size_t hi = 0; hi < heap_cd_count; hi++) {
+            free(heap_cd_bufs[hi]);
+        }
+        free(heap_cd_bufs);
         free(slots);
         free(raw_buf);
         errno = ERANGE;
@@ -1217,6 +1444,10 @@ static int pt_handle_spoofed_csops_blob(pid_t pid,
             cur_off += slots[i].len;
         }
     }
+    for (size_t hi = 0; hi < heap_cd_count; hi++) {
+        free(heap_cd_bufs[hi]);
+    }
+    free(heap_cd_bufs);
     free(slots);
     free(raw_buf);
     errno = saved_errno;
@@ -1588,6 +1819,16 @@ static OSStatus pt_validate_key_params_access_groups(CFDictionaryRef parametersR
     return errSecSuccess;
 }
 
+static void pt_ensure_playchain_default_access_group(void) {
+    static dispatch_once_t s_agrp_once;
+    dispatch_once(&s_agrp_once, ^{
+        NSArray<NSString *> *allowed = pt_get_allowed_keychain_access_groups();
+        if (allowed.count > 0) {
+            [PlayKeychain setDefaultAccessGroup:allowed.firstObject];
+        }
+    });
+}
+
 // Use the implementations from PlayKeychain
 static OSStatus pt_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
     const void *caller = __builtin_return_address(0);
@@ -1599,14 +1840,16 @@ static OSStatus pt_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result)
         if (query == NULL) {
             return errSecParam;
         }
-        if (!pt_is_effective_system_or_playtools_caller(caller)) {
+        pt_ensure_playchain_default_access_group();
+        BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
+        if (!is_sys) {
             OSStatus agrpStatus = pt_validate_dict_access_group(query, YES);
             if (agrpStatus != errSecSuccess) {
                 return agrpStatus;
             }
         }
         retval = [PlayKeychain copyMatching:(__bridge NSDictionary * _Nonnull)(query) result:result];
-        if (retval == errSecItemNotFound) {
+        if (retval == errSecItemNotFound && is_sys) {
             CFTypeRef secClass = CFDictionaryGetValue(query, kSecClass);
             if ((secClass != NULL && CFEqual(secClass, kSecClassCertificate)) ||
                 CFDictionaryContainsKey(query, kSecMatchPolicy) ||
@@ -1637,13 +1880,29 @@ static OSStatus pt_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
         if (attributes == NULL) {
             return errSecParam;
         }
+        pt_ensure_playchain_default_access_group();
+        NSDictionary *attrsDict = (__bridge NSDictionary *)attributes;
         if (!pt_is_effective_system_or_playtools_caller(caller)) {
+            id rawToken = attrsDict[(__bridge id)kSecAttrTokenID];
+            if ([rawToken isKindOfClass:[NSString class]] &&
+                [(NSString *)rawToken isEqualToString:(__bridge NSString *)kSecAttrTokenIDSecureEnclave] &&
+                attrsDict[(__bridge id)kSecValueData] != nil) {
+                return errSecParam;
+            }
             OSStatus agrpStatus = pt_validate_dict_access_group(attributes, NO);
             if (agrpStatus != errSecSuccess) {
                 return agrpStatus;
             }
+            if (attrsDict[(__bridge id)kSecAttrAccessGroup] == nil) {
+                NSString *defGroup = pt_get_allowed_keychain_access_groups().firstObject;
+                if (defGroup.length > 0) {
+                    NSMutableDictionary *withAgrp = [attrsDict mutableCopy];
+                    withAgrp[(__bridge id)kSecAttrAccessGroup] = defGroup;
+                    attrsDict = [withAgrp copy];
+                }
+            }
         }
-        retval = [PlayKeychain add:(__bridge NSDictionary * _Nonnull)(attributes) result:result];
+        retval = [PlayKeychain add:attrsDict result:result];
     } else {
         retval = SecItemAdd(attributes, result);
     }
@@ -1661,6 +1920,7 @@ static OSStatus pt_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attribut
         if (query == NULL || attributesToUpdate == NULL) {
             return errSecParam;
         }
+        pt_ensure_playchain_default_access_group();
         if (!pt_is_effective_system_or_playtools_caller(caller)) {
             OSStatus agrpStatus = pt_validate_dict_access_group(query, NO);
             if (agrpStatus != errSecSuccess) {
@@ -1689,6 +1949,7 @@ static OSStatus pt_SecItemDelete(CFDictionaryRef query) {
         if (query == NULL) {
             return errSecParam;
         }
+        pt_ensure_playchain_default_access_group();
         if (!pt_is_effective_system_or_playtools_caller(caller)) {
             OSStatus agrpStatus = pt_validate_dict_access_group(query, NO);
             if (agrpStatus != errSecSuccess) {
@@ -1718,6 +1979,7 @@ static SecKeyRef pt_SecKeyCreateRandomKey(CFDictionaryRef parameters, CFErrorRef
             }
             return NULL;
         }
+        pt_ensure_playchain_default_access_group();
         if (!pt_is_effective_system_or_playtools_caller(caller)) {
             OSStatus agrpStatus = pt_validate_key_params_access_groups(parameters);
             if (agrpStatus != errSecSuccess) {
@@ -1778,16 +2040,25 @@ static CFDictionaryRef pt_SecKeyCopyAttributes(SecKeyRef key) {
         return NULL;
     }
     const void *caller = __builtin_return_address(0);
-    if (pt_is_playchain_enabled() &&
-        !pt_is_effective_system_or_playtools_caller(caller) &&
-        [PTPlayChainSecureEnclaveRegistry isSecureEnclaveKey:key]) {
-        NSDictionary *dict = (__bridge NSDictionary *)attrs;
-        if ([dict isKindOfClass:[NSDictionary class]]) {
-            NSMutableDictionary *sanitized = [dict mutableCopy];
-            [sanitized removeObjectForKey:(__bridge id)kSecValueData];
-            sanitized[(__bridge id)kSecAttrTokenID] = (__bridge id)kSecAttrTokenIDSecureEnclave;
-            CFRelease(attrs);
-            return (__bridge_retained CFDictionaryRef)[sanitized copy];
+    if (pt_is_playchain_enabled() && !pt_is_effective_system_or_playtools_caller(caller)) {
+        BOOL isSE = [PTPlayChainSecureEnclaveRegistry isSecureEnclaveKey:key];
+        NSDictionary *persisted = [PTPlayChainSecureEnclaveRegistry persistedAttributesForKey:key];
+        if (isSE || persisted.count > 0) {
+            NSDictionary *dict = (__bridge NSDictionary *)attrs;
+            if ([dict isKindOfClass:[NSDictionary class]]) {
+                NSMutableDictionary *sanitized = [dict mutableCopy];
+                if (persisted != nil) {
+                    for (id pKey in persisted) {
+                        sanitized[pKey] = persisted[pKey];
+                    }
+                }
+                if (isSE) {
+                    [sanitized removeObjectForKey:(__bridge id)kSecValueData];
+                    sanitized[(__bridge id)kSecAttrTokenID] = (__bridge id)kSecAttrTokenIDSecureEnclave;
+                }
+                CFRelease(attrs);
+                return (__bridge_retained CFDictionaryRef)[sanitized copy];
+            }
         }
     }
     return attrs;
@@ -1803,6 +2074,7 @@ static OSStatus pt_SecKeyGeneratePair(CFDictionaryRef parameters, SecKeyRef *pub
         if (parameters == NULL) {
             return errSecParam;
         }
+        pt_ensure_playchain_default_access_group();
         if (!pt_is_effective_system_or_playtools_caller(caller)) {
             OSStatus agrpStatus = pt_validate_key_params_access_groups(parameters);
             if (agrpStatus != errSecSuccess) {
@@ -1914,7 +2186,9 @@ static int pt_sandbox_check_impl(BOOL use_audit_token,
         int ret = use_audit_token ? sandbox_check_by_audit_token(au, operation, type)
                                   : sandbox_check(pid, operation, type);
         if (!is_sys && bypass && ret == 0 &&
-            (operation == NULL || strncmp(operation, "process-fork", 12) == 0)) {
+            (operation == NULL ||
+             strncmp(operation, "process-fork", 12) == 0 ||
+             strncmp(operation, "process-exec", 12) == 0)) {
             return 1;
         }
         return ret;
@@ -1988,18 +2262,14 @@ static int pt_sandbox_check_by_audit_token(audit_token_t au, const char *operati
 // normal signed iOS app execution bits (ALLOW_AT_PATH=0x1, ALLOW_FALLBACK_PATHS=0x8).
 #define PT_AMFI_DYLD_RELAXED_MASK 0x00000000000000F6ULL
 
+extern int pt_orig_amfi_check_dyld_policy_self(uint64_t, uint64_t *) __asm__("_amfi_check_dyld_policy_self") __attribute__((weak_import));
+
 static int pt_amfi_check_dyld_policy_self(uint64_t in_flags, uint64_t *out_flags) {
-    typedef int (*AmfiDyldPolicyFn)(uint64_t, uint64_t *);
-    static AmfiDyldPolicyFn s_orig = NULL;
-    static dispatch_once_t s_once;
-    dispatch_once(&s_once, ^{
-        s_orig = (AmfiDyldPolicyFn)dlsym(RTLD_NEXT, "amfi_check_dyld_policy_self");
-    });
-    if (s_orig == NULL) {
+    if (&pt_orig_amfi_check_dyld_policy_self == NULL) {
         errno = ENOSYS;
         return -1;
     }
-    int ret = s_orig(in_flags, out_flags);
+    int ret = pt_orig_amfi_check_dyld_policy_self(in_flags, out_flags);
     if (ret == 0 && out_flags != NULL &&
         pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
@@ -2010,12 +2280,18 @@ static int pt_amfi_check_dyld_policy_self(uint64_t in_flags, uint64_t *out_flags
 
 extern int pt_orig_mac_syscall(const char *policy, int call, void *arg) __asm("___mac_syscall");
 
+static BOOL pt_mac_sandbox_operation_denied(const char *operation) {
+    return (operation != NULL &&
+            pt_is_valid_user_pointer(operation) &&
+            (strncmp(operation, "process-fork", 12) == 0 ||
+             strncmp(operation, "process-exec", 12) == 0));
+}
+
 static BOOL pt_mac_sandbox_should_deny(const char *operation,
                                        int type,
                                        uintptr_t arg0,
                                        const void *caller) {
-    if (operation != NULL && pt_is_valid_user_pointer(operation) &&
-        strncmp(operation, "process-fork", 12) == 0) {
+    if (pt_mac_sandbox_operation_denied(operation)) {
         return YES;
     }
     int filter = (type & 0x0f);
@@ -2099,6 +2375,22 @@ int pt_mac_syscall_with_caller(const char *policy, int call, void *arg, const vo
             }
             return 1;
         }
+        if ((sb_req.type & 0x0f) == PT_SANDBOX_FILTER_PATH &&
+            sb_req.arg0 != 0 &&
+            pt_is_valid_user_pointer((const void *)sb_req.arg0)) {
+            char vbuf[PATH_MAX];
+            const char *resolved = (const char *)sb_req.arg0;
+            int is_sys_flag = 0;
+            (void)pt_prepare_fs_path_cached_caller(
+                (const char *)sb_req.arg0, caller, vbuf, sizeof(vbuf), &resolved, &is_sys_flag);
+            if (resolved != (const char *)sb_req.arg0) {
+                sb_req.arg0 = (uintptr_t)resolved;
+                if (out_handled != NULL) {
+                    *out_handled = YES;
+                }
+                return pt_orig_mac_syscall(policy, call, &sb_req);
+            }
+        }
     } else if (strcmp(policy, "Sandbox") == 0 && call == 2 && arg != NULL && pt_is_valid_user_pointer(arg)) {
         struct {
             audit_token_t au;
@@ -2123,8 +2415,262 @@ int pt_mac_syscall_with_caller(const char *policy, int call, void *arg, const vo
             }
             return 1;
         }
+        if ((sb_au_req.type & 0x0f) == PT_SANDBOX_FILTER_PATH &&
+            sb_au_req.arg0 != 0 &&
+            pt_is_valid_user_pointer((const void *)sb_au_req.arg0)) {
+            char vbuf[PATH_MAX];
+            const char *resolved = (const char *)sb_au_req.arg0;
+            int is_sys_flag = 0;
+            (void)pt_prepare_fs_path_cached_caller(
+                (const char *)sb_au_req.arg0, caller, vbuf, sizeof(vbuf), &resolved, &is_sys_flag);
+            if (resolved != (const char *)sb_au_req.arg0) {
+                sb_au_req.arg0 = (uintptr_t)resolved;
+                if (out_handled != NULL) {
+                    *out_handled = YES;
+                }
+                return pt_orig_mac_syscall(policy, call, &sb_au_req);
+            }
+        }
+    } else if (strcmp(policy, "Sandbox") == 0 && call == 21 && arg != NULL && pt_is_valid_user_pointer(arg)) {
+        struct {
+            uint64_t pid;
+            uint64_t pidver;
+            const char *operation;
+            uint64_t flags;
+            uint64_t count;
+            const char *const *paths;
+            uint8_t *results;
+        } sb_bulk;
+        memset(&sb_bulk, 0, sizeof(sb_bulk));
+        memcpy(&sb_bulk, arg, sizeof(sb_bulk));
+        if (sb_bulk.pid != 0 && (pid_t)sb_bulk.pid != getpid()) {
+            if (out_handled != NULL) {
+                *out_handled = YES;
+            }
+            errno = EPERM;
+            return -1;
+        }
+        if (pt_mac_sandbox_operation_denied(sb_bulk.operation) &&
+            sb_bulk.results != NULL &&
+            pt_is_valid_user_pointer(sb_bulk.results) &&
+            sb_bulk.count <= 4096U) {
+            if (out_handled != NULL) {
+                *out_handled = YES;
+            }
+            memset(sb_bulk.results, 1, (size_t)sb_bulk.count);
+            return 0;
+        }
+        if (sb_bulk.count > 0 &&
+            sb_bulk.count <= 4096U &&
+            sb_bulk.paths != NULL &&
+            pt_is_valid_user_pointer(sb_bulk.paths)) {
+            size_t cnt = (size_t)sb_bulk.count;
+            const char **rewritten = (const char **)calloc(cnt, sizeof(const char *));
+            char (*vbufs)[PATH_MAX] = (char (*)[PATH_MAX])malloc(cnt * PATH_MAX);
+            BOOL *deny_mask = (BOOL *)calloc(cnt, sizeof(BOOL));
+            if (rewritten != NULL && vbufs != NULL && deny_mask != NULL) {
+                for (size_t i = 0; i < cnt; i++) {
+                    const char *p = sb_bulk.paths[i];
+                    const char *resolved = p;
+                    int is_sys_flag = 0;
+                    pt_fs_path_disposition_t disp = pt_prepare_fs_path_cached_caller(
+                        p, caller, vbufs[i], PATH_MAX, &resolved, &is_sys_flag);
+                    if (disp == PT_FS_PATH_HIDDEN || disp == PT_FS_PATH_VIRTUAL_ANCESTOR) {
+                        deny_mask[i] = YES;
+                    }
+                    rewritten[i] = resolved;
+                }
+                __typeof__(sb_bulk) sb_bulk_copy = sb_bulk;
+                sb_bulk_copy.paths = rewritten;
+                if (out_handled != NULL) {
+                    *out_handled = YES;
+                }
+                int ret = pt_orig_mac_syscall(policy, call, &sb_bulk_copy);
+                if (ret == 0 && sb_bulk.results != NULL && pt_is_valid_user_pointer(sb_bulk.results)) {
+                    for (size_t i = 0; i < cnt; i++) {
+                        if (deny_mask[i]) {
+                            sb_bulk.results[i] = 1;
+                        }
+                    }
+                }
+                free(rewritten);
+                free(vbufs);
+                free(deny_mask);
+                return ret;
+            }
+            free(rewritten);
+            free(vbufs);
+            free(deny_mask);
+        }
     }
     return 0;
+}
+
+extern int pt_orig_sandbox_check_by_uniqueid(pid_t pid, uint64_t uniqueid, const char *operation, int type, ...)
+    __asm__("_sandbox_check_by_uniqueid") __attribute__((weak_import));
+extern int pt_orig_sandbox_check_by_reference(void *ref, const char *operation, int type, ...)
+    __asm__("_sandbox_check_by_reference") __attribute__((weak_import));
+extern int pt_orig_sandbox_check_bulk(const audit_token_t *au,
+                                      const char *operation,
+                                      int flags,
+                                      uint32_t count,
+                                      const char *const *paths,
+                                      uint8_t *results)
+    __asm__("_sandbox_check_bulk") __attribute__((weak_import));
+
+static int pt_sandbox_check_by_uniqueid(pid_t pid, uint64_t uniqueid, const char *operation, int type, ...) {
+    if (&pt_orig_sandbox_check_by_uniqueid == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    const void *caller = __builtin_return_address(0);
+    int filter = (type & 0x0f);
+    BOOL bypass = pt_is_bypass_enabled();
+    BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
+    if (!is_sys && bypass && pid != 0 && pid != getpid()) {
+        errno = EPERM;
+        return -1;
+    }
+    if (filter == PT_SANDBOX_FILTER_NONE) {
+        int ret = pt_orig_sandbox_check_by_uniqueid(pid, uniqueid, operation, type);
+        if (!is_sys && bypass && ret == 0 &&
+            (operation == NULL ||
+             strncmp(operation, "process-fork", 12) == 0 ||
+             strncmp(operation, "process-exec", 12) == 0)) {
+            return 1;
+        }
+        return ret;
+    }
+    va_list ap;
+    va_start(ap, type);
+    if (filter == PT_SANDBOX_FILTER_PATH) {
+        const char *path = va_arg(ap, const char *);
+        va_end(ap);
+        char vbuf[PATH_MAX];
+        const char *resolved = path;
+        int is_sys_flag = is_sys ? 1 : 0;
+        pt_fs_path_disposition_t disp = pt_prepare_fs_path_cached_caller(
+            path, caller, vbuf, sizeof(vbuf), &resolved, &is_sys_flag);
+        if (!is_sys && bypass && (disp == PT_FS_PATH_HIDDEN || disp == PT_FS_PATH_VIRTUAL_ANCESTOR)) {
+            return 1;
+        }
+        return pt_orig_sandbox_check_by_uniqueid(pid, uniqueid, operation, type, resolved);
+    }
+    uintptr_t arg1 = va_arg(ap, uintptr_t);
+    va_end(ap);
+    if (!is_sys && bypass && pt_mac_sandbox_should_deny(operation, type, arg1, caller)) {
+        return 1;
+    }
+    return pt_orig_sandbox_check_by_uniqueid(pid, uniqueid, operation, type, arg1);
+}
+
+static int pt_sandbox_check_by_reference(void *ref, const char *operation, int type, ...) {
+    if (&pt_orig_sandbox_check_by_reference == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    const void *caller = __builtin_return_address(0);
+    int filter = (type & 0x0f);
+    BOOL bypass = pt_is_bypass_enabled();
+    BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
+    if (filter == PT_SANDBOX_FILTER_NONE) {
+        int ret = pt_orig_sandbox_check_by_reference(ref, operation, type);
+        if (!is_sys && bypass && ret == 0 &&
+            (operation == NULL ||
+             strncmp(operation, "process-fork", 12) == 0 ||
+             strncmp(operation, "process-exec", 12) == 0)) {
+            return 1;
+        }
+        return ret;
+    }
+    va_list ap;
+    va_start(ap, type);
+    if (filter == PT_SANDBOX_FILTER_PATH) {
+        const char *path = va_arg(ap, const char *);
+        va_end(ap);
+        char vbuf[PATH_MAX];
+        const char *resolved = path;
+        int is_sys_flag = is_sys ? 1 : 0;
+        pt_fs_path_disposition_t disp = pt_prepare_fs_path_cached_caller(
+            path, caller, vbuf, sizeof(vbuf), &resolved, &is_sys_flag);
+        if (!is_sys && bypass && (disp == PT_FS_PATH_HIDDEN || disp == PT_FS_PATH_VIRTUAL_ANCESTOR)) {
+            return 1;
+        }
+        return pt_orig_sandbox_check_by_reference(ref, operation, type, resolved);
+    }
+    uintptr_t arg1 = va_arg(ap, uintptr_t);
+    va_end(ap);
+    if (!is_sys && bypass && pt_mac_sandbox_should_deny(operation, type, arg1, caller)) {
+        return 1;
+    }
+    return pt_orig_sandbox_check_by_reference(ref, operation, type, arg1);
+}
+
+static int pt_sandbox_check_bulk(const audit_token_t *au,
+                                 const char *operation,
+                                 int flags,
+                                 uint32_t count,
+                                 const char *const *paths,
+                                 uint8_t *results) {
+    if (&pt_orig_sandbox_check_bulk == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    const void *caller = __builtin_return_address(0);
+    BOOL bypass = pt_is_bypass_enabled();
+    BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
+    if (!is_sys && bypass && au != NULL && pt_is_valid_user_pointer(au)) {
+        pid_t au_pid = (pid_t)au->val[5];
+        if (au_pid != 0 && au_pid != getpid()) {
+            errno = EPERM;
+            return -1;
+        }
+    }
+    if (is_sys || !bypass || count == 0 || count > 4096U) {
+        return pt_orig_sandbox_check_bulk(au, operation, flags, count, paths, results);
+    }
+    if (pt_mac_sandbox_operation_denied(operation)) {
+        if (results != NULL && pt_is_valid_user_pointer(results)) {
+            memset(results, 1, count);
+            return 0;
+        }
+        return pt_orig_sandbox_check_bulk(au, operation, flags, count, paths, results);
+    }
+    if (paths == NULL || !pt_is_valid_user_pointer(paths)) {
+        return pt_orig_sandbox_check_bulk(au, operation, flags, count, paths, results);
+    }
+    const char **rewritten = (const char **)calloc(count, sizeof(const char *));
+    char (*vbufs)[PATH_MAX] = (char (*)[PATH_MAX])malloc((size_t)count * PATH_MAX);
+    BOOL *deny_mask = (BOOL *)calloc(count, sizeof(BOOL));
+    if (rewritten == NULL || vbufs == NULL || deny_mask == NULL) {
+        free(rewritten);
+        free(vbufs);
+        free(deny_mask);
+        return pt_orig_sandbox_check_bulk(au, operation, flags, count, paths, results);
+    }
+    for (uint32_t i = 0; i < count; i++) {
+        const char *p = paths[i];
+        const char *resolved = p;
+        int is_sys_flag = 0;
+        pt_fs_path_disposition_t disp = pt_prepare_fs_path_cached_caller(
+            p, caller, vbufs[i], PATH_MAX, &resolved, &is_sys_flag);
+        if (disp == PT_FS_PATH_HIDDEN || disp == PT_FS_PATH_VIRTUAL_ANCESTOR) {
+            deny_mask[i] = YES;
+        }
+        rewritten[i] = resolved;
+    }
+    int ret = pt_orig_sandbox_check_bulk(au, operation, flags, count, rewritten, results);
+    if (ret == 0 && results != NULL && pt_is_valid_user_pointer(results)) {
+        for (uint32_t i = 0; i < count; i++) {
+            if (deny_mask[i]) {
+                results[i] = 1;
+            }
+        }
+    }
+    free(rewritten);
+    free(vbufs);
+    free(deny_mask);
+    return ret;
 }
 
 static int pt_mac_syscall(const char *policy, int call, void *arg) {
@@ -2152,13 +2698,18 @@ PT_INTERPOSE_ONLY(pt_SecStaticCodeCheckValidity, SecStaticCodeCheckValidity)
 PT_INTERPOSE_ONLY(pt_SecStaticCodeCheckValidityWithErrors, SecStaticCodeCheckValidityWithErrors)
 PT_INTERPOSE(pt_csops, csops)
 PT_INTERPOSE(pt_csops_audittoken, csops_audittoken)
+extern void pt_orig_raw_ptrace(void) __asm__("___ptrace") __attribute__((weak_import));
+
 PT_INTERPOSE(pt_ptrace, ptrace)
-PT_DLSYM_ONLY("__ptrace", pt_ptrace)
-PT_DLSYM_ONLY("amfi_check_dyld_policy_self", pt_amfi_check_dyld_policy_self)
+PT_INTERPOSE_WEAK_NAMED(pt_ptrace, pt_orig_raw_ptrace, "__ptrace")
+PT_INTERPOSE_WEAK_NAMED(pt_amfi_check_dyld_policy_self, pt_orig_amfi_check_dyld_policy_self, "amfi_check_dyld_policy_self")
 PT_INTERPOSE(pt_sandbox_extension_issue_file, sandbox_extension_issue_file)
 PT_INTERPOSE(pt_sandbox_extension_issue_file_to_self, sandbox_extension_issue_file_to_self)
 PT_INTERPOSE(pt_sandbox_extension_issue_file_to_process, sandbox_extension_issue_file_to_process)
 PT_INTERPOSE(pt_sandbox_extension_issue_file_to_process_by_pid, sandbox_extension_issue_file_to_process_by_pid)
 PT_INTERPOSE(pt_sandbox_check, sandbox_check)
 PT_INTERPOSE(pt_sandbox_check_by_audit_token, sandbox_check_by_audit_token)
+PT_INTERPOSE_WEAK_NAMED(pt_sandbox_check_by_uniqueid, pt_orig_sandbox_check_by_uniqueid, "sandbox_check_by_uniqueid")
+PT_INTERPOSE_WEAK_NAMED(pt_sandbox_check_by_reference, pt_orig_sandbox_check_by_reference, "sandbox_check_by_reference")
+PT_INTERPOSE_WEAK_NAMED(pt_sandbox_check_bulk, pt_orig_sandbox_check_bulk, "sandbox_check_bulk")
 PT_INTERPOSE_NAMED(pt_mac_syscall, pt_orig_mac_syscall, "__mac_syscall")

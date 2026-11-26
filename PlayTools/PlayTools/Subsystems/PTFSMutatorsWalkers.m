@@ -29,6 +29,19 @@ int pt_fs_fstatfs_with_caller(int fd, struct statfs *buf, const void *caller) {
     int is_sys_caller = -1;
     int ret = fstatfs(fd, buf);
     if (ret == 0 && buf != NULL) {
+        if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller)) {
+            is_sys_caller = 0;
+            struct stat fst;
+            int saved_errno = errno;
+            if (fstat(fd, &fst) == 0 && pt_is_synth_system_version_stat(fst.st_dev, fst.st_ino)) {
+                (void)statfs("/", buf);
+                pt_sanitize_statfs_entry(buf, caller, &is_sys_caller);
+                buf->f_flags |= (uint32_t)(MNT_RDONLY | MNT_ROOTFS);
+                errno = saved_errno;
+                return 0;
+            }
+            errno = saved_errno;
+        }
         pt_sanitize_statfs_entry(buf, caller, &is_sys_caller);
     }
     return ret;
@@ -105,22 +118,31 @@ void pt_fs_sanitize_legacy_statfs_strings(char *mnton,
 
 __attribute__((visibility("hidden")))
 int pt_fs_getfsstat_with_caller(struct statfs *buf, int bufsize, int mode, const void *caller) {
-    if ((buf == NULL || bufsize == 0) &&
-        pt_is_bypass_enabled() &&
-        !pt_is_effective_system_or_playtools_caller(caller)) {
+    if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller)) {
         int raw_cnt = getfsstat(NULL, 0, mode);
         if (raw_cnt <= 0) {
             return raw_cnt;
         }
-        int cap = (raw_cnt < 512) ? raw_cnt : 512;
+        int cap = raw_cnt + 16;
+        if (cap > 512) {
+            cap = 512;
+        }
         struct statfs *tmp = (struct statfs *)calloc((size_t)cap, sizeof(struct statfs));
         if (tmp != NULL) {
             int got = getfsstat(tmp, (int)((size_t)cap * sizeof(struct statfs)), mode);
             int kept = (got > 0) ? pt_filter_statfs_array(tmp, got, caller) : got;
+            if (buf != NULL && bufsize > 0 && kept > 0) {
+                int max_entries = bufsize / (int)sizeof(struct statfs);
+                int copy_n = (kept < max_entries) ? kept : max_entries;
+                if (copy_n > 0) {
+                    memcpy(buf, tmp, (size_t)copy_n * sizeof(struct statfs));
+                }
+                free(tmp);
+                return copy_n;
+            }
             free(tmp);
             return kept;
         }
-        return raw_cnt;
     }
     int count = getfsstat(buf, bufsize, mode);
     if (count > 0 && buf != NULL && bufsize > 0) {
@@ -531,10 +553,17 @@ static int pt_ftw_trampoline(const char *fpath, const struct stat *sb, int typef
     }
     char vout[PATH_MAX];
     const char *virt = fpath;
+    struct stat sb_copy;
+    const struct stat *out_sb = sb;
+    if (sb != NULL && ctx->is_sys_caller == 0) {
+        sb_copy = *sb;
+        pt_sanitize_stat_buf(&sb_copy, ctx->caller);
+        out_sb = &sb_copy;
+    }
     if (fpath != NULL && ctx->is_sys_caller == 0) {
         virt = pt_virtualize_path_for_app(fpath, vout, sizeof(vout), YES);
     }
-    return ctx->ftw_fn(virt, sb, typeflag);
+    return ctx->ftw_fn(virt, out_sb, typeflag);
 }
 
 static int pt_nftw_trampoline(const char *fpath, const struct stat *sb, int typeflag, struct FTW *ftwbuf) {
@@ -547,6 +576,13 @@ static int pt_nftw_trampoline(const char *fpath, const struct stat *sb, int type
     }
     char vout[PATH_MAX];
     const char *virt = fpath;
+    struct stat sb_copy;
+    const struct stat *out_sb = sb;
+    if (sb != NULL && ctx->is_sys_caller == 0) {
+        sb_copy = *sb;
+        pt_sanitize_stat_buf(&sb_copy, ctx->caller);
+        out_sb = &sb_copy;
+    }
     struct FTW ftw_local;
     struct FTW *out_ftwbuf = ftwbuf;
     if (fpath != NULL && ctx->is_sys_caller == 0) {
@@ -558,7 +594,7 @@ static int pt_nftw_trampoline(const char *fpath, const struct stat *sb, int type
             out_ftwbuf = &ftw_local;
         }
     }
-    return ctx->nftw_fn(virt, sb, typeflag, out_ftwbuf);
+    return ctx->nftw_fn(virt, out_sb, typeflag, out_ftwbuf);
 }
 
 static int pt_ftw(const char *dirpath, int (*fn)(const char *, const struct stat *, int), int nopenfd) {
@@ -637,6 +673,10 @@ typedef struct {
     const void *caller;
     int is_sys_caller;
     BOOL use_private_prefix;
+    int (*orig_compar)(const FTSENT **, const FTSENT **);
+#ifdef __BLOCKS__
+    int (^orig_compar_b)(const FTSENT **, const FTSENT **);
+#endif
     FTSENT *cur_ent;
     char *orig_cur_path;
     char *orig_cur_accpath;
@@ -644,6 +684,88 @@ typedef struct {
     pt_fts_child_record_t *children;
     char cur_virt_path[PATH_MAX];
 } pt_fts_state_t;
+
+typedef struct pt_fts_compar_tls_ctx {
+    const void *caller;
+    BOOL use_private_prefix;
+    int (*compar)(const FTSENT **, const FTSENT **);
+#ifdef __BLOCKS__
+    int (^compar_b)(const FTSENT **, const FTSENT **);
+#endif
+    struct pt_fts_compar_tls_ctx *prev;
+} pt_fts_compar_tls_ctx_t;
+
+static _Thread_local pt_fts_compar_tls_ctx_t *tls_pt_fts_compar = NULL;
+
+static int pt_fts_compar_invoke(const FTSENT **pa,
+                                const FTSENT **pb,
+                                const void *caller,
+                                BOOL use_private_prefix,
+                                int (*compar)(const FTSENT **, const FTSENT **),
+#ifdef __BLOCKS__
+                                int (^compar_b)(const FTSENT **, const FTSENT **),
+#endif
+                                BOOL use_block) {
+    FTSENT *a = (pa != NULL) ? (FTSENT *)*pa : NULL;
+    FTSENT *b = (pb != NULL) ? (FTSENT *)*pb : NULL;
+    char *orig_ap = a ? a->fts_path : NULL;
+    char *orig_aa = a ? a->fts_accpath : NULL;
+    char *orig_bp = b ? b->fts_path : NULL;
+    char *orig_ba = b ? b->fts_accpath : NULL;
+    char va[PATH_MAX], vb[PATH_MAX];
+    if (a != NULL) {
+        if (a->fts_statp != NULL) pt_sanitize_stat_buf(a->fts_statp, caller);
+        if (a->fts_path != NULL && a->fts_path[0] == '/') {
+            const char *vp = pt_virtualize_path_for_app(a->fts_path, va, sizeof(va), use_private_prefix);
+            if (vp != a->fts_path) a->fts_path = (char *)vp;
+        }
+        if (a->fts_accpath != NULL && a->fts_accpath[0] == '/') {
+            a->fts_accpath = a->fts_path;
+        }
+    }
+    if (b != NULL) {
+        if (b->fts_statp != NULL) pt_sanitize_stat_buf(b->fts_statp, caller);
+        if (b->fts_path != NULL && b->fts_path[0] == '/') {
+            const char *vp = pt_virtualize_path_for_app(b->fts_path, vb, sizeof(vb), use_private_prefix);
+            if (vp != b->fts_path) b->fts_path = (char *)vp;
+        }
+        if (b->fts_accpath != NULL && b->fts_accpath[0] == '/') {
+            b->fts_accpath = b->fts_path;
+        }
+    }
+    const FTSENT *ca = a;
+    const FTSENT *cb = b;
+    int cmp = 0;
+#ifdef __BLOCKS__
+    if (use_block && compar_b != nil) {
+        cmp = compar_b(&ca, &cb);
+    } else
+#endif
+    if (compar != NULL) {
+        cmp = compar(&ca, &cb);
+    }
+    if (a != NULL) {
+        a->fts_path = orig_ap;
+        a->fts_accpath = orig_aa;
+    }
+    if (b != NULL) {
+        b->fts_path = orig_bp;
+        b->fts_accpath = orig_ba;
+    }
+    return cmp;
+}
+
+static int pt_fts_compar_trampoline(const FTSENT **pa, const FTSENT **pb) {
+    pt_fts_compar_tls_ctx_t *ctx = tls_pt_fts_compar;
+    if (ctx == NULL || ctx->compar == NULL) {
+        return 0;
+    }
+    return pt_fts_compar_invoke(pa, pb, ctx->caller, ctx->use_private_prefix, ctx->compar,
+#ifdef __BLOCKS__
+                                nil,
+#endif
+                                NO);
+}
 
 static os_unfair_lock s_fts_states_lock = OS_UNFAIR_LOCK_INIT;
 static CFMutableDictionaryRef s_fts_states = NULL;
@@ -762,11 +884,30 @@ static FTS *pt_fts_open_common(char * const *path_argv,
         return NULL;
     }
 
+    BOOL use_priv = (strncmp(path_argv[0], "/private/", 9) == 0);
+    pt_fts_compar_tls_ctx_t cctx = {
+        .caller = caller,
+        .use_private_prefix = use_priv,
+        .compar = compar,
 #ifdef __BLOCKS__
-    FTS *ftsp = use_block ? fts_open_b(mapped_argv, options, compar_b) : fts_open(mapped_argv, options, compar);
-#else
-    FTS *ftsp = fts_open(mapped_argv, options, compar);
+        .compar_b = compar_b,
 #endif
+        .prev = tls_pt_fts_compar,
+    };
+    tls_pt_fts_compar = &cctx;
+#ifdef __BLOCKS__
+    int (^wrapped_compar_b)(const FTSENT **, const FTSENT **) = (use_block && compar_b != nil)
+        ? ^int(const FTSENT **pa, const FTSENT **pb) {
+              return pt_fts_compar_invoke(pa, pb, caller, use_priv, NULL, compar_b, YES);
+          }
+        : nil;
+    FTS *ftsp = use_block
+        ? fts_open_b(mapped_argv, options, wrapped_compar_b)
+        : fts_open(mapped_argv, options, (compar != NULL) ? pt_fts_compar_trampoline : NULL);
+#else
+    FTS *ftsp = fts_open(mapped_argv, options, (compar != NULL) ? pt_fts_compar_trampoline : NULL);
+#endif
+    tls_pt_fts_compar = cctx.prev;
     int saved_errno = errno;
     for (size_t j = 0; j < owned_idx; j++) {
         free(owned_strs[j]);
@@ -779,7 +920,13 @@ static FTS *pt_fts_open_common(char * const *path_argv,
         if (state != NULL) {
             state->caller = caller;
             state->is_sys_caller = 0;
-            state->use_private_prefix = (strncmp(path_argv[0], "/private/", 9) == 0);
+            state->use_private_prefix = use_priv;
+            state->orig_compar = compar;
+#ifdef __BLOCKS__
+            if (use_block && compar_b != nil) {
+                state->orig_compar_b = [compar_b copy];
+            }
+#endif
             os_unfair_lock_lock(&s_fts_states_lock);
             if (s_fts_states == NULL) {
                 s_fts_states = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, NULL, NULL);
@@ -820,9 +967,20 @@ static FTSENT *pt_fts_read(FTS *ftsp) {
         return fts_read(ftsp);
     }
 
+    pt_fts_compar_tls_ctx_t cctx = {
+        .caller = state->caller,
+        .use_private_prefix = state->use_private_prefix,
+        .compar = state->orig_compar,
+#ifdef __BLOCKS__
+        .compar_b = state->orig_compar_b,
+#endif
+        .prev = tls_pt_fts_compar,
+    };
+    tls_pt_fts_compar = &cctx;
     for (;;) {
         FTSENT *ent = fts_read(ftsp);
         if (ent == NULL) {
+            tls_pt_fts_compar = cctx.prev;
             return NULL;
         }
         if (ent->fts_path != NULL &&
@@ -832,22 +990,28 @@ static FTSENT *pt_fts_read(FTS *ftsp) {
             }
             continue;
         }
-        if (ent->fts_path != NULL && state->is_sys_caller == 0) {
-            const char *virt = pt_virtualize_path_for_app(ent->fts_path, state->cur_virt_path, sizeof(state->cur_virt_path), state->use_private_prefix);
-            if (virt != ent->fts_path) {
-                state->cur_ent = ent;
-                state->orig_cur_path = ent->fts_path;
-                state->orig_cur_accpath = ent->fts_accpath;
-                state->orig_cur_pathlen = ent->fts_pathlen;
-                ent->fts_path = state->cur_virt_path;
-                size_t vlen = strlen(state->cur_virt_path);
-                size_t max_plen = (sizeof(ent->fts_pathlen) == sizeof(unsigned short)) ? (size_t)USHRT_MAX : SIZE_MAX;
-                ent->fts_pathlen = (__typeof__(ent->fts_pathlen))MIN(vlen, max_plen);
-                if (ent->fts_accpath != NULL && ent->fts_accpath[0] == '/') {
-                    ent->fts_accpath = state->cur_virt_path;
+        if (state->is_sys_caller == 0) {
+            if (ent->fts_statp != NULL) {
+                pt_sanitize_stat_buf(ent->fts_statp, state->caller);
+            }
+            if (ent->fts_path != NULL) {
+                const char *virt = pt_virtualize_path_for_app(ent->fts_path, state->cur_virt_path, sizeof(state->cur_virt_path), state->use_private_prefix);
+                if (virt != ent->fts_path) {
+                    state->cur_ent = ent;
+                    state->orig_cur_path = ent->fts_path;
+                    state->orig_cur_accpath = ent->fts_accpath;
+                    state->orig_cur_pathlen = ent->fts_pathlen;
+                    ent->fts_path = state->cur_virt_path;
+                    size_t vlen = strlen(state->cur_virt_path);
+                    size_t max_plen = (sizeof(ent->fts_pathlen) == sizeof(unsigned short)) ? (size_t)USHRT_MAX : SIZE_MAX;
+                    ent->fts_pathlen = (__typeof__(ent->fts_pathlen))MIN(vlen, max_plen);
+                    if (ent->fts_accpath != NULL && ent->fts_accpath[0] == '/') {
+                        ent->fts_accpath = state->cur_virt_path;
+                    }
                 }
             }
         }
+        tls_pt_fts_compar = cctx.prev;
         return ent;
     }
 }
@@ -921,6 +1085,9 @@ static FTSENT *pt_fts_children(FTS *ftsp, int instr) {
                 out_head = curr;
             }
             if (state->is_sys_caller == 0) {
+                if (curr->fts_statp != NULL) {
+                    pt_sanitize_stat_buf(curr->fts_statp, state->caller);
+                }
                 if (curr->fts_path != NULL && curr->fts_path[0] != '\0') {
                     char vbuf[PATH_MAX];
                     const char *vp = pt_virtualize_path_for_app(curr->fts_path, vbuf, sizeof(vbuf), state->use_private_prefix);
@@ -1000,6 +1167,9 @@ static int pt_fts_close(FTS *ftsp) {
         if (state != NULL) {
             pt_fts_restore_cur(state);
             pt_fts_restore_children(state);
+#ifdef __BLOCKS__
+            state->orig_compar_b = nil;
+#endif
             free(state);
         }
     }
@@ -1053,6 +1223,31 @@ static int pt_filter_and_virtualize_glob(glob_t *pglob,
     return 0;
 }
 
+typedef struct pt_glob_err_ctx {
+    int (*errfunc)(const char *, int);
+    const void *caller;
+    int is_sys_caller;
+    struct pt_glob_err_ctx *prev;
+} pt_glob_err_ctx_t;
+
+static _Thread_local pt_glob_err_ctx_t *tls_pt_glob_err_ctx = NULL;
+
+static int pt_glob_err_trampoline(const char *epath, int eerrno) {
+    pt_glob_err_ctx_t *ctx = tls_pt_glob_err_ctx;
+    if (ctx == NULL || ctx->errfunc == NULL) {
+        return 0;
+    }
+    if (epath != NULL && pt_is_hidden_traversed_entry(epath, NULL, ctx->caller, &ctx->is_sys_caller)) {
+        return 0;
+    }
+    char vout[PATH_MAX];
+    const char *virt = epath;
+    if (epath != NULL && ctx->is_sys_caller == 0) {
+        virt = pt_virtualize_path_for_app(epath, vout, sizeof(vout), YES);
+    }
+    return ctx->errfunc(virt, eerrno);
+}
+
 static int pt_glob(const char * __restrict pattern,
                    int flags,
                    int (*errfunc)(const char *, int),
@@ -1069,11 +1264,25 @@ static int pt_glob(const char * __restrict pattern,
         }
         return GLOB_NOMATCH;
     }
+    if (is_sys_caller < 0) {
+        is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
+    }
     size_t start_idx = ((flags & GLOB_APPEND) != 0 && pglob != NULL) ? pglob->gl_pathc : 0U;
-    int rc = glob(resolved_pattern, flags, errfunc, pglob);
-    if ((rc == 0 || rc == GLOB_ABORTED) && pt_is_bypass_enabled() &&
-        (is_sys_caller == 0 || (is_sys_caller < 0 && !pt_is_effective_system_or_playtools_caller(caller)))) {
-        is_sys_caller = 0;
+    int rc = 0;
+    if (errfunc != NULL && pt_is_bypass_enabled() && is_sys_caller == 0) {
+        pt_glob_err_ctx_t ctx = {
+            .errfunc = errfunc,
+            .caller = caller,
+            .is_sys_caller = 0,
+            .prev = tls_pt_glob_err_ctx,
+        };
+        tls_pt_glob_err_ctx = &ctx;
+        rc = glob(resolved_pattern, flags, pt_glob_err_trampoline, pglob);
+        tls_pt_glob_err_ctx = ctx.prev;
+    } else {
+        rc = glob(resolved_pattern, flags, errfunc, pglob);
+    }
+    if ((rc == 0 || rc == GLOB_ABORTED) && pt_is_bypass_enabled() && is_sys_caller == 0) {
         int frc = pt_filter_and_virtualize_glob(pglob, flags, start_idx, caller, &is_sys_caller);
         if (rc == 0 && frc != 0) {
             return frc;
@@ -1098,11 +1307,23 @@ static int pt_glob_b(const char * __restrict pattern,
         }
         return GLOB_NOMATCH;
     }
+    if (is_sys_caller < 0) {
+        is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
+    }
     size_t start_idx = ((flags & GLOB_APPEND) != 0 && pglob != NULL) ? pglob->gl_pathc : 0U;
-    int rc = glob_b(resolved_pattern, flags, errblk, pglob);
-    if ((rc == 0 || rc == GLOB_ABORTED) && pt_is_bypass_enabled() &&
-        (is_sys_caller == 0 || (is_sys_caller < 0 && !pt_is_effective_system_or_playtools_caller(caller)))) {
-        is_sys_caller = 0;
+    __block int sys_flag = is_sys_caller;
+    int (^wrapped_blk)(const char *, int) = (errblk != nil && pt_is_bypass_enabled() && is_sys_caller == 0)
+        ? ^int(const char *epath, int eerrno) {
+              if (epath != NULL && pt_is_hidden_traversed_entry(epath, NULL, caller, &sys_flag)) {
+                  return 0;
+              }
+              char vout[PATH_MAX];
+              const char *virt = (epath != NULL) ? pt_virtualize_path_for_app(epath, vout, sizeof(vout), YES) : epath;
+              return errblk(virt, eerrno);
+          }
+        : errblk;
+    int rc = glob_b(resolved_pattern, flags, wrapped_blk, pglob);
+    if ((rc == 0 || rc == GLOB_ABORTED) && pt_is_bypass_enabled() && is_sys_caller == 0) {
         int frc = pt_filter_and_virtualize_glob(pglob, flags, start_idx, caller, &is_sys_caller);
         if (rc == 0 && frc != 0) {
             return frc;
@@ -1407,6 +1628,29 @@ static int pt_clonefileat(int src_dirfd, const char *src, int dst_dirfd, const c
     return pt_fs_clonefileat_with_caller(src_dirfd, src, dst_dirfd, dst, flags, __builtin_return_address(0));
 }
 
+extern int pt_orig_fclonefileat(int src_fd, int dst_dirfd, const char *dst, uint32_t flags) __asm__("_fclonefileat") __attribute__((weak_import));
+
+__attribute__((visibility("hidden")))
+int pt_fs_fclonefileat_with_caller(int src_fd, int dst_dirfd, const char *dst, uint32_t flags, const void *caller) {
+    if (&pt_orig_fclonefileat == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    if (pt_fd_is_sensitive(src_fd, caller) || pt_fd_is_sensitive(dst_dirfd, caller)) {
+        errno = EACCES;
+        return -1;
+    }
+    char vbuf[PATH_MAX];
+    if (!pt_prepare_fs_path_for_modify(dst_dirfd, dst, caller, vbuf, sizeof(vbuf), &dst, EACCES)) {
+        return -1;
+    }
+    return pt_orig_fclonefileat(src_fd, dst_dirfd, dst, flags);
+}
+
+static int pt_fclonefileat(int src_fd, int dst_dirfd, const char *dst, uint32_t flags) {
+    return pt_fs_fclonefileat_with_caller(src_fd, dst_dirfd, dst, flags, __builtin_return_address(0));
+}
+
 static size_t pt_count_template_xs(const char *tmpl, int slen) {
     if (tmpl == NULL || slen < 0) {
         return 0;
@@ -1440,10 +1684,16 @@ static int pt_mkstemp(char *tmpl) {
         errno = EINVAL;
         return -1;
     }
-    size_t x_count = pt_count_template_xs(tmpl, 0);
     char vbuf[PATH_MAX];
-    const char *resolved = pt_resolve_virtual_path(tmpl, vbuf, sizeof(vbuf));
-    if (resolved == vbuf) {
+    const char *resolved = NULL;
+    if (!pt_prepare_fs_path_for_modify(AT_FDCWD, tmpl, __builtin_return_address(0), vbuf, sizeof(vbuf), &resolved, EACCES)) {
+        return -1;
+    }
+    size_t x_count = pt_count_template_xs(tmpl, 0);
+    if (resolved != tmpl) {
+        if (resolved != vbuf) {
+            strlcpy(vbuf, resolved, sizeof(vbuf));
+        }
         int fd = mkstemp(vbuf);
         if (fd >= 0) {
             pt_copy_template_xs(tmpl, vbuf, 0, x_count);
@@ -1457,10 +1707,16 @@ static int pt_mkstemps(char *tmpl, int slen) {
     if (tmpl == NULL) {
         return mkstemps(tmpl, slen);
     }
-    size_t x_count = pt_count_template_xs(tmpl, slen);
     char vbuf[PATH_MAX];
-    const char *resolved = pt_resolve_virtual_path(tmpl, vbuf, sizeof(vbuf));
-    if (resolved == vbuf) {
+    const char *resolved = NULL;
+    if (!pt_prepare_fs_path_for_modify(AT_FDCWD, tmpl, __builtin_return_address(0), vbuf, sizeof(vbuf), &resolved, EACCES)) {
+        return -1;
+    }
+    size_t x_count = pt_count_template_xs(tmpl, slen);
+    if (resolved != tmpl) {
+        if (resolved != vbuf) {
+            strlcpy(vbuf, resolved, sizeof(vbuf));
+        }
         int fd = mkstemps(vbuf, slen);
         if (fd >= 0) {
             pt_copy_template_xs(tmpl, vbuf, slen, x_count);
@@ -1474,10 +1730,16 @@ static int pt_mkostemp(char *tmpl, int oflags) {
     if (tmpl == NULL) {
         return mkostemp(tmpl, oflags);
     }
-    size_t x_count = pt_count_template_xs(tmpl, 0);
     char vbuf[PATH_MAX];
-    const char *resolved = pt_resolve_virtual_path(tmpl, vbuf, sizeof(vbuf));
-    if (resolved == vbuf) {
+    const char *resolved = NULL;
+    if (!pt_prepare_fs_path_for_modify(AT_FDCWD, tmpl, __builtin_return_address(0), vbuf, sizeof(vbuf), &resolved, EACCES)) {
+        return -1;
+    }
+    size_t x_count = pt_count_template_xs(tmpl, 0);
+    if (resolved != tmpl) {
+        if (resolved != vbuf) {
+            strlcpy(vbuf, resolved, sizeof(vbuf));
+        }
         int fd = mkostemp(vbuf, oflags);
         if (fd >= 0) {
             pt_copy_template_xs(tmpl, vbuf, 0, x_count);
@@ -1491,10 +1753,16 @@ static int pt_mkostemps(char *tmpl, int slen, int oflags) {
     if (tmpl == NULL) {
         return mkostemps(tmpl, slen, oflags);
     }
-    size_t x_count = pt_count_template_xs(tmpl, slen);
     char vbuf[PATH_MAX];
-    const char *resolved = pt_resolve_virtual_path(tmpl, vbuf, sizeof(vbuf));
-    if (resolved == vbuf) {
+    const char *resolved = NULL;
+    if (!pt_prepare_fs_path_for_modify(AT_FDCWD, tmpl, __builtin_return_address(0), vbuf, sizeof(vbuf), &resolved, EACCES)) {
+        return -1;
+    }
+    size_t x_count = pt_count_template_xs(tmpl, slen);
+    if (resolved != tmpl) {
+        if (resolved != vbuf) {
+            strlcpy(vbuf, resolved, sizeof(vbuf));
+        }
         int fd = mkostemps(vbuf, slen, oflags);
         if (fd >= 0) {
             pt_copy_template_xs(tmpl, vbuf, slen, x_count);
@@ -1509,10 +1777,16 @@ static char *pt_mkdtemp(char *tmpl) {
         errno = EINVAL;
         return NULL;
     }
-    size_t x_count = pt_count_template_xs(tmpl, 0);
     char vbuf[PATH_MAX];
-    const char *resolved = pt_resolve_virtual_path(tmpl, vbuf, sizeof(vbuf));
-    if (resolved == vbuf) {
+    const char *resolved = NULL;
+    if (!pt_prepare_fs_path_for_modify(AT_FDCWD, tmpl, __builtin_return_address(0), vbuf, sizeof(vbuf), &resolved, EACCES)) {
+        return NULL;
+    }
+    size_t x_count = pt_count_template_xs(tmpl, 0);
+    if (resolved != tmpl) {
+        if (resolved != vbuf) {
+            strlcpy(vbuf, resolved, sizeof(vbuf));
+        }
         char *res = mkdtemp(vbuf);
         if (res == NULL) {
             return NULL;
@@ -1529,10 +1803,17 @@ static char *pt_mktemp(char *tmpl) {
         errno = EINVAL;
         return NULL;
     }
-    size_t x_count = pt_count_template_xs(tmpl, 0);
     char vbuf[PATH_MAX];
-    const char *resolved = pt_resolve_virtual_path(tmpl, vbuf, sizeof(vbuf));
-    if (resolved == vbuf) {
+    const char *resolved = NULL;
+    if (!pt_prepare_fs_path_for_modify(AT_FDCWD, tmpl, __builtin_return_address(0), vbuf, sizeof(vbuf), &resolved, EACCES)) {
+        tmpl[0] = '\0';
+        return NULL;
+    }
+    size_t x_count = pt_count_template_xs(tmpl, 0);
+    if (resolved != tmpl) {
+        if (resolved != vbuf) {
+            strlcpy(vbuf, resolved, sizeof(vbuf));
+        }
         char *res = pt_orig_mktemp(vbuf);
         if (res == NULL || vbuf[0] == '\0') {
             tmpl[0] = '\0';
@@ -1547,8 +1828,11 @@ static char *pt_mktemp(char *tmpl) {
 extern char *_amkrtemp(const char *path);
 static char *pt_amkrtemp(const char *path) {
     char vbuf[PATH_MAX];
-    path = pt_resolve_virtual_path(pt_fs_ue_fix_filename(path), vbuf, sizeof(vbuf));
-    return _amkrtemp(path);
+    const char *resolved = NULL;
+    if (!pt_prepare_fs_path_for_modify(AT_FDCWD, path, __builtin_return_address(0), vbuf, sizeof(vbuf), &resolved, EACCES)) {
+        return NULL;
+    }
+    return _amkrtemp(resolved);
 }
 
 
@@ -1640,12 +1924,121 @@ static int pt_sqlite3_open_v2(const char *filename, sqlite3 **ppDb, int flags, c
     return sqlite3_open_v2(filename, ppDb, flags, zVfs);
 }
 
+extern void pt_orig_statfs64(void) __asm__("_statfs64") __attribute__((weak_import));
+extern void pt_orig_fstatfs64(void) __asm__("_fstatfs64") __attribute__((weak_import));
+extern void pt_orig_getfsstat64(void) __asm__("_getfsstat64") __attribute__((weak_import));
+extern int pt_orig_statfs_ext(const char *, struct statfs *, int) __asm__("_statfs_ext") __attribute__((weak_import));
+extern int pt_orig_fstatfs_ext(int, struct statfs *, int) __asm__("_fstatfs_ext") __attribute__((weak_import));
+extern int pt_orig_fchflagsat(int, const char *, uint32_t, int) __asm__("_fchflagsat") __attribute__((weak_import));
+extern int pt_orig_exchangedata(const char *, const char *, unsigned int) __asm__("_exchangedata") __attribute__((weak_import));
+
+static int pt_statfs_ext(const char *path, struct statfs *buf, int flags) {
+    if (&pt_orig_statfs_ext == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    const void *caller = __builtin_return_address(0);
+    int is_sys_caller = -1;
+    char vbuf[PATH_MAX];
+    const char *resolved = NULL;
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_cached_caller_ro(path, caller, vbuf, sizeof(vbuf), &resolved, &is_sys_caller);
+    if (disp == PT_FS_PATH_HIDDEN) {
+        errno = ENOENT;
+        return -1;
+    }
+    const char *query_path = resolved;
+    BOOL is_synth_sysver = NO;
+    if (disp == PT_FS_PATH_VIRTUAL_ANCESTOR) {
+        pt_ensure_data_container_map();
+        query_path = (s_real_data_container_len > 0) ? s_real_data_container_dir : "/private/var";
+    } else if (pt_is_synth_system_version_path(resolved)) {
+        if (is_sys_caller < 0) {
+            is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
+        }
+        if (is_sys_caller == 0 && pt_is_bypass_enabled()) {
+            query_path = "/";
+            is_synth_sysver = YES;
+        }
+    }
+    int ret = pt_orig_statfs_ext(query_path, buf, flags);
+    if (ret == 0 && buf != NULL) {
+        pt_sanitize_statfs_entry(buf, caller, &is_sys_caller);
+        if (is_synth_sysver && is_sys_caller == 0) {
+            buf->f_flags |= (uint32_t)(MNT_RDONLY | MNT_ROOTFS);
+        }
+    }
+    return ret;
+}
+
+static int pt_fstatfs_ext(int fd, struct statfs *buf, int flags) {
+    if (&pt_orig_fstatfs_ext == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    const void *caller = __builtin_return_address(0);
+    if (pt_fd_is_sensitive(fd, caller)) {
+        errno = EBADF;
+        return -1;
+    }
+    int is_sys_caller = -1;
+    int ret = pt_orig_fstatfs_ext(fd, buf, flags);
+    if (ret == 0 && buf != NULL) {
+        if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller)) {
+            is_sys_caller = 0;
+            struct stat fst;
+            int saved_errno = errno;
+            if (fstat(fd, &fst) == 0 && pt_is_synth_system_version_stat(fst.st_dev, fst.st_ino)) {
+                (void)pt_orig_statfs_ext("/", buf, flags);
+                pt_sanitize_statfs_entry(buf, caller, &is_sys_caller);
+                buf->f_flags |= (uint32_t)(MNT_RDONLY | MNT_ROOTFS);
+                errno = saved_errno;
+                return 0;
+            }
+            errno = saved_errno;
+        }
+        pt_sanitize_statfs_entry(buf, caller, &is_sys_caller);
+    }
+    return ret;
+}
+
+static int pt_fchflagsat(int dirfd, const char *path, uint32_t flags, int at_flags) {
+    if (&pt_orig_fchflagsat == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    char vbuf[PATH_MAX];
+    const void *caller = __builtin_return_address(0);
+    if (!pt_prepare_fs_path_for_modify(dirfd, path, caller, vbuf, sizeof(vbuf), &path, EACCES)) {
+        return -1;
+    }
+    return pt_orig_fchflagsat(dirfd, path, flags, at_flags);
+}
+
+static int pt_exchangedata(const char *path1, const char *path2, unsigned int options) {
+    if (&pt_orig_exchangedata == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    char vbuf1[PATH_MAX];
+    char vbuf2[PATH_MAX];
+    const void *caller = __builtin_return_address(0);
+    if (!pt_prepare_fs_path_for_modify(AT_FDCWD, path1, caller, vbuf1, sizeof(vbuf1), &path1, EACCES) ||
+        !pt_prepare_fs_path_for_modify(AT_FDCWD, path2, caller, vbuf2, sizeof(vbuf2), &path2, EACCES)) {
+        return -1;
+    }
+    return pt_orig_exchangedata(path1, path2, options);
+}
+
 PT_INTERPOSE(pt_statfs, statfs)
-PT_DLSYM_ONLY("statfs64", pt_statfs)
+PT_INTERPOSE_WEAK_NAMED(pt_statfs, pt_orig_statfs64, "statfs64")
 PT_INTERPOSE(pt_fstatfs, fstatfs)
-PT_DLSYM_ONLY("fstatfs64", pt_fstatfs)
+PT_INTERPOSE_WEAK_NAMED(pt_fstatfs, pt_orig_fstatfs64, "fstatfs64")
 PT_INTERPOSE(pt_getfsstat, getfsstat)
-PT_DLSYM_ONLY("getfsstat64", pt_getfsstat)
+PT_INTERPOSE_WEAK_NAMED(pt_getfsstat, pt_orig_getfsstat64, "getfsstat64")
+PT_INTERPOSE_WEAK_NAMED(pt_statfs_ext, pt_orig_statfs_ext, "statfs_ext")
+PT_INTERPOSE_WEAK_NAMED(pt_fstatfs_ext, pt_orig_fstatfs_ext, "fstatfs_ext")
+PT_INTERPOSE_WEAK_NAMED(pt_fchflagsat, pt_orig_fchflagsat, "fchflagsat")
+PT_INTERPOSE_WEAK_NAMED(pt_exchangedata, pt_orig_exchangedata, "exchangedata")
 PT_INTERPOSE(pt_getmntinfo, getmntinfo)
 PT_INTERPOSE(pt_getmntinfo_r_np, getmntinfo_r_np)
 PT_INTERPOSE(pt_statvfs, statvfs)
@@ -1703,6 +2096,7 @@ PT_INTERPOSE(pt_fremovexattr, fremovexattr)
 PT_INTERPOSE(pt_copyfile, copyfile)
 PT_INTERPOSE(pt_clonefile, clonefile)
 PT_INTERPOSE(pt_clonefileat, clonefileat)
+PT_INTERPOSE_WEAK_NAMED(pt_fclonefileat, pt_orig_fclonefileat, "fclonefileat")
 PT_INTERPOSE(pt_mkstemp, mkstemp)
 PT_INTERPOSE(pt_mkstemps, mkstemps)
 PT_INTERPOSE(pt_mkostemp, mkostemp)

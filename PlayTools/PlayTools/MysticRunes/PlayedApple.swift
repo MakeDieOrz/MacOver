@@ -16,6 +16,10 @@ public class PlayKeychain: NSObject {
     static let shared = PlayKeychain()
     private static let playChainDB = PlayKeychainDB.shared
 
+    @objc public static func setDefaultAccessGroup(_ group: String?) {
+        playChainDB.setDefaultAccessGroup(group)
+    }
+
     @objc public static func debugLogger(_ logContent: String) {
         if PlaySettings.shared.playChainDebugging {
             NSLog("PC-DEBUG: \(logContent)")
@@ -235,6 +239,34 @@ public class PlayKeychain: NSObject {
         kSecAttrCanUnwrap
     ]
 
+    private static func buildPersistedAttributesMetadata(
+        from source: [String: Any],
+        permanentFallback: Bool? = nil
+    ) -> NSDictionary? {
+        var meta = [String: Any]()
+        let keys: [CFString] = [
+            kSecAttrIsPermanent,
+            kSecAttrApplicationTag,
+            kSecAttrLabel,
+            kSecAttrAccessGroup,
+            kSecAttrApplicationLabel
+        ]
+        for key in keys {
+            let keyStr = key as String
+            if let val = source[keyStr] {
+                meta[keyStr] = val
+            }
+        }
+        if meta[kSecAttrIsPermanent as String] == nil, let permanentFallback {
+            meta[kSecAttrIsPermanent as String] = permanentFallback
+        }
+        if meta[kSecAttrAccessGroup as String] == nil,
+           let defGroup = playChainDB.currentDefaultAccessGroup() {
+            meta[kSecAttrAccessGroup as String] = defGroup
+        }
+        return meta.isEmpty ? nil : (meta as NSDictionary)
+    }
+
     private static func mergeGeneratedKeyMetadata(from key: SecKey, into dict: inout [String: Any]) {
         guard let keyAttrs = SecKeyCopyAttributes(key) as? [String: Any] else {
             return
@@ -345,7 +377,7 @@ public class PlayKeychain: NSObject {
             if isSecureEnclave {
                 keychainDict[PlayKeychainDB.internalTokenIDColumn] = kSecAttrTokenIDSecureEnclave as String
             }
-            let (insertStatus, _) = playChainDB.insertWithStatus(keychainDict as NSDictionary)
+            let (insertStatus, insertedItem) = playChainDB.insertWithStatus(keychainDict as NSDictionary)
             guard insertStatus == errSecSuccess else {
                 debugLogger("Failed to write keychain file (status: \(insertStatus))")
                 if let errorPtr = error {
@@ -353,6 +385,19 @@ public class PlayKeychain: NSObject {
                 }
                 return nil
             }
+            let persistedSource = (insertedItem as? [String: Any]) ?? keychainDict
+            PTPlayChainSecureEnclaveRegistry.setPersistedAttributes(
+                buildPersistedAttributesMetadata(from: persistedSource, permanentFallback: true),
+                for: key
+            )
+        } else {
+            var metaSource = [String: Any]()
+            copyPersistedKeyAttributes(from: parameters, subAttrs: rawPrivateKeyAttrs, into: &metaSource)
+            mergeGeneratedKeyMetadata(from: key, into: &metaSource)
+            PTPlayChainSecureEnclaveRegistry.setPersistedAttributes(
+                buildPersistedAttributesMetadata(from: metaSource, permanentFallback: false),
+                for: key
+            )
         }
         if isSecureEnclave {
             PTPlayChainSecureEnclaveRegistry.markSecureEnclaveKey(key)
@@ -411,11 +456,16 @@ public class PlayKeychain: NSObject {
             publicKeyDict["type"] = publicKeyDict[kSecAttrKeyType as String]
             publicKeyDict["kcls"] = kSecAttrKeyClassPublic
             publicKeyDict[kSecValueData as String] = pubData
-            let (pubStatus, _) = playChainDB.insertWithStatus(publicKeyDict as NSDictionary)
+            let (pubStatus, insertedPub) = playChainDB.insertWithStatus(publicKeyDict as NSDictionary)
             guard pubStatus == errSecSuccess else {
                 debugLogger("Failed to write public key to keychain db (status: \(pubStatus))")
                 return pubStatus
             }
+            let pubSource = (insertedPub as? [String: Any]) ?? publicKeyDict
+            PTPlayChainSecureEnclaveRegistry.setPersistedAttributes(
+                buildPersistedAttributesMetadata(from: pubSource, permanentFallback: true),
+                for: publicKeyRef
+            )
             var privateKeyDict = [String: Any]()
             privateKeyDict[kSecClass as String] = kSecClassKey
             privateKeyDict[kSecAttrKeyType as String] = parameters[kSecAttrKeyType as String]
@@ -429,10 +479,34 @@ public class PlayKeychain: NSObject {
             if isSecureEnclave {
                 privateKeyDict[PlayKeychainDB.internalTokenIDColumn] = kSecAttrTokenIDSecureEnclave as String
             }
-            let (privStatus, _) = playChainDB.insertWithStatus(privateKeyDict as NSDictionary)
+            let (privStatus, insertedPriv) = playChainDB.insertWithStatus(privateKeyDict as NSDictionary)
             guard privStatus == errSecSuccess else {
                 debugLogger("Failed to write private key to keychain db (status: \(privStatus))")
                 return privStatus
+            }
+            let privSource = (insertedPriv as? [String: Any]) ?? privateKeyDict
+            PTPlayChainSecureEnclaveRegistry.setPersistedAttributes(
+                buildPersistedAttributesMetadata(from: privSource, permanentFallback: true),
+                for: privateKeyRef
+            )
+        } else {
+            if let pubKey = newPublicKey {
+                var pubMeta = [String: Any]()
+                copyPersistedKeyAttributes(from: parameters, subAttrs: rawPublicKeyAttrs, into: &pubMeta)
+                mergeGeneratedKeyMetadata(from: pubKey, into: &pubMeta)
+                PTPlayChainSecureEnclaveRegistry.setPersistedAttributes(
+                    buildPersistedAttributesMetadata(from: pubMeta, permanentFallback: false),
+                    for: pubKey
+                )
+            }
+            if let privKey = newPrivateKey {
+                var privMeta = [String: Any]()
+                copyPersistedKeyAttributes(from: parameters, subAttrs: rawPrivateKeyAttrs, into: &privMeta)
+                mergeGeneratedKeyMetadata(from: privKey, into: &privMeta)
+                PTPlayChainSecureEnclaveRegistry.setPersistedAttributes(
+                    buildPersistedAttributesMetadata(from: privMeta, permanentFallback: false),
+                    for: privKey
+                )
             }
         }
         if isSecureEnclave, let newPrivateKey {
@@ -480,6 +554,12 @@ extension PlayKeychain {
         }
         if isSecureEnclavePrivateKeyItem(keychainDict) {
             PTPlayChainSecureEnclaveRegistry.markSecureEnclaveKey(secKey)
+        }
+        if let rawMeta = keychainDict as? [String: Any] {
+            PTPlayChainSecureEnclaveRegistry.setPersistedAttributes(
+                buildPersistedAttributesMetadata(from: rawMeta, permanentFallback: true),
+                for: secKey
+            )
         }
         return secKey
     }
