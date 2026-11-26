@@ -282,6 +282,21 @@ static BOOL pt_has_blocked_jailbreak_dlopen_component(const char *path) {
     return NO;
 }
 
+static BOOL pt_is_cf_internal_carboncore_caller(const void *caller) {
+    if (caller == NULL) {
+        return NO;
+    }
+    const void *scaller = pt_strip_return_addr((uintptr_t)caller);
+    Dl_info cinfo;
+    if (dladdr(scaller, &cinfo) == 0 || cinfo.dli_fname == NULL) {
+        return NO;
+    }
+    if (pt_classify_caller_image_path(cinfo.dli_fname, NULL) != PT_CALLER_SYS_WRAPPER) {
+        return NO;
+    }
+    return pt_is_cf_internal_carboncore_bridge_caller_cstr(cinfo.dli_fname, cinfo.dli_sname) ? YES : NO;
+}
+
 static BOOL pt_should_block_dlopen_path(const char *path, const void *caller) {
     if (path == NULL || !pt_is_bypass_enabled()) {
         return NO;
@@ -296,6 +311,10 @@ static BOOL pt_should_block_dlopen_path(const char *path, const void *caller) {
         if (collapsed != NULL) {
             norm = collapsed;
         }
+    }
+    // Allow CoreFoundation's internal text-encoding lookup bridge while keeping app callers blocked.
+    if (pt_is_carboncore_framework_path_cstr(norm) && pt_is_cf_internal_carboncore_caller(caller)) {
+        return NO;
     }
     if (strstr(norm, ".framework/Versions/") != NULL ||
         strstr(norm, ".bundle/Versions/") != NULL ||
@@ -1416,14 +1435,19 @@ static void *pt_dlsym(void *handle, const char *symbol) {
     if (sym != NULL && app_caller) {
         const void *target_sym = pt_resolve_interposed_target(sym);
         if (target_sym == sym) {
+            Dl_info sym_info;
+            BOOL has_sym_info = (dladdr(target_sym, &sym_info) != 0 && sym_info.dli_fname != NULL);
+            BOOL cf_carboncore_bridge = (has_sym_info && handle != NULL && handle != RTLD_DEFAULT &&
+                                         handle != RTLD_NEXT && handle != RTLD_MAIN_ONLY && handle != RTLD_SELF &&
+                                         pt_is_carboncore_framework_path_cstr(sym_info.dli_fname) &&
+                                         pt_is_cf_internal_carboncore_caller(caller));
             const struct mach_header *sym_hdr = dyld_image_header_containing_address(target_sym);
-            if (sym_hdr != NULL && pt_is_hidden_dyld_image_header(sym_hdr)) {
+            if (!cf_carboncore_bridge && sym_hdr != NULL && pt_is_hidden_dyld_image_header(sym_hdr)) {
                 PT_DEBUG_TRACE("dyld", "hid dlsym symbol=%s", symbol != NULL ? symbol : "<null>");
                 pt_set_synthetic_dlerror("symbol not found");
                 return NULL;
             }
-            Dl_info sym_info;
-            if (dladdr(target_sym, &sym_info) != 0 && sym_info.dli_fname != NULL &&
+            if (!cf_carboncore_bridge && has_sym_info &&
                 (pt_is_hidden_dyld_image_name(sym_info.dli_fname) ||
                  pt_is_post13_7_hidden_framework_path(sym_info.dli_fname))) {
                 PT_DEBUG_TRACE("dyld", "hid dlsym symbol=%s", symbol != NULL ? symbol : "<null>");

@@ -2850,7 +2850,33 @@ int main(int argc, const char *argv[]) {
                 s11R3CfBundleOK = cfBundleOK;
                 s11R3DlopenFromOK = dlopenFromOK;
                 s11R3UnwindOK = unwindOK;
-                s11Round3DyldHandleUnwindOK = (explicitHandleOK && cfBundleOK && dlopenFromOK && unwindOK);
+
+                // CoreFoundation CarbonCore TEC encoding bridge must work while app callers still see CarbonCore hidden
+                const unsigned char gbkBytes[] = { 0xC4, 0xFA, 0xBA, 0xC3, 0xA3, 0xA1 };
+                CFStringRef cfGbkDecoded = CFStringCreateWithBytes(
+                    kCFAllocatorDefault, gbkBytes, sizeof(gbkBytes), kCFStringEncodingGBK_95, false);
+                BOOL gbkTextOK = (cfGbkDecoded != NULL &&
+                                  CFStringGetLength(cfGbkDecoded) == 3 &&
+                                  CFStringGetCharacterAtIndex(cfGbkDecoded, 0) == 0x60A8 &&
+                                  CFStringGetCharacterAtIndex(cfGbkDecoded, 1) == 0x597D &&
+                                  CFStringGetCharacterAtIndex(cfGbkDecoded, 2) == 0xFF01);
+                if (cfGbkDecoded != NULL) CFRelease(cfGbkDecoded);
+                BOOL ianaAliasesOK = (
+                    CFStringConvertIANACharSetNameToEncoding(CFSTR("gbk")) == kCFStringEncodingGBK_95 &&
+                    CFStringConvertIANACharSetNameToEncoding(CFSTR("x-gbk")) == kCFStringEncodingGBK_95 &&
+                    CFStringConvertIANACharSetNameToEncoding(CFSTR("gb_2312-80")) == kCFStringEncodingEUC_CN &&
+                    CFStringConvertIANACharSetNameToEncoding(CFSTR("cn-gb")) == kCFStringEncodingEUC_CN &&
+                    CFStringConvertIANACharSetNameToEncoding(CFSTR("chinese")) == kCFStringEncodingEUC_CN &&
+                    CFStringConvertIANACharSetNameToEncoding(CFSTR("iso-ir-58")) == kCFStringEncodingEUC_CN);
+                void *ccH = dlopen("/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/CarbonCore.framework/Versions/A/CarbonCore",
+                                   RTLD_LAZY | RTLD_NOLOAD);
+                BOOL ccAppHiddenOK = (ccH == NULL &&
+                                      CFBundleGetBundleWithIdentifier(CFSTR("com.apple.CoreServices.CarbonCore")) == NULL &&
+                                      dlsym(RTLD_DEFAULT, "TECGetTextEncodingFromInternetName") == NULL);
+                if (ccH != NULL) dlclose(ccH);
+
+                s11Round3DyldHandleUnwindOK = (explicitHandleOK && cfBundleOK && dlopenFromOK && unwindOK &&
+                                               gbkTextOK && ianaAliasesOK && ccAppHiddenOK);
 
                 NSString *home3 = NSHomeDirectory();
                 BOOL caseSensOK = (pathconf(home3.fileSystemRepresentation, _PC_CASE_SENSITIVE) == 1);

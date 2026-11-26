@@ -24,6 +24,9 @@ __attribute__((visibility("hidden"))) const char *pt_match_prefix_modulo_private
 __attribute__((visibility("hidden"))) bool pt_path_has_component(const char *path, const char *comp);
 
 __attribute__((visibility("hidden"))) bool pt_is_macos_only_framework_path_cstr(const char *name);
+__attribute__((visibility("hidden"))) bool pt_is_carboncore_framework_path_cstr(const char *path);
+__attribute__((visibility("hidden"))) bool pt_is_cf_internal_carboncore_bridge_caller_cstr(const char *caller_fname,
+                                                                                           const char *caller_sname);
 __attribute__((visibility("hidden"))) bool pt_is_hidden_macos_only_dlsym_symbol_cstr(const char *symbol);
 
 __attribute__((visibility("hidden"))) bool pt_is_desktop_supplemental_gid_c(gid_t g);

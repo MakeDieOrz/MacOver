@@ -1080,3 +1080,31 @@ __attribute__((visibility("hidden"))) bool pt_is_hidden_swift_qualified_token_cs
     }
     return false;
 }
+
+__attribute__((visibility("hidden"))) bool pt_is_carboncore_framework_path_cstr(const char *path) {
+    if (path == NULL || path[0] == '\0' || strstr(path, "..") != NULL) {
+        return false;
+    }
+    static const char kCoreServicesPrefix[] = "/System/Library/Frameworks/CoreServices.framework/";
+    const size_t prefix_len = sizeof(kCoreServicesPrefix) - 1U;
+    if (strncmp(path, kCoreServicesPrefix, prefix_len) != 0) {
+        return false;
+    }
+    const char *hit = strstr(path + prefix_len, "CarbonCore.framework/");
+    return (hit != NULL && (hit == path + prefix_len || hit[-1] == '/'));
+}
+
+__attribute__((visibility("hidden"))) bool pt_is_cf_internal_carboncore_bridge_caller_cstr(const char *caller_fname,
+                                                                                           const char *caller_sname) {
+    if (caller_fname == NULL || caller_fname[0] == '\0' || strstr(caller_fname, "..") != NULL) {
+        return false;
+    }
+    static const char kCFPrefix[] = "/System/Library/Frameworks/CoreFoundation.framework/";
+    if (strncmp(caller_fname, kCFPrefix, sizeof(kCFPrefix) - 1U) != 0) {
+        return false;
+    }
+    if (caller_sname != NULL && strstr(caller_sname, "CFBundle") != NULL) {
+        return false;
+    }
+    return true;
+}

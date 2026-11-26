@@ -1485,6 +1485,42 @@ static void test_swift_hidden_type_boundary_rules(void) {
     assert(pt_is_hidden_swift_qualified_token_cstr("Swift.Duration", 14U, true));
 }
 
+static void test_cf_internal_carboncore_bridge_rules(void) {
+    assert(pt_is_carboncore_framework_path_cstr("/System/Library/Frameworks/CoreServices.framework/Versions/A/"
+                                                "Frameworks/CarbonCore.framework/Versions/A/CarbonCore"));
+    assert(pt_is_carboncore_framework_path_cstr(
+        "/System/Library/Frameworks/CoreServices.framework/Frameworks/CarbonCore.framework/CarbonCore"));
+    assert(!pt_is_carboncore_framework_path_cstr("/System/Library/Frameworks/CoreServices.framework/CoreServices"));
+    assert(!pt_is_carboncore_framework_path_cstr("/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit"));
+    assert(!pt_is_carboncore_framework_path_cstr(
+        "/System/Library/Frameworks/CoreServices.framework/../CarbonCore.framework/CarbonCore"));
+    assert(!pt_is_carboncore_framework_path_cstr("/tmp/CarbonCore.framework/CarbonCore"));
+    assert(!pt_is_carboncore_framework_path_cstr(NULL));
+
+    assert(pt_is_cf_internal_carboncore_bridge_caller_cstr(
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+        "____CFLookupCarbonCoreFunction_block_invoke"));
+    assert(pt_is_cf_internal_carboncore_bridge_caller_cstr(
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+        "____CFCarbonCore_TECGetTextEncodingFromInternetName_block_invoke"));
+    assert(pt_is_cf_internal_carboncore_bridge_caller_cstr(
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation", NULL));
+    assert(!pt_is_cf_internal_carboncore_bridge_caller_cstr(
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation", "CFBundleLoadExecutable"));
+    assert(!pt_is_cf_internal_carboncore_bridge_caller_cstr(
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation", "_CFBundleDlfcnLoadBundle"));
+    assert(!pt_is_cf_internal_carboncore_bridge_caller_cstr(
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+        "CFBundleGetFunctionPointerForName"));
+    assert(!pt_is_cf_internal_carboncore_bridge_caller_cstr(
+        "/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation", "something"));
+    assert(!pt_is_cf_internal_carboncore_bridge_caller_cstr("/var/containers/Bundle/Application/App.app/App",
+                                                            "____CFLookupCarbonCoreFunction_block_invoke"));
+    assert(!pt_is_cf_internal_carboncore_bridge_caller_cstr(
+        "/System/Library/Frameworks/CoreFoundation.framework/../Foundation", NULL));
+    assert(!pt_is_cf_internal_carboncore_bridge_caller_cstr(NULL, NULL));
+}
+
 int main(void) {
     test_der_entitlements_encoding_and_superblob_rewrite();
     test_attr_ref_zero_fill();
@@ -1513,6 +1549,7 @@ int main(void) {
     test_v105_batch2_sysctl_iokit_mig_and_metal();
     test_production_c_modules_extra();
     test_swift_hidden_type_boundary_rules();
+    test_cf_internal_carboncore_bridge_rules();
     printf("All compat104 unit tests passed.\n");
     return 0;
 }
