@@ -76,6 +76,7 @@ struct AppSettingsData: Codable, Equatable {
     var strictViewportOrientation: StrictViewportOrientation = .landscape
     var strictViewportScaleMode: StrictViewportScaleMode = .fitScreen
     var storedHasIntrospection = false
+    var storedHasIosFrameworks = false
 
     init() {}
 
@@ -168,6 +169,7 @@ struct AppSettingsData: Codable, Equatable {
             rawSetting: try? container.decodeIfPresent(String.self, forKey: .strictViewportScaleMode)
         )
         storedHasIntrospection = (try? container.decodeIfPresent(Bool.self, forKey: .storedHasIntrospection)) ?? false
+        storedHasIosFrameworks = (try? container.decodeIfPresent(Bool.self, forKey: .storedHasIosFrameworks)) ?? false
     }
 
     private static func decodeFloat<K: CodingKey>(

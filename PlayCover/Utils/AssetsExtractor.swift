@@ -70,6 +70,27 @@ extension CUINamedImage {
         guard let cgImage = self._rendition().unslicedImage()?.takeUnretainedValue() else {
             return nil
         }
-        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        let width = cgImage.width
+        let height = cgImage.height
+        guard width > 0, height > 0, width <= 4096, height <= 4096 else {
+            return nil
+        }
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(
+                  data: nil,
+                  width: width,
+                  height: height,
+                  bitsPerComponent: 8,
+                  bytesPerRow: width * 4,
+                  space: colorSpace,
+                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              ) else {
+            return nil
+        }
+        ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard let detachedCGImage = ctx.makeImage() else {
+            return nil
+        }
+        return NSImage(cgImage: detachedCGImage, size: NSSize(width: width, height: height))
     }
 }

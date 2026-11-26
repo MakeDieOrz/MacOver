@@ -236,7 +236,7 @@ final class AppSettingsDataTests: XCTestCase {
             "CFBundleExecutable": "IntrospectionProbe",
             "CFBundleShortVersionString": "1.0",
             "LSEnvironment": [
-                "DYLD_LIBRARY_PATH": "\(PlayApp.introspection):\(PlayApp.iosFrameworks)"
+                "DYLD_LIBRARY_PATH": "\(PlayApp.introspection):\(PlayApp.iosFrameworks):/custom/dyld"
             ]
         ]
         try PropertyListSerialization.data(fromPropertyList: initialPlist, format: .xml, options: 0)
@@ -245,34 +245,43 @@ final class AppSettingsDataTests: XCTestCase {
         let app = PlayApp(appUrl: appURL)
         defer { _ = app.settings.flush() }
         XCTAssertFalse(app.settings.settings.storedHasIntrospection)
+        XCTAssertFalse(app.settings.settings.storedHasIosFrameworks)
 
-        // Strict launch strips introspection from Info.plist, syncs in-memory info,
-        // and records storedHasIntrospection = true non-destructively.
+        // Strict launch strips both introspection and iosFrameworks from Info.plist,
+        // syncs in-memory info, preserves custom entries, and records stored flags non-destructively.
         let strictLaunchInfo = AppInfo(contentsOf: plistURL)
         XCTAssertTrue(app.stripIntrospectionForStrictLaunch(launchInfo: strictLaunchInfo))
         XCTAssertTrue(app.settings.settings.storedHasIntrospection)
+        XCTAssertTrue(app.settings.settings.storedHasIosFrameworks)
         let afterStrictDisk = AppInfo(contentsOf: plistURL)
-        XCTAssertEqual(afterStrictDisk.lsEnvironment["DYLD_LIBRARY_PATH"], PlayApp.iosFrameworks)
-        XCTAssertEqual(app.info.lsEnvironment["DYLD_LIBRARY_PATH"], PlayApp.iosFrameworks)
+        XCTAssertEqual(afterStrictDisk.lsEnvironment["DYLD_LIBRARY_PATH"], "/custom/dyld")
+        XCTAssertEqual(app.info.lsEnvironment["DYLD_LIBRARY_PATH"], "/custom/dyld")
 
         // Second strict pass is a no-op.
         XCTAssertFalse(app.stripIntrospectionForStrictLaunch(launchInfo: afterStrictDisk))
 
-        // Non-strict launch restores introspection when storedHasIntrospection == true.
+        // Non-strict launch restores both introspection and iosFrameworks when stored flags are true.
         let nonStrictLaunchInfo = AppInfo(contentsOf: plistURL)
         XCTAssertTrue(app.restoreIntrospectionForNonStrictLaunch(launchInfo: nonStrictLaunchInfo))
         let afterRestoreDisk = AppInfo(contentsOf: plistURL)
         let restoredEntries = (afterRestoreDisk.lsEnvironment["DYLD_LIBRARY_PATH"] ?? "").split(separator: ":")
         XCTAssertTrue(restoredEntries.contains(Substring(PlayApp.introspection)))
         XCTAssertTrue(restoredEntries.contains(Substring(PlayApp.iosFrameworks)))
+        XCTAssertTrue(restoredEntries.contains("/custom/dyld"))
         XCTAssertEqual(app.info.lsEnvironment["DYLD_LIBRARY_PATH"], afterRestoreDisk.lsEnvironment["DYLD_LIBRARY_PATH"])
 
-        // When storedHasIntrospection == false and stripped, non-strict launch does not inject introspection.
-        app.settings.update { $0.storedHasIntrospection = false }
+        // When stored flags == false and stripped, non-strict launch does not inject host paths.
+        app.settings.update {
+            $0.storedHasIntrospection = false
+            $0.storedHasIosFrameworks = false
+        }
         let cleanLaunchInfo = AppInfo(contentsOf: plistURL)
         XCTAssertTrue(app.stripIntrospectionForStrictLaunch(launchInfo: cleanLaunchInfo))
-        // Note: strip sets storedHasIntrospection = true only when it had to strip; explicit off clears it.
-        app.settings.update { $0.storedHasIntrospection = false }
+        // Note: strip sets stored flags = true when it had to strip; explicit off clears them.
+        app.settings.update {
+            $0.storedHasIntrospection = false
+            $0.storedHasIosFrameworks = false
+        }
         XCTAssertFalse(app.restoreIntrospectionForNonStrictLaunch(launchInfo: AppInfo(contentsOf: plistURL)))
     }
 

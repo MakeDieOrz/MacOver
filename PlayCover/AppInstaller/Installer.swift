@@ -620,11 +620,10 @@ class Installer {
             label: "_CodeSignature/CodeResources"
         )
 
-        let hasThinExecutable: Bool
+        let executableSliceContext: Macho.SliceContext?
         if checkBackupSourceRegularFile(at: baseApp.executable, label: "executable") {
             do {
-                let ctx = try Macho.inspectArm64Slice(at: baseApp.executable)
-                hasThinExecutable = !ctx.isFat
+                executableSliceContext = try Macho.inspectArm64Slice(at: baseApp.executable)
             } catch {
                 PlayCoverDiagnostics.log(
                     "Failed to inspect executable for AppBackups staging: \(error)",
@@ -633,10 +632,10 @@ class Installer {
                 return .failed
             }
         } else {
-            hasThinExecutable = false
+            executableSliceContext = nil
         }
 
-        guard hasProvision || hasThinExecutable || hasInfoPlist || hasCodeResources else {
+        guard hasProvision || executableSliceContext != nil || hasInfoPlist || hasCodeResources else {
             return .noneApplicable
         }
 
@@ -686,10 +685,43 @@ class Installer {
             }
         }
 
-        if hasThinExecutable {
+        if let ctx = executableSliceContext {
             let stagedExec = stagingDir.appendingPathComponent("executable")
             do {
-                try cloneOrCopyRegularFileNoFollow(from: baseApp.executable, to: stagedExec)
+                if !ctx.isFat {
+                    try cloneOrCopyRegularFileNoFollow(from: baseApp.executable, to: stagedExec)
+                } else {
+                    let srcHandle = try FileHandle(forReadingFrom: baseApp.executable)
+                    defer { try? srcHandle.close() }
+                    guard fm.createFile(
+                        atPath: stagedExec.path,
+                        contents: nil,
+                        attributes: [.posixPermissions: NSNumber(value: 0o755)]
+                    ) else {
+                        throw PlayCoverError.failedToStripBinary
+                    }
+                    let outHandle = try FileHandle(forWritingTo: stagedExec)
+                    do {
+                        try srcHandle.seek(toOffset: ctx.sliceOffset)
+                        var remaining = ctx.sliceSize
+                        let chunkSize = 4 * 1024 * 1024
+                        while remaining > 0 {
+                            let step = Int(min(remaining, UInt64(chunkSize)))
+                            let written: Int = try autoreleasepool {
+                                guard let chunk = try srcHandle.read(upToCount: step), !chunk.isEmpty else {
+                                    throw PlayCoverError.appCorrupted
+                                }
+                                try outHandle.write(contentsOf: chunk)
+                                return chunk.count
+                            }
+                            remaining -= UInt64(written)
+                        }
+                        try outHandle.close()
+                    } catch {
+                        try? outHandle.close()
+                        throw error
+                    }
+                }
                 try? stagedExec.setBinaryPosixPermissions(0o755)
             } catch {
                 PlayCoverDiagnostics.log("Failed to stage executable backup: \(error)", isError: true)
@@ -981,6 +1013,7 @@ class Installer {
             var orderedNames: [String] = [
                 Installer.backupManifestFileName,
                 "Info.plist",
+                "CodeResources",
                 "executable",
                 "embedded.mobileprovision"
             ]

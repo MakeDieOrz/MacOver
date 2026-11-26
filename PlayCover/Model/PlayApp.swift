@@ -759,38 +759,79 @@ extension PlayApp {
     }
 
     func stripIntrospectionForStrictLaunch(launchInfo: AppInfo) -> Bool {
-        let result = Self.updatedLSEnvironment(
-            launchInfo.lsEnvironment,
+        var env = launchInfo.lsEnvironment
+        var changed = false
+
+        let introResult = Self.updatedLSEnvironment(
+            env,
             including: Self.introspection,
             enabled: false
         )
-        guard result.changed else {
+        if introResult.changed {
+            if !settings.settings.storedHasIntrospection {
+                settings.update { $0.storedHasIntrospection = true }
+                _ = settings.flush()
+            }
+            env = introResult.env
+            changed = true
+        }
+
+        let iosFwResult = Self.updatedLSEnvironment(
+            env,
+            including: Self.iosFrameworks,
+            enabled: false
+        )
+        if iosFwResult.changed {
+            if !settings.settings.storedHasIosFrameworks {
+                settings.update { $0.storedHasIosFrameworks = true }
+                _ = settings.flush()
+            }
+            env = iosFwResult.env
+            changed = true
+        }
+
+        guard changed else {
             return false
         }
-        if !settings.settings.storedHasIntrospection {
-            settings.update { $0.storedHasIntrospection = true }
-            _ = settings.flush()
-        }
-        launchInfo.lsEnvironment = result.env
-        syncInMemoryLSEnvironment(result.env)
+        launchInfo.lsEnvironment = env
+        syncInMemoryLSEnvironment(env)
         Self.invalidateVerifiedBundleStamp(for: url)
         return true
     }
 
     func restoreIntrospectionForNonStrictLaunch(launchInfo: AppInfo) -> Bool {
-        guard settings.settings.storedHasIntrospection else {
+        var env = launchInfo.lsEnvironment
+        var changed = false
+
+        if settings.settings.storedHasIntrospection {
+            let introResult = Self.updatedLSEnvironment(
+                env,
+                including: Self.introspection,
+                enabled: true
+            )
+            if introResult.changed {
+                env = introResult.env
+                changed = true
+            }
+        }
+
+        if settings.settings.storedHasIosFrameworks {
+            let iosFwResult = Self.updatedLSEnvironment(
+                env,
+                including: Self.iosFrameworks,
+                enabled: true
+            )
+            if iosFwResult.changed {
+                env = iosFwResult.env
+                changed = true
+            }
+        }
+
+        guard changed else {
             return false
         }
-        let result = Self.updatedLSEnvironment(
-            launchInfo.lsEnvironment,
-            including: Self.introspection,
-            enabled: true
-        )
-        guard result.changed else {
-            return false
-        }
-        launchInfo.lsEnvironment = result.env
-        syncInMemoryLSEnvironment(result.env)
+        launchInfo.lsEnvironment = env
+        syncInMemoryLSEnvironment(env)
         Self.invalidateVerifiedBundleStamp(for: url)
         return true
     }
@@ -799,6 +840,8 @@ extension PlayApp {
         if let set {
             if path == Self.introspection {
                 settings.update { $0.storedHasIntrospection = set }
+            } else if path == Self.iosFrameworks {
+                settings.update { $0.storedHasIosFrameworks = set }
             }
             let result = Self.updatedLSEnvironment(info.lsEnvironment, including: path, enabled: set)
             if result.changed {

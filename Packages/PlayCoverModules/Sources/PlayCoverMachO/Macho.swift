@@ -1076,7 +1076,10 @@ public class Macho {
             let loadCommand = try commandData.extract(load_command.self,
                                                   offset: commandData.startIndex,
                                                   swap: shouldSwap ? swap_load_command : nil)
-            if ![LC_LOAD_WEAK_DYLIB, UInt32(LC_LOAD_DYLIB)].contains(loadCommand.cmd) ||
+            if ![LC_LOAD_WEAK_DYLIB,
+                 UInt32(LC_LOAD_DYLIB),
+                 UInt32(LC_REEXPORT_DYLIB),
+                 UInt32(LC_LOAD_UPWARD_DYLIB)].contains(loadCommand.cmd) ||
                 Int(loadCommand.cmdsize) < MemoryLayout<dylib_command>.size {
                 return false
             }
@@ -1127,28 +1130,86 @@ public class Macho {
         if binary.startIndex != 0 {
             binary = Data(binary)
         }
+        let headerSize = MemoryLayout<mach_header_64>.size
+        guard binary.count >= headerSize else {
+            throw PlayCoverError.appCorrupted
+        }
+        var header = try binary.extract(mach_header_64.self)
+        let headerSwapped = (header.magic == MH_CIGAM_64)
+        if headerSwapped {
+            swap_mach_header_64(&header, NXHostByteOrder())
+        }
+
+        let commandsEnd = headerSize + Int(header.sizeofcmds)
+        guard commandsEnd <= binary.count else {
+            throw PlayCoverError.appCorrupted
+        }
+
+        var filteredCommands = Data()
+        filteredCommands.reserveCapacity(Int(header.sizeofcmds) + MemoryLayout<build_version_command>.size)
+        var keptCount: UInt32 = 0
+        var foundVersionCommand = false
+
+        _ = try iterateLoadCommands(binary: binary) { offset, needSwap in
+            let loadCommand = try binary.extract(load_command.self,
+                                                 offset: offset,
+                                                 swap: needSwap ? swap_load_command : nil)
+            let isVersionCmd = [UInt32(LC_VERSION_MIN_IPHONEOS),
+                                UInt32(LC_VERSION_MIN_MACOSX),
+                                UInt32(LC_BUILD_VERSION)].contains(loadCommand.cmd)
+            if isVersionCmd {
+                foundVersionCommand = true
+            } else {
+                filteredCommands.append(binary[offset ..< offset + Int(loadCommand.cmdsize)])
+                keptCount += 1
+            }
+            return false
+        }
+        guard foundVersionCommand else {
+            return
+        }
+
         var macCatalystCommand = build_version_command(cmd: UInt32(LC_BUILD_VERSION),
                                                        cmdsize: 24,
                                                        platform: UInt32(PLATFORM_MACCATALYST),
                                                        minos: 0x000b0000,
                                                        sdk: 0x000e0000,
                                                        ntools: 0)
+        if headerSwapped {
+            swap_build_version_command(&macCatalystCommand, NX_BigEndian)
+        }
+        filteredCommands.append(Data(bytes: &macCatalystCommand, count: MemoryLayout<build_version_command>.size))
+        keptCount += 1
 
-        try replaceLastCommand(&binary, satisfy: { data, shouldSwap in
-            let loadCommand = try data.extract(load_command.self,
-                                           offset: data.startIndex,
-                                           swap: shouldSwap ? swap_load_command : nil)
-            return [UInt32(LC_VERSION_MIN_IPHONEOS),
-                    UInt32(LC_VERSION_MIN_MACOSX),
-                    UInt32(LC_BUILD_VERSION)]
-                .contains(loadCommand.cmd)
-
-        }, with: { shouldSwap in
-            if shouldSwap {
-                swap_build_version_command(&macCatalystCommand, NX_BigEndian)
+        let newCommandsEnd = headerSize + filteredCommands.count
+        if newCommandsEnd > commandsEnd {
+            let maxAllowedEnd = try earliestContentOffset(in: binary, totalSize: totalSize)
+            let neededGrowth = newCommandsEnd - commandsEnd
+            let availableSpace = max(0, maxAllowedEnd - commandsEnd)
+            if newCommandsEnd > maxAllowedEnd || newCommandsEnd > binary.count {
+                throw MachoCapacityError.insufficientLoadCommandSpace(
+                    needed: neededGrowth,
+                    available: availableSpace
+                )
             }
-            return Data(bytes: &macCatalystCommand, count: MemoryLayout<build_version_command>.size)
-        }, atEnd: true, totalSize: totalSize)
+            if binary[commandsEnd ..< newCommandsEnd].contains(where: { $0 != 0 }) {
+                throw MachoCapacityError.insufficientLoadCommandSpace(
+                    needed: neededGrowth,
+                    available: 0
+                )
+            }
+        } else if newCommandsEnd < commandsEnd {
+            binary.replaceSubrange(newCommandsEnd ..< commandsEnd,
+                                   with: Data(count: commandsEnd - newCommandsEnd))
+        }
+
+        binary.replaceSubrange(headerSize ..< newCommandsEnd, with: filteredCommands)
+        header.ncmds = keptCount
+        header.sizeofcmds = UInt32(filteredCommands.count)
+        if headerSwapped {
+            swap_mach_header_64(&header, NX_BigEndian)
+        }
+        binary.replaceSubrange(0 ..< headerSize, with: Data(bytes: &header, count: headerSize))
     }
 
     public static func replaceLastCommand(
@@ -1341,7 +1402,8 @@ public class Macho {
 
     public static func isMachoValidArch(_ url: URL) throws -> Bool {
         let binary = try readHeaderSlice(at: url)
-        var result = false
+        var sawBuildVersion = false
+        var allCatalyst = true
         _ = try iterateLoadCommands(binary: binary) { offset, shouldSwap in
             let loadCommand = try binary.extract(load_command.self,
                                              offset: offset,
@@ -1353,12 +1415,15 @@ public class Macho {
                 let versionCommand = try binary.extract(build_version_command.self,
                                                     offset: offset,
                                                     swap: shouldSwap ? swap_build_version_command : nil)
-                result = versionCommand.platform == PLATFORM_MACCATALYST
-                return true
+                sawBuildVersion = true
+                if versionCommand.platform != PLATFORM_MACCATALYST {
+                    allCatalyst = false
+                    return true
+                }
             }
             return false
         }
-        return result
+        return sawBuildVersion && allCatalyst
     }
 
     public static func inspectBinary(
