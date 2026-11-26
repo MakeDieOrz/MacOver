@@ -157,6 +157,7 @@
 		AA71A18D2F00000C00623C15 /* PTSystemSpooferSyscallMIG.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A18C2F00000C00623C15 /* PTSystemSpooferSyscallMIG.m */; };
 		AA71A18F2F00000C00623C15 /* PTSystemSpooferSysctl.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A18E2F00000C00623C15 /* PTSystemSpooferSysctl.m */; };
 		AA71A1912F00000C00623C15 /* PTWebKitScripts.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A1902F00000C00623C15 /* PTWebKitScripts.m */; };
+		AA71A19F2F00000C00623C15 /* PTCustomInputViewHost.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71A19E2F00000C00623C15 /* PTCustomInputViewHost.m */; };
 		AA71A11F2F00000700623C15 /* PTRegistration.c in Sources */ = {isa = PBXBuildFile; fileRef = AA71A1032F00000700623C15 /* PTRegistration.c */; };
 		AA71A1202F00000700623C15 /* PTSafeMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA71A10C2F00000700623C15 /* PTSafeMode.swift */; };
 		AA71A1212F00000700623C15 /* PTPluginContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA71A10D2F00000700623C15 /* PTPluginContainer.swift */; };
@@ -349,6 +350,7 @@
 		AA71A18C2F00000C00623C15 /* PTSystemSpooferSyscallMIG.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTSystemSpooferSyscallMIG.m; sourceTree = "<group>"; };
 		AA71A18E2F00000C00623C15 /* PTSystemSpooferSysctl.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTSystemSpooferSysctl.m; sourceTree = "<group>"; };
 		AA71A1902F00000C00623C15 /* PTWebKitScripts.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTWebKitScripts.m; sourceTree = "<group>"; };
+		AA71A19E2F00000C00623C15 /* PTCustomInputViewHost.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PTCustomInputViewHost.m; sourceTree = "<group>"; };
 		AA71A10C2F00000700623C15 /* PTSafeMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PTSafeMode.swift; sourceTree = "<group>"; };
 		AA71A10D2F00000700623C15 /* PTPluginContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PTPluginContainer.swift; sourceTree = "<group>"; };
 		AA71A10E2F00000700623C15 /* PTRegistrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PTRegistrationTests.swift; sourceTree = "<group>"; };
@@ -754,6 +756,7 @@
 				AA71A18C2F00000C00623C15 /* PTSystemSpooferSyscallMIG.m */,
 				AA71A18E2F00000C00623C15 /* PTSystemSpooferSysctl.m */,
 				AA71A1902F00000C00623C15 /* PTWebKitScripts.m */,
+				AA71A19E2F00000C00623C15 /* PTCustomInputViewHost.m */,
 			);
 			path = Subsystems;
 			sourceTree = "<group>";
@@ -1249,6 +1252,7 @@
 				"$(SRCROOT)/PlayTools/Subsystems/PTSystemSpooferSyscallMIG.m",
 				"$(SRCROOT)/PlayTools/Subsystems/PTSystemSpooferSysctl.m",
 				"$(SRCROOT)/PlayTools/Subsystems/PTWebKitScripts.m",
+				"$(SRCROOT)/PlayTools/Subsystems/PTCustomInputViewHost.m",
 			);
 			name = "Build PlayTools XCFramework";
 			outputFileListPaths = (
@@ -1347,6 +1351,7 @@
 				AA71A18D2F00000C00623C15 /* PTSystemSpooferSyscallMIG.m in Sources */,
 				AA71A18F2F00000C00623C15 /* PTSystemSpooferSysctl.m in Sources */,
 				AA71A1912F00000C00623C15 /* PTWebKitScripts.m in Sources */,
+				AA71A19F2F00000C00623C15 /* PTCustomInputViewHost.m in Sources */,
 				9562D16F2AB50D34002C329D /* ActionDispatcher.swift in Sources */,
 				2847AE48298EFC0F00B0F983 /* PlayScreen.swift in Sources */,
 				9562D1532AB484FD002C329D /* EventAdapter.swift in Sources */,
@@ -1546,6 +1551,9 @@
 					"$(inherited)",
 					"-lsqlite3",
 					"-weak-lMobileGestalt",
+					"-weak-licucore",
+					"-weak_framework",
+					Network,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = app.makedie.PlayTools;
 				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
@@ -1580,6 +1588,9 @@
 					"$(inherited)",
 					"-lsqlite3",
 					"-weak-lMobileGestalt",
+					"-weak-licucore",
+					"-weak_framework",
+					Network,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = app.makedie.PlayTools;
 				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
@@ -1614,6 +1625,9 @@
 					"$(inherited)",
 					"-lsqlite3",
 					"-weak-lMobileGestalt",
+					"-weak-licucore",
+					"-weak_framework",
+					Network,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = app.makedie.PlayTools;
 				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";

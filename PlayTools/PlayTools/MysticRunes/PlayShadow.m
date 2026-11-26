@@ -263,6 +263,7 @@ __attribute__((visibility("hidden"))) BOOL ps_class_defines_instance_method(Clas
     [self debugLogger:@"PlayShadow is now loading"];
     ps_install_network_blocker_hooks();
     pt_install_frame_rate_hooks_if_loaded();
+    ps_install_custom_input_view_host();
     if (pt_is_bypass_enabled() &&
         ![[NSProcessInfo processInfo].environment[@"DISABLE_PLAYSHADOW_BYPASS"] isEqualToString:@"1"]) {
         [self loadJailbreakBypass];

@@ -100,6 +100,9 @@ characterEncodingName:(NSString *)characterEncodingName
 - (instancetype) pm_wk_initWithFrame:(CGRect)frame configuration:(id)configuration __attribute__((objc_method_family(init)));
 - (instancetype) pm_wk_initWithCoder:(NSCoder *)coder __attribute__((objc_method_family(init)));
 - (NSString *) pm_wk_customUserAgent;
+- (BOOL) pm_ptkb_becomeFirstResponder;
+- (BOOL) pm_ptkb_resignFirstResponder;
+- (void) pm_ptkb_reloadInputViews;
 + (void) pm_wk_registerSchemeForCustomProtocol:(NSString *)scheme;
 + (void) pm_wk_unregisterSchemeForCustomProtocol:(NSString *)scheme;
 @end
@@ -165,7 +168,10 @@ __attribute__((visibility("hidden"))) void ps_load_environment_bypass_hooks(void
 __attribute__((visibility("hidden"))) void ps_install_dynamic_system_bundle_hooks(void);
 __attribute__((visibility("hidden"))) void ps_install_uifont_hooks_if_loaded(void);
 __attribute__((visibility("hidden"))) void ps_install_audio_session_port_hooks(void);
+__attribute__((visibility("hidden"))) void ps_install_avfoundation_audio_unit_hooks_if_loaded(void);
+__attribute__((visibility("hidden"))) void ps_install_corehaptics_hooks_if_loaded(void);
 __attribute__((visibility("hidden"))) void ps_install_avcapture_hooks_if_loaded(void);
+__attribute__((visibility("hidden"))) void ps_install_coretelephony_hooks_if_loaded(void);
 __attribute__((visibility("hidden"))) void ps_install_app_attest_hooks_if_loaded(void);
 __attribute__((visibility("hidden"))) void ps_install_local_auth_hooks_if_loaded(void);
 __attribute__((visibility("hidden"))) void ps_install_game_controller_hooks_if_loaded(void);
@@ -180,5 +186,8 @@ __attribute__((visibility("hidden"))) void ps_install_network_blocker_hooks(void
 __attribute__((visibility("hidden"))) void ps_install_webkit_network_hooks_if_loaded(void);
 __attribute__((visibility("hidden"))) void ps_apply_proxy_to_wk_configuration(id cfg);
 __attribute__((visibility("hidden"))) void ps_install_default_wk_trust_delegate(id webView);
+
+// PTCustomInputViewHost exports
+__attribute__((visibility("hidden"))) void ps_install_custom_input_view_host(void);
 
 #endif /* PSInternal_h */

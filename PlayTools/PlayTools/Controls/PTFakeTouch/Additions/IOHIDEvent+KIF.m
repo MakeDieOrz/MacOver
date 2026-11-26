@@ -137,6 +137,17 @@ IOHIDEventRef IOHIDEventCreateDigitizerFingerEventWithQuality(CFAllocatorRef all
                                                               IOHIDFloat minorRadius, IOHIDFloat majorRadius, IOHIDFloat quality, IOHIDFloat density, IOHIDFloat irregularity,
                                                               Boolean range, Boolean touch, IOOptionBits options);
 
+static uint64_t kif_apple_multitouch_sender_id(void) {
+    static uint64_t s_sender_id = 0;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        // Use a randomized per-process multitouch sender ID instead of the 0x27F constant fingerprint.
+        uint32_t low = 0x400U + arc4random_uniform(0x7000U);
+        s_sender_id = 0x0000000100000000ULL | (uint64_t)low;
+    });
+    return s_sender_id;
+}
+
 static void kif_append_finger_event(IOHIDEventRef handEvent, UITouch *touch, uint32_t touchIndex, AbsoluteTime baseTime) {
     if (handEvent == NULL || touch == nil) {
         return;
@@ -175,6 +186,8 @@ static void kif_append_finger_event(IOHIDEventRef handEvent, UITouch *touch, uin
         fingerTimestamp = baseTime;
     }
 
+    IOHIDFloat minorR = isTouching ? (IOHIDFloat)(22.5 + (double)(touchIndex % 3U) * 0.6) : 0.0;
+    IOHIDFloat majorR = isTouching ? (IOHIDFloat)(25.0 + (double)(touchIndex % 3U) * 0.6) : 0.0;
     IOHIDEventRef fingerEvent = IOHIDEventCreateDigitizerFingerEventWithQuality(kCFAllocatorDefault, // allocator
                                                                                 fingerTimestamp, // finger timestamp
                                                                                 touchIndex + 1, // index
@@ -185,8 +198,8 @@ static void kif_append_finger_event(IOHIDEventRef handEvent, UITouch *touch, uin
                                                                                 0.0, // z
                                                                                 0, // tipPressure
                                                                                 0, // twist
-                                                                                5.0, // minor radius
-                                                                                5.0, // major radius
+                                                                                minorR, // minor radius
+                                                                                majorR, // major radius
                                                                                 1.0, // quality
                                                                                 1.0, // density
                                                                                 1.0, // irregularity
@@ -197,7 +210,7 @@ static void kif_append_finger_event(IOHIDEventRef handEvent, UITouch *touch, uin
         return;
     }
     IOHIDEventSetIntegerValue(fingerEvent, kIOHIDEventFieldDigitizerIsDisplayIntegrated, 1);
-    IOHIDEventSetSenderID(fingerEvent, 0x000000010000027Full);
+    IOHIDEventSetSenderID(fingerEvent, kif_apple_multitouch_sender_id());
     IOHIDEventAppendEvent(handEvent, fingerEvent);
     CFRelease(fingerEvent);
 }
@@ -222,7 +235,7 @@ static IOHIDEventRef kif_create_hand_event(AbsoluteTime timeStamp) {
         return NULL;
     }
     IOHIDEventSetIntegerValue(handEvent, kIOHIDEventFieldDigitizerIsDisplayIntegrated, true);
-    IOHIDEventSetSenderID(handEvent, 0x000000010000027Full);
+    IOHIDEventSetSenderID(handEvent, kif_apple_multitouch_sender_id());
     return handEvent;
 }
 

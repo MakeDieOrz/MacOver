@@ -8,6 +8,7 @@
 //  which Square, Inc. licenses this file to you.
 
 #import "UITouch-KIFAdditions.h"
+#import <objc/message.h>
 #import <objc/runtime.h>
 #import "PTFakeMetaTouch.h"
 
@@ -134,6 +135,18 @@
     if (event != NULL) {
         [self _setHidEvent:event];
         CFRelease(event);
+    }
+    CGFloat radius = 24.5 + (CGFloat)(fingerIndex % 3U) * 0.6;
+    SEL setMajorSel = sel_registerName("setMajorRadius:");
+    SEL privMajorSel = sel_registerName("_setMajorRadius:");
+    SEL setTolSel = sel_registerName("_setMajorRadiusTolerance:");
+    if ([self respondsToSelector:privMajorSel]) {
+        ((void (*)(id, SEL, CGFloat))objc_msgSend)(self, privMajorSel, radius);
+    } else if ([self respondsToSelector:setMajorSel]) {
+        ((void (*)(id, SEL, CGFloat))objc_msgSend)(self, setMajorSel, radius);
+    }
+    if ([self respondsToSelector:setTolSel]) {
+        ((void (*)(id, SEL, CGFloat))objc_msgSend)(self, setTolSel, (CGFloat)1.5);
     }
 }
 

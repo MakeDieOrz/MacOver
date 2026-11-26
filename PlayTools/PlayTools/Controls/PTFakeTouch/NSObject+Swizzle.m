@@ -22,6 +22,7 @@
 
 extern __attribute__((visibility("hidden"))) void pt_ensure_playloader_early_init(void);
 extern __attribute__((visibility("hidden"))) BOOL pt_is_bypass_enabled(void);
+extern __attribute__((visibility("hidden"))) BOOL pt_is_compat13_7_active(void);
 extern __attribute__((visibility("hidden"))) BOOL pt_is_effective_system_or_playtools_caller(const void *ret_addr);
 extern __attribute__((visibility("hidden"))) void pt_get_spoofed_screen_native_bounds(double *out_portrait_width, double *out_portrait_height, double *out_native_scale);
 extern __attribute__((visibility("hidden"))) double pt_get_device_native_scale(void);
@@ -262,9 +263,12 @@ static id (*s_orig_screen_preferredMode)(id, SEL) = NULL;
 static NSArray *(*s_orig_screen_availableModes)(id, SEL) = NULL;
 static NSArray *(*s_orig_screen_screens)(id, SEL) = NULL;
 static id (*s_orig_screen_mirroredScreen)(id, SEL) = NULL;
+static BOOL (*s_orig_screen_isCaptured)(id, SEL) = NULL;
 static NSString *(*s_orig_screen_description)(id, SEL) = NULL;
 static id (*s_orig_screen_dispCfg)(id, SEL) = NULL;
 static id (*s_orig_screen_privDispCfg)(id, SEL) = NULL;
+static CGFloat (*s_orig_screen_potEDR)(id, SEL) = NULL;
+static CGFloat (*s_orig_screen_curEDR)(id, SEL) = NULL;
 static long long (*s_orig_device_orientation)(id, SEL) = NULL;
 static NSString *(*s_orig_nsstring_regex_replace)(id, SEL, NSString *, NSString *, NSRegularExpressionOptions, NSRange) = NULL;
 static void (*s_orig_requestRecordPermission)(id, SEL, void (^)(BOOL)) = NULL;
@@ -315,12 +319,27 @@ static BOOL pt_get_spoofed_portrait_pixel_size(id screenOrNil,
     // `pt_resolve_effective_screen_bounds` so window layout and touch mapping stay aligned.
     double w = 0.0, h = 0.0, spoofS = s;
     pt_get_spoofed_screen_native_bounds(&w, &h, &spoofS);
+    CGRect b = pt_resolve_effective_screen_bounds(screenOrNil);
     if (w > 0.0 && h > 0.0) {
-        if (out_px_w) *out_px_w = MIN(w, h);
-        if (out_px_h) *out_px_h = MAX(w, h);
+        double pMin = MIN(w, h);
+        double pMax = MAX(w, h);
+        if (b.size.width > 1.0 && b.size.height > 1.0) {
+            double bMin = MIN((double)b.size.width, (double)b.size.height);
+            double bMax = MAX((double)b.size.width, (double)b.size.height);
+            double bAspect = bMax / bMin;
+            double pAspect = pMax / pMin;
+            if (fabs(bAspect - pAspect) > 0.05) {
+                if (bAspect > pAspect) {
+                    pMin = round(pMax / bAspect);
+                } else {
+                    pMax = round(pMin * bAspect);
+                }
+            }
+        }
+        if (out_px_w) *out_px_w = pMin;
+        if (out_px_h) *out_px_h = pMax;
         return YES;
     }
-    CGRect b = pt_resolve_effective_screen_bounds(screenOrNil);
     if (b.size.width > 1.0 && b.size.height > 1.0) {
         double minPt = MIN((double)b.size.width, (double)b.size.height);
         double maxPt = MAX((double)b.size.width, (double)b.size.height);
@@ -491,6 +510,38 @@ static NSInteger pt_hook_screen_maxFPS(id self, SEL _cmd) {
     return orig;
 }
 
+static CGFloat pt_hook_screen_potEDR(id self, SEL _cmd) {
+    if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (pt_is_compat13_7_active()) {
+            return 1.0;
+        }
+        const char *m = pt_get_device_model_cstr();
+        if (m == NULL ||
+            strncmp(m, "iPad6,", 6) == 0 ||
+            strncmp(m, "iPad7,", 6) == 0 ||
+            strncmp(m, "iPad8,", 6) == 0 ||
+            strncmp(m, "iPad11,", 7) == 0 ||
+            strncmp(m, "iPad12,", 7) == 0 ||
+            strcmp(m, "iPad13,1") == 0 ||
+            strcmp(m, "iPad13,2") == 0 ||
+            strcmp(m, "iPhone11,8") == 0 ||
+            strcmp(m, "iPhone12,1") == 0 ||
+            strcmp(m, "iPhone12,8") == 0 ||
+            strcmp(m, "iPhone14,6") == 0) {
+            return 1.0;
+        }
+        return 2.0;
+    }
+    return s_orig_screen_potEDR ? s_orig_screen_potEDR(self, _cmd) : 1.0;
+}
+
+static CGFloat pt_hook_screen_curEDR(id self, SEL _cmd) {
+    if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return 1.0;
+    }
+    return s_orig_screen_curEDR ? s_orig_screen_curEDR(self, _cmd) : 1.0;
+}
+
 static CGSize pt_hook_screenmode_size(id self, SEL _cmd) {
     if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         double pxW = 0.0, pxH = 0.0;
@@ -584,6 +635,13 @@ static id pt_hook_screen_mirroredScreen(id self, SEL _cmd) {
         return nil;
     }
     return s_orig_screen_mirroredScreen ? s_orig_screen_mirroredScreen(self, _cmd) : nil;
+}
+
+static BOOL pt_hook_screen_isCaptured(id self, SEL _cmd) {
+    if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return NO;
+    }
+    return s_orig_screen_isCaptured ? s_orig_screen_isCaptured(self, _cmd) : NO;
 }
 
 static CGRect pt_hook_fixed_coord_bounds(id self, SEL _cmd) {
@@ -779,7 +837,8 @@ static void pt_hook_requestRecordPermission(id self, SEL _cmd, void (^response)(
 
 static id pt_hook_CMMotionManager_init(id self, SEL _cmd) {
     CMMotionManager *motionManager = s_orig_CMMotionManager_init ? (CMMotionManager *)s_orig_CMMotionManager_init(self, _cmd) : nil;
-    if (motionManager != nil) {
+    if (motionManager != nil &&
+        (!pt_is_bypass_enabled() || pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)))) {
         // The default update interval is 0, which may lead to excessive CPU usage
         motionManager.accelerometerUpdateInterval = 0.01;
         motionManager.deviceMotionUpdateInterval = 0.01;
@@ -844,11 +903,23 @@ static void pt_install_bypass_screen_hooks(BOOL hookBounds) {
         pt_replace_instance_imp(screenCls, @selector(scale), (IMP)pt_hook_screen_scale, NULL);
         if (pt_is_bypass_enabled()) {
             pt_replace_instance_imp(screenCls, @selector(maximumFramesPerSecond), (IMP)pt_hook_screen_maxFPS, (IMP *)&s_orig_screen_maxFPS);
+            SEL potEDRSel = sel_registerName("potentialEDRHeadroom");
+            if (class_getInstanceMethod(screenCls, potEDRSel) != NULL) {
+                pt_replace_instance_imp(screenCls, potEDRSel, (IMP)pt_hook_screen_potEDR, (IMP *)&s_orig_screen_potEDR);
+            }
+            SEL curEDRSel = sel_registerName("currentEDRHeadroom");
+            if (class_getInstanceMethod(screenCls, curEDRSel) != NULL) {
+                pt_replace_instance_imp(screenCls, curEDRSel, (IMP)pt_hook_screen_curEDR, (IMP *)&s_orig_screen_curEDR);
+            }
             pt_replace_instance_imp(screenCls, @selector(currentMode), (IMP)pt_hook_screen_currentMode, (IMP *)&s_orig_screen_currentMode);
             pt_replace_instance_imp(screenCls, @selector(preferredMode), (IMP)pt_hook_screen_preferredMode, (IMP *)&s_orig_screen_preferredMode);
             pt_replace_instance_imp(screenCls, @selector(availableModes), (IMP)pt_hook_screen_availableModes, (IMP *)&s_orig_screen_availableModes);
             pt_replace_class_imp(screenCls, @selector(screens), (IMP)pt_hook_screen_screens, (IMP *)&s_orig_screen_screens);
             pt_replace_instance_imp(screenCls, @selector(mirroredScreen), (IMP)pt_hook_screen_mirroredScreen, (IMP *)&s_orig_screen_mirroredScreen);
+            SEL isCapturedSel = sel_registerName("isCaptured");
+            if (class_getInstanceMethod(screenCls, isCapturedSel) != NULL) {
+                pt_replace_instance_imp(screenCls, isCapturedSel, (IMP)pt_hook_screen_isCaptured, (IMP *)&s_orig_screen_isCaptured);
+            }
             pt_replace_instance_imp(screenCls, @selector(description), (IMP)pt_hook_screen_description, (IMP *)&s_orig_screen_description);
             pt_replace_instance_imp(screenCls, sel_registerName("displayConfiguration"), (IMP)pt_hook_screen_dispCfg, (IMP *)&s_orig_screen_dispCfg);
             pt_replace_instance_imp(screenCls, sel_registerName("_displayConfiguration"), (IMP)pt_hook_screen_privDispCfg, (IMP *)&s_orig_screen_privDispCfg);
