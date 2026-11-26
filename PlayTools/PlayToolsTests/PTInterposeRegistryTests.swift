@@ -98,7 +98,10 @@ final class PTInterposeRegistryTests: XCTestCase {
                                 pt_dlsym_index_lookup(&index, "objc_enumerateClasses", false),
                                 UnsafeMutableRawPointer(mutating: targetA)
                             )
-                            XCTAssertNil(pt_dlsym_index_lookup(&index, "objc_enumerateClasses", true))
+                            XCTAssertEqual(
+                                pt_dlsym_index_lookup(&index, "objc_enumerateClasses", true),
+                                UnsafeMutableRawPointer(bitPattern: -1)
+                            )
 
                             // Dynamic resolver invoked per lookup
                             XCTAssertEqual(

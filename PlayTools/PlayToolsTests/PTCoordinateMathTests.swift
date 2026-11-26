@@ -437,6 +437,7 @@ final class PTCoordinateMathTests: XCTestCase {
         // UIKit keyboard/effects overlay windows vs normal content windows
         XCTAssertTrue(PTWindowGeometryMath.isAuxiliaryUIWindow(className: "UITextEffectsWindow"))
         XCTAssertTrue(PTWindowGeometryMath.isAuxiliaryUIWindow(className: "UIRemoteKeyboardWindow"))
+        XCTAssertTrue(PTWindowGeometryMath.isAuxiliaryUIWindow(className: "PTCustomInputWindow"))
         XCTAssertFalse(PTWindowGeometryMath.isAuxiliaryUIWindow(className: "UIWindow"))
     }
 

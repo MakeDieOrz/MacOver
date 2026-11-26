@@ -116,32 +116,49 @@ final class PlayedAppleDBBackupTests: XCTestCase {
             kSecClassKey,
             kSecClassIdentity
         ]
-        for cls in tables {
+        for (idx, cls) in tables.enumerated() {
             let tableName = cls as String
-            let pRef = PTPlayChainPersistentRef.encode(tableName: tableName)
-            XCTAssertEqual(pRef.count, 20)
+            let rowID = Int64(idx + 1)
+            let pRef = PTPlayChainPersistentRef.encode(tableName: tableName, rowID: rowID)
+            XCTAssertEqual(pRef.count, 12)
             XCTAssertTrue(PTPlayChainPersistentRef.isPersistentRef(pRef))
             XCTAssertEqual(PTPlayChainPersistentRef.decodeTableName(from: pRef), tableName)
 
-            // Ensure no readable PCPR prefix or ASCII table name appears in persistent ref bytes
+            // Ensure iOS 12-byte format: 4-byte class tag + 8-byte little-endian rowID
             XCTAssertFalse(pRef.starts(with: Data("PCPR".utf8)))
-            let utf8Str = String(data: pRef, encoding: .utf8)
-            XCTAssertNil(utf8Str)
-            XCTAssertNil(pRef.range(of: Data(tableName.utf8)))
-            for byte in pRef.prefix(4) {
-                XCTAssertGreaterThanOrEqual(byte, 0x80)
+            XCTAssertEqual(Data(pRef.prefix(4)), Data(tableName.utf8))
+            var decodedRowID: Int64 = 0
+            _ = withUnsafeMutableBytes(of: &decodedRowID) { dst in
+                pRef[4..<12].copyBytes(to: dst)
             }
+            XCTAssertEqual(Int64(littleEndian: decodedRowID), rowID)
         }
+
+        // Legacy 20-byte [0x8A, 0x9F, 0xC4, 0x91..0x95] binary refs remain decodable
+        var legacyBinaryBytes: [UInt8] = [0x8A, 0x9F, 0xC4, 0x91]
+        legacyBinaryBytes.append(contentsOf: [UInt8](repeating: 0x11, count: 16))
+        let legacyBinaryRef = Data(legacyBinaryBytes)
+        XCTAssertTrue(PTPlayChainPersistentRef.isPersistentRef(legacyBinaryRef))
+        XCTAssertEqual(PTPlayChainPersistentRef.decodeTableName(from: legacyBinaryRef), kSecClassGenericPassword as String)
 
         // Legacy PCPR1 lookup fallback remains decodable without minting PCPR1
         let legacyRef = Data("PCPR1:genp:\(UUID().uuidString)".utf8)
         XCTAssertTrue(PTPlayChainPersistentRef.isPersistentRef(legacyRef))
         XCTAssertEqual(PTPlayChainPersistentRef.decodeTableName(from: legacyRef), kSecClassGenericPassword as String)
 
-        // Arbitrary 20-byte non-persistent-ref key payload is not misidentified
+        // Arbitrary non-persistent-ref key payloads (including invalid zero rowID or unknown 12-byte tags) are rejected
         let random20 = Data(repeating: 0x2A, count: 20)
         XCTAssertFalse(PTPlayChainPersistentRef.isPersistentRef(random20))
         XCTAssertNil(PTPlayChainPersistentRef.decodeTableName(from: random20))
+
+        var zeroRowGenp = Data("genp".utf8)
+        zeroRowGenp.append(Data(repeating: 0, count: 8))
+        XCTAssertFalse(PTPlayChainPersistentRef.isPersistentRef(zeroRowGenp))
+        XCTAssertNil(PTPlayChainPersistentRef.decodeTableName(from: zeroRowGenp))
+
+        let random12 = Data("abcd12345678".utf8)
+        XCTAssertFalse(PTPlayChainPersistentRef.isPersistentRef(random12))
+        XCTAssertNil(PTPlayChainPersistentRef.decodeTableName(from: random12))
     }
 
     func testAccessGroupEntitlementAllowsDefaultsAndEntitledPatterns() {

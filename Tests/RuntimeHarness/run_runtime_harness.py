@@ -487,6 +487,8 @@ int main(int argc, const char *argv[]) {
         CMAccelerometerData *cmSampleCopy = [cmSample copy];
         NSString *cmSampleDesc = [cmSample description];
         [motionMgr startDeviceMotionUpdates];
+        CMDeviceMotion *cmDMArb = motionMgr.deviceMotion;
+        [motionMgr startDeviceMotionUpdatesUsingReferenceFrame:CMAttitudeReferenceFrameXMagneticNorthZVertical];
         CMDeviceMotion *cmDM = motionMgr.deviceMotion;
         CMAttitude *cmAttCopy = [cmDM.attitude copy];
         NSString *cmDMDesc = [cmDM description];
@@ -504,8 +506,12 @@ int main(int argc, const char *argv[]) {
                                magField1.z == magField2.z &&
                                cmDM != nil &&
                                fabs(magTs1 - cmDM.timestamp) < 60.0);
-        BOOL cmDMMagneticCalibrated = (cmDM != nil &&
-                                       cmDM.magneticField.accuracy != CMMagneticFieldCalibrationAccuracyUncalibrated);
+        BOOL cmDMMagneticCalibrated = (cmDMArb != nil &&
+                                       cmDMArb.magneticField.accuracy == CMMagneticFieldCalibrationAccuracyUncalibrated &&
+                                       cmDMArb.heading < 0.0 &&
+                                       cmDM != nil &&
+                                       cmDM.magneticField.accuracy != CMMagneticFieldCalibrationAccuracyUncalibrated &&
+                                       cmDM.heading >= 0.0);
         BOOL cmSampleValid = (cmSample != nil &&
                               [cmSample isKindOfClass:[CMAccelerometerData class]] &&
                               cmSample.acceleration.z < -0.9 &&
@@ -1328,8 +1334,12 @@ int main(int argc, const char *argv[]) {
                     if (CFGetTypeID(prefObj) == CFDataGetTypeID()) {
                         NSData *prefData = (__bridge NSData *)prefObj;
                         const uint8_t *b = (const uint8_t *)prefData.bytes;
-                        if (prefData.length == 20 && b[0] >= 0x80 && b[1] >= 0x80 && b[2] >= 0x80 &&
-                            memcmp(b, "PCPR1:", 6) != 0) {
+                        int64_t rowID = 0;
+                        if (prefData.length == 12) {
+                            memcpy(&rowID, b + 4, sizeof(rowID));
+                            rowID = OSSwapLittleToHostInt64(rowID);
+                        }
+                        if (prefData.length == 12 && memcmp(b, "genp", 4) == 0 && rowID > 0) {
                             s10PlayChainOpaqueRefOK = YES;
                         }
                     }
@@ -3955,7 +3965,7 @@ def build_mock_app(work_dir: Path, playtools_fw: Path) -> Path:
     return target_bin
 
 
-def parse_scenarios_spec(spec: Optional[str], max_scenario: int = 14) -> set[int]:
+def parse_scenarios_spec(spec: Optional[str], max_scenario: int = 15) -> set[int]:
     if not spec:
         return set(range(1, max_scenario + 1))
     selected: set[int] = set()
@@ -4107,7 +4117,7 @@ def run_scenarios(
     selected_scenarios: Optional[set[int]] = None,
     jobs: int = 1,
 ) -> list[ScenarioResult]:
-    selected = selected_scenarios if selected_scenarios is not None else set(range(1, 15))
+    selected = selected_scenarios if selected_scenarios is not None else set(range(1, 16))
     results: list[ScenarioResult] = []
     isolated_home = work_dir / "IsolatedHome"
     isolated_home.mkdir(parents=True, exist_ok=True)
@@ -5585,7 +5595,7 @@ int main(void) {
                     mitm_sock.settimeout(0.25)
                     c, _ = mitm_sock.accept()
                     threading.Thread(target=handle_mitm_conn, args=(c,), daemon=True).start()
-                except TimeoutError:
+                except (TimeoutError, socket.timeout):
                     continue
                 except OSError:
                     break
@@ -5999,6 +6009,1106 @@ int main(int argc, char **argv) {
         payload14 = {"runA": info14_a, "runB": info14_b, "runC": info14_c, "runD": info14_d}
         return [(14, res14, [f"  Scenario 14 payload: {payload14}"])]
 
+    # Scenario 15: Wave 1-5 adversarial parity across MIG/IOKit/MG/Metal/Display/Sensors/Fonts/Net/WebKit/JSC/ICU.
+    def run_s15() -> list[tuple[int, ScenarioResult, list[str]]]:
+        t15 = time.monotonic()
+        tool_env15, sdk_path15, fw_parent15 = resolve_sdk_and_tool_env(playtools_fw)
+        ios_sup_fw15 = f"{sdk_path15}/System/iOSSupport/System/Library/Frameworks"
+        w5_dir = work_dir / "Scenario15Wave5"
+        w5_app_dir = w5_dir / "MockWave5.app"
+        w5_app_dir.mkdir(parents=True, exist_ok=True)
+        with open(w5_app_dir / "Info.plist", "wb") as fp:
+            plistlib.dump({
+                "CFBundleIdentifier": "app.makedie.harness.wave5",
+                "CFBundleExecutable": "MockWave5",
+                "CFBundleName": "MockWave5",
+                "CFBundlePackageType": "APPL",
+                "CFBundleShortVersionString": "1.0",
+                "CFBundleVersion": "1",
+                "LSRequiresIPhoneOS": True,
+                "UIDeviceFamily": [1, 2],
+            }, fp)
+
+        w5_m = w5_dir / "mock_wave5.m"
+        w5_m.write_text(r'''
+#import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
+#import <Metal/Metal.h>
+#import <IOKit/IOKitLib.h>
+#import <AudioToolbox/AudioToolbox.h>
+#import <CoreText/CoreText.h>
+#import <CoreMotion/CoreMotion.h>
+#import <CoreHaptics/CoreHaptics.h>
+#import <AVFoundation/AVFoundation.h>
+#import <GameController/GameController.h>
+#import <LocalAuthentication/LocalAuthentication.h>
+#import <JavaScriptCore/JavaScriptCore.h>
+#import <WebKit/WebKit.h>
+#import <Network/Network.h>
+#import <SystemConfiguration/SystemConfiguration.h>
+#import <CommonCrypto/CommonDigest.h>
+#import <objc/message.h>
+#import <objc/runtime.h>
+#include <dlfcn.h>
+#include <errno.h>
+#include <mach/mach.h>
+#include <net/if.h>
+#include <net/if_media.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+@interface UIApplication (PTTestPrivate)
+- (UIEvent *)_touchesEvent;
+@end
+
+@interface UIEvent (PTTestPrivate)
+- (id)_init;
+- (void)_clearTouches;
+- (void)_addTouch:(UITouch *)touch forDelayedDelivery:(BOOL)delayed;
+@end
+
+@interface UITouch (PTTestPrivate)
+- (id)pm_kif_initAtPoint:(CGPoint)point inWindow:(UIWindow *)window onView:(UIView *)view fingerIndex:(uint32_t)idx;
+- (void)pm_kif_setPhaseAndUpdateTimestamp:(UITouchPhase)phase fingerIndex:(uint32_t)idx;
+@end
+
+@interface PTTestCustomKeyButton : UIButton
+@end
+
+@implementation PTTestCustomKeyButton
+- (void)sendAction:(SEL)action to:(id)target forEvent:(UIEvent *)event {
+    [super sendAction:action to:target forEvent:event];
+    if ([UIApplication sharedApplication] == nil && target != nil && action != NULL) {
+        ((void (*)(id, SEL))objc_msgSend)(target, action);
+    }
+}
+@end
+
+@interface PTTestCustomKeyPadView : UIView
+@property (nonatomic, assign) NSInteger beganCount;
+@property (nonatomic, assign) NSInteger endedCount;
+@property (nonatomic, strong) UIView *keyTileView;
+@property (nonatomic, strong) PTTestCustomKeyButton *actionButton;
+@property (nonatomic, assign) NSInteger btnTapCount;
+@end
+
+@implementation PTTestCustomKeyPadView
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self != nil) {
+        self.backgroundColor = [UIColor systemGrayColor];
+        _keyTileView = [[UIView alloc] initWithFrame:CGRectMake(20.0, 20.0, 80.0, 60.0)];
+        _keyTileView.backgroundColor = [UIColor whiteColor];
+        [self addSubview:_keyTileView];
+
+        _actionButton = [PTTestCustomKeyButton buttonWithType:UIButtonTypeSystem];
+        _actionButton.frame = CGRectMake(140.0, 20.0, 100.0, 60.0);
+        [_actionButton addTarget:self
+                          action:@selector(onActionButtonTap)
+                forControlEvents:UIControlEventTouchUpInside];
+        [self addSubview:_actionButton];
+    }
+    return self;
+}
+- (void)onActionButtonTap {
+    self.btnTapCount++;
+}
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    self.beganCount++;
+    [super touchesBegan:touches withEvent:event];
+}
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    self.endedCount++;
+    [super touchesEnded:touches withEvent:event];
+}
+@end
+
+static BOOL pt_w5_send_synthetic_tap(UIWindow *win, CGPoint ptInWin) {
+    if (win == nil) {
+        return NO;
+    }
+    UIApplication *app = [UIApplication sharedApplication];
+    UIEvent *ev = (app != nil && [app respondsToSelector:@selector(_touchesEvent)]) ? [app _touchesEvent] : nil;
+    if (ev == nil) {
+        Class touchesEvCls = objc_lookUpClass("UITouchesEvent");
+        if (touchesEvCls != Nil) {
+            id allocated = [touchesEvCls alloc];
+            if ([allocated respondsToSelector:@selector(_init)]) {
+                ev = [allocated _init];
+            } else {
+                ev = [allocated init];
+            }
+        }
+    }
+    UIView *hitView = [win hitTest:ptInWin withEvent:nil];
+    if (ev == nil || hitView == nil ||
+        ![ev respondsToSelector:@selector(_clearTouches)] ||
+        ![ev respondsToSelector:@selector(_addTouch:forDelayedDelivery:)]) {
+        return NO;
+    }
+    UITouch *touch = [[UITouch alloc] pm_kif_initAtPoint:ptInWin inWindow:win onView:hitView fingerIndex:0];
+    if (touch == nil) {
+        return NO;
+    }
+    [ev _clearTouches];
+    [ev _addTouch:touch forDelayedDelivery:NO];
+    if (app != nil) {
+        [app sendEvent:ev];
+    } else {
+        [win sendEvent:ev];
+    }
+
+    [touch pm_kif_setPhaseAndUpdateTimestamp:UITouchPhaseEnded fingerIndex:0];
+    [ev _clearTouches];
+    [ev _addTouch:touch forDelayedDelivery:NO];
+    if (app != nil) {
+        [app sendEvent:ev];
+    } else {
+        [win sendEvent:ev];
+    }
+    return YES;
+}
+
+static NSString *pt_w5_md5_mg_hash(NSString *canonicalKey) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    NSString *prefixed = [@"MGCopyAnswer" stringByAppendingString:canonicalKey];
+    const char *utf8 = prefixed.UTF8String;
+    uint8_t digest[CC_MD5_DIGEST_LENGTH];
+    CC_MD5(utf8, (CC_LONG)strlen(utf8), digest);
+    NSString *b64 = [[NSData dataWithBytes:digest length:sizeof(digest)] base64EncodedStringWithOptions:0];
+    while ([b64 hasSuffix:@"="]) {
+        b64 = [b64 substringToIndex:b64.length - 1];
+    }
+    return b64;
+#pragma clang diagnostic pop
+}
+
+static void pt_w5_spin_until(NSTimeInterval maxSec, BOOL (^cond)(void)) {
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:maxSec];
+    while (!cond() && [deadline timeIntervalSinceNow] > 0.0) {
+        [[NSRunLoop mainRunLoop] runMode:NSDefaultRunLoopMode
+                              beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+    }
+}
+
+static NSDictionary *pt_w5_run_webview_checks(BOOL isCompat13) {
+    WKWebViewConfiguration *cfg = [[WKWebViewConfiguration alloc] init];
+    WKWebView *wv = [[WKWebView alloc] initWithFrame:CGRectMake(0, 0, 320, 240) configuration:cfg];
+    __block BOOL navDone = NO;
+    // Wait until the actual target document commits (avoid matching initial empty about:blank).
+    [wv loadHTMLString:@"<!doctype html><html><body><div id='d'>ok</div></body></html>"
+               baseURL:[NSURL URLWithString:@"https://harness.test/"]];
+    pt_w5_spin_until(4.0, ^BOOL {
+        __block BOOL ready = NO;
+        __block BOOL probed = NO;
+        [wv evaluateJavaScript:@"location.href === 'https://harness.test/' && document.getElementById('d') !== null"
+             completionHandler:^(id res, NSError *err) {
+            (void)err;
+            ready = [res isKindOfClass:[NSNumber class]] && [res boolValue];
+            probed = YES;
+        }];
+        pt_w5_spin_until(0.3, ^BOOL { return probed; });
+        if (ready) {
+            navDone = YES;
+        }
+        return navDone;
+    });
+
+    __block BOOL defaultWorldClean = NO;
+    __block BOOL namedWorldClean = NO;
+    __block BOOL iframeClean = NO;
+    __block BOOL cssContainerUnsupported = NO;
+
+    Class worldCls = NSClassFromString(@"WKContentWorld");
+    SEL evalWorldSel = @selector(evaluateJavaScript:inFrame:inContentWorld:completionHandler:);
+    if (worldCls != Nil && [wv respondsToSelector:evalWorldSel]) {
+        id defWorld = ((id (*)(id, SEL))objc_msgSend)(worldCls, @selector(defaultClientWorld));
+        id namedWorld = ((id (*)(id, SEL, NSString *))objc_msgSend)(worldCls, @selector(worldWithName:), @"harness.isolated");
+        if (defWorld != nil) {
+            __block BOOL done = NO;
+            ((void (*)(id, SEL, NSString *, id, id, void (^)(id, NSError *)))objc_msgSend)(
+                wv, evalWorldSel,
+                @"({p: navigator.platform, ua: navigator.userAgent})",
+                nil, defWorld, ^(id res, NSError *err) {
+                    if (err == nil && [res isKindOfClass:[NSDictionary class]]) {
+                        NSString *p = [res[@"p"] isKindOfClass:[NSString class]] ? res[@"p"] : @"";
+                        NSString *ua = [res[@"ua"] isKindOfClass:[NSString class]] ? res[@"ua"] : @"";
+                        defaultWorldClean = (p.length > 0 && ![p containsString:@"Mac"] &&
+                                             ua.length > 0 && ![ua containsString:@"Macintosh"]);
+                    }
+                    done = YES;
+                });
+            pt_w5_spin_until(2.0, ^BOOL { return done; });
+        }
+        if (namedWorld != nil) {
+            __block BOOL done = NO;
+            ((void (*)(id, SEL, NSString *, id, id, void (^)(id, NSError *)))objc_msgSend)(
+                wv, evalWorldSel,
+                @"({p: navigator.platform, ua: navigator.userAgent})",
+                nil, namedWorld, ^(id res, NSError *err) {
+                    if (err == nil && [res isKindOfClass:[NSDictionary class]]) {
+                        NSString *p = [res[@"p"] isKindOfClass:[NSString class]] ? res[@"p"] : @"";
+                        NSString *ua = [res[@"ua"] isKindOfClass:[NSString class]] ? res[@"ua"] : @"";
+                        namedWorldClean = (p.length > 0 && ![p containsString:@"Mac"] &&
+                                           ua.length > 0 && ![ua containsString:@"Macintosh"]);
+                    }
+                    done = YES;
+                });
+            pt_w5_spin_until(2.0, ^BOOL { return done; });
+        }
+    } else {
+        // Under compat13_7 WKContentWorld is intentionally hidden; verify page world works
+        defaultWorldClean = YES;
+        namedWorldClean = YES;
+    }
+
+    __block BOOL doneIframe = NO;
+    [wv evaluateJavaScript:
+        @"(function(){"
+         "document.body.innerHTML += '<iframe id=\"f1\"></iframe>';"
+         "var f2 = document.createElement('iframe'); f2.id = 'f2'; document.body.append(f2);"
+         "var p0 = navigator.platform;"
+         "var p1 = document.getElementById('f1').contentWindow.navigator.platform;"
+         "var p2 = f2.contentWindow.navigator.platform;"
+         "var cssOk = (typeof CSS !== 'undefined' && typeof CSS.supports === 'function') ? CSS.supports('container-type', 'inline-size') : null;"
+         "return {p0: p0, p1: p1, p2: p2, cssOk: cssOk};"
+         "})()"
+         completionHandler:^(id res, NSError *err) {
+        if (err == nil && [res isKindOfClass:[NSDictionary class]]) {
+            NSString *p0 = [res[@"p0"] isKindOfClass:[NSString class]] ? res[@"p0"] : @"";
+            NSString *p1 = [res[@"p1"] isKindOfClass:[NSString class]] ? res[@"p1"] : @"";
+            NSString *p2 = [res[@"p2"] isKindOfClass:[NSString class]] ? res[@"p2"] : @"";
+            iframeClean = (p0.length > 0 && ![p0 containsString:@"Mac"] &&
+                           p1.length > 0 && ![p1 containsString:@"Mac"] &&
+                           p2.length > 0 && ![p2 containsString:@"Mac"]);
+            if (isCompat13) {
+                cssContainerUnsupported = [res[@"cssOk"] isKindOfClass:[NSNumber class]] && ![res[@"cssOk"] boolValue];
+            } else {
+                cssContainerUnsupported = YES;
+            }
+        }
+        doneIframe = YES;
+    }];
+    pt_w5_spin_until(2.0, ^BOOL { return doneIframe; });
+
+    return @{
+        @"navDone": @(navDone),
+        @"defaultWorldClean": @(defaultWorldClean),
+        @"namedWorldClean": @(namedWorldClean),
+        @"iframeClean": @(iframeClean),
+        @"cssContainerUnsupported": @(cssContainerUnsupported),
+    };
+}
+
+int main(int argc, char **argv) {
+    @autoreleasepool {
+        NSString *mode = (argc > 1) ? [NSString stringWithUTF8String:argv[1]] : @"runA";
+        if ([mode isEqualToString:@"runB"]) {
+            // Run B: non-strict iPad13,8 (1920x1080) + WKWebView WKContentWorld & iframe checks
+            UIScreen *scr = [UIScreen mainScreen];
+            CGSize nat = scr.nativeBounds.size;
+            BOOL natCeilingOK = (nat.width > 0 && nat.height > 0 &&
+                                 MAX(nat.width, nat.height) <= 2732.0 &&
+                                 MIN(nat.width, nat.height) <= 2048.0);
+            BOOL hapticsIpadOK = ![[CHHapticEngine capabilitiesForHardware] supportsHaptics];
+            NSDictionary *wvInfo = pt_w5_run_webview_checks(NO);
+            NSDictionary *outB = @{
+                @"natW": @(nat.width),
+                @"natH": @(nat.height),
+                @"natCeilingOK": @(natCeilingOK),
+                @"hapticsIpadOK": @(hapticsIpadOK),
+                @"webview": wvInfo,
+            };
+            NSData *jd = [NSJSONSerialization dataWithJSONObject:outB options:0 error:nil];
+            printf("HARNESS_JSON:%s\n", [[NSString alloc] initWithData:jd encoding:NSUTF8StringEncoding].UTF8String);
+            return 0;
+        }
+
+        // Run A: compat13_7 + iPhone12,5 + strictEmulationMode=YES
+        // 1. Legacy split-send mach_msg MIG RPC (200 & 3405)
+        BOOL splitMig200OK = NO;
+        BOOL splitMig3405OK = NO;
+        {
+            struct {
+                mach_msg_header_t hdr;
+                NDR_record_t ndr;
+                int flavor;
+                mach_msg_type_number_t count;
+            } req200 = {0};
+            union { mach_msg_header_t hdr; uint8_t bytes[512]; } rep200 = {0};
+            mach_port_t rp = MACH_PORT_NULL;
+            if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &rp) == KERN_SUCCESS) {
+                host_t h = mach_host_self();
+                req200.hdr.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE);
+                req200.hdr.msgh_size = sizeof(req200);
+                req200.hdr.msgh_remote_port = h;
+                req200.hdr.msgh_local_port = rp;
+                req200.hdr.msgh_id = 200;
+                req200.ndr = NDR_record;
+                req200.flavor = HOST_BASIC_INFO;
+                req200.count = HOST_BASIC_INFO_COUNT;
+                mach_msg_return_t kr = mach_msg(&req200.hdr, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(req200), 0, MACH_PORT_NULL, 500, MACH_PORT_NULL);
+                if (kr == KERN_SUCCESS) {
+                    kr = mach_msg(&rep200.hdr, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(rep200), rp, 500, MACH_PORT_NULL);
+                }
+                mach_port_mod_refs(mach_task_self(), rp, MACH_PORT_RIGHT_RECEIVE, -1);
+                mach_port_deallocate(mach_task_self(), h);
+                const size_t pfx = sizeof(mach_msg_header_t) + sizeof(NDR_record_t);
+                if (kr == KERN_SUCCESS && rep200.hdr.msgh_id == 300 && rep200.hdr.msgh_size >= pfx + 8 + sizeof(host_basic_info_data_t)) {
+                    host_basic_info_data_t hbi = {0};
+                    memcpy(&hbi, rep200.bytes + pfx + 8, sizeof(hbi));
+                    splitMig200OK = (hbi.max_mem <= (4ULL << 30) && hbi.avail_cpus == 6);
+                }
+            }
+
+            struct {
+                mach_msg_header_t hdr;
+                NDR_record_t ndr;
+                int flavor;
+                mach_msg_type_number_t count;
+            } req3405 = {0};
+            union { mach_msg_header_t hdr; uint8_t bytes[1024]; } rep3405 = {0};
+            mach_port_t tp = MACH_PORT_NULL;
+            if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &tp) == KERN_SUCCESS) {
+                req3405.hdr.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE);
+                req3405.hdr.msgh_size = sizeof(req3405);
+                req3405.hdr.msgh_remote_port = mach_task_self();
+                req3405.hdr.msgh_local_port = tp;
+                req3405.hdr.msgh_id = 3405;
+                req3405.ndr = NDR_record;
+                req3405.flavor = TASK_VM_INFO;
+                req3405.count = TASK_VM_INFO_COUNT;
+                mach_msg_return_t kr = mach_msg(&req3405.hdr, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(req3405), 0, MACH_PORT_NULL, 500, MACH_PORT_NULL);
+                if (kr == KERN_SUCCESS) {
+                    kr = mach_msg(&rep3405.hdr, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(rep3405), tp, 500, MACH_PORT_NULL);
+                }
+                mach_port_mod_refs(mach_task_self(), tp, MACH_PORT_RIGHT_RECEIVE, -1);
+                const size_t pfx = sizeof(mach_msg_header_t) + sizeof(NDR_record_t);
+                if (kr == KERN_SUCCESS && rep3405.hdr.msgh_id == 3505 && rep3405.hdr.msgh_size >= pfx + 8 + sizeof(task_vm_info_data_t)) {
+                    task_vm_info_data_t tv = {0};
+                    memcpy(&tv, rep3405.bytes + pfx + 8, sizeof(tv));
+                    splitMig3405OK = (tv.limit_bytes_remaining > 0);
+                }
+            }
+        }
+
+        // 2. IOKit & MobileGestalt
+        BOOL iokitChipOK = NO;
+        BOOL iokitSmcHiddenOK = NO;
+        BOOL iopsOK = NO;
+        BOOL mgOK = NO;
+        {
+            io_registry_entry_t dt = IORegistryEntryFromPath(kIOMainPortDefault, "IODeviceTree:/chosen");
+            if (dt != IO_OBJECT_NULL) {
+                id cid = CFBridgingRelease(IORegistryEntryCreateCFProperty(dt, CFSTR("chip-id"), kCFAllocatorDefault, 0));
+                if ([cid isKindOfClass:[NSData class]] && [(NSData *)cid length] >= 4) {
+                    uint32_t v = 0;
+                    memcpy(&v, [(NSData *)cid bytes], 4);
+                    iokitChipOK = (v == 0x8030U);
+                }
+                IOObjectRelease(dt);
+            }
+            io_service_t smc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSMC"));
+            iokitSmcHiddenOK = (smc == IO_OBJECT_NULL);
+            if (smc != IO_OBJECT_NULL) IOObjectRelease(smc);
+
+            typedef bool (*DrawUnlimFn)(void);
+            typedef CFTypeRef (*PSInfoFn)(void);
+            typedef CFStringRef (*PSProvFn)(CFTypeRef);
+            DrawUnlimFn fnUnlim = (DrawUnlimFn)dlsym(RTLD_DEFAULT, "IOPSDrawingUnlimitedPower");
+            PSInfoFn fnInfo = (PSInfoFn)dlsym(RTLD_DEFAULT, "IOPSCopyPowerSourcesInfo");
+            PSProvFn fnProv = (PSProvFn)dlsym(RTLD_DEFAULT, "IOPSGetProvidingPowerSourceType");
+            BOOL unlimFalse = (fnUnlim != NULL && !fnUnlim());
+            BOOL battPower = NO;
+            if (fnInfo != NULL && fnProv != NULL) {
+                CFTypeRef ps = fnInfo();
+                if (ps != NULL) {
+                    CFStringRef ptype = fnProv(ps);
+                    battPower = (ptype != NULL && [(__bridge NSString *)ptype isEqualToString:@"Battery Power"]);
+                    CFRelease(ps);
+                }
+            }
+            iopsOK = (unlimFalse && battPower);
+
+            typedef CFTypeRef (*MGAnsFn)(CFStringRef, CFDictionaryRef);
+            typedef int64_t (*MG64Fn)(CFStringRef, int64_t);
+            typedef bool (*MGValidFn)(CFStringRef);
+            MGAnsFn fnMGAns = (MGAnsFn)dlsym(RTLD_DEFAULT, "MGCopyAnswer");
+            MG64Fn fnMG64 = (MG64Fn)dlsym(RTLD_DEFAULT, "MGGetSInt64Answer");
+            MGValidFn fnMGValid = (MGValidFn)dlsym(RTLD_DEFAULT, "MGIsQuestionValid");
+            if (fnMGAns != NULL && fnMG64 != NULL && fnMGValid != NULL) {
+                id face = CFBridgingRelease(fnMGAns(CFSTR("PearlIDCapability"), NULL));
+                id dcls = CFBridgingRelease(fnMGAns(CFSTR("DeviceClass"), NULL));
+                id obfPt = CFBridgingRelease(fnMGAns((__bridge CFStringRef)pt_w5_md5_mg_hash(@"ProductType"), NULL));
+                int64_t chip64 = fnMG64(CFSTR("ChipID"), -1);
+                bool ptValid = fnMGValid(CFSTR("ProductType"));
+                mgOK = ([face isKindOfClass:[NSNumber class]] && [face boolValue] &&
+                        [dcls isKindOfClass:[NSString class]] && [dcls isEqualToString:@"iPhone"] &&
+                        [obfPt isKindOfClass:[NSString class]] && [obfPt isEqualToString:@"iPhone12,5"] &&
+                        chip64 == 0x8030 && ptValid);
+            }
+        }
+
+        // 3. Metal preamble/version, RGBA32Float sampler clamp vs RGBA8Unorm linear, compat13 rejections
+        BOOL metalPreambleOK = NO;
+        BOOL metalSamplersOK = NO;
+        BOOL metalCompat13OK = NO;
+        {
+            id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+            if (dev != nil) {
+                SEL workSetSel = sel_registerName("recommendedMaxWorkingSetSize");
+                SEL dynLibSel = sel_registerName("supportsDynamicLibraries");
+                metalCompat13OK = (![dev respondsToSelector:workSetSel] && ![dev respondsToSelector:dynLibSel]);
+
+                NSError *errPre = nil;
+                NSString *srcPre =
+                    @"#include <metal_stdlib>\n"
+                    "using namespace metal;\n"
+                    "kernel void kpre(device uint *out [[buffer(0)]]) {\n"
+                    "#ifdef __METAL_MACOS__\n"
+                    "    out[0] = 1;\n"
+                    "#else\n"
+                    "    out[0] = 0;\n"
+                    "#endif\n"
+                    "#ifdef __METAL_IOS__\n"
+                    "    out[1] = 1;\n"
+                    "#else\n"
+                    "    out[1] = 0;\n"
+                    "#endif\n"
+                    "    out[2] = __METAL_VERSION__;\n"
+                    "}\n";
+                id<MTLLibrary> libPre = [dev newLibraryWithSource:srcPre options:nil error:&errPre];
+                id<MTLFunction> fnPre = [libPre newFunctionWithName:@"kpre"];
+                id<MTLComputePipelineState> psoPre = fnPre ? [dev newComputePipelineStateWithFunction:fnPre error:nil] : nil;
+                id<MTLBuffer> bufPre = [dev newBufferWithLength:sizeof(uint32_t) * 3 options:MTLResourceStorageModeShared];
+                id<MTLCommandQueue> cq = [dev newCommandQueue];
+                if (psoPre && bufPre && cq) {
+                    id<MTLCommandBuffer> cb = [cq commandBuffer];
+                    id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+                    [ce setComputePipelineState:psoPre];
+                    [ce setBuffer:bufPre offset:0 atIndex:0];
+                    [ce dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+                    [ce endEncoding];
+                    [cb commit];
+                    [cb waitUntilCompleted];
+                    const uint32_t *u = (const uint32_t *)bufPre.contents;
+                    metalPreambleOK = (u[0] == 0U && u[1] == 1U && u[2] == 220U);
+                }
+
+                // Sampler state parity: 32F clamps linear->nearest; RGBA8 keeps linear interpolation
+                MTLTextureDescriptor *td32 = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:2 height:1 mipmapped:NO];
+                td32.usage = MTLTextureUsageShaderRead;
+                id<MTLTexture> tex32 = [dev newTextureWithDescriptor:td32];
+                float px32[8] = {0.0f, 0.0f, 0.0f, 1.0f, 100.0f, 0.0f, 0.0f, 1.0f};
+                [tex32 replaceRegion:MTLRegionMake2D(0, 0, 2, 1) mipmapLevel:0 withBytes:px32 bytesPerRow:8 * sizeof(float)];
+
+                MTLTextureDescriptor *td8 = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:2 height:1 mipmapped:NO];
+                td8.usage = MTLTextureUsageShaderRead;
+                id<MTLTexture> tex8 = [dev newTextureWithDescriptor:td8];
+                uint8_t px8[8] = {0, 0, 0, 255, 255, 0, 0, 255};
+                [tex8 replaceRegion:MTLRegionMake2D(0, 0, 2, 1) mipmapLevel:0 withBytes:px8 bytesPerRow:8];
+
+                MTLSamplerDescriptor *sd = [[MTLSamplerDescriptor alloc] init];
+                sd.minFilter = MTLSamplerMinMagFilterLinear;
+                sd.magFilter = MTLSamplerMinMagFilterLinear;
+                sd.normalizedCoordinates = YES;
+                id<MTLSamplerState> samp = [dev newSamplerStateWithDescriptor:sd];
+
+                NSString *srcSamp =
+                    @"#include <metal_stdlib>\n"
+                    "using namespace metal;\n"
+                    "kernel void ksamp1(texture2d<float, access::sample> t [[texture(0)]],\n"
+                    "                   sampler s [[sampler(0)]],\n"
+                    "                   device float *out [[buffer(0)]]) {\n"
+                    "    out[0] = t.sample(s, float2(0.45f, 0.5f)).x;\n"
+                    "}\n";
+                id<MTLLibrary> libS = [dev newLibraryWithSource:srcSamp options:nil error:nil];
+                id<MTLFunction> fnS = [libS newFunctionWithName:@"ksamp1"];
+                id<MTLComputePipelineState> psoS = fnS ? [dev newComputePipelineStateWithFunction:fnS error:nil] : nil;
+                id<MTLBuffer> bufS = [dev newBufferWithLength:sizeof(float) * 2 options:MTLResourceStorageModeShared];
+                if (psoS && bufS && cq && samp) {
+                    id<MTLCommandBuffer> cb = [cq commandBuffer];
+                    id<MTLComputeCommandEncoder> ce1 = [cb computeCommandEncoder];
+                    [ce1 setComputePipelineState:psoS];
+                    [ce1 setTexture:tex32 atIndex:0];
+                    [ce1 setSamplerState:samp atIndex:0];
+                    [ce1 setBuffer:bufS offset:0 atIndex:0];
+                    [ce1 dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+                    [ce1 endEncoding];
+
+                    id<MTLComputeCommandEncoder> ce2 = [cb computeCommandEncoder];
+                    [ce2 setComputePipelineState:psoS];
+                    [ce2 setTexture:tex8 atIndex:0];
+                    [ce2 setSamplerState:samp atIndex:0];
+                    [ce2 setBuffer:bufS offset:sizeof(float) atIndex:0];
+                    [ce2 dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+                    [ce2 endEncoding];
+
+                    [cb commit];
+                    [cb waitUntilCompleted];
+                    const float *f = (const float *)bufS.contents;
+                    metalSamplersOK = (f[0] >= -0.01f && f[0] < 1.0f && f[1] > 0.1f && f[1] < 0.9f);
+                }
+            }
+        }
+
+        // 4. Display, Traits, CoreMotion, Fonts, Haptics, Audio, SF Symbols, Biometry, GCController
+        BOOL displayOK = NO;
+        BOOL traitsOK = NO;
+        BOOL motionExtraOK = NO;
+        BOOL fontsOK = NO;
+        BOOL hapticsOK = NO;
+        BOOL audioUnitsOK = NO;
+        BOOL sfSymbolsOK = NO;
+        BOOL biometryOK = NO;
+        BOOL gcMonitorOK = NO;
+        {
+            UIScreen *scr = [UIScreen mainScreen];
+            CGSize nat = scr.nativeBounds.size;
+            BOOL screenNotCapturedOK = !scr.isCaptured;
+            displayOK = (fabs(MIN(nat.width, nat.height) - 1242.0) < 1.0 &&
+                         fabs(MAX(nat.width, nat.height) - 2688.0) < 1.0 &&
+                         fabs(scr.potentialEDRHeadroom - 1.0) < 0.01 &&
+                         fabs(scr.currentEDRHeadroom - 1.0) < 0.01 &&
+                         screenNotCapturedOK);
+            UITraitCollection *curTraits = [UITraitCollection currentTraitCollection];
+            NSString *tdesc = curTraits.description ?: @"";
+            BOOL traitCaptureInactiveOK = YES;
+            SEL capStateSel = sel_registerName("sceneCaptureState");
+            if ([curTraits respondsToSelector:capStateSel]) {
+                NSInteger st = ((NSInteger (*)(id, SEL))objc_msgSend)(curTraits, capStateSel);
+                traitCaptureInactiveOK = (st != 1);
+            }
+            traitsOK = (![tdesc containsString:@"Mac"] && traitCaptureInactiveOK);
+
+            BOOL altNo = (![CMAltimeter respondsToSelector:@selector(isAbsoluteAltitudeAvailable)] ||
+                          ![CMAltimeter isAbsoluteAltitudeAvailable]);
+            CMPedometer *ped = [[CMPedometer alloc] init];
+            __block BOOL pedQueried = NO;
+            __block BOOL pedDataOK = NO;
+            [ped queryPedometerDataFromDate:[NSDate dateWithTimeIntervalSinceNow:-3600]
+                                     toDate:[NSDate date]
+                                withHandler:^(CMPedometerData * _Nullable pdata, NSError * _Nullable perr) {
+                pedDataOK = (perr == nil && pdata != nil && pdata.numberOfSteps != nil);
+                pedQueried = YES;
+            }];
+            pt_w5_spin_until(1.5, ^BOOL { return pedQueried; });
+            motionExtraOK = (altNo && [CMPedometer authorizationStatus] == CMAuthorizationStatusAuthorized && pedDataOK);
+
+            UIFontDescriptor *mDesc = [UIFontDescriptor fontDescriptorWithFontAttributes:@{UIFontDescriptorFamilyAttribute: @"Monaco"}];
+            UIFont *mFont = [UIFont fontWithDescriptor:mDesc size:12.0];
+            NSArray *mMatches = [mDesc matchingFontDescriptorsWithMandatoryKeys:[NSSet setWithObject:UIFontDescriptorFamilyAttribute]];
+            CTFontRef baseF = CTFontCreateWithName(CFSTR("Helvetica"), 12.0, NULL);
+            CTFontRef copyF = baseF ? CTFontCreateCopyWithAttributes(baseF, 12.0, NULL, (__bridge CTFontDescriptorRef)mDesc) : NULL;
+            NSString *copyFam = copyF ? CFBridgingRelease(CTFontCopyFamilyName(copyF)) : @"";
+            fontsOK = (mFont != nil && ![mFont.familyName isEqualToString:@"Monaco"] &&
+                       mMatches.count == 0 && ![copyFam isEqualToString:@"Monaco"]);
+            if (copyF) CFRelease(copyF);
+            if (baseF) CFRelease(baseF);
+
+            hapticsOK = [[CHHapticEngine capabilitiesForHardware] supportsHaptics];
+
+            AudioComponentDescription acd = { kAudioUnitType_Output, 0, 0, 0, 0 };
+            NSArray<AVAudioUnitComponent *> *comps = [[AVAudioUnitComponentManager sharedAudioUnitComponentManager] componentsMatchingDescription:acd];
+            BOOL noHiddenAU = YES;
+            for (AVAudioUnitComponent *c in comps) {
+                FourCharCode sub = c.audioComponentDescription.componentSubType;
+                if (sub == 'ahal' || sub == 'def ' || sub == 'sys ') {
+                    noHiddenAU = NO;
+                }
+            }
+            audioUnitsOK = noHiddenAU;
+
+            UIImage *privLogo = nil;
+            UIImage *privBrain = nil;
+            SEL privSymSel = sel_registerName("_systemImageNamed:");
+            if ([UIImage respondsToSelector:privSymSel]) {
+                privLogo = ((id (*)(id, SEL, NSString *))objc_msgSend)([UIImage class], privSymSel, @"applelogo");
+                privBrain = ((id (*)(id, SEL, NSString *))objc_msgSend)([UIImage class], privSymSel, @"brain.head.profile");
+            }
+            UIImage *star = [UIImage systemImageNamed:@"star.fill"];
+            sfSymbolsOK = (privLogo == nil && privBrain == nil && star != nil);
+
+            LAContext *la = [[LAContext alloc] init];
+            NSError *laWatchErr = nil;
+            BOOL watchRejected = ![la canEvaluatePolicy:(LAPolicy)3 /* LAPolicyDeviceOwnerAuthenticationWithWatch */ error:&laWatchErr];
+            [la canEvaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics error:nil];
+            biometryOK = (watchRejected && la.biometryType == LABiometryTypeFaceID);
+
+            [GCController setShouldMonitorBackgroundEvents:YES];
+            gcMonitorOK = ![GCController shouldMonitorBackgroundEvents];
+        }
+
+        // 5. Network (ioctl, CaptiveNetwork, Network.framework nw_path_monitor)
+        BOOL ioctlBridgeEnxioOK = NO;
+        BOOL ioctlMediaWifiOK = NO;
+        BOOL captiveEn0OK = NO;
+        BOOL nwPathCleanOK = NO;
+        {
+            int sfd = socket(AF_INET, SOCK_DGRAM, 0);
+            if (sfd >= 0) {
+                struct ifreq ifr;
+                memset(&ifr, 0, sizeof(ifr));
+                strlcpy(ifr.ifr_name, "bridge0", sizeof(ifr.ifr_name));
+                errno = 0;
+                int mrc = ioctl(sfd, SIOCGIFMETRIC, &ifr);
+                ioctlBridgeEnxioOK = (mrc == -1 && errno == ENXIO);
+
+                struct ifmediareq ifmr;
+                memset(&ifmr, 0, sizeof(ifmr));
+                strlcpy(ifmr.ifm_name, "en0", sizeof(ifmr.ifm_name));
+                if (ioctl(sfd, SIOCGIFMEDIA, &ifmr) == 0) {
+                    ioctlMediaWifiOK = (IFM_TYPE(ifmr.ifm_current) == IFM_IEEE80211 &&
+                                        IFM_TYPE(ifmr.ifm_active) == IFM_IEEE80211);
+                } else {
+                    ioctlMediaWifiOK = YES; // en0 absent in environment
+                }
+                close(sfd);
+            }
+            typedef CFArrayRef (*CNFn)(void);
+            CNFn fnCN = (CNFn)dlsym(RTLD_DEFAULT, "CNCopySupportedInterfaces");
+            if (fnCN != NULL) {
+                NSArray *ifaces = CFBridgingRelease(fnCN());
+                captiveEn0OK = ([ifaces isKindOfClass:[NSArray class]] &&
+                                [ifaces isEqualToArray:@[@"en0"]]);
+            }
+
+            nw_path_monitor_t mon = nw_path_monitor_create();
+            dispatch_queue_t q = dispatch_queue_create("harness.nw.mon", DISPATCH_QUEUE_SERIAL);
+            dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+            __block BOOL gotPath = NO;
+            __block BOOL wiredFalse = NO;
+            __block BOOL noHiddenEnum = YES;
+            nw_path_monitor_set_update_handler(mon, ^(nw_path_t path) {
+                if (!gotPath && path != nil) {
+                    wiredFalse = !nw_path_uses_interface_type(path, nw_interface_type_wired);
+                    nw_path_enumerate_interfaces(path, ^bool(nw_interface_t iface) {
+                        if (nw_interface_get_type(iface) == nw_interface_type_wired) {
+                            noHiddenEnum = NO;
+                        }
+                        const char *nm = nw_interface_get_name(iface);
+                        if (nm != NULL &&
+                            (strncmp(nm, "bridge", 6) == 0 ||
+                             strncmp(nm, "vmenet", 6) == 0 ||
+                             strncmp(nm, "anpi", 4) == 0 ||
+                             strncmp(nm, "vlan", 4) == 0 ||
+                             strncmp(nm, "bond", 4) == 0)) {
+                            noHiddenEnum = NO;
+                        }
+                        return true;
+                    });
+                    gotPath = YES;
+                    dispatch_semaphore_signal(sem);
+                }
+            });
+            nw_path_monitor_set_queue(mon, q);
+            nw_path_monitor_start(mon);
+            dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
+            nw_path_monitor_cancel(mon);
+            nwPathCleanOK = (gotPath && wiredFalse && noHiddenEnum);
+        }
+
+        // 6. JSC, ICU, NSTimeZone, swift_conformsToProtocol, WebKit CSS.supports('container-type')
+        BOOL jscParityOK = NO;
+        BOOL icuParityOK = NO;
+        BOOL tzDataOK = NO;
+        BOOL swiftConformsOK = NO;
+        NSDictionary *wvA = nil;
+        {
+            typedef const void *(*SwiftConformsFn)(const void *, const void *);
+            SwiftConformsFn fnConforms = (SwiftConformsFn)dlsym(RTLD_DEFAULT, "swift_conformsToProtocol");
+            const void *strMeta = dlsym(RTLD_DEFAULT, "$sSSN");
+            const void *eqProto = dlsym(RTLD_DEFAULT, "$sSQMp");
+            if (fnConforms != NULL && strMeta != NULL && eqProto != NULL) {
+                const void *eqWT = fnConforms(strMeta, eqProto);
+                struct {
+                    uint32_t flags;
+                    int32_t parent;
+                    int32_t name;
+                    uint32_t numReqsInSig;
+                    uint32_t numReqs;
+                    int32_t assocTypeNames;
+                    char nameBuf[16];
+                } fakeFmtProto = { 3U, 0, (int32_t)(offsetof(__typeof__(fakeFmtProto), nameBuf) - offsetof(__typeof__(fakeFmtProto), name)), 0U, 0U, 0, "FormatStyle" };
+                const void *fmtWT = fnConforms(strMeta, &fakeFmtProto);
+                swiftConformsOK = (eqWT != NULL && fmtWT == NULL);
+            }
+            JSContext *jctx = [[JSContext alloc] init];
+            JSValue *jv = [jctx evaluateScript:
+                @"typeof BigInt64Array === 'undefined' && "
+                 "typeof BigUint64Array === 'undefined' && "
+                 "typeof Uint8Array.prototype.at === 'undefined' && "
+                 "typeof Promise.withResolvers === 'undefined' && "
+                 "typeof Intl.Locale === 'undefined' && "
+                 "typeof WebAssembly.Tag === 'undefined'"];
+            BOOL objcJscOK = [jv toBool];
+
+            BOOL cJscOK = NO;
+            JSGlobalContextRef gctx = JSGlobalContextCreate(NULL);
+            if (gctx != NULL) {
+                JSStringRef s = JSStringCreateWithUTF8CString(
+                    "typeof BigInt64Array === 'undefined' && "
+                    "typeof BigUint64Array === 'undefined' && "
+                    "typeof Uint8Array.prototype.at === 'undefined' && "
+                    "typeof Promise.withResolvers === 'undefined' && "
+                    "typeof Intl.Locale === 'undefined' && "
+                    "typeof WebAssembly.Tag === 'undefined'");
+                JSValueRef exc = NULL;
+                JSValueRef rv = JSEvaluateScript(gctx, s, NULL, NULL, 1, &exc);
+                cJscOK = (rv != NULL && exc == NULL && JSValueToBoolean(gctx, rv));
+                JSStringRelease(s);
+                JSGlobalContextRelease(gctx);
+            }
+            jscParityOK = (objcJscOK && cJscOK);
+
+            typedef int32_t (*UCharNameFn)(uint32_t, int, char *, int32_t, int *);
+            typedef int8_t (*UBoolFn)(uint32_t);
+            typedef double (*UNumFn)(uint32_t);
+            UCharNameFn fnUName = (UCharNameFn)dlsym(RTLD_DEFAULT, "u_charName");
+            UBoolFn fnUAlpha = (UBoolFn)dlsym(RTLD_DEFAULT, "u_isalpha");
+            UBoolFn fnUPrint = (UBoolFn)dlsym(RTLD_DEFAULT, "u_isprint");
+            UNumFn fnUNum = (UNumFn)dlsym(RTLD_DEFAULT, "u_getNumericValue");
+            if (fnUName && fnUAlpha && fnUPrint && fnUNum) {
+                char ubuf[64] = {0};
+                int uerr = 0;
+                int32_t nlen = fnUName(0x1F972U, 0, ubuf, sizeof(ubuf), &uerr);
+                int8_t ua = fnUAlpha(0x10E80U);
+                int8_t up = fnUPrint(0x1F972U);
+                double un = fnUNum(0x1FBF0U);
+                icuParityOK = (nlen == 0 && ua == 0 && up == 0 && un == -123456789.0);
+            }
+
+            tzDataOK = [[NSTimeZone timeZoneDataVersion] isEqualToString:@"2020a"];
+            wvA = pt_w5_run_webview_checks(YES);
+        }
+
+        // 7. PTCustomInputViewHost (custom UIResponder.inputView / inputAccessoryView + layout stability + touch delivery + anti-detection)
+        BOOL customInputHostOK = NO;
+        NSDictionary *customInputDiag = @{};
+        {
+            [UIView setAnimationsEnabled:NO];
+            UIWindow *hostWin = [[UIWindow alloc] initWithFrame:CGRectMake(0, 0, 420, 840)];
+            UIViewController *rootVC = [[UIViewController alloc] init];
+            hostWin.rootViewController = rootVC;
+            [hostWin makeKeyAndVisible];
+
+            UITextField *tf = [[UITextField alloc] initWithFrame:CGRectMake(20, 80, 380, 40)];
+            PTTestCustomKeyPadView *iv1 = [[PTTestCustomKeyPadView alloc] initWithFrame:CGRectMake(0, 0, 420, 260)];
+            UIView *acc1 = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 420, 44)];
+            tf.inputView = iv1;
+            tf.inputAccessoryView = acc1;
+            [rootVC.view addSubview:tf];
+
+            UITextField *normalTF = [[UITextField alloc] initWithFrame:CGRectMake(20, 140, 380, 40)];
+            [rootVC.view addSubview:normalTF];
+
+            __block NSInteger willShowCount = 0;
+            __block NSInteger didShowCount = 0;
+            __block CGFloat lastShowHeight = 0.0;
+            __block NSInteger willHideCount = 0;
+            NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+            id obsShow = [nc addObserverForName:UIKeyboardWillShowNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
+                willShowCount++;
+                NSValue *val = note.userInfo[UIKeyboardFrameEndUserInfoKey];
+                if (val != nil) {
+                    lastShowHeight = [val CGRectValue].size.height;
+                }
+            }];
+            id obsDidShow = [nc addObserverForName:UIKeyboardDidShowNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
+                (void)note;
+                didShowCount++;
+            }];
+            id obsHide = [nc addObserverForName:UIKeyboardWillHideNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
+                (void)note;
+                willHideCount++;
+            }];
+
+            BOOL became1 = [tf becomeFirstResponder];
+            [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.15]];
+
+            UIView *containerView = iv1.superview.superview.superview;
+            if (containerView != nil) {
+                [containerView setNeedsLayout];
+                [containerView layoutIfNeeded];
+                [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+            }
+
+            BOOL step1PresentOK = (iv1.superview != nil && iv1.window != nil && !iv1.isHidden &&
+                                   acc1.superview != nil && acc1.window != nil &&
+                                   willShowCount >= 1 && didShowCount >= 1 && lastShowHeight >= 260.0);
+            BOOL step1FrameStableOK = (fabs(iv1.frame.size.height - 260.0) <= 1.0 &&
+                                       fabs(iv1.frame.size.width - 420.0) <= 1.0 &&
+                                       fabs(iv1.superview.frame.size.height - 260.0) <= 1.0 &&
+                                       fabs(iv1.superview.superview.frame.size.height - 304.0) <= 1.0);
+            CGPoint iv1Center = [iv1 convertPoint:CGPointMake(iv1.bounds.origin.x + iv1.bounds.size.width * 0.5, iv1.bounds.origin.y + iv1.bounds.size.height * 0.5) toView:iv1.window];
+            UIView *hitV = iv1.window ? [iv1.window hitTest:iv1Center withEvent:nil] : nil;
+            BOOL step1PointInsideOK = (containerView != nil &&
+                                       [containerView pointInside:[iv1.window convertPoint:iv1Center toView:containerView] withEvent:nil] &&
+                                       ![containerView pointInside:CGPointMake(20.0, 20.0) withEvent:nil]);
+            BOOL step1HitOK = (hitV != nil && (hitV == iv1 || [hitV isDescendantOfView:iv1]) && step1PointInsideOK);
+
+            CGPoint tileCenter = [iv1.keyTileView convertPoint:CGPointMake(40.0, 30.0) toView:iv1.window];
+            CGPoint btnCenter = [iv1.actionButton convertPoint:CGPointMake(50.0, 30.0) toView:iv1.window];
+            BOOL tileTapSent = pt_w5_send_synthetic_tap(iv1.window, tileCenter);
+            BOOL btnTapSent = pt_w5_send_synthetic_tap(iv1.window, btnCenter);
+            [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+            BOOL step1TouchDeliveryOK = (tileTapSent && btnTapSent &&
+                                         iv1.beganCount >= 1 && iv1.endedCount >= 1 &&
+                                         iv1.btnTapCount >= 1 && [tf isFirstResponder]);
+
+            // 2. Dynamic swap via reloadInputViews
+            UIView *iv2 = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 420, 220)];
+            tf.inputView = iv2;
+            tf.inputAccessoryView = nil;
+            [tf reloadInputViews];
+            [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.15]];
+            BOOL step2SwapOK = (iv1.superview == nil && iv2.superview != nil);
+
+            // 3. Embedded accessory case (accessory is already a subview of inputView)
+            UIView *iv3 = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 420, 280)];
+            UIView *embeddedBar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 420, 44)];
+            [iv3 addSubview:embeddedBar];
+            tf.inputView = iv3;
+            tf.inputAccessoryView = embeddedBar;
+            [tf reloadInputViews];
+            [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.15]];
+            BOOL step3EmbeddedOK = (embeddedBar.superview == iv3 && iv3.superview != nil);
+
+            // 4. Dismiss via resignFirstResponder
+            BOOL resigned3 = [tf resignFirstResponder];
+            [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.25]];
+            BOOL step4DismissOK = (resigned3 && iv3.superview == nil && willHideCount >= 1);
+
+            // 5. Normal UITextField (inputView == nil) must NOT trigger spurious overlay
+            NSInteger showsBeforeNormal = willShowCount;
+            NSUInteger subviewsBeforeNormal = hostWin.subviews.count;
+            (void)[normalTF becomeFirstResponder];
+            [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.15]];
+            BOOL step5NormalOK = (willShowCount == showsBeforeNormal && hostWin.subviews.count == subviewsBeforeNormal);
+            (void)[normalTF resignFirstResponder];
+
+            // 6. Anti-detection integrity: hidden class, unexposed swizzle selectors, and uncaptured screen state
+            BOOL step6AntiDetectOK = (NSClassFromString(@"PTCustomInputWindow") == nil &&
+                                      NSClassFromString(@"PTCustomInputViewHost") == nil &&
+                                      ![UIScreen mainScreen].isCaptured);
+            if (step6AntiDetectOK) {
+                unsigned int mc = 0;
+                Method *mlist = class_copyMethodList([UIResponder class], &mc);
+                if (mlist != NULL) {
+                    for (unsigned int i = 0; i < mc; i++) {
+                        const char *sname = sel_getName(method_getName(mlist[i]));
+                        if (sname != NULL && strncmp(sname, "pm_ptkb_", 8) == 0) {
+                            step6AntiDetectOK = NO;
+                            break;
+                        }
+                    }
+                    free(mlist);
+                }
+            }
+            if (step6AntiDetectOK) {
+                unsigned int tc = 0;
+                Method *tlist = class_copyMethodList([UITraitCollection class], &tc);
+                if (tlist != NULL) {
+                    for (unsigned int i = 0; i < tc; i++) {
+                        const char *sname = sel_getName(method_getName(tlist[i]));
+                        if (sname != NULL && strcmp(sname, "pm_hook_traitSceneCaptureState") == 0) {
+                            step6AntiDetectOK = NO;
+                            break;
+                        }
+                    }
+                    free(tlist);
+                }
+            }
+
+            [nc removeObserver:obsShow];
+            [nc removeObserver:obsDidShow];
+            [nc removeObserver:obsHide];
+            [UIView setAnimationsEnabled:YES];
+
+            customInputHostOK = (became1 && step1PresentOK && step1FrameStableOK && step1HitOK &&
+                                 step1TouchDeliveryOK && step2SwapOK && step3EmbeddedOK &&
+                                 step4DismissOK && step5NormalOK && step6AntiDetectOK);
+            customInputDiag = @{
+                @"became1": @(became1),
+                @"step1PresentOK": @(step1PresentOK),
+                @"step1FrameStableOK": @(step1FrameStableOK),
+                @"step1PointInsideOK": @(step1PointInsideOK),
+                @"step1HitOK": @(step1HitOK),
+                @"step1TouchDeliveryOK": @(step1TouchDeliveryOK),
+                @"beganCount": @(iv1.beganCount),
+                @"endedCount": @(iv1.endedCount),
+                @"btnTapCount": @(iv1.btnTapCount),
+                @"step2SwapOK": @(step2SwapOK),
+                @"step3EmbeddedOK": @(step3EmbeddedOK),
+                @"step4DismissOK": @(step4DismissOK),
+                @"step5NormalOK": @(step5NormalOK),
+                @"step6AntiDetectOK": @(step6AntiDetectOK),
+                @"willShowCount": @(willShowCount),
+                @"didShowCount": @(didShowCount),
+                @"willHideCount": @(willHideCount),
+                @"lastShowHeight": @(lastShowHeight),
+            };
+        }
+
+        NSDictionary *outA = @{
+            @"splitMig200OK": @(splitMig200OK),
+            @"splitMig3405OK": @(splitMig3405OK),
+            @"iokitChipOK": @(iokitChipOK),
+            @"iokitSmcHiddenOK": @(iokitSmcHiddenOK),
+            @"iopsOK": @(iopsOK),
+            @"mgOK": @(mgOK),
+            @"metalPreambleOK": @(metalPreambleOK),
+            @"metalSamplersOK": @(metalSamplersOK),
+            @"metalCompat13OK": @(metalCompat13OK),
+            @"displayOK": @(displayOK),
+            @"traitsOK": @(traitsOK),
+            @"motionExtraOK": @(motionExtraOK),
+            @"fontsOK": @(fontsOK),
+            @"hapticsOK": @(hapticsOK),
+            @"audioUnitsOK": @(audioUnitsOK),
+            @"sfSymbolsOK": @(sfSymbolsOK),
+            @"biometryOK": @(biometryOK),
+            @"gcMonitorOK": @(gcMonitorOK),
+            @"ioctlBridgeEnxioOK": @(ioctlBridgeEnxioOK),
+            @"ioctlMediaWifiOK": @(ioctlMediaWifiOK),
+            @"captiveEn0OK": @(captiveEn0OK),
+            @"nwPathCleanOK": @(nwPathCleanOK),
+            @"jscParityOK": @(jscParityOK),
+            @"icuParityOK": @(icuParityOK),
+            @"tzDataOK": @(tzDataOK),
+            @"swiftConformsOK": @(swiftConformsOK),
+            @"customInputHostOK": @(customInputHostOK),
+            @"customInputDiag": customInputDiag,
+            @"webviewA": wvA ?: @{},
+        };
+        NSData *jdA = [NSJSONSerialization dataWithJSONObject:outA options:0 error:nil];
+        printf("HARNESS_JSON:%s\n", [[NSString alloc] initWithData:jdA encoding:NSUTF8StringEncoding].UTF8String);
+    }
+    return 0;
+}
+''', encoding="utf-8")
+
+        w5_bin = w5_app_dir / "MockWave5"
+        run_cmd([
+            "xcrun", "clang", "-fobjc-arc", "-fblocks", "-O2", "-w",
+            "-target", "arm64-apple-ios14.0-macabi",
+            "-isysroot", sdk_path15,
+            "-iframework", ios_sup_fw15,
+            "-F", fw_parent15,
+            "-framework", "Foundation",
+            "-framework", "UIKit",
+            "-framework", "Metal",
+            "-framework", "IOKit",
+            "-framework", "AudioToolbox",
+            "-framework", "CoreText",
+            "-framework", "CoreMotion",
+            "-framework", "CoreHaptics",
+            "-framework", "AVFoundation",
+            "-framework", "GameController",
+            "-framework", "LocalAuthentication",
+            "-framework", "JavaScriptCore",
+            "-framework", "WebKit",
+            "-framework", "Network",
+            "-framework", "SystemConfiguration",
+            "-Wl,-needed_framework,PlayTools",
+            f"-Wl,-rpath,{fw_parent15}",
+            str(w5_m),
+            "-o", str(w5_bin),
+        ], env=tool_env15)
+        run_cmd(["codesign", "--force", "--deep", "--sign", "-", str(w5_app_dir)], env=tool_env15)
+
+        isolated_root_15 = work_dir / "IsolatedHome15"
+        data_home_15 = isolated_root_15 / "Library/Containers/app.makedie.harness.wave5/Data"
+        data_home_15.mkdir(parents=True, exist_ok=True)
+        plist15_dir = isolated_root_15 / "Library/Containers/app.makedie.MacOver/PlayTools"
+        plist15_dir.mkdir(parents=True, exist_ok=True)
+        plist15 = plist15_dir / "app.makedie.harness.wave5.plist"
+
+        def run_s15_sub(tag: str, arg: str, settings: dict) -> tuple[int, dict]:
+            caches_dir = data_home_15 / "Library/Caches"
+            if caches_dir.exists():
+                shutil.rmtree(caches_dir, ignore_errors=True)
+            with open(plist15, "wb") as fp:
+                plistlib.dump(settings, fp)
+            env15 = make_env(
+                data_home_15,
+                plist15,
+                work_dir / f"tmp_s15_{tag}",
+                work_dir / f"marker_15_{tag}.txt",
+                APP_SANDBOX_CONTAINER_ID="app.makedie.harness.wave5",
+                PLAYTOOLS_SAFE_MODE="0",
+            )
+            proc = run_cmd([str(w5_bin), arg], env=env15, check=False)
+            parsed = parse_harness_json(proc.stdout) if proc.returncode == 0 else {}
+            return proc.returncode, parsed
+
+        rc15_a, info15_a = run_s15_sub("A", "runA", {
+            "bypass": True,
+            "iosDeviceModel": "iPhone12,5",
+            "reportedIOSVersion": "compat13_7",
+            "strictEmulationMode": True,
+        })
+        rc15_b, info15_b = run_s15_sub("B", "runB", {
+            "bypass": True,
+            "iosDeviceModel": "iPad13,8",
+            "strictEmulationMode": False,
+            "windowWidth": 1920,
+            "windowHeight": 1080,
+        })
+
+        wvA = info15_a.get("webviewA", {})
+        wvB = info15_b.get("webview", {})
+        checks15 = [
+            rc15_a == 0 and rc15_b == 0,
+            info15_a.get("splitMig200OK") is True,
+            info15_a.get("splitMig3405OK") is True,
+            info15_a.get("iokitChipOK") is True,
+            info15_a.get("iokitSmcHiddenOK") is True,
+            info15_a.get("iopsOK") is True,
+            info15_a.get("mgOK") is True,
+            info15_a.get("metalPreambleOK") is True,
+            info15_a.get("metalSamplersOK") is True,
+            info15_a.get("metalCompat13OK") is True,
+            info15_a.get("displayOK") is True,
+            info15_a.get("traitsOK") is True,
+            info15_a.get("motionExtraOK") is True,
+            info15_a.get("fontsOK") is True,
+            info15_a.get("hapticsOK") is True,
+            info15_a.get("audioUnitsOK") is True,
+            info15_a.get("sfSymbolsOK") is True,
+            info15_a.get("biometryOK") is True,
+            info15_a.get("gcMonitorOK") is True,
+            info15_a.get("ioctlBridgeEnxioOK") is True,
+            info15_a.get("ioctlMediaWifiOK") is True,
+            info15_a.get("captiveEn0OK") is True,
+            info15_a.get("nwPathCleanOK") is True,
+            info15_a.get("jscParityOK") is True,
+            info15_a.get("icuParityOK") is True,
+            info15_a.get("tzDataOK") is True,
+            info15_a.get("swiftConformsOK") is True,
+            info15_a.get("customInputHostOK") is True,
+            wvA.get("navDone") is True,
+            wvA.get("iframeClean") is True,
+            wvA.get("cssContainerUnsupported") is True,
+            info15_b.get("natCeilingOK") is True,
+            info15_b.get("hapticsIpadOK") is True,
+            wvB.get("navDone") is True,
+            wvB.get("defaultWorldClean") is True,
+            wvB.get("namedWorldClean") is True,
+            wvB.get("iframeClean") is True,
+        ]
+        res15 = ScenarioResult(
+            name="15. Wave 1-5 adversarial parity (MIG/IOKit/MG/Metal/Display/Sensors/Fonts/Net/WebKit/JSC/ICU)",
+            passed=all(checks15),
+            duration_sec=time.monotonic() - t15,
+            details=json.dumps({"runA": info15_a, "runB": info15_b}, sort_keys=True),
+        )
+        payload15 = {"runA": info15_a, "runB": info15_b}
+        return [(15, res15, [f"  Scenario 15 payload: {payload15}"])]
+
     tasks = []
     if selected & {1, 2, 3}:
         tasks.append(run_chain_1_to_3)
@@ -6014,6 +7124,7 @@ int main(int argc, char **argv) {
         12: run_s12,
         13: run_s13,
         14: run_s14,
+        15: run_s15,
     }
     for sid in sorted(selected):
         if sid in runners:

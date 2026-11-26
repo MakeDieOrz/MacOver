@@ -14,10 +14,7 @@
 
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 static uint32_t to_be32(uint32_t v) {
-    return ((v & 0x000000ffU) << 24) |
-           ((v & 0x0000ff00U) << 8) |
-           ((v & 0x00ff0000U) >> 8) |
-           ((v & 0xff000000U) >> 24);
+    return ((v & 0x000000ffU) << 24) | ((v & 0x0000ff00U) << 8) | ((v & 0x00ff0000U) >> 8) | ((v & 0xff000000U) >> 24);
 }
 #else
 static uint32_t to_be32(uint32_t v) {
@@ -45,7 +42,7 @@ static void test_der_entitlements_encoding_and_superblob_rewrite(void) {
     pt_der_buf_append(&set_body, pair1.data, pair1.len);
 
     pt_der_buf_t app_body = {0};
-    uint8_t ver[3] = { 0x02U, 0x01U, 0x01U };
+    uint8_t ver[3] = {0x02U, 0x01U, 0x01U};
     pt_der_buf_append(&app_body, ver, sizeof(ver));
     pt_der_buf_wrap_tlv(&app_body, 0x31U, set_body.data, set_body.len);
 
@@ -92,7 +89,7 @@ static void test_attr_ref_zero_fill(void) {
 }
 
 static void test_getgroups_filter(void) {
-    const uint32_t mac_gids[] = { 20, 12, 29, 33, 61, 79, 80, 81, 98, 100, 101, 204, 250, 395, 398, 399, 400, 701 };
+    const uint32_t mac_gids[] = {20, 12, 29, 33, 61, 79, 80, 81, 98, 100, 101, 204, 250, 395, 398, 399, 400, 701};
     uint32_t out[32];
     int out_n = 0;
     for (size_t i = 0; i < sizeof(mac_gids) / sizeof(mac_gids[0]); i++) {
@@ -112,12 +109,9 @@ static int is_hidden_sysctl_name(const char *name, int compat13_7, int e_cores) 
     if (name == NULL || name[0] == '\0') {
         return 0;
     }
-    if (strcmp(name, "sysctl.proc_translated") == 0 ||
-        strcmp(name, "sysctl.proc_native") == 0 ||
-        strcmp(name, "kern.iossupportversion") == 0 ||
-        strncmp(name, "kern.hibernate", 14) == 0 ||
-        strcmp(name, "hw.use_kernelmanagerd") == 0 ||
-        strcmp(name, "vm.swapusage") == 0) {
+    if (strcmp(name, "sysctl.proc_translated") == 0 || strcmp(name, "sysctl.proc_native") == 0 ||
+        strcmp(name, "kern.iossupportversion") == 0 || strncmp(name, "kern.hibernate", 14) == 0 ||
+        strcmp(name, "hw.use_kernelmanagerd") == 0 || strcmp(name, "vm.swapusage") == 0) {
         return 1;
     }
     if (strncmp(name, "hw.perflevel1.", 14) == 0 && e_cores == 0) {
@@ -142,22 +136,26 @@ static void test_sysctl_filters(void) {
 
 static void replace_substr(char *buf, size_t cap, const char *needle, const char *repl) {
     size_t nlen = strlen(needle), rlen = strlen(repl);
-    if (nlen == 0 || strcmp(needle, repl) == 0) return;
+    if (nlen == 0 || strcmp(needle, repl) == 0)
+        return;
     size_t pos = 0;
     while (1) {
         char *hit = strstr(buf + pos, needle);
-        if (!hit) break;
+        if (!hit)
+            break;
         size_t off = (size_t)(hit - buf);
         size_t cur = strlen(buf);
-        if (cur - nlen + rlen >= cap) break;
-        if (rlen != nlen) memmove(hit + rlen, hit + nlen, cur - off - nlen + 1U);
+        if (cur - nlen + rlen >= cap)
+            break;
+        if (rlen != nlen)
+            memmove(hit + rlen, hit + nlen, cur - off - nlen + 1U);
         memcpy(hit, repl, rlen);
         pos = off + rlen;
     }
 }
 
 static void sanitize_io_compat13(char *buf, size_t cap) {
-    static const char *const kSocs[] = { "T8103", "T8101", "T810x", "T6000" };
+    static const char *const kSocs[] = {"T8103", "T8101", "T810x", "T6000"};
     for (size_t i = 0; i < sizeof(kSocs) / sizeof(kSocs[0]); i++) {
         replace_substr(buf, cap, kSocs[i], "T8027");
     }
@@ -204,20 +202,25 @@ static void test_sf_symbols_and_versions(void) {
 /* ---------- Batch 4 Unit Tests ---------- */
 
 static int is_code_res_key_dirty(const char *k) {
-    if (!k) return 0;
-    return (strstr(k, "PlayTools") != NULL ||
-            strstr(k, "AKInterface") != NULL ||
-            strstr(k, "SVCPatches") != NULL ||
-            strstr(k, "Playtools.strings") != NULL ||
-            strstr(k, "UserPlugins") != NULL) ? 1 : 0;
+    if (!k)
+        return 0;
+    return (strstr(k, "PlayTools") != NULL || strstr(k, "AKInterface") != NULL || strstr(k, "SVCPatches") != NULL ||
+            strstr(k, "Playtools.strings") != NULL || strstr(k, "UserPlugins") != NULL)
+               ? 1
+               : 0;
 }
 
 static void test_network_and_coderesources(void) {
     assert(pt_is_hidden_network_ifname_prefix_cstr("anpi0"));
     assert(pt_is_hidden_network_ifname_prefix_cstr("anpi2"));
     assert(pt_is_hidden_network_ifname_prefix_cstr("bridge100"));
+    assert(pt_is_hidden_network_ifname_prefix_cstr("vlan0"));
+    assert(pt_is_hidden_network_ifname_prefix_cstr("bond0"));
+    assert(pt_is_hidden_network_ifname_prefix_cstr("fw0"));
+    assert(pt_is_hidden_network_ifname_prefix_cstr("usb0"));
     assert(!pt_is_hidden_network_ifname_prefix_cstr("en0"));
     assert(!pt_is_hidden_network_ifname_prefix_cstr("lo0"));
+    assert(!pt_is_hidden_network_ifname_prefix_cstr("pdp_ip0"));
     assert(pt_is_secondary_en_ifname_cstr("en1"));
     assert(pt_is_secondary_en_ifname_cstr("en12"));
     assert(!pt_is_secondary_en_ifname_cstr("en0"));
@@ -242,25 +245,47 @@ static void test_sha1_raw(const uint8_t *msg, size_t len, uint8_t out[CC_SHA1_DI
 
 static void test_der_3byte_len_and_nested_set(void) {
     pt_der_buf_t b = {0};
-    pt_der_buf_append_tag_len(&b, 0x31U, 0x12345U);
+    pt_der_buf_append_tag_len(&b, 0xB0U, 0x12345U);
     assert(!b.failed);
     assert(b.len == 5U);
-    assert(b.data[0] == 0x31U && b.data[1] == 0x83U && b.data[2] == 0x01U && b.data[3] == 0x23U && b.data[4] == 0x45U);
+    assert(b.data[0] == 0xB0U && b.data[1] == 0x83U && b.data[2] == 0x01U && b.data[3] == 0x23U && b.data[4] == 0x45U);
     free(b.data);
 
-    /* Nested dictionary must use SET tag 0x31 (Apple CE DER spec) */
+    /* Dictionary containers must use context [16] constructed tag 0xB0 (Apple CoreEntitlements DER spec) */
     pt_der_buf_t inner_kv = {0};
     pt_der_buf_wrap_tlv(&inner_kv, 0x0cU, (const uint8_t *)"subkey", 6U);
     uint8_t der_true = 0xffU;
     pt_der_buf_wrap_tlv(&inner_kv, 0x01U, &der_true, 1U);
     pt_der_buf_t inner_seq = {0};
     pt_der_buf_wrap_tlv(&inner_seq, 0x30U, inner_kv.data, inner_kv.len);
-    pt_der_buf_t nested_set = {0};
-    pt_der_buf_wrap_tlv(&nested_set, 0x31U, inner_seq.data, inner_seq.len);
-    assert(nested_set.data[0] == 0x31U);
+    pt_der_buf_t nested_dict = {0};
+    pt_der_buf_wrap_tlv(&nested_dict, 0xB0U, inner_seq.data, inner_seq.len);
+    assert(nested_dict.data[0] == 0xB0U);
     free(inner_kv.data);
     free(inner_seq.data);
-    free(nested_set.data);
+    free(nested_dict.data);
+
+    /* Key-order sorting: longer key/value SEQUENCE whose key is lexicographically earlier must sort first */
+    pt_der_buf_t kv1 = {0}, kv2 = {0}, seq1 = {0}, seq2 = {0};
+    pt_der_buf_wrap_tlv(&kv1, 0x0cU, (const uint8_t *)"com.apple.private.longkey.extra", 31U);
+    pt_der_buf_wrap_tlv(&kv1, 0x01U, &der_true, 1U);
+    pt_der_buf_wrap_tlv(&seq1, 0x30U, kv1.data, kv1.len);
+
+    pt_der_buf_wrap_tlv(&kv2, 0x0cU, (const uint8_t *)"com.apple.short", 15U);
+    pt_der_buf_wrap_tlv(&kv2, 0x01U, &der_true, 1U);
+    pt_der_buf_wrap_tlv(&seq2, 0x30U, kv2.data, kv2.len);
+
+    pt_der_item_t items[2] = {
+        {.bytes = seq2.data, .len = seq2.len},
+        {.bytes = seq1.data, .len = seq1.len},
+    };
+    qsort(items, 2U, sizeof(pt_der_item_t), pt_der_item_cmp);
+    assert(items[0].bytes == seq1.data);
+    assert(items[1].bytes == seq2.data);
+    free(kv1.data);
+    free(kv2.data);
+    free(seq1.data);
+    free(seq2.data);
 }
 
 static void test_superblob_cd_special_slot_sha256_update(void) {
@@ -293,7 +318,7 @@ static void test_superblob_cd_special_slot_sha256_update(void) {
     memcpy(slot5 + 4, &l5, 4);
     memcpy(slot5 + 8, xml_body, strlen(xml_body));
 
-    uint8_t der_body[6] = { 0x70U, 0x04U, 0x02U, 0x01U, 0x01U, 0x31U };
+    uint8_t der_body[6] = {0x70U, 0x04U, 0x02U, 0x01U, 0x01U, 0x31U};
     size_t der_blob_len = 8U + sizeof(der_body);
     uint8_t slot7[32];
     uint32_t m7 = to_be32(PT_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS), l7 = to_be32((uint32_t)der_blob_len);
@@ -306,8 +331,8 @@ static void test_superblob_cd_special_slot_sha256_update(void) {
     uint8_t zero_sha1[CC_SHA1_DIGEST_LENGTH] = {0};
     pt_sha256_cs_blob(PT_CSMAGIC_EMBEDDED_ENTITLEMENTS, (const uint8_t *)xml_body, strlen(xml_body), xml_sha256);
     pt_sha256_cs_blob(PT_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS, der_body, sizeof(der_body), der_sha256);
-    pt_patch_code_directory_entitlement_hashes(
-        cd, sizeof(cd), true, xml_sha256, zero_sha1, true, der_sha256, zero_sha1);
+    pt_patch_code_directory_entitlement_hashes(cd, sizeof(cd), true, xml_sha256, zero_sha1, true, der_sha256,
+                                               zero_sha1);
 
     uint8_t verify5[32], verify7[32];
     test_sha256_raw(slot5, xml_blob_len, verify5);
@@ -345,7 +370,7 @@ static void test_fnv1a_linear_dedup(void) {
     const char **out = (const char **)calloc(n_per_slice * 2U, sizeof(const char *));
     assert(ht != NULL && out != NULL);
     size_t out_n = 0;
-    const char **slices[2] = { slice1, slice2 };
+    const char **slices[2] = {slice1, slice2};
     for (int si = 0; si < 2; si++) {
         for (size_t k = 0; k < n_per_slice; k++) {
             const char *c = slices[si][k];
@@ -376,39 +401,48 @@ static void test_sf_symbols_multisuffix(void) {
     assert(pt_is_post13_7_sf_symbol_name_cstr("leaf.circle.fill"));
     assert(pt_is_post13_7_sf_symbol_name_cstr("gearshape.2.fill"));
     assert(pt_is_post13_7_sf_symbol_name_cstr("applelogo"));
-    assert(!pt_is_post13_7_sf_symbol_name_cstr("house.circle.fill"));
+    assert(pt_is_post13_7_sf_symbol_name_cstr("house.circle.fill"));
+    assert(!pt_is_post13_7_sf_symbol_name_cstr("heart.circle.fill"));
+    assert(!pt_is_post13_7_sf_symbol_name_cstr("star.circle.fill"));
+    assert(!pt_is_post13_7_sf_symbol_name_cstr("arrow.2.circlepath"));
+    assert(pt_is_post13_7_sf_symbol_name_cstr("gearshape.circle"));
+    assert(pt_is_post13_7_sf_symbol_name_cstr("bell.badge"));
+    assert(pt_is_post13_7_sf_symbol_name_cstr("bolt.car"));
+    assert(pt_is_post13_7_sf_symbol_name_cstr("brain"));
+    assert(pt_is_post13_7_sf_symbol_name_cstr("ellipsis.curlybraces"));
+    assert(pt_is_post13_7_sf_symbol_name_cstr("figure.run"));
+    assert(pt_is_post13_7_sf_symbol_name_cstr("theatermasks"));
 }
 
 static int ci_contains(const char *hay, const char *needle) {
     size_t nlen = strlen(needle);
-    if (nlen == 0) return 1;
+    if (nlen == 0)
+        return 1;
     for (const char *p = hay; *p; p++) {
         size_t i = 0;
         while (i < nlen && p[i]) {
             char a = p[i], b = needle[i];
-            if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
-            if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
-            if (a != b) break;
+            if (a >= 'A' && a <= 'Z')
+                a = (char)(a - 'A' + 'a');
+            if (b >= 'A' && b <= 'Z')
+                b = (char)(b - 'A' + 'a');
+            if (a != b)
+                break;
             i++;
         }
-        if (i == nlen) return 1;
+        if (i == nlen)
+            return 1;
     }
     return 0;
 }
 
 static void test_coderesources_case_insensitive_and_attr_fallback(void) {
-    const char *dirty[] = {
-        "Frameworks/playtools.framework/PlayTools",
-        "Playtools.strings",
-        "Frameworks/akinterface.framework/AKInterface",
-        "SVCPatches/patch.bin",
-        "UserPlugins/foo.dylib"
-    };
+    const char *dirty[] = {"Frameworks/playtools.framework/PlayTools", "Playtools.strings",
+                           "Frameworks/akinterface.framework/AKInterface", "SVCPatches/patch.bin",
+                           "UserPlugins/foo.dylib"};
     for (size_t i = 0; i < sizeof(dirty) / sizeof(dirty[0]); i++) {
-        int hit = ci_contains(dirty[i], "playtools") ||
-                  ci_contains(dirty[i], "akinterface") ||
-                  ci_contains(dirty[i], "svcpatches") ||
-                  ci_contains(dirty[i], "userplugins");
+        int hit = ci_contains(dirty[i], "playtools") || ci_contains(dirty[i], "akinterface") ||
+                  ci_contains(dirty[i], "svcpatches") || ci_contains(dirty[i], "userplugins");
         assert(hit == 1);
     }
     assert(ci_contains("Info.plist", "playtools") == 0);
@@ -431,7 +465,8 @@ static void test_ioreg_agx_path_and_kinfo_cr_groups_and_prefs(void) {
     char *p = strstr(path, "AGXAcceleratorG");
     assert(p != NULL);
     size_t tail_off = 15U;
-    while (p[tail_off] && p[tail_off] != '/' && p[tail_off] != ':') tail_off++;
+    while (p[tail_off] && p[tail_off] != '/' && p[tail_off] != ':')
+        tail_off++;
     char repl[64] = "AGXAcceleratorG12P";
     size_t rlen = strlen(repl);
     memmove(p + rlen, p + tail_off, strlen(p + tail_off) + 1U);
@@ -443,90 +478,79 @@ static void test_ioreg_agx_path_and_kinfo_cr_groups_and_prefs(void) {
     assert(strstr("AppleT6000ATCDPXBAR", "ATCDPXBAR") != NULL);
 
     /* kinfo_proc cr_groups scrub */
-    uint32_t cr_groups[16] = { 20, 12, 61, 80, 81, 204, 250, 395, 398, 399, 400, 701 };
+    uint32_t cr_groups[16] = {20, 12, 61, 80, 81, 204, 250, 395, 398, 399, 400, 701};
     int cr_ngroups = 12;
     int w = 0;
     for (int i = 0; i < cr_ngroups; i++) {
         uint32_t g = cr_groups[i];
-        if (pt_is_desktop_supplemental_gid_c((gid_t)g)) continue;
-        if (g == 20U) g = 501U;
+        if (pt_is_desktop_supplemental_gid_c((gid_t)g))
+            continue;
+        if (g == 20U)
+            g = 501U;
         cr_groups[w++] = g;
     }
     cr_ngroups = w;
     assert(cr_ngroups == 1 && cr_groups[0] == 501U);
 
     /* NSGlobalDomain desktop preference keys */
-    const char *hidden_prefs[] = {
-        "com.apple.trackpad.scaling",
-        "com.apple.mouse.scaling",
-        "com.apple.swipescrolldirection",
-        "AppleMiniaturizeOnDoubleClick",
-        "NSNavRecentPlaces"
-    };
+    const char *hidden_prefs[] = {"com.apple.trackpad.scaling", "com.apple.mouse.scaling",
+                                  "com.apple.swipescrolldirection", "AppleMiniaturizeOnDoubleClick",
+                                  "NSNavRecentPlaces"};
     for (size_t i = 0; i < sizeof(hidden_prefs) / sizeof(hidden_prefs[0]); i++) {
         const char *k = hidden_prefs[i];
-        int is_hidden = (strncmp(k, "com.apple.trackpad.", 19) == 0 ||
-                         strncmp(k, "com.apple.mouse.", 16) == 0 ||
+        int is_hidden = (strncmp(k, "com.apple.trackpad.", 19) == 0 || strncmp(k, "com.apple.mouse.", 16) == 0 ||
                          strcmp(k, "com.apple.swipescrolldirection") == 0 ||
-                         strcmp(k, "AppleMiniaturizeOnDoubleClick") == 0 ||
-                         strcmp(k, "NSNavRecentPlaces") == 0);
+                         strcmp(k, "AppleMiniaturizeOnDoubleClick") == 0 || strcmp(k, "NSNavRecentPlaces") == 0);
         assert(is_hidden == 1);
     }
 }
 
 static void test_round2_cg_hid_dlsym_blacklist(void) {
-    const char *blocked[] = {
-        "CGMainDisplayID", "CGGetActiveDisplayList", "CGGetOnlineDisplayList",
-        "CGWindowListCopyWindowInfo", "CGPreflightScreenCaptureAccess",
-        "CGSessionCopyCurrentDictionary", "IOHIDManagerCreate", "IOHIDManagerCopyDevices"
-    };
+    const char *blocked[] = {"CGMainDisplayID",
+                             "CGGetActiveDisplayList",
+                             "CGGetOnlineDisplayList",
+                             "CGWindowListCopyWindowInfo",
+                             "CGPreflightScreenCaptureAccess",
+                             "CGSessionCopyCurrentDictionary",
+                             "IOHIDManagerCreate",
+                             "IOHIDManagerCopyDevices"};
     for (size_t i = 0; i < sizeof(blocked) / sizeof(blocked[0]); i++) {
         assert(pt_is_hidden_macos_only_dlsym_symbol_cstr(blocked[i]));
     }
-    const char *allowed_ios_cg[] = {
-        "CGContextDrawImage", "CGImageCreate", "CGColorSpaceCreateDeviceRGB",
-        "CGPathCreateMutable", "CGBitmapContextCreate", "CGDataProviderCreateWithData"
-    };
+    const char *allowed_ios_cg[] = {"CGContextDrawImage",  "CGImageCreate",         "CGColorSpaceCreateDeviceRGB",
+                                    "CGPathCreateMutable", "CGBitmapContextCreate", "CGDataProviderCreateWithData"};
     for (size_t i = 0; i < sizeof(allowed_ios_cg) / sizeof(allowed_ios_cg[0]); i++) {
         assert(!pt_is_hidden_macos_only_dlsym_symbol_cstr(allowed_ios_cg[i]));
     }
 }
 
 static void test_round2_macos_framework_and_font_filters(void) {
-    const char *mac_fw[] = {
-        "/System/Library/Frameworks/Cocoa.framework/Cocoa",
-        "/System/Library/Frameworks/Carbon.framework/Carbon",
-        "/System/Library/Frameworks/ServiceManagement.framework/ServiceManagement",
-        "/System/Library/Frameworks/DiskArbitration.framework/DiskArbitration",
-        "/System/Library/Frameworks/CoreWLAN.framework/CoreWLAN",
-        "/System/Library/Frameworks/EndpointSecurity.framework/EndpointSecurity",
-        "/System/Library/Frameworks/ScriptingBridge.framework/ScriptingBridge",
-        "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices",
-        "/System/Library/Frameworks/AppKit.framework/AppKit"
-    };
+    const char *mac_fw[] = {"/System/Library/Frameworks/Cocoa.framework/Cocoa",
+                            "/System/Library/Frameworks/Carbon.framework/Carbon",
+                            "/System/Library/Frameworks/ServiceManagement.framework/ServiceManagement",
+                            "/System/Library/Frameworks/DiskArbitration.framework/DiskArbitration",
+                            "/System/Library/Frameworks/CoreWLAN.framework/CoreWLAN",
+                            "/System/Library/Frameworks/EndpointSecurity.framework/EndpointSecurity",
+                            "/System/Library/Frameworks/ScriptingBridge.framework/ScriptingBridge",
+                            "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices",
+                            "/System/Library/Frameworks/AppKit.framework/AppKit"};
     for (size_t i = 0; i < sizeof(mac_fw) / sizeof(mac_fw[0]); i++) {
         assert(pt_is_macos_only_framework_path_cstr(mac_fw[i]));
     }
-    const char *ios_fw[] = {
-        "/System/Library/Frameworks/UIKit.framework/UIKit",
-        "/System/Library/Frameworks/Foundation.framework/Foundation",
-        "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics",
-        "/System/Library/Frameworks/Metal.framework/Metal"
-    };
+    const char *ios_fw[] = {"/System/Library/Frameworks/UIKit.framework/UIKit",
+                            "/System/Library/Frameworks/Foundation.framework/Foundation",
+                            "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics",
+                            "/System/Library/Frameworks/Metal.framework/Metal"};
     for (size_t i = 0; i < sizeof(ios_fw) / sizeof(ios_fw[0]); i++) {
         assert(!pt_is_macos_only_framework_path_cstr(ios_fw[i]));
     }
 
-    const char *mac_fonts[] = {
-        "Monaco", "Lucida Grande", "Skia", "Osaka", "AppleGothic",
-        "Wingdings", "Andale Mono", "Big Caslon", "Comic Sans MS"
-    };
+    const char *mac_fonts[] = {"Monaco",    "Lucida Grande", "Skia",       "Osaka",        "AppleGothic",
+                               "Wingdings", "Andale Mono",   "Big Caslon", "Comic Sans MS"};
     for (size_t i = 0; i < sizeof(mac_fonts) / sizeof(mac_fonts[0]); i++) {
         assert(pt_is_hidden_desktop_font_name_cstr(mac_fonts[i]));
     }
-    const char *ios_fonts[] = {
-        "Helvetica", "SF Pro", "PingFang SC", "Avenir", "Georgia", "Menlo"
-    };
+    const char *ios_fonts[] = {"Helvetica", "SF Pro", "PingFang SC", "Avenir", "Georgia", "Menlo"};
     for (size_t i = 0; i < sizeof(ios_fonts) / sizeof(ios_fonts[0]); i++) {
         assert(!pt_is_hidden_desktop_font_name_cstr(ios_fonts[i]));
     }
@@ -543,20 +567,18 @@ static uint64_t sanitize_osvariant_status(uint64_t raw) {
 }
 
 static int is_sensitive_af_unix_path(const char *sun_path) {
-    if (sun_path == NULL || sun_path[0] == '\0') return 0;
-    return (strncmp(sun_path, "/Users/", 7U) == 0 ||
-            ci_contains(sun_path, "/Library/Containers/") ||
-            ci_contains(sun_path, "MacOver") ||
-            ci_contains(sun_path, "PlayTools") ||
+    if (sun_path == NULL || sun_path[0] == '\0')
+        return 0;
+    return (strncmp(sun_path, "/Users/", 7U) == 0 || ci_contains(sun_path, "/Library/Containers/") ||
+            ci_contains(sun_path, "MacOver") || ci_contains(sun_path, "PlayTools") ||
             ci_contains(sun_path, "PlayCover"));
 }
 
 static void test_round2_xattr_osvariant_and_afunix(void) {
-    const char *bad_xattrs[] = {
-        "com.apple.quarantine", "com.apple.provenance", "com.apple.macl",
-        "com.apple.FinderInfo", "com.apple.ResourceFork",
-        "com.apple.metadata:kMDItemWhereFroms"
-    };
+    const char *bad_xattrs[] = {"com.apple.quarantine",   "com.apple.provenance",
+                                "com.apple.macl",         "com.apple.FinderInfo",
+                                "com.apple.ResourceFork", "com.apple.metadata:kMDItemWhereFroms",
+                                "com.apple.rootless"};
     for (size_t i = 0; i < sizeof(bad_xattrs) / sizeof(bad_xattrs[0]); i++) {
         assert(pt_is_hidden_xattr_name_cstr(bad_xattrs[i]));
     }
@@ -564,7 +586,8 @@ static void test_round2_xattr_osvariant_and_afunix(void) {
     assert(!pt_is_hidden_xattr_name_cstr("com.apple.decmpfs"));
 
     /* Simulate listxattr buffer compaction removing desktop xattrs */
-    const char raw_list[] = "com.apple.quarantine\0com.example.custom\0com.apple.macl\0com.apple.metadata:kMDItemWhereFroms\0";
+    const char raw_list[] =
+        "com.apple.quarantine\0com.example.custom\0com.apple.macl\0com.apple.metadata:kMDItemWhereFroms\0";
     char filtered[256];
     size_t out_len = 0;
     const char *cur = raw_list, *end = raw_list + sizeof(raw_list) - 1U;
@@ -579,7 +602,8 @@ static void test_round2_xattr_osvariant_and_afunix(void) {
     assert(out_len == strlen("com.example.custom") + 1U);
     assert(strcmp(filtered, "com.example.custom") == 0);
 
-    /* kern.osvariant_status 2-bit pair sanitization: YES (0b11) -> NO (0b10), preserving bits [28..31] == 0xF and [60..62] == 0x7 */
+    /* kern.osvariant_status 2-bit pair sanitization: YES (0b11) -> NO (0b10), preserving bits [28..31] == 0xF and
+     * [60..62] == 0x7 */
     uint64_t dirty_variant = 0x70010000F3FFAB3BULL;
     uint64_t clean_variant = sanitize_osvariant_status(dirty_variant);
     assert(((clean_variant >> 28) & 0xFULL) == 0xFULL);
@@ -620,15 +644,13 @@ static void test_round2_sha1_sha256_cd_and_sfsymbols(void) {
     /* Verify SHA-1 standard test vector ("abc") */
     uint8_t abc_digest[20];
     test_sha1_raw((const uint8_t *)"abc", 3U, abc_digest);
-    const uint8_t expected_abc[20] = {
-        0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e,
-        0x25, 0x71, 0x78, 0x50, 0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d
-    };
+    const uint8_t expected_abc[20] = {0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e,
+                                      0x25, 0x71, 0x78, 0x50, 0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d};
     assert(memcmp(abc_digest, expected_abc, 20U) == 0);
 
     /* Dual CodeDirectory patching via production PTCodeSignParser */
-    const uint8_t xml_payload[8] = { '<', 'p', 'l', 'i', 's', 't', '/', '>' };
-    const uint8_t der_payload[4] = { 0x30, 0x02, 0x05, 0x00 };
+    const uint8_t xml_payload[8] = {'<', 'p', 'l', 'i', 's', 't', '/', '>'};
+    const uint8_t der_payload[4] = {0x30, 0x02, 0x05, 0x00};
 
     uint8_t s5_sha1[CC_SHA1_DIGEST_LENGTH], s7_sha1[CC_SHA1_DIGEST_LENGTH];
     uint8_t s5_sha256[CC_SHA256_DIGEST_LENGTH], s7_sha256[CC_SHA256_DIGEST_LENGTH];
@@ -645,8 +667,8 @@ static void test_round2_sha1_sha256_cd_and_sfsymbols(void) {
     put_be32(cd_sha1 + 24, 7U);   /* nSpecialSlots */
     cd_sha1[36] = 20U;            /* hashSize */
     cd_sha1[37] = PT_CS_HASHTYPE_SHA1;
-    pt_patch_code_directory_entitlement_hashes(
-        cd_sha1, sizeof(cd_sha1), true, s5_sha256, s5_sha1, true, s7_sha256, s7_sha1);
+    pt_patch_code_directory_entitlement_hashes(cd_sha1, sizeof(cd_sha1), true, s5_sha256, s5_sha1, true, s7_sha256,
+                                               s7_sha1);
     assert(memcmp(cd_sha1 + 100U, s5_sha1, 20U) == 0);
     assert(memcmp(cd_sha1 + 60U, s7_sha1, 20U) == 0);
 
@@ -658,10 +680,28 @@ static void test_round2_sha1_sha256_cd_and_sfsymbols(void) {
     put_be32(cd_sha256 + 24, 7U);   /* nSpecialSlots */
     cd_sha256[36] = 32U;            /* hashSize */
     cd_sha256[37] = PT_CS_HASHTYPE_SHA256;
-    pt_patch_code_directory_entitlement_hashes(
-        cd_sha256, sizeof(cd_sha256), true, s5_sha256, s5_sha1, true, s7_sha256, s7_sha1);
+    pt_patch_code_directory_entitlement_hashes(cd_sha256, sizeof(cd_sha256), true, s5_sha256, s5_sha1, true, s7_sha256,
+                                               s7_sha1);
     assert(memcmp(cd_sha256 + 120U, s5_sha256, 32U) == 0);
     assert(memcmp(cd_sha256 + 56U, s7_sha256, 32U) == 0);
+
+    /* CodeDirectory metadata scrubbing (flags + FAKETEAMID) and slot count helper */
+    uint8_t cd_meta[80];
+    memset(cd_meta, 0, sizeof(cd_meta));
+    put_be32(cd_meta + 0U, PT_CSMAGIC_CODEDIRECTORY);
+    put_be32(cd_meta + 4U, (uint32_t)sizeof(cd_meta));
+    put_be32(cd_meta + 8U, 0x20400U); /* version */
+    put_be32(cd_meta + 12U,
+             0x00010003U); /* flags (adhoc=0x2 + get_task_allow=0x4 cleared, keep valid=0x1 + runtime=0x10000 masked) */
+    put_be32(cd_meta + 24U, 5U);  /* nSpecialSlots */
+    put_be32(cd_meta + 48U, 64U); /* teamOffset */
+    memcpy(cd_meta + 64U, "FAKETEAMID", 11U);
+    assert(pt_code_directory_special_slot_count(cd_meta, sizeof(cd_meta)) == 5U);
+    pt_patch_code_directory_metadata(cd_meta, sizeof(cd_meta), 0x00010002U, "A2B3C4D5E6");
+    uint32_t patched_flags = 0;
+    memcpy(&patched_flags, cd_meta + 12U, 4U);
+    assert(ntohl(patched_flags) == 0x00000001U);
+    assert(strcmp((const char *)(cd_meta + 64U), "A2B3C4D5E6") == 0);
 
     /* SF Symbols hardware prefix checks directly via production PTDetectionRules */
     assert(pt_is_post13_7_sf_symbol_name_cstr("macbook"));
@@ -679,13 +719,16 @@ static void test_round2_sha1_sha256_cd_and_sfsymbols(void) {
 }
 
 static uint32_t l1i_cache_size_for_machine(const char *machine) {
-    if (machine == NULL) return 131072U;
+    if (machine == NULL)
+        return 131072U;
     /* A9X (iPad6,7 / iPad6,8): 64 KiB */
-    if (strcmp(machine, "iPad6,7") == 0 || strcmp(machine, "iPad6,8") == 0) return 65536U;
+    if (strcmp(machine, "iPad6,7") == 0 || strcmp(machine, "iPad6,8") == 0)
+        return 65536U;
     /* A14+ / M1+ (iPhone13+, iPad13+): 192 KiB */
     if (strncmp(machine, "iPhone13,", 9) == 0 || strncmp(machine, "iPhone14,", 9) == 0 ||
         strncmp(machine, "iPhone15,", 9) == 0 || strncmp(machine, "iPad13,", 7) == 0 ||
-        strncmp(machine, "iPad14,", 7) == 0) return 196608U;
+        strncmp(machine, "iPad14,", 7) == 0)
+        return 196608U;
     /* A12X / A13 (iPad8,x / iPhone12,x): 128 KiB */
     return 131072U;
 }
@@ -700,7 +743,8 @@ static void test_round3_cdhash_kernel_version_and_l1i(void) {
     put_be32(cd + 24, 2U);
     cd[36] = 32U;
     cd[37] = 2U;
-    for (size_t i = 44; i < sizeof(cd); i++) cd[i] = (uint8_t)(i * 7U + 3U);
+    for (size_t i = 44; i < sizeof(cd); i++)
+        cd[i] = (uint8_t)(i * 7U + 3U);
 
     uint8_t full_sha256[32];
     test_sha256_raw(cd, sizeof(cd), full_sha256);
@@ -748,14 +792,15 @@ static void test_round3_fs_case_gid_and_prot(void) {
     assert((valid_format & kVolCapFmtCaseSensitive) != 0U);
 
     /* st_gid 20 (staff) -> 501 (mobile), other gids preserved */
-    uint32_t gids_in[3] = { 20U, 501U, 0U };
-    uint32_t gids_exp[3] = { 501U, 501U, 0U };
+    uint32_t gids_in[3] = {20U, 501U, 0U};
+    uint32_t gids_exp[3] = {501U, 501U, 0U};
     for (size_t i = 0; i < 3; i++) {
         uint32_t mapped = (gids_in[i] == 20U) ? 501U : gids_in[i];
         assert(mapped == gids_exp[i]);
     }
 
-    /* F_GETPROTECTIONCLASS: macOS returns 0 (PROTECTION_CLASS_NONE) -> spoof to 4 (NSFileProtectionCompleteUntilFirstUserAuthentication) */
+    /* F_GETPROTECTIONCLASS: macOS returns 0 (PROTECTION_CLASS_NONE) -> spoof to 4
+     * (NSFileProtectionCompleteUntilFirstUserAuthentication) */
     int raw_prot = 0;
     int spoofed_prot = (raw_prot == 0) ? 4 : raw_prot;
     assert(spoofed_prot > 0 && spoofed_prot == 4);
@@ -769,7 +814,8 @@ static int is_icu_age_post_13_7(uint8_t major, uint8_t minor) {
 static int verify_swift_length_prefixed_mangling(const char *s) {
     /* Checks <digits><ident> tokens (skipping leading stdlib shorthand 's' before a digit) */
     const char *p = s;
-    if (*p == 's' && p[1] >= '0' && p[1] <= '9') p++;
+    if (*p == 's' && p[1] >= '0' && p[1] <= '9')
+        p++;
     int count = 0;
     while (*p >= '0' && *p <= '9') {
         size_t len = 0;
@@ -777,7 +823,8 @@ static int verify_swift_length_prefixed_mangling(const char *s) {
             len = len * 10U + (size_t)(*p - '0');
             p++;
         }
-        if (len == 0 || strlen(p) < len) return 0;
+        if (len == 0 || strlen(p) < len)
+            return 0;
         p += len;
         count++;
     }
@@ -786,18 +833,21 @@ static int verify_swift_length_prefixed_mangling(const char *s) {
 
 static void test_round3_extended_dlsym_fw_icu_swift(void) {
     /* Extended macOS-only dlsym symbols hidden; iOS CGContext/CGColor/QuartzCore NOT touched */
-    const char *blocked_syms[] = {
-        "AuthorizationCreate", "SecKeychainCopyDefault", "CVDisplayLinkCreateWithActiveCGDisplays",
-        "FSEventStreamCreate", "csr_get_active_config", "csr_check", "csrctl",
-        "SCDynamicStoreCopyComputerName", "IOBluetoothDeviceInquiryCreateWithDelegate"
-    };
+    const char *blocked_syms[] = {"AuthorizationCreate",
+                                  "SecKeychainCopyDefault",
+                                  "CVDisplayLinkCreateWithActiveCGDisplays",
+                                  "FSEventStreamCreate",
+                                  "csr_get_active_config",
+                                  "csr_check",
+                                  "csrctl",
+                                  "SCDynamicStoreCopyComputerName",
+                                  "IOBluetoothDeviceInquiryCreateWithDelegate"};
     for (size_t i = 0; i < sizeof(blocked_syms) / sizeof(blocked_syms[0]); i++) {
         assert(pt_is_hidden_macos_only_dlsym_symbol_cstr(blocked_syms[i]));
     }
-    const char *safe_ios_syms[] = {
-        "CGContextDrawImage", "CGColorSpaceCreateDeviceRGB", "CGImageCreate",
-        "SecItemCopyMatching", "SecKeyCreateRandomKey", "SCNetworkReachabilityCreateWithName"
-    };
+    const char *safe_ios_syms[] = {"CGContextDrawImage",    "CGColorSpaceCreateDeviceRGB",
+                                   "CGImageCreate",         "SecItemCopyMatching",
+                                   "SecKeyCreateRandomKey", "SCNetworkReachabilityCreateWithName"};
     for (size_t i = 0; i < sizeof(safe_ios_syms) / sizeof(safe_ios_syms[0]); i++) {
         assert(!pt_is_hidden_macos_only_dlsym_symbol_cstr(safe_ios_syms[i]));
     }
@@ -805,8 +855,10 @@ static void test_round3_extended_dlsym_fw_icu_swift(void) {
     /* /Quartz.framework hidden while QuartzCore.framework MUST remain visible */
     assert(pt_is_macos_only_framework_path_cstr("/System/Library/Frameworks/Quartz.framework/Quartz"));
     assert(pt_is_macos_only_framework_path_cstr("/System/Library/Frameworks/CoreMediaIO.framework/CoreMediaIO"));
-    assert(pt_is_macos_only_framework_path_cstr("/System/Library/PrivateFrameworks/DFRFoundation.framework/DFRFoundation"));
-    assert(pt_is_macos_only_framework_path_cstr("/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/FSEvents"));
+    assert(pt_is_macos_only_framework_path_cstr(
+        "/System/Library/PrivateFrameworks/DFRFoundation.framework/DFRFoundation"));
+    assert(pt_is_macos_only_framework_path_cstr(
+        "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/FSEvents"));
     assert(!pt_is_macos_only_framework_path_cstr("/System/Library/Frameworks/QuartzCore.framework/QuartzCore"));
     assert(!pt_is_macos_only_framework_path_cstr("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"));
 
@@ -819,13 +871,8 @@ static void test_round3_extended_dlsym_fw_icu_swift(void) {
     assert(is_icu_age_post_13_7(15U, 1U) == 1);
 
     /* Swift length-prefixed mangling accuracy (zero off-by-one length bugs) */
-    const char *mangled[] = {
-        "10Foundation16AttributedStringV",
-        "s8DurationV",
-        "8StoreKit7ProductV",
-        "11Observation20ObservationRegistrarV",
-        "9PlayTools12PlaySettingsC"
-    };
+    const char *mangled[] = {"10Foundation16AttributedStringV", "s8DurationV", "8StoreKit7ProductV",
+                             "11Observation20ObservationRegistrarV", "9PlayTools12PlaySettingsC"};
     for (size_t i = 0; i < sizeof(mangled) / sizeof(mangled[0]); i++) {
         assert(verify_swift_length_prefixed_mangling(mangled[i]) == 1);
     }
@@ -833,34 +880,42 @@ static void test_round3_extended_dlsym_fw_icu_swift(void) {
 }
 
 static void test_round3_hidden_bundle_ids_regression(void) {
-    const char *must_hide_always[] = {
-        "com.apple.ApplicationServices", "com.apple.ServiceManagement",
-        "com.apple.ScriptingBridge", "com.apple.DiskArbitration",
-        "com.apple.Hypervisor", "com.apple.Virtualization", "com.apple.CoreWLAN",
-        "com.apple.OpenDirectory", "com.apple.DirectoryService", "com.apple.FinderSync",
-        "com.apple.SystemAdministration", "com.apple.Automator", "com.apple.AppleScriptObjC",
-        "com.apple.InputMethodKit", "com.apple.PreferencePanes", "com.apple.ScreenSaver",
-        "com.apple.SecurityInterface", "com.apple.OSAKit", "com.apple.NetFS",
-        "com.apple.ParavirtualizedGraphics", "com.apple.DriverKit"
-    };
+    const char *must_hide_always[] = {"com.apple.ApplicationServices",
+                                      "com.apple.ServiceManagement",
+                                      "com.apple.ScriptingBridge",
+                                      "com.apple.DiskArbitration",
+                                      "com.apple.Hypervisor",
+                                      "com.apple.Virtualization",
+                                      "com.apple.CoreWLAN",
+                                      "com.apple.OpenDirectory",
+                                      "com.apple.DirectoryService",
+                                      "com.apple.FinderSync",
+                                      "com.apple.SystemAdministration",
+                                      "com.apple.Automator",
+                                      "com.apple.AppleScriptObjC",
+                                      "com.apple.InputMethodKit",
+                                      "com.apple.PreferencePanes",
+                                      "com.apple.ScreenSaver",
+                                      "com.apple.SecurityInterface",
+                                      "com.apple.OSAKit",
+                                      "com.apple.NetFS",
+                                      "com.apple.ParavirtualizedGraphics",
+                                      "com.apple.DriverKit"};
     for (size_t i = 0; i < sizeof(must_hide_always) / sizeof(must_hide_always[0]); i++) {
         assert(pt_is_hidden_bundle_id_rule_cstr(must_hide_always[i], false));
         assert(pt_is_hidden_bundle_id_rule_cstr(must_hide_always[i], true));
     }
     const char *must_hide_compat13[] = {
-        "com.apple.ExtensionKit", "com.apple.ExtensionFoundation", "com.apple.AppIntents",
-        "com.apple.OSLog", "com.apple.WorkoutKit", "com.apple.FamilyControls",
-        "com.apple.ManagedSettings", "com.apple.DeviceActivity", "com.apple.CoreTransferable",
-        "com.apple.Spatial", "com.apple.LockedCameraCapture", "com.apple.MarketplaceKit"
-    };
+        "com.apple.ExtensionKit",    "com.apple.ExtensionFoundation", "com.apple.AppIntents",
+        "com.apple.OSLog",           "com.apple.WorkoutKit",          "com.apple.FamilyControls",
+        "com.apple.ManagedSettings", "com.apple.DeviceActivity",      "com.apple.CoreTransferable",
+        "com.apple.Spatial",         "com.apple.LockedCameraCapture", "com.apple.MarketplaceKit"};
     for (size_t i = 0; i < sizeof(must_hide_compat13) / sizeof(must_hide_compat13[0]); i++) {
         assert(!pt_is_hidden_bundle_id_rule_cstr(must_hide_compat13[i], false));
         assert(pt_is_hidden_bundle_id_rule_cstr(must_hide_compat13[i], true));
     }
-    const char *safe_ios_bundles[] = {
-        "com.apple.UIKit", "com.apple.Foundation", "com.apple.CoreGraphics",
-        "com.apple.Metal", "com.apple.QuartzCore"
-    };
+    const char *safe_ios_bundles[] = {"com.apple.UIKit", "com.apple.Foundation", "com.apple.CoreGraphics",
+                                      "com.apple.Metal", "com.apple.QuartzCore"};
     for (size_t i = 0; i < sizeof(safe_ios_bundles) / sizeof(safe_ios_bundles[0]); i++) {
         assert(!pt_is_hidden_bundle_id_rule_cstr(safe_ios_bundles[i], false));
         assert(!pt_is_hidden_bundle_id_rule_cstr(safe_ios_bundles[i], true));
@@ -868,10 +923,8 @@ static void test_round3_hidden_bundle_ids_regression(void) {
 }
 
 static int mock_is_app_embedded(const char *path) {
-    return (strstr(path, ".app/Frameworks/") != NULL ||
-            strstr(path, ".app/Contents/Frameworks/") != NULL ||
-            strstr(path, ".app/PlugIns/") != NULL ||
-            strstr(path, ".appex/Frameworks/") != NULL);
+    return (strstr(path, ".app/Frameworks/") != NULL || strstr(path, ".app/Contents/Frameworks/") != NULL ||
+            strstr(path, ".app/PlugIns/") != NULL || strstr(path, ".appex/Frameworks/") != NULL);
 }
 
 static void mock_strip_nested_image_versions(const char *p, char *out, size_t out_sz) {
@@ -895,9 +948,11 @@ static void mock_strip_nested_image_versions(const char *p, char *out, size_t ou
             keep_ext_len = 7U;
             skip_prefix_len = 22U;
         }
-        if (hit == NULL) break;
+        if (hit == NULL)
+            break;
         const char *rest = (hit == bdl_mac) ? (hit + skip_prefix_len) : strchr(hit + skip_prefix_len, '/');
-        if (rest == NULL) break;
+        if (rest == NULL)
+            break;
         size_t prefix_len = (size_t)(hit - out) + keep_ext_len;
         size_t rest_len = strlen(rest);
         assert(prefix_len + rest_len < out_sz);
@@ -919,7 +974,8 @@ static void test_round4_audit_regressions(void) {
             snprintf(keys[i], 32U, "app.benign.key_%zu", i);
         }
         int hidden = (strncmp(keys[i], "com.apple.trackpad.", 19U) == 0);
-        if (!hidden) kept[kept_count++] = (int)i;
+        if (!hidden)
+            kept[kept_count++] = (int)i;
     }
     assert(kept_count == 125U);
     assert(kept[kept_count - 1U] == 127);
@@ -937,11 +993,11 @@ static void test_round4_audit_regressions(void) {
     uint8_t kernel_cdhash[20];
     memcpy(kernel_cdhash, h_sha256, 20U);
     assert(memcmp(kernel_cdhash, h_sha1, 20U) != 0);
-    int matched_any = (memcmp(kernel_cdhash, h_sha1, 20U) == 0) ||
-                      (memcmp(kernel_cdhash, h_sha256, 20U) == 0);
+    int matched_any = (memcmp(kernel_cdhash, h_sha1, 20U) == 0) || (memcmp(kernel_cdhash, h_sha256, 20U) == 0);
     assert(matched_any == 1);
 
-    /* 3. F_GETPROTECTIONCLASS: negative error (e.g. -1 / EBADF) must NEVER be rewritten to 3; only ret == 0 spoofs to 3 */
+    /* 3. F_GETPROTECTIONCLASS: negative error (e.g. -1 / EBADF) must NEVER be rewritten to 3; only ret == 0 spoofs to 3
+     */
     int dp_err = -1;
     int dp_mac_zero = 0;
     int dp_existing = 4;
@@ -953,26 +1009,27 @@ static void test_round4_audit_regressions(void) {
     assert(out_existing == 4);
 
     /* 4. protocol_copyMethodDescriptionList full-list copy with sentinel {NULL, NULL} never overflows */
-    typedef struct { const char *name; const char *types; } MockMethodDesc;
+    typedef struct {
+        const char *name;
+        const char *types;
+    } MockMethodDesc;
     const size_t cnt = 4U;
-    MockMethodDesc src[4] = {
-        { "m1", "v@:" }, { "m2", "v@:" }, { "m3", "v@:" }, { "m4", "v@:" }
-    };
+    MockMethodDesc src[4] = {{"m1", "v@:"}, {"m2", "v@:"}, {"m3", "v@:"}, {"m4", "v@:"}};
     /* Allocate (cnt + 1) slots so full copy + terminating {NULL, NULL} never writes out of bounds */
     MockMethodDesc *dst = (MockMethodDesc *)calloc(cnt + 1U, sizeof(MockMethodDesc));
     assert(dst != NULL);
     size_t w = 0;
-    for (size_t i = 0; i < cnt; i++) dst[w++] = src[i];
+    for (size_t i = 0; i < cnt; i++)
+        dst[w++] = src[i];
     dst[w].name = NULL;
     dst[w].types = NULL;
     assert(w == cnt && dst[cnt].name == NULL && dst[cnt].types == NULL);
     free(dst);
 
     /* 5. NSVersionOfRunTimeLibrary: hidden macOS libs and unloaded libs must return -1 */
-    const char *hidden_or_unloaded[] = { "AppKit", "Cocoa", "ServiceManagement", "NonExistentLibXYZ" };
+    const char *hidden_or_unloaded[] = {"AppKit", "Cocoa", "ServiceManagement", "NonExistentLibXYZ"};
     for (size_t i = 0; i < sizeof(hidden_or_unloaded) / sizeof(hidden_or_unloaded[0]); i++) {
-        int is_hidden = (strcmp(hidden_or_unloaded[i], "AppKit") == 0 ||
-                         strcmp(hidden_or_unloaded[i], "Cocoa") == 0 ||
+        int is_hidden = (strcmp(hidden_or_unloaded[i], "AppKit") == 0 || strcmp(hidden_or_unloaded[i], "Cocoa") == 0 ||
                          strcmp(hidden_or_unloaded[i], "ServiceManagement") == 0);
         int is_loaded = 0;
         int32_t ver = (is_hidden || !is_loaded) ? -1 : (1677 << 16);
@@ -987,15 +1044,16 @@ static void test_round4_audit_regressions(void) {
     assert(pt_is_secondary_en_ifname_cstr("en15"));
     assert(!pt_is_secondary_en_ifname_cstr("en1a"));
 
-    /* 7. MTLDevice compat13_7 three-property symmetry: supportsBCTextureCompression, supports32BitMSAA, supports32BitFloatFiltering */
-    const char *compat13_mtl_props[] = {
-        "supportsBCTextureCompression", "supports32BitMSAA", "supports32BitFloatFiltering"
-    };
+    /* 7. MTLDevice compat13_7 three-property symmetry: supportsBCTextureCompression, supports32BitMSAA,
+     * supports32BitFloatFiltering */
+    const char *compat13_mtl_props[] = {"supportsBCTextureCompression", "supports32BitMSAA",
+                                        "supports32BitFloatFiltering"};
     for (size_t i = 0; i < 3U; i++) {
         assert(strncmp(compat13_mtl_props[i], "supports", 8U) == 0);
     }
 
-    /* 8. Darwin syscall numbers: SYS_openat_dprotected_np == 218 does NOT collide with SYS_open_dprotected_np (216) or 478 (SYS_proc_uuid_policy / other) */
+    /* 8. Darwin syscall numbers: SYS_openat_dprotected_np == 218 does NOT collide with SYS_open_dprotected_np (216) or
+     * 478 (SYS_proc_uuid_policy / other) */
     const int kSysOpenDprotectedNp = 216;
     const int kSysOpenatDprotectedNp = 218;
     const int kSysOther478 = 478;
@@ -1006,9 +1064,12 @@ static void test_round4_audit_regressions(void) {
     /* 9. Path-component boundary & app-embedded bundle exemption must NOT match MyCocoa.framework as Cocoa.framework */
     assert(pt_path_has_component("/System/Library/Frameworks/Cocoa.framework/Cocoa", "Cocoa.framework"));
     assert(pt_path_has_component("/System/Library/Frameworks/Cocoa.framework", "Cocoa.framework"));
-    assert(!pt_path_has_component("/var/containers/Bundle/Application/X/DemoApp.app/Frameworks/MyCocoa.framework/MyCocoa", "Cocoa.framework"));
-    assert(mock_is_app_embedded("/var/containers/Bundle/Application/X/DemoApp.app/Frameworks/MyCocoa.framework/MyCocoa") == 1);
-    assert(mock_is_app_embedded("/var/containers/Bundle/Application/X/DemoApp.app/Frameworks/Charts.framework/Charts") == 1);
+    assert(!pt_path_has_component(
+        "/var/containers/Bundle/Application/X/DemoApp.app/Frameworks/MyCocoa.framework/MyCocoa", "Cocoa.framework"));
+    assert(mock_is_app_embedded(
+               "/var/containers/Bundle/Application/X/DemoApp.app/Frameworks/MyCocoa.framework/MyCocoa") == 1);
+    assert(mock_is_app_embedded(
+               "/var/containers/Bundle/Application/X/DemoApp.app/Frameworks/Charts.framework/Charts") == 1);
     assert(mock_is_app_embedded("/System/Library/Frameworks/Charts.framework/Charts") == 0);
 
     /* 10. Nested .framework/Versions/ and .bundle/Contents/MacOS/ image path stripping */
@@ -1016,15 +1077,18 @@ static void test_round4_audit_regressions(void) {
     mock_strip_nested_image_versions(
         "/System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vImage.framework/Versions/A/vImage",
         stripped_img, sizeof(stripped_img));
-    assert(strcmp(stripped_img, "/System/Library/Frameworks/Accelerate.framework/Frameworks/vImage.framework/vImage") == 0);
-    mock_strip_nested_image_versions(
-        "/System/Library/CoreServices/RawCamera.bundle/Contents/MacOS/RawCamera",
-        stripped_img, sizeof(stripped_img));
+    assert(strcmp(stripped_img, "/System/Library/Frameworks/Accelerate.framework/Frameworks/vImage.framework/vImage") ==
+           0);
+    mock_strip_nested_image_versions("/System/Library/CoreServices/RawCamera.bundle/Contents/MacOS/RawCamera",
+                                     stripped_img, sizeof(stripped_img));
     assert(strcmp(stripped_img, "/System/Library/CoreServices/RawCamera.bundle/RawCamera") == 0);
-    mock_strip_nested_image_versions(
-        "/System/Library/AccessibilityBundles/AccessibilitySettingsLoader.bundle/Versions/A/AccessibilitySettingsLoader",
-        stripped_img, sizeof(stripped_img));
-    assert(strcmp(stripped_img, "/System/Library/AccessibilityBundles/AccessibilitySettingsLoader.bundle/AccessibilitySettingsLoader") == 0);
+    mock_strip_nested_image_versions("/System/Library/AccessibilityBundles/AccessibilitySettingsLoader.bundle/Versions/"
+                                     "A/AccessibilitySettingsLoader",
+                                     stripped_img, sizeof(stripped_img));
+    assert(
+        strcmp(stripped_img,
+               "/System/Library/AccessibilityBundles/AccessibilitySettingsLoader.bundle/AccessibilitySettingsLoader") ==
+        0);
 }
 
 static uint32_t mock_encode_adrp_x16(uintptr_t stub_pc, uintptr_t target_page) {
@@ -1079,11 +1143,11 @@ static void test_arm64_stub_decoder_and_got_bitmap(void) {
 
     /* Fail-closed rejections: short stride, NOP, wrong register, BLR instead of BR */
     assert(!pt_decode_arm64_stub_target_slot(pc_pos, stub_pos, 8U, &decoded));
-    uint32_t bad_nop[3] = { 0xD503201FU, stub_pos[1], stub_pos[2] };
+    uint32_t bad_nop[3] = {0xD503201FU, stub_pos[1], stub_pos[2]};
     assert(!pt_decode_arm64_stub_target_slot(pc_pos, bad_nop, 12U, &decoded));
-    uint32_t bad_reg[3] = { stub_pos[0], mock_encode_ldr_x_uimm(15U, 0x960U), stub_pos[2] };
+    uint32_t bad_reg[3] = {stub_pos[0], mock_encode_ldr_x_uimm(15U, 0x960U), stub_pos[2]};
     assert(!pt_decode_arm64_stub_target_slot(pc_pos, bad_reg, 12U, &decoded));
-    uint32_t bad_blr[3] = { stub_pos[0], stub_pos[1], 0xD63F0200U };
+    uint32_t bad_blr[3] = {stub_pos[0], stub_pos[1], 0xD63F0200U};
     assert(!pt_decode_arm64_stub_target_slot(pc_pos, bad_blr, 12U, &decoded));
 
     /* GOT bitmap: mark slot 3 & slot 67 as stubbed, leave slot 2 & slot 66 un-stubbed */
@@ -1117,9 +1181,17 @@ static void test_v105_macos_frameworks_and_vm_read_got_sanitize(void) {
         "/usr/lib/libUniversalAccess.dylib",
     };
     const char *comps[] = {
-        "OpenGL.framework", "OpenGL.framework", "Kerberos.framework", "LDAP.framework",
-        "QuickLookUI.framework", "PreferencePanesSupport.framework", "SecurityFoundation.framework",
-        "NetAuth.framework", "IO80211.framework", "AppleVA.framework", "libUniversalAccess.dylib",
+        "OpenGL.framework",
+        "OpenGL.framework",
+        "Kerberos.framework",
+        "LDAP.framework",
+        "QuickLookUI.framework",
+        "PreferencePanesSupport.framework",
+        "SecurityFoundation.framework",
+        "NetAuth.framework",
+        "IO80211.framework",
+        "AppleVA.framework",
+        "libUniversalAccess.dylib",
     };
     for (size_t i = 0; i < sizeof(macos_paths) / sizeof(macos_paths[0]); i++) {
         assert(pt_path_has_component(macos_paths[i], comps[i]));
@@ -1128,7 +1200,8 @@ static void test_v105_macos_frameworks_and_vm_read_got_sanitize(void) {
     }
     assert(!pt_path_has_component("/System/Library/Frameworks/OpenGLES.framework/OpenGLES", "OpenGL.framework"));
     assert(!pt_path_has_component("/System/Library/Frameworks/QuickLook.framework/QuickLook", "QuickLookUI.framework"));
-    assert(mock_is_app_embedded("/var/containers/Bundle/Application/X/DemoApp.app/Frameworks/OpenGL.framework/OpenGL") == 1);
+    assert(mock_is_app_embedded(
+               "/var/containers/Bundle/Application/X/DemoApp.app/Frameworks/OpenGL.framework/OpenGL") == 1);
 
     /* Aligned vm_read GOT/lazy slot sanitization window math */
     const uintptr_t sec_start = 0x104008000ULL;
@@ -1174,13 +1247,13 @@ static void test_v105_macos_frameworks_and_vm_read_got_sanitize(void) {
 
 static void test_v105_batch2_sysctl_iokit_mig_and_metal(void) {
     /* 1. CTL_SYSCTL sub-MIB discrimination: 1/4/5/6 query name2oid, only 2 walks sysctl.next */
-    int mib_fmt[5] = { 0, 4, 1, 2, 3 };
+    int mib_fmt[5] = {0, 4, 1, 2, 3};
     assert((mib_fmt[1] == 1 || mib_fmt[1] == 4 || mib_fmt[1] == 5 || mib_fmt[1] == 6));
     assert(!(mib_fmt[1] == 2));
-    int mib_descr[5] = { 0, 5, 1, 2, 3 };
+    int mib_descr[5] = {0, 5, 1, 2, 3};
     assert((mib_descr[1] == 1 || mib_descr[1] == 4 || mib_descr[1] == 5 || mib_descr[1] == 6));
     assert(!(mib_descr[1] == 2));
-    int mib_next[3] = { 0, 2, 1 };
+    int mib_next[3] = {0, 2, 1};
     assert(mib_next[1] == 2);
 
     /* 2. NUL-delimited IOKit byte sequence sanitization preserves multi-string boundaries */
@@ -1227,18 +1300,18 @@ static void test_v105_batch2_sysctl_iokit_mig_and_metal(void) {
     assert(line == 2 && col == 10);
 }
 
-static int pt_dummy_fn_a(void) { return 1; }
-static int pt_dummy_fn_b(void) { return 2; }
+static int pt_dummy_fn_a(void) {
+    return 1;
+}
+static int pt_dummy_fn_b(void) {
+    return 2;
+}
 
 static void test_production_c_modules_extra(void) {
     /* 1. pt_filter_xattr_list_buffer compaction + unterminated tail */
     char xbuf[128];
-    const char *entries[] = {
-        "com.apple.quarantine",
-        "com.example.keep1",
-        "com.apple.metadata:kMDItemWhereFroms",
-        "com.apple.decmpfs"
-    };
+    const char *entries[] = {"com.apple.quarantine", "com.example.keep1", "com.apple.metadata:kMDItemWhereFroms",
+                             "com.apple.decmpfs"};
     size_t pos = 0;
     for (size_t i = 0; i < 4U; i++) {
         size_t l = strlen(entries[i]) + 1U;
@@ -1254,7 +1327,8 @@ static void test_production_c_modules_extra(void) {
     char norm[256];
     assert(pt_normalize_lexical_path("/private//var/./mobile/../tmp/", norm, sizeof(norm)) == norm);
     assert(strcmp(norm, "/private/var/tmp") == 0);
-    const char *rel = pt_match_prefix_modulo_private("/var/containers/Bundle/Application/X", "/private/var/containers", 23U);
+    const char *rel =
+        pt_match_prefix_modulo_private("/var/containers/Bundle/Application/X", "/private/var/containers", 23U);
     assert(rel != NULL && strcmp(rel, "/Bundle/Application/X") == 0);
 
     /* 3. Env, Prefs, Threads, Mach services */
@@ -1265,7 +1339,8 @@ static void test_production_c_modules_extra(void) {
     assert(pt_is_hidden_thread_name_cstr("com.apple.NSEventThread"));
     assert(!pt_is_hidden_thread_name_cstr("com.apple.main-thread"));
     assert(pt_is_hidden_macos_mach_service_cstr("com.apple.dock.server"));
-    assert(!pt_is_hidden_macos_mach_service_cstr("com.apple.SecurityServer"));
+    assert(pt_is_hidden_macos_mach_service_cstr("com.apple.SecurityServer"));
+    assert(!pt_is_hidden_macos_mach_service_cstr("com.apple.securityd"));
 
     /* 4. pt_collect_two_table_macho_sections on synthetic Mach-O buffer */
     struct {
@@ -1304,16 +1379,16 @@ static void test_production_c_modules_extra(void) {
     uintptr_t stubs_start = 0, stubs_size = 0;
     uint32_t stubs_stride = 0, got_count = 0;
     pt_got_sec_range_t got_secs[PT_MAX_NONLAZY_GOT_SECS];
-    assert(pt_collect_two_table_macho_sections(
-        &fake_mh.hdr, 0, &stubs_start, &stubs_size, &stubs_stride, got_secs, &got_count));
-    assert(stubs_size == 36U && stubs_stride == 12U && got_count == 1U &&
-           got_secs[0].start == 0x200004000ULL && got_secs[0].size == 4U * sizeof(void *));
+    assert(pt_collect_two_table_macho_sections(&fake_mh.hdr, 0, &stubs_start, &stubs_size, &stubs_stride, got_secs,
+                                               &got_count));
+    assert(stubs_size == 36U && stubs_stride == 12U && got_count == 1U && got_secs[0].start == 0x200004000ULL &&
+           got_secs[0].size == 4U * sizeof(void *));
 
     /* 5. PTInterposeRegistry hash table lookup + compat13_7 hiding */
     const pt_dlsym_entry_t reg_entries[2] = {
-        { "pt_sym_alpha", (const void *)&pt_dummy_fn_a, NULL, PT_DLSYM_FLAG_NONE },
-        { "pt_sym_beta", (const void *)&pt_dummy_fn_b, (const void *)&pt_dummy_fn_b,
-          PT_DLSYM_FLAG_WEAK_GUARD | PT_DLSYM_FLAG_HIDE_IN_COMPAT13_7 },
+        {"pt_sym_alpha", (const void *)&pt_dummy_fn_a, NULL, PT_DLSYM_FLAG_NONE},
+        {"pt_sym_beta", (const void *)&pt_dummy_fn_b, (const void *)&pt_dummy_fn_b,
+         PT_DLSYM_FLAG_WEAK_GUARD | PT_DLSYM_FLAG_HIDE_IN_COMPAT13_7},
     };
     uint16_t reg_slots[16];
     pt_dlsym_index_t reg_idx;
@@ -1321,7 +1396,7 @@ static void test_production_c_modules_extra(void) {
     assert(dup_cnt == 0U);
     assert(pt_dlsym_index_lookup(&reg_idx, "pt_sym_alpha", false) == (const void *)&pt_dummy_fn_a);
     assert(pt_dlsym_index_lookup(&reg_idx, "pt_sym_beta", false) == (const void *)&pt_dummy_fn_b);
-    assert(pt_dlsym_index_lookup(&reg_idx, "pt_sym_beta", true) == NULL);
+    assert(pt_dlsym_index_lookup(&reg_idx, "pt_sym_beta", true) == PT_DLSYM_HIDDEN_SENTINEL);
 
     /* 6. PTCallerAddressMath helpers */
     uint64_t packed_caller = 0ULL;
