@@ -6,6 +6,7 @@
 //
 
 #include "PTDetectionRules.h"
+#include "PTSFSymbols13Allowlist.h"
 
 #include <ctype.h>
 #include <stdlib.h>
@@ -73,18 +74,18 @@ __attribute__((visibility("hidden"))) const char *pt_match_prefix_modulo_private
     if (path == NULL || base == NULL || base_len == 0) {
         return NULL;
     }
-    if (strncmp(path, base, base_len) == 0 && (path[base_len] == '/' || path[base_len] == '\0')) {
+    if (strncasecmp(path, base, base_len) == 0 && (path[base_len] == '/' || path[base_len] == '\0')) {
         return path + base_len;
     }
-    if (base_len > 8 && strncmp(base, "/private/", 9) == 0) {
+    if (base_len > 8 && strncasecmp(base, "/private/", 9) == 0) {
         const char *sbase = base + 8;
         size_t slen = base_len - 8;
-        if (strncmp(path, sbase, slen) == 0 && (path[slen] == '/' || path[slen] == '\0')) {
+        if (strncasecmp(path, sbase, slen) == 0 && (path[slen] == '/' || path[slen] == '\0')) {
             return path + slen;
         }
-    } else if (strncmp(path, "/private/", 9) == 0) {
+    } else if (strncasecmp(path, "/private/", 9) == 0) {
         const char *spath = path + 8;
-        if (strncmp(spath, base, base_len) == 0 && (spath[base_len] == '/' || spath[base_len] == '\0')) {
+        if (strncasecmp(spath, base, base_len) == 0 && (spath[base_len] == '/' || spath[base_len] == '\0')) {
             return spath + base_len;
         }
     }
@@ -274,7 +275,24 @@ __attribute__((visibility("hidden"))) bool pt_is_hidden_macos_only_dlsym_symbol_
         strcmp(symbol, "csrctl") == 0 || PT_HAS_PREFIX_LIT(symbol, "IOBluetooth") ||
         strcmp(symbol, "_LSCopyApplicationInformation") == 0 || strcmp(symbol, "_LSGetCurrentApplicationASN") == 0 ||
         PT_HAS_PREFIX_LIT(symbol, "_LSASN") || PT_HAS_PREFIX_LIT(symbol, "_LSCopyApplicationInformation") ||
-        PT_HAS_PREFIX_LIT(symbol, "IOHIDManager") || PT_HAS_PREFIX_LIT(symbol, "IOHIDDevice")) {
+        PT_HAS_PREFIX_LIT(symbol, "IOHIDManager") || PT_HAS_PREFIX_LIT(symbol, "IOHIDDevice") ||
+        strcmp(symbol, "NSAddImage") == 0 || strcmp(symbol, "NSAddLibrary") == 0 ||
+        strcmp(symbol, "NSAddLibraryWithSearching") == 0 || strcmp(symbol, "NSCreateObjectFileImageFromFile") == 0 ||
+        strcmp(symbol, "NSCreateObjectFileImageFromMemory") == 0 || strcmp(symbol, "NSDestroyObjectFileImage") == 0 ||
+        strcmp(symbol, "NSIsSymbolDefinedInObjectFileImage") == 0 ||
+        strcmp(symbol, "NSGetSectionDataInObjectFileImage") == 0 || strcmp(symbol, "NSNameOfModule") == 0 ||
+        strcmp(symbol, "NSLibraryNameForModule") == 0 || strcmp(symbol, "NSLinkModule") == 0 ||
+        strcmp(symbol, "NSUnLinkModule") == 0 || PT_HAS_PREFIX_LIT(symbol, "NSIsSymbolNameDefined") ||
+        PT_HAS_PREFIX_LIT(symbol, "NSLookupAndBindSymbol") || strcmp(symbol, "NSLookupSymbolInModule") == 0 ||
+        strcmp(symbol, "NSLookupSymbolInImage") == 0 || strcmp(symbol, "NSAddressOfSymbol") == 0 ||
+        strcmp(symbol, "NSModuleForSymbol") == 0 || strcmp(symbol, "NSLinkEditError") == 0 ||
+        strcmp(symbol, "_dyld_present") == 0 || strcmp(symbol, "_dyld_bind_fully_image_containing_address") == 0 ||
+        strcmp(symbol, "_dyld_image_containing_address") == 0 || PT_HAS_PREFIX_LIT(symbol, "_dyld_lookup_and_bind") ||
+        strcmp(symbol, "_dyld_get_image_header_containing_address") == 0 ||
+        strcmp(symbol, "_dyld_process_info_for_each_aot_image") == 0 ||
+        strcmp(symbol, "_dyld_process_info_get_aot_cache") == 0 ||
+        strcmp(symbol, "dyld_shared_cache_for_each_subcache4Rosetta") == 0 ||
+        strcmp(symbol, "dyld_shared_subcache_get_info4Rosetta") == 0) {
         return true;
     }
     if (symbol[0] == 'C' && symbol[1] == 'G') {
@@ -533,10 +551,12 @@ __attribute__((visibility("hidden"))) bool pt_is_hidden_macos_pref_key_cstr(cons
     if (strncmp(key, "NSWindow Frame", 14) == 0 || strncmp(key, "NSToolbar Configuration", 23) == 0 ||
         strncmp(key, "NSNav", 5) == 0 || strncmp(key, "NSStatusItem", 12) == 0 ||
         strncmp(key, "NSTableView", 11) == 0 || strncmp(key, "NSSplitView", 11) == 0 ||
+        strncmp(key, "NSSpellChecker", 14) == 0 || strncmp(key, "NSGlass", 7) == 0 ||
         strncmp(key, "com.apple.trackpad.", 19) == 0 || strncmp(key, "com.apple.mouse.", 16) == 0 ||
         strncmp(key, "com.apple.springing.", 20) == 0 || strncmp(key, "com.apple.sound.beep.", 21) == 0 ||
-        strcasestr(key, "PlayCover") != NULL || strcasestr(key, "PlayTools") != NULL ||
-        strcasestr(key, "MacOver") != NULL || strcasestr(key, "AKInterface") != NULL) {
+        strncmp(key, "com.apple.finder.", 17) == 0 || strcasestr(key, "PlayCover") != NULL ||
+        strcasestr(key, "PlayTools") != NULL || strcasestr(key, "MacOver") != NULL ||
+        strcasestr(key, "AKInterface") != NULL) {
         return true;
     }
     static const char *const kHiddenPrefKeys[] = {
@@ -549,10 +569,15 @@ __attribute__((visibility("hidden"))) bool pt_is_hidden_macos_pref_key_cstr(cons
         "AppleEnableSwipeNavigateWithScrolls",
         "AppleEnableMouseSwipeNavigateWithScrolls",
         "ApplePressAndHoldEnabled",
+        "AppleAntiAliasingThreshold",
+        "AppleKeyboardUIMode",
+        "AppleIconAppearanceTheme",
         "com.apple.swipescrolldirection",
+        "com.apple.sound.uiaudio.enabled",
         "NSDocumentRevisionsDebugMode",
         "ApplePersistenceIgnoreState",
         "NSFullScreenMenuItemEverywhere",
+        "NSPreferredWebServices",
         "WebKitDeveloperExtras",
     };
     for (size_t i = 0; i < sizeof(kHiddenPrefKeys) / sizeof(kHiddenPrefKeys[0]); i++) {
@@ -573,11 +598,15 @@ __attribute__((visibility("hidden"))) bool pt_is_hidden_macos_mach_service_cstr(
         strncmp(name, "com.apple.coreservices.appleevents", 34) == 0 ||
         strncmp(name, "com.apple.coreservices.quarantine-resolver", 42) == 0 ||
         strncmp(name, "com.apple.coreservices.sharedfilelistd", 38) == 0 ||
-        strncmp(name, "com.apple.loginwindow", 21) == 0 || strncmp(name, "com.apple.systemuiserver", 24) == 0 ||
-        strcmp(name, "com.apple.pasteboard.1") == 0 || strcmp(name, "com.apple.CoreDisplay.master") == 0 ||
-        strncmp(name, "com.apple.SkyLight.", 19) == 0 || strncmp(name, "com.apple.ControlCenter", 23) == 0 ||
-        strncmp(name, "com.apple.tsm.uiserver", 22) == 0 || strcmp(name, "com.apple.DesktopServicesHelper") == 0 ||
-        strncmp(name, "com.apple.endpointsecurity.", 27) == 0) {
+        strcmp(name, "com.apple.CoreServices.coreservicesd") == 0 || strncmp(name, "com.apple.loginwindow", 21) == 0 ||
+        strncmp(name, "com.apple.systemuiserver", 24) == 0 || strcmp(name, "com.apple.pasteboard.1") == 0 ||
+        strcmp(name, "com.apple.CoreDisplay.master") == 0 || strncmp(name, "com.apple.SkyLight.", 19) == 0 ||
+        strncmp(name, "com.apple.ControlCenter", 23) == 0 || strncmp(name, "com.apple.tsm.uiserver", 22) == 0 ||
+        strcmp(name, "com.apple.DesktopServicesHelper") == 0 || strncmp(name, "com.apple.endpointsecurity.", 27) == 0 ||
+        strcmp(name, "com.apple.DiskArbitration.diskarbitrationd") == 0 || strcmp(name, "com.apple.FSEvents") == 0 ||
+        strncmp(name, "com.apple.metadata.mds", 22) == 0 || strcmp(name, "com.apple.PowerManagement.control") == 0 ||
+        strcmp(name, "com.apple.ocspd") == 0 || strncmp(name, "com.apple.cmio.", 15) == 0 ||
+        strcmp(name, "com.apple.touchbarserver") == 0 || strcmp(name, "com.apple.SecurityServer") == 0) {
         return true;
     }
     if (strcasestr(name, "playcover") != NULL || strcasestr(name, "macover") != NULL ||
@@ -598,7 +627,8 @@ __attribute__((visibility("hidden"))) bool pt_is_hidden_xattr_name_cstr(const ch
     return (strcmp(name, "com.apple.quarantine") == 0 || strcmp(name, "com.apple.provenance") == 0 ||
             strcmp(name, "com.apple.macl") == 0 || strcmp(name, "com.apple.FinderInfo") == 0 ||
             strcmp(name, "com.apple.ResourceFork") == 0 || strcmp(name, "com.apple.TextEncoding") == 0 ||
-            strcmp(name, "com.apple.lastuseddate#PS") == 0 || strcmp(name, "com.apple.LaunchServices.OpenWith") == 0);
+            strcmp(name, "com.apple.lastuseddate#PS") == 0 || strcmp(name, "com.apple.LaunchServices.OpenWith") == 0 ||
+            strcmp(name, "com.apple.rootless") == 0);
 }
 
 __attribute__((visibility("hidden"))) ssize_t pt_filter_xattr_list_buffer(char *buf, ssize_t raw_len) {
@@ -637,7 +667,8 @@ __attribute__((visibility("hidden"))) bool pt_is_hidden_network_ifname_prefix_cs
     return (strncmp(name, "vmenet", 6) == 0 || strncmp(name, "vmnet", 5) == 0 || strncmp(name, "bridge", 6) == 0 ||
             strncmp(name, "anpi", 4) == 0 || strncmp(name, "feth", 4) == 0 || strncmp(name, "XHC", 3) == 0 ||
             strncmp(name, "gif", 3) == 0 || strncmp(name, "stf", 3) == 0 || strncmp(name, "pktap", 5) == 0 ||
-            strncmp(name, "iptap", 5) == 0);
+            strncmp(name, "iptap", 5) == 0 || strncmp(name, "vlan", 4) == 0 || strncmp(name, "bond", 4) == 0 ||
+            strncmp(name, "fw", 2) == 0 || strncmp(name, "usb", 3) == 0);
 }
 
 __attribute__((visibility("hidden"))) bool pt_is_secondary_en_ifname_cstr(const char *name) {
@@ -759,166 +790,27 @@ __attribute__((visibility("hidden"))) bool pt_is_post13_7_sf_symbol_name_cstr(co
     if (s == NULL || s[0] == '\0') {
         return false;
     }
-    static const char *const kPost13Prefixes[] = {
-        "airpods.",         "applewatch.", "aqi.",       "arrow.triangle.", "camera.metering.",
-        "contextualmenu.",  "die.face.",   "dock.",      "figure.",         "filemenu.",
-        "homepod.",         "imac.",       "ipad.",      "iphone.",         "macbook.",
-        "macpro.",          "macwindow",   "menubar.",   "point.3.",        "rectangle.inset.",
-        "rectangle.split.", "signpost.",   "visionpro.", "wave.3.",         "widget.",
-    };
-    for (size_t i = 0; i < sizeof(kPost13Prefixes) / sizeof(kPost13Prefixes[0]); i++) {
-        size_t plen = strlen(kPost13Prefixes[i]);
-        if (strncmp(s, kPost13Prefixes[i], plen) == 0) {
-            return true;
-        }
+    const size_t kAllowCount = sizeof(kPTSFSymbols13Allowlist) / sizeof(kPTSFSymbols13Allowlist[0]);
+    if (bsearch(s, kPTSFSymbols13Allowlist, kAllowCount, sizeof(kPTSFSymbols13Allowlist[0]),
+                pt_sf_symbol_bsearch_cmp) != NULL) {
+        return false;
     }
-    static const char *const kPost13Symbols[] = {"airpodsmax",
-                                                 "airpodspro",
-                                                 "airtag",
-                                                 "allergens",
-                                                 "ant",
-                                                 "apple.intelligence",
-                                                 "applelogo",
-                                                 "applescript",
-                                                 "appletv",
-                                                 "applewatch",
-                                                 "banknote",
-                                                 "barometer",
-                                                 "bicycle",
-                                                 "binoculars",
-                                                 "books.vertical",
-                                                 "brain.head.profile",
-                                                 "building.columns",
-                                                 "bus",
-                                                 "case",
-                                                 "character",
-                                                 "checklist",
-                                                 "checklist.checked",
-                                                 "comb",
-                                                 "cpu",
-                                                 "cross.case",
-                                                 "crown",
-                                                 "cup.and.saucer",
-                                                 "cursorarrow",
-                                                 "cylinder",
-                                                 "diamond",
-                                                 "display",
-                                                 "esim",
-                                                 "externaldrive",
-                                                 "ferry",
-                                                 "figure.walk",
-                                                 "fingerprint",
-                                                 "fork.knife",
-                                                 "fuelpump",
-                                                 "gearshape",
-                                                 "gearshape.2",
-                                                 "giftcard",
-                                                 "graduationcap",
-                                                 "guitars",
-                                                 "gyroscope",
-                                                 "hifispeaker",
-                                                 "homepod",
-                                                 "homepodmini",
-                                                 "horn",
-                                                 "humidity",
-                                                 "hurricane",
-                                                 "imac",
-                                                 "internaldrive",
-                                                 "ipad",
-                                                 "iphone",
-                                                 "ladybug",
-                                                 "lanyardcard",
-                                                 "laptopcomputer",
-                                                 "leaf",
-                                                 "level",
-                                                 "list.bullet.rectangle",
-                                                 "lock.shield",
-                                                 "lungs",
-                                                 "macbook",
-                                                 "macmini",
-                                                 "macpro",
-                                                 "macstudio",
-                                                 "magicmouse",
-                                                 "megaphone",
-                                                 "memorychip",
-                                                 "menucard",
-                                                 "metronome",
-                                                 "network",
-                                                 "newspaper",
-                                                 "note.text",
-                                                 "octagon",
-                                                 "opticaldisc",
-                                                 "opticid",
-                                                 "paintpalette",
-                                                 "parkingsign",
-                                                 "pawprint",
-                                                 "pc",
-                                                 "pianokeys",
-                                                 "pills",
-                                                 "puzzlepiece",
-                                                 "radio",
-                                                 "recordingtape",
-                                                 "ruler",
-                                                 "scroll",
-                                                 "seal",
-                                                 "server.rack",
-                                                 "shareplay",
-                                                 "shazam.logo",
-                                                 "shippingbox",
-                                                 "sidebar.leading",
-                                                 "sidebar.trailing",
-                                                 "simcard",
-                                                 "sparkles.tv",
-                                                 "swift",
-                                                 "tablecells",
-                                                 "takeoutbag",
-                                                 "terminal",
-                                                 "theatermasks",
-                                                 "tornado",
-                                                 "touchid",
-                                                 "tram",
-                                                 "tropicalstorm",
-                                                 "tuningfork",
-                                                 "visionpro",
-                                                 "wallet.pass",
-                                                 "wrench.and.screwdriver",
-                                                 "xserve"};
-    const size_t kSymCount = sizeof(kPost13Symbols) / sizeof(kPost13Symbols[0]);
-    char base[128];
-    strlcpy(base, s, sizeof(base));
-    if (bsearch(base, kPost13Symbols, kSymCount, sizeof(kPost13Symbols[0]), pt_sf_symbol_bsearch_cmp) != NULL) {
-        return true;
-    }
-    static const char *const kSuffixes[] = {".badge.exclamationmark",
-                                            ".badge.questionmark",
-                                            ".badge.checkmark",
-                                            ".badge.minus",
-                                            ".badge.plus",
-                                            ".badge.xmark",
-                                            ".checked",
-                                            ".circle",
-                                            ".square",
-                                            ".slash",
-                                            ".fill",
-                                            ".rtl",
-                                            ".2",
-                                            ".3"};
-    bool stripped = true;
-    while (stripped) {
-        stripped = false;
-        size_t blen = strlen(base);
-        for (size_t i = 0; i < sizeof(kSuffixes) / sizeof(kSuffixes[0]); i++) {
-            size_t slen = strlen(kSuffixes[i]);
-            if (blen > slen && strcmp(base + blen - slen, kSuffixes[i]) == 0) {
-                base[blen - slen] = '\0';
-                if (bsearch(base, kPost13Symbols, kSymCount, sizeof(kPost13Symbols[0]), pt_sf_symbol_bsearch_cmp) !=
-                    NULL) {
-                    return true;
+    static const char *const kLocaleSuffixes[] = {".rtl", ".ar", ".he", ".hi", ".ja", ".ko", ".th", ".zh"};
+    size_t len = strlen(s);
+    if (len < 128U) {
+        char base[128];
+        memcpy(base, s, len + 1U);
+        for (size_t i = 0; i < sizeof(kLocaleSuffixes) / sizeof(kLocaleSuffixes[0]); i++) {
+            size_t slen = strlen(kLocaleSuffixes[i]);
+            if (len > slen && strcmp(base + len - slen, kLocaleSuffixes[i]) == 0) {
+                base[len - slen] = '\0';
+                if (bsearch(base, kPTSFSymbols13Allowlist, kAllowCount, sizeof(kPTSFSymbols13Allowlist[0]),
+                            pt_sf_symbol_bsearch_cmp) != NULL) {
+                    return false;
                 }
-                stripped = true;
                 break;
             }
         }
     }
-    return false;
+    return true;
 }

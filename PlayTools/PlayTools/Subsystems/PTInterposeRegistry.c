@@ -14,11 +14,19 @@
 
 extern const struct mach_header *dyld_image_header_containing_address(const void *addr);
 
-#define PT_DLSYM_STATIC_SLOT_CAP 2048U
+#define PT_DLSYM_STATIC_SLOT_CAP 4096U
 
 static pt_dlsym_index_t s_dlsym_index;
 static uint16_t s_dlsym_slots[PT_DLSYM_STATIC_SLOT_CAP];
 static pthread_once_t s_dlsym_once = PTHREAD_ONCE_INIT;
+
+static inline const void *pt_dlsym_strip_ptr(const void *p) {
+#if defined(__arm64__) || defined(__aarch64__)
+    return (const void *)((uintptr_t)p & 0x0000FFFFFFFFFFFFULL);
+#else
+    return p;
+#endif
+}
 
 static uint64_t pt_dlsym_fnv1a(const char *s) {
     uint64_t h = 14695981039346656037ULL;
@@ -38,7 +46,7 @@ static void *pt_dlsym_eval_entry(const pt_dlsym_entry_t *entry, bool compat13_7_
         return NULL;
     }
     if ((entry->flags & PT_DLSYM_FLAG_HIDE_IN_COMPAT13_7) != 0U && compat13_7_active) {
-        return NULL;
+        return PT_DLSYM_HIDDEN_SENTINEL;
     }
     if ((entry->flags & PT_DLSYM_FLAG_WEAK_GUARD) != 0U && entry->guard == NULL) {
         return NULL;
@@ -161,6 +169,28 @@ static void pt_interpose_registry_init_once(void) {
 void *pt_interpose_registry_lookup(const char *symbol, bool compat13_7_active) {
     pthread_once(&s_dlsym_once, pt_interpose_registry_init_once);
     return pt_dlsym_index_lookup(&s_dlsym_index, symbol, compat13_7_active);
+}
+
+const char *pt_interpose_registry_symbol_for_target(const void *stripped_target) {
+    if (stripped_target == NULL) {
+        return NULL;
+    }
+    const void *needle = pt_dlsym_strip_ptr(stripped_target);
+    pthread_once(&s_dlsym_once, pt_interpose_registry_init_once);
+    if (s_dlsym_index.entries == NULL || s_dlsym_index.count == 0) {
+        return NULL;
+    }
+    for (size_t i = 0; i < s_dlsym_index.count; i++) {
+        const pt_dlsym_entry_t *entry = &s_dlsym_index.entries[i];
+        if ((entry->flags & PT_DLSYM_FLAG_DYNAMIC_RESOLVER) != 0U) {
+            continue;
+        }
+        if (entry->symbol != NULL && entry->target != NULL &&
+            (entry->target == stripped_target || pt_dlsym_strip_ptr(entry->target) == needle)) {
+            return entry->symbol;
+        }
+    }
+    return NULL;
 }
 
 size_t pt_interpose_registry_count(void) {

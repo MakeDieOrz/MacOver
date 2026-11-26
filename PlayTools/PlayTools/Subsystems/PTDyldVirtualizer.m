@@ -8,6 +8,8 @@
 #import "PTSystemSpooferInternal.h"
 #import "PTFSInternal.h"
 
+#import "PTInterposeRegistry.h"
+
 #define PT_HAS_PREFIX_LIT(s, lit) (strncmp((s), (lit), sizeof(lit) - 1) == 0)
 
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_class(const char *name) {
@@ -126,7 +128,8 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_objc_class(const char *n
         case '_':
             if (PT_HAS_PREFIX_LIT(name, "_UINS") ||
                 PT_HAS_PREFIX_LIT(name, "_NSWindow") ||
-                PT_HAS_PREFIX_LIT(name, "_NSApplication")) {
+                PT_HAS_PREFIX_LIT(name, "_NSApplication") ||
+                (pt_is_compat13_7_active() && strcmp(name, "_NSSwiftProcessInfo") == 0)) {
                 return YES;
             }
             break;
@@ -725,6 +728,15 @@ BOOL pt_is_address_in_playtools(const void *addr) {
             pt_is_registered_hidden_module(path));
 }
 
+#define PT_REG_ORIG_CACHE_CAP 128U
+
+static os_unfair_lock s_reg_orig_cache_lock = OS_UNFAIR_LOCK_INIT;
+static struct {
+    const void *stripped_target;
+    const void *orig_ptr;
+} s_reg_orig_cache[PT_REG_ORIG_CACHE_CAP];
+static uint32_t s_reg_orig_cache_count = 0;
+
 __attribute__((visibility("hidden"))) const void *pt_resolve_interposed_target(const void *addr) {
     if (addr == NULL) {
         return NULL;
@@ -740,6 +752,39 @@ __attribute__((visibility("hidden"))) const void *pt_resolve_interposed_target(c
     const void *swizzled_orig = pt_lookup_swizzled_orig_imp(stripped);
     if (swizzled_orig != NULL) {
         return swizzled_orig;
+    }
+    os_unfair_lock_lock(&s_reg_orig_cache_lock);
+    for (uint32_t i = 0; i < s_reg_orig_cache_count; i++) {
+        if (s_reg_orig_cache[i].stripped_target == stripped) {
+            const void *cached = s_reg_orig_cache[i].orig_ptr;
+            os_unfair_lock_unlock(&s_reg_orig_cache_lock);
+            return (cached != NULL) ? cached : addr;
+        }
+    }
+    os_unfair_lock_unlock(&s_reg_orig_cache_lock);
+
+    const char *reg_sym = pt_interpose_registry_symbol_for_target(stripped);
+    if (reg_sym != NULL) {
+        void *resolved = dlsym(RTLD_NEXT, reg_sym);
+        os_unfair_lock_lock(&s_reg_orig_cache_lock);
+        if (s_reg_orig_cache_count < PT_REG_ORIG_CACHE_CAP) {
+            BOOL dup = NO;
+            for (uint32_t i = 0; i < s_reg_orig_cache_count; i++) {
+                if (s_reg_orig_cache[i].stripped_target == stripped) {
+                    dup = YES;
+                    break;
+                }
+            }
+            if (!dup) {
+                s_reg_orig_cache[s_reg_orig_cache_count].stripped_target = stripped;
+                s_reg_orig_cache[s_reg_orig_cache_count].orig_ptr = resolved;
+                s_reg_orig_cache_count++;
+            }
+        }
+        os_unfair_lock_unlock(&s_reg_orig_cache_lock);
+        if (resolved != NULL) {
+            return resolved;
+        }
     }
     return addr;
 }
@@ -1180,55 +1225,175 @@ static uint32_t pt_dyld_get_base_platform(uint32_t platform) {
     return (dyld_get_base_platform != NULL) ? dyld_get_base_platform(platform) : platform;
 }
 
+extern bool pt_orig_dyld_has_inserted_or_interposing_libraries(void)
+    __asm__("_dyld_has_inserted_or_interposing_libraries") __attribute__((weak_import));
+
+static bool pt_dyld_has_inserted_or_interposing_libraries(void) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return false;
+    }
+    return (pt_orig_dyld_has_inserted_or_interposing_libraries != NULL)
+        ? pt_orig_dyld_has_inserted_or_interposing_libraries()
+        : false;
+}
+
 extern void pt_orig_dyld_get_image_versions(
     const struct mach_header *mh,
     void (^callback)(uint32_t platform, uint32_t sdk_version, uint32_t min_version))
     __asm__("_dyld_get_image_versions") __attribute__((weak_import));
+extern bool pt_orig_dyld_sdk_at_least(const struct mach_header *mh, pt_dyld_build_version_t version)
+    __asm__("_dyld_sdk_at_least") __attribute__((weak_import));
+extern bool pt_orig_dyld_minos_at_least(const struct mach_header *mh, pt_dyld_build_version_t version)
+    __asm__("_dyld_minos_at_least") __attribute__((weak_import));
+extern uint32_t pt_orig_dyld_get_sdk_version(const struct mach_header *mh)
+    __asm__("_dyld_get_sdk_version") __attribute__((weak_import));
+extern uint32_t pt_orig_dyld_get_min_os_version(const struct mach_header *mh)
+    __asm__("_dyld_get_min_os_version") __attribute__((weak_import));
+extern uint32_t pt_orig_dyld_get_program_sdk_version(void)
+    __asm__("_dyld_get_program_sdk_version") __attribute__((weak_import));
+extern uint32_t pt_orig_dyld_get_program_min_os_version(void)
+    __asm__("_dyld_get_program_min_os_version") __attribute__((weak_import));
+extern bool pt_orig_dyld_program_sdk_at_least(pt_dyld_build_version_t version)
+    __asm__("_dyld_program_sdk_at_least") __attribute__((weak_import));
+extern bool pt_orig_dyld_program_minos_at_least(pt_dyld_build_version_t version)
+    __asm__("_dyld_program_minos_at_least") __attribute__((weak_import));
+
+static BOOL pt_extract_raw_versions_from_mh64(const struct mach_header_64 *mh64,
+                                              uint32_t *out_minos,
+                                              uint32_t *out_sdk) {
+    if (mh64 == NULL || !pt_is_valid_user_pointer(mh64) ||
+        mh64->magic != MH_MAGIC_64 ||
+        mh64->sizeofcmds == 0 || mh64->sizeofcmds > (1U << 20)) {
+        return NO;
+    }
+    const uint8_t *base = (const uint8_t *)mh64;
+    size_t total = sizeof(struct mach_header_64) + (size_t)mh64->sizeofcmds;
+    size_t off = sizeof(struct mach_header_64);
+
+    int best_prio = 0; // 3=IOS, 2=MACCATALYST, 1=other LC_BUILD_VERSION
+    uint32_t best_minos = 0, best_sdk = 0;
+    uint32_t vmin_minos = 0, vmin_sdk = 0;
+    BOOL has_vmin = NO;
+
+    for (uint32_t i = 0; i < mh64->ncmds && off + sizeof(struct load_command) <= total; i++) {
+        const struct load_command *lc = (const struct load_command *)(base + off);
+        if (lc->cmdsize < sizeof(struct load_command) || off + lc->cmdsize > total) {
+            break;
+        }
+        if (lc->cmd == LC_BUILD_VERSION && lc->cmdsize >= sizeof(struct build_version_command)) {
+            const struct build_version_command *bv = (const struct build_version_command *)lc;
+            int prio = (bv->platform == PLATFORM_IOS) ? 3 : ((bv->platform == PLATFORM_MACCATALYST) ? 2 : 1);
+            if (prio > best_prio) {
+                best_prio = prio;
+                best_minos = bv->minos;
+                best_sdk = bv->sdk;
+            }
+        } else if ((lc->cmd == LC_VERSION_MIN_IPHONEOS || lc->cmd == LC_VERSION_MIN_MACOSX) &&
+                   lc->cmdsize >= sizeof(struct version_min_command) && !has_vmin) {
+            const struct version_min_command *vmc = (const struct version_min_command *)lc;
+            vmin_minos = vmc->version;
+            vmin_sdk = vmc->sdk;
+            has_vmin = YES;
+        }
+        off += lc->cmdsize;
+    }
+
+    if (best_prio > 0) {
+        if (out_minos != NULL) *out_minos = best_minos;
+        if (out_sdk != NULL) *out_sdk = best_sdk;
+        return YES;
+    }
+    if (has_vmin) {
+        if (out_minos != NULL) *out_minos = vmin_minos;
+        if (out_sdk != NULL) *out_sdk = vmin_sdk;
+        return YES;
+    }
+    return NO;
+}
+
+static BOOL pt_extract_spoofed_ios_image_versions(const struct mach_header *mh,
+                                                  uint32_t *out_minos,
+                                                  uint32_t *out_sdk) {
+    const struct mach_header *real_mh = pt_uncloak_shadow_mach_header(mh);
+    if (real_mh == NULL) {
+        return NO;
+    }
+    uint32_t minos = 0, sdk = 0;
+    BOOL extracted = NO;
+    if (real_mh == pt_get_main_executable_header()) {
+        size_t bkp_len = 0;
+        const uint8_t *bkp = pt_get_cached_backup_main_mach_header(&bkp_len);
+        if (bkp != NULL && bkp_len >= sizeof(struct mach_header_64)) {
+            extracted = pt_extract_raw_versions_from_mh64((const struct mach_header_64 *)bkp, &minos, &sdk);
+        }
+    }
+    if (!extracted) {
+        extracted = pt_extract_raw_versions_from_mh64((const struct mach_header_64 *)real_mh, &minos, &sdk);
+    }
+    if (!extracted) {
+        return NO;
+    }
+    uint32_t clamp = pt_get_compat_version_clamp();
+    if (clamp != 0) {
+        if (minos > clamp) minos = clamp;
+        if (sdk > clamp) sdk = clamp;
+    }
+    if (out_minos != NULL) *out_minos = minos;
+    if (out_sdk != NULL) *out_sdk = sdk;
+    return YES;
+}
 
 static void pt_dyld_get_image_versions(
     const struct mach_header *mh,
     void (^callback)(uint32_t platform, uint32_t sdk_version, uint32_t min_version)) {
-    if (pt_orig_dyld_get_image_versions == NULL || mh == NULL || callback == NULL) {
+    if (mh == NULL || callback == NULL) {
         return;
     }
     const void *caller = __builtin_return_address(0);
     if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller)) {
-        const struct mach_header *lc_mh = pt_maybe_shadow_mach_header(mh);
-        BOOL compat13 = pt_is_compat13_7_active();
-        pt_orig_dyld_get_image_versions(lc_mh, ^(uint32_t platform, uint32_t sdk_version, uint32_t min_version) {
-            if (platform == 1U || platform == PLATFORM_MACCATALYST) {
-                platform = PLATFORM_IOS;
-            }
-            if (compat13) {
-                if (sdk_version > 0x0d0700U) {
-                    sdk_version = 0x0d0700U;
+        uint32_t minos = 0, sdk = 0;
+        if (pt_extract_spoofed_ios_image_versions(mh, &minos, &sdk)) {
+            callback(PLATFORM_IOS, sdk, minos);
+            return;
+        }
+        if (pt_orig_dyld_get_image_versions != NULL) {
+            const struct mach_header *real_mh = pt_uncloak_shadow_mach_header(mh);
+            uint32_t clamp = pt_get_compat_version_clamp();
+            __block BOOL invoked = NO;
+            pt_orig_dyld_get_image_versions(real_mh, ^(uint32_t platform, uint32_t sdk_version, uint32_t min_version) {
+                if (invoked) {
+                    return;
                 }
-                if (min_version > 0x0d0700U) {
-                    min_version = 0x0d0700U;
+                invoked = YES;
+                (void)platform;
+                if (clamp != 0) {
+                    if (sdk_version > clamp) sdk_version = clamp;
+                    if (min_version > clamp) min_version = clamp;
                 }
-            }
-            callback(platform, sdk_version, min_version);
-        });
+                callback(PLATFORM_IOS, sdk_version, min_version);
+            });
+        }
         return;
     }
-    pt_orig_dyld_get_image_versions(pt_uncloak_shadow_mach_header(mh), callback);
+    if (pt_orig_dyld_get_image_versions != NULL) {
+        pt_orig_dyld_get_image_versions(pt_uncloak_shadow_mach_header(mh), callback);
+    }
 }
 
 static inline BOOL pt_dyld_version_query_blocked_for_app(pt_dyld_build_version_t version) {
     if (version.platform == 1U || version.platform == PLATFORM_MACCATALYST) {
         return YES;
     }
-    if (pt_is_compat13_7_active() && version.platform == PLATFORM_IOS && version.version > 0x0d0700U) {
+    uint32_t clamp = pt_get_compat_version_clamp();
+    if (clamp != 0 && version.platform == PLATFORM_IOS && version.version > clamp) {
         return YES;
     }
     return NO;
 }
 
-extern bool pt_orig_dyld_sdk_at_least(const struct mach_header *mh, pt_dyld_build_version_t version)
-    __asm__("_dyld_sdk_at_least") __attribute__((weak_import));
-
 static bool pt_dyld_sdk_at_least(const struct mach_header *mh, pt_dyld_build_version_t version) {
-    if (pt_orig_dyld_sdk_at_least == NULL || mh == NULL) {
+    if (mh == NULL) {
         return false;
     }
     if (pt_is_bypass_enabled() &&
@@ -1236,17 +1401,21 @@ static bool pt_dyld_sdk_at_least(const struct mach_header *mh, pt_dyld_build_ver
         if (pt_dyld_version_query_blocked_for_app(version)) {
             return false;
         }
-        const struct mach_header *lc_mh = pt_maybe_shadow_mach_header(mh);
-        return pt_orig_dyld_sdk_at_least(lc_mh, version);
+        uint32_t minos = 0, sdk = 0;
+        if (pt_extract_spoofed_ios_image_versions(mh, &minos, &sdk) && version.platform == PLATFORM_IOS) {
+            return (sdk >= version.version);
+        }
+        return (pt_orig_dyld_sdk_at_least != NULL)
+            ? pt_orig_dyld_sdk_at_least(pt_maybe_shadow_mach_header(mh), version)
+            : false;
     }
-    return pt_orig_dyld_sdk_at_least(pt_uncloak_shadow_mach_header(mh), version);
+    return (pt_orig_dyld_sdk_at_least != NULL)
+        ? pt_orig_dyld_sdk_at_least(pt_uncloak_shadow_mach_header(mh), version)
+        : false;
 }
-
-extern bool pt_orig_dyld_minos_at_least(const struct mach_header *mh, pt_dyld_build_version_t version)
-    __asm__("_dyld_minos_at_least") __attribute__((weak_import));
 
 static bool pt_dyld_minos_at_least(const struct mach_header *mh, pt_dyld_build_version_t version) {
-    if (pt_orig_dyld_minos_at_least == NULL || mh == NULL) {
+    if (mh == NULL) {
         return false;
     }
     if (pt_is_bypass_enabled() &&
@@ -1254,166 +1423,257 @@ static bool pt_dyld_minos_at_least(const struct mach_header *mh, pt_dyld_build_v
         if (pt_dyld_version_query_blocked_for_app(version)) {
             return false;
         }
-        const struct mach_header *lc_mh = pt_maybe_shadow_mach_header(mh);
-        return pt_orig_dyld_minos_at_least(lc_mh, version);
+        uint32_t minos = 0, sdk = 0;
+        if (pt_extract_spoofed_ios_image_versions(mh, &minos, &sdk) && version.platform == PLATFORM_IOS) {
+            return (minos >= version.version);
+        }
+        return (pt_orig_dyld_minos_at_least != NULL)
+            ? pt_orig_dyld_minos_at_least(pt_maybe_shadow_mach_header(mh), version)
+            : false;
     }
-    return pt_orig_dyld_minos_at_least(pt_uncloak_shadow_mach_header(mh), version);
+    return (pt_orig_dyld_minos_at_least != NULL)
+        ? pt_orig_dyld_minos_at_least(pt_uncloak_shadow_mach_header(mh), version)
+        : false;
 }
-
-extern uint32_t pt_orig_dyld_get_sdk_version(const struct mach_header *mh)
-    __asm__("_dyld_get_sdk_version") __attribute__((weak_import));
 
 static uint32_t pt_dyld_get_sdk_version(const struct mach_header *mh) {
-    if (pt_orig_dyld_get_sdk_version == NULL || mh == NULL) {
+    if (mh == NULL) {
         return 0;
     }
     if (pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        uint32_t v = pt_orig_dyld_get_sdk_version(pt_maybe_shadow_mach_header(mh));
-        if (pt_is_compat13_7_active() && v > 0x0d0700U) {
-            return 0x0d0700U;
+        uint32_t minos = 0, sdk = 0;
+        if (pt_extract_spoofed_ios_image_versions(mh, &minos, &sdk)) {
+            return sdk;
+        }
+        uint32_t v = (pt_orig_dyld_get_sdk_version != NULL)
+            ? pt_orig_dyld_get_sdk_version(pt_maybe_shadow_mach_header(mh))
+            : 0;
+        uint32_t clamp = pt_get_compat_version_clamp();
+        if (clamp != 0 && v > clamp) {
+            return clamp;
         }
         return v;
     }
-    return pt_orig_dyld_get_sdk_version(pt_uncloak_shadow_mach_header(mh));
+    return (pt_orig_dyld_get_sdk_version != NULL)
+        ? pt_orig_dyld_get_sdk_version(pt_uncloak_shadow_mach_header(mh))
+        : 0;
 }
-
-extern uint32_t pt_orig_dyld_get_min_os_version(const struct mach_header *mh)
-    __asm__("_dyld_get_min_os_version") __attribute__((weak_import));
 
 static uint32_t pt_dyld_get_min_os_version(const struct mach_header *mh) {
-    if (pt_orig_dyld_get_min_os_version == NULL || mh == NULL) {
+    if (mh == NULL) {
         return 0;
     }
     if (pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        uint32_t v = pt_orig_dyld_get_min_os_version(pt_maybe_shadow_mach_header(mh));
-        if (pt_is_compat13_7_active() && v > 0x0d0700U) {
-            return 0x0d0700U;
+        uint32_t minos = 0, sdk = 0;
+        if (pt_extract_spoofed_ios_image_versions(mh, &minos, &sdk)) {
+            return minos;
+        }
+        uint32_t v = (pt_orig_dyld_get_min_os_version != NULL)
+            ? pt_orig_dyld_get_min_os_version(pt_maybe_shadow_mach_header(mh))
+            : 0;
+        uint32_t clamp = pt_get_compat_version_clamp();
+        if (clamp != 0 && v > clamp) {
+            return clamp;
         }
         return v;
     }
-    return pt_orig_dyld_get_min_os_version(pt_uncloak_shadow_mach_header(mh));
+    return (pt_orig_dyld_get_min_os_version != NULL)
+        ? pt_orig_dyld_get_min_os_version(pt_uncloak_shadow_mach_header(mh))
+        : 0;
 }
 
-extern uint32_t pt_orig_dyld_get_program_sdk_version(void)
-    __asm__("_dyld_get_program_sdk_version") __attribute__((weak_import));
+static uint32_t pt_dyld_get_program_sdk_version_for_app(void) {
+    const struct mach_header *main_mh = pt_get_main_executable_header();
+    uint32_t minos = 0, sdk = 0;
+    if (main_mh != NULL && pt_extract_spoofed_ios_image_versions(main_mh, &minos, &sdk)) {
+        return sdk;
+    }
+    uint32_t v = (pt_orig_dyld_get_program_sdk_version != NULL) ? pt_orig_dyld_get_program_sdk_version() : 0;
+    uint32_t clamp = pt_get_compat_version_clamp();
+    return (clamp != 0 && v > clamp) ? clamp : v;
+}
+
+static uint32_t pt_dyld_get_program_min_os_version_for_app(void) {
+    const struct mach_header *main_mh = pt_get_main_executable_header();
+    uint32_t minos = 0, sdk = 0;
+    if (main_mh != NULL && pt_extract_spoofed_ios_image_versions(main_mh, &minos, &sdk)) {
+        return minos;
+    }
+    uint32_t v = (pt_orig_dyld_get_program_min_os_version != NULL) ? pt_orig_dyld_get_program_min_os_version() : 0;
+    uint32_t clamp = pt_get_compat_version_clamp();
+    return (clamp != 0 && v > clamp) ? clamp : v;
+}
 
 static uint32_t pt_dyld_get_program_sdk_version(void) {
-    if (pt_orig_dyld_get_program_sdk_version == NULL) {
-        return 0;
-    }
-    uint32_t v = pt_orig_dyld_get_program_sdk_version();
     if (pt_is_bypass_enabled() &&
-        pt_is_compat13_7_active() &&
-        v > 0x0d0700U &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        return 0x0d0700U;
+        return pt_dyld_get_program_sdk_version_for_app();
     }
-    return v;
+    return (pt_orig_dyld_get_program_sdk_version != NULL) ? pt_orig_dyld_get_program_sdk_version() : 0;
 }
-
-extern uint32_t pt_orig_dyld_get_program_min_os_version(void)
-    __asm__("_dyld_get_program_min_os_version") __attribute__((weak_import));
 
 static uint32_t pt_dyld_get_program_min_os_version(void) {
-    if (pt_orig_dyld_get_program_min_os_version == NULL) {
-        return 0;
-    }
-    uint32_t v = pt_orig_dyld_get_program_min_os_version();
     if (pt_is_bypass_enabled() &&
-        pt_is_compat13_7_active() &&
-        v > 0x0d0700U &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        return 0x0d0700U;
+        return pt_dyld_get_program_min_os_version_for_app();
     }
-    return v;
+    return (pt_orig_dyld_get_program_min_os_version != NULL) ? pt_orig_dyld_get_program_min_os_version() : 0;
 }
 
-extern bool pt_orig_dyld_program_sdk_at_least(pt_dyld_build_version_t version)
-    __asm__("_dyld_program_sdk_at_least") __attribute__((weak_import));
-
 static bool pt_dyld_program_sdk_at_least(pt_dyld_build_version_t version) {
-    if (pt_orig_dyld_program_sdk_at_least == NULL) {
-        return false;
-    }
     if (pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         if (pt_dyld_version_query_blocked_for_app(version)) {
             return false;
+        }
+        if (version.platform == PLATFORM_IOS) {
+            return (pt_dyld_get_program_sdk_version_for_app() >= version.version);
         }
         const struct mach_header *main_mh = pt_get_main_executable_header();
         if (main_mh != NULL && pt_orig_dyld_sdk_at_least != NULL) {
             return pt_orig_dyld_sdk_at_least(pt_maybe_shadow_mach_header(main_mh), version);
         }
     }
-    return pt_orig_dyld_program_sdk_at_least(version);
+    return (pt_orig_dyld_program_sdk_at_least != NULL) ? pt_orig_dyld_program_sdk_at_least(version) : false;
 }
 
-extern bool pt_orig_dyld_program_minos_at_least(pt_dyld_build_version_t version)
-    __asm__("_dyld_program_minos_at_least") __attribute__((weak_import));
-
 static bool pt_dyld_program_minos_at_least(pt_dyld_build_version_t version) {
-    if (pt_orig_dyld_program_minos_at_least == NULL) {
-        return false;
-    }
     if (pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         if (pt_dyld_version_query_blocked_for_app(version)) {
             return false;
+        }
+        if (version.platform == PLATFORM_IOS) {
+            return (pt_dyld_get_program_min_os_version_for_app() >= version.version);
         }
         const struct mach_header *main_mh = pt_get_main_executable_header();
         if (main_mh != NULL && pt_orig_dyld_minos_at_least != NULL) {
             return pt_orig_dyld_minos_at_least(pt_maybe_shadow_mach_header(main_mh), version);
         }
     }
-    return pt_orig_dyld_program_minos_at_least(version);
+    return (pt_orig_dyld_program_minos_at_least != NULL) ? pt_orig_dyld_program_minos_at_least(version) : false;
+}
+
+extern uint64_t pt_orig_dyld_get_program_sdk_version_token(void)
+    __asm__("_dyld_get_program_sdk_version_token") __attribute__((weak_import));
+extern uint64_t pt_orig_dyld_get_program_minos_version_token(void)
+    __asm__("_dyld_get_program_minos_version_token") __attribute__((weak_import));
+extern uint32_t pt_orig_dyld_version_token_get_platform(uint64_t token)
+    __asm__("_dyld_version_token_get_platform") __attribute__((weak_import));
+extern bool pt_orig_dyld_version_token_at_least(uint64_t token, pt_dyld_build_version_t version)
+    __asm__("_dyld_version_token_at_least") __attribute__((weak_import));
+
+static uint64_t pt_dyld_get_program_sdk_version_token(void) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        uint32_t sdk = pt_dyld_get_program_sdk_version_for_app();
+        return ((uint64_t)sdk << 32) | (uint64_t)PLATFORM_IOS;
+    }
+    return (pt_orig_dyld_get_program_sdk_version_token != NULL) ? pt_orig_dyld_get_program_sdk_version_token() : 0ULL;
+}
+
+static uint64_t pt_dyld_get_program_minos_version_token(void) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        uint32_t minos = pt_dyld_get_program_min_os_version_for_app();
+        return ((uint64_t)minos << 32) | (uint64_t)PLATFORM_IOS;
+    }
+    return (pt_orig_dyld_get_program_minos_version_token != NULL) ? pt_orig_dyld_get_program_minos_version_token() : 0ULL;
+}
+
+static uint32_t pt_dyld_version_token_get_platform(uint64_t token) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        uint32_t plat = (uint32_t)(token & 0xFFFFFFFFULL);
+        if (plat == 1U || plat == PLATFORM_MACCATALYST || plat == PLATFORM_IOS) {
+            return PLATFORM_IOS;
+        }
+        return plat;
+    }
+    return (pt_orig_dyld_version_token_get_platform != NULL)
+        ? pt_orig_dyld_version_token_get_platform(token)
+        : (uint32_t)(token & 0xFFFFFFFFULL);
+}
+
+static bool pt_dyld_version_token_at_least(uint64_t token, pt_dyld_build_version_t version) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (pt_dyld_version_query_blocked_for_app(version)) {
+            return false;
+        }
+        uint32_t tok_plat = (uint32_t)(token & 0xFFFFFFFFULL);
+        uint32_t tok_ver = (uint32_t)(token >> 32);
+        if (version.platform == PLATFORM_IOS &&
+            (tok_plat == 1U || tok_plat == PLATFORM_MACCATALYST || tok_plat == PLATFORM_IOS)) {
+            uint32_t clamp = pt_get_compat_version_clamp();
+            if (clamp != 0 && tok_ver > clamp) {
+                tok_ver = clamp;
+            }
+            return (tok_ver >= version.version);
+        }
+    }
+    return (pt_orig_dyld_version_token_at_least != NULL)
+        ? pt_orig_dyld_version_token_at_least(token, version)
+        : false;
 }
 
 typedef const struct mach_header *(*pt_dyld_get_prog_image_header_fn)(void);
-static pt_dyld_get_prog_image_header_fn pt_resolve_dyld_get_prog_image_header(void) {
-    static pt_dyld_get_prog_image_header_fn s_fn = NULL;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        s_fn = (pt_dyld_get_prog_image_header_fn)dlsym(RTLD_NEXT, "_dyld_get_prog_image_header");
-    });
-    return s_fn;
-}
+extern const struct mach_header *pt_orig_sym_dyld_get_prog_image_header(void) __asm__("__dyld_get_prog_image_header") __attribute__((weak_import));
 
 static const struct mach_header *pt_dyld_get_prog_image_header(void) {
-    pt_dyld_get_prog_image_header_fn fn = pt_resolve_dyld_get_prog_image_header();
-    if (fn == NULL) {
+    if (&pt_orig_sym_dyld_get_prog_image_header == NULL) {
         return _dyld_get_image_header(0);
     }
-    return fn();
+    return pt_orig_sym_dyld_get_prog_image_header();
 }
 
-typedef const char *(*pt_dyld_shared_cache_real_path_fn)(const char *path);
-static pt_dyld_shared_cache_real_path_fn pt_resolve_dyld_shared_cache_real_path(void) {
-    static pt_dyld_shared_cache_real_path_fn s_fn = NULL;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        s_fn = (pt_dyld_shared_cache_real_path_fn)dlsym(RTLD_NEXT, "_dyld_shared_cache_real_path");
-    });
-    return s_fn;
-}
+extern const char *pt_orig_sym_dyld_shared_cache_real_path(const char *path) __asm__("__dyld_shared_cache_real_path") __attribute__((weak_import));
 
 static const char *pt_dyld_shared_cache_real_path(const char *path) {
-    pt_dyld_shared_cache_real_path_fn fn = pt_resolve_dyld_shared_cache_real_path();
-    if (fn == NULL) {
+    if (&pt_orig_sym_dyld_shared_cache_real_path == NULL) {
         return NULL;
     }
     const void *caller = __builtin_return_address(0);
     if (path != NULL && pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(caller)) {
-        if (strcmp(path, "/System/iOSSupport") == 0 ||
-            strncmp(path, "/System/iOSSupport/", 19) == 0 ||
-            strstr(path, ".framework/Versions/") != NULL ||
-            pt_should_hide_dyld_image(path) ||
-            pt_is_hidden_path(path, caller)) {
+        char lex_buf[PATH_MAX];
+        const char *norm = path;
+        if (norm[0] == '/' && pt_needs_lexical_norm(norm)) {
+            const char *collapsed = pt_normalize_lexical_path(norm, lex_buf, sizeof(lex_buf));
+            if (collapsed != NULL) {
+                norm = collapsed;
+            }
+        }
+        if (strcmp(norm, "/System/iOSSupport") == 0 ||
+            strncmp(norm, "/System/iOSSupport/", 19) == 0 ||
+            strstr(norm, ".framework/Versions/") != NULL ||
+            pt_should_hide_dyld_image(norm) ||
+            pt_is_hidden_path(norm, caller)) {
             return NULL;
         }
-        const char *res = fn(path);
+        const char *res = pt_orig_sym_dyld_shared_cache_real_path(norm);
+        if (res == NULL && (strncmp(norm, "/System/Library/", 16) == 0 || strncmp(norm, "/usr/lib/", 9) == 0)) {
+            char ios_buf[PATH_MAX];
+            int n = snprintf(ios_buf, sizeof(ios_buf), "/System/iOSSupport%s", norm);
+            if (n > 0 && (size_t)n < sizeof(ios_buf)) {
+                res = pt_orig_sym_dyld_shared_cache_real_path(ios_buf);
+            }
+            if (res == NULL) {
+                const char *slash = strrchr(norm, '/');
+                if (slash != NULL && slash > norm && strstr(norm, ".framework/") != NULL &&
+                    strstr(norm, "/Versions/") == NULL) {
+                    size_t dir_len = (size_t)(slash - norm);
+                    n = snprintf(ios_buf, sizeof(ios_buf),
+                                 "/System/iOSSupport%.*s/Versions/A%s",
+                                 (int)dir_len, norm, slash);
+                    if (n > 0 && (size_t)n < sizeof(ios_buf)) {
+                        res = pt_orig_sym_dyld_shared_cache_real_path(ios_buf);
+                    }
+                }
+            }
+        }
         if (res != NULL) {
             if (pt_should_hide_dyld_image(res)) {
                 return NULL;
@@ -1422,53 +1682,35 @@ static const char *pt_dyld_shared_cache_real_path(const char *path) {
         }
         return NULL;
     }
-    return fn(path);
+    return pt_orig_sym_dyld_shared_cache_real_path(path);
 }
 
-typedef bool (*pt_dyld_shared_cache_some_image_overridden_fn)(void);
-static pt_dyld_shared_cache_some_image_overridden_fn pt_resolve_dyld_shared_cache_some_image_overridden(void) {
-    static pt_dyld_shared_cache_some_image_overridden_fn s_fn = NULL;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        s_fn = (pt_dyld_shared_cache_some_image_overridden_fn)dlsym(RTLD_NEXT, "dyld_shared_cache_some_image_overridden");
-    });
-    return s_fn;
-}
+extern bool pt_orig_sym_dyld_shared_cache_some_image_overridden(void) __asm__("_dyld_shared_cache_some_image_overridden") __attribute__((weak_import));
 
 static bool pt_dyld_shared_cache_some_image_overridden(void) {
     if (pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return false;
     }
-    pt_dyld_shared_cache_some_image_overridden_fn fn = pt_resolve_dyld_shared_cache_some_image_overridden();
-    return (fn != NULL) ? fn() : false;
+    return (&pt_orig_sym_dyld_shared_cache_some_image_overridden != NULL) ? pt_orig_sym_dyld_shared_cache_some_image_overridden() : false;
 }
 
-typedef bool (*pt_dyld_find_unwind_sections_fn)(void *addr, void *info);
-static pt_dyld_find_unwind_sections_fn pt_resolve_dyld_find_unwind_sections(void) {
-    static pt_dyld_find_unwind_sections_fn s_fn = NULL;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        s_fn = (pt_dyld_find_unwind_sections_fn)dlsym(RTLD_NEXT, "_dyld_find_unwind_sections");
-    });
-    return s_fn;
-}
+extern bool pt_orig_sym_dyld_find_unwind_sections(void *addr, void *info) __asm__("__dyld_find_unwind_sections") __attribute__((weak_import));
 
 static bool pt_dyld_find_unwind_sections(void *addr, void *info) {
-    pt_dyld_find_unwind_sections_fn fn = pt_resolve_dyld_find_unwind_sections();
-    if (fn == NULL) {
+    if (&pt_orig_sym_dyld_find_unwind_sections == NULL) {
         return false;
     }
     if (!pt_is_bypass_enabled() ||
         pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        return fn(addr, info);
+        return pt_orig_sym_dyld_find_unwind_sections(addr, info);
     }
     addr = (void *)pt_resolve_interposed_target(addr);
     const char *path = dyld_image_path_containing_address(addr);
     if (path != NULL && pt_should_hide_dyld_image(path)) {
         return false;
     }
-    return fn(addr, info);
+    return pt_orig_sym_dyld_find_unwind_sections(addr, info);
 }
 
 typedef const struct dyld_process_info_base *pt_dyld_process_info_t;
@@ -1479,6 +1721,13 @@ typedef uint32_t (*pt_dyld_process_info_get_platform_fn)(pt_dyld_process_info_t 
 typedef void (*pt_dyld_process_info_get_cache_fn)(pt_dyld_process_info_t info, void *cacheInfo);
 typedef void (*pt_dyld_process_info_get_state_fn)(pt_dyld_process_info_t info, void *stateInfo);
 
+extern pt_dyld_process_info_t pt_orig_sym_dyld_process_info_create(task_t task, uint64_t timestamp, kern_return_t *kernelError) __asm__("__dyld_process_info_create") __attribute__((weak_import));
+extern void pt_orig_sym_dyld_process_info_for_each_image(pt_dyld_process_info_t info,
+                                                         void (^callback)(uint64_t machHeaderAddress, const uuid_t uuid, const char *path)) __asm__("__dyld_process_info_for_each_image") __attribute__((weak_import));
+extern uint32_t pt_orig_sym_dyld_process_info_get_platform(pt_dyld_process_info_t info) __asm__("__dyld_process_info_get_platform") __attribute__((weak_import));
+extern void pt_orig_sym_dyld_process_info_get_cache(pt_dyld_process_info_t info, void *cacheInfo) __asm__("__dyld_process_info_get_cache") __attribute__((weak_import));
+extern void pt_orig_sym_dyld_process_info_get_state(pt_dyld_process_info_t info, void *stateInfo) __asm__("__dyld_process_info_get_state") __attribute__((weak_import));
+
 typedef struct {
     void *plain_fn;
     void *underscored_fn;
@@ -1486,79 +1735,89 @@ typedef struct {
 
 static void pt_resolve_dual_dyld_sym(pt_dyld_proc_info_sym_t *out,
                                      const char *plainName,
-                                     const char *underscoredName) {
+                                     void *origUnderscored) {
     out->plain_fn = dlsym(RTLD_NEXT, plainName);
-    out->underscored_fn = dlsym(RTLD_NEXT, underscoredName);
+    out->underscored_fn = origUnderscored;
 }
 
 static const pt_dyld_proc_info_sym_t *pt_dyld_process_info_create_sym(void) {
     static pt_dyld_proc_info_sym_t s_sym = { NULL, NULL };
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        pt_resolve_dual_dyld_sym(&s_sym, "dyld_process_info_create", "_dyld_process_info_create");
+        pt_resolve_dual_dyld_sym(&s_sym, "dyld_process_info_create", (void *)&pt_orig_sym_dyld_process_info_create);
     });
     return &s_sym;
 }
 
 static pt_dyld_process_info_create_fn pt_resolve_dyld_process_info_create(void) {
-    const pt_dyld_proc_info_sym_t *sym = pt_dyld_process_info_create_sym();
-    return (pt_dyld_process_info_create_fn)(sym->underscored_fn != NULL ? sym->underscored_fn : sym->plain_fn);
+    if (&pt_orig_sym_dyld_process_info_create != NULL) {
+        return pt_orig_sym_dyld_process_info_create;
+    }
+    return (pt_dyld_process_info_create_fn)pt_dyld_process_info_create_sym()->plain_fn;
 }
 
 static const pt_dyld_proc_info_sym_t *pt_dyld_process_info_for_each_image_sym(void) {
     static pt_dyld_proc_info_sym_t s_sym = { NULL, NULL };
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        pt_resolve_dual_dyld_sym(&s_sym, "dyld_process_info_for_each_image", "_dyld_process_info_for_each_image");
+        pt_resolve_dual_dyld_sym(&s_sym, "dyld_process_info_for_each_image", (void *)&pt_orig_sym_dyld_process_info_for_each_image);
     });
     return &s_sym;
 }
 
 static pt_dyld_process_info_for_each_image_fn pt_resolve_dyld_process_info_for_each_image(void) {
-    const pt_dyld_proc_info_sym_t *sym = pt_dyld_process_info_for_each_image_sym();
-    return (pt_dyld_process_info_for_each_image_fn)(sym->underscored_fn != NULL ? sym->underscored_fn : sym->plain_fn);
+    if (&pt_orig_sym_dyld_process_info_for_each_image != NULL) {
+        return pt_orig_sym_dyld_process_info_for_each_image;
+    }
+    return (pt_dyld_process_info_for_each_image_fn)pt_dyld_process_info_for_each_image_sym()->plain_fn;
 }
 
 static const pt_dyld_proc_info_sym_t *pt_dyld_process_info_get_platform_sym(void) {
     static pt_dyld_proc_info_sym_t s_sym = { NULL, NULL };
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        pt_resolve_dual_dyld_sym(&s_sym, "dyld_process_info_get_platform", "_dyld_process_info_get_platform");
+        pt_resolve_dual_dyld_sym(&s_sym, "dyld_process_info_get_platform", (void *)&pt_orig_sym_dyld_process_info_get_platform);
     });
     return &s_sym;
 }
 
 static pt_dyld_process_info_get_platform_fn pt_resolve_dyld_process_info_get_platform(void) {
-    const pt_dyld_proc_info_sym_t *sym = pt_dyld_process_info_get_platform_sym();
-    return (pt_dyld_process_info_get_platform_fn)(sym->underscored_fn != NULL ? sym->underscored_fn : sym->plain_fn);
+    if (&pt_orig_sym_dyld_process_info_get_platform != NULL) {
+        return pt_orig_sym_dyld_process_info_get_platform;
+    }
+    return (pt_dyld_process_info_get_platform_fn)pt_dyld_process_info_get_platform_sym()->plain_fn;
 }
 
 static const pt_dyld_proc_info_sym_t *pt_dyld_process_info_get_cache_sym(void) {
     static pt_dyld_proc_info_sym_t s_sym = { NULL, NULL };
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        pt_resolve_dual_dyld_sym(&s_sym, "dyld_process_info_get_cache", "_dyld_process_info_get_cache");
+        pt_resolve_dual_dyld_sym(&s_sym, "dyld_process_info_get_cache", (void *)&pt_orig_sym_dyld_process_info_get_cache);
     });
     return &s_sym;
 }
 
 static pt_dyld_process_info_get_cache_fn pt_resolve_dyld_process_info_get_cache(void) {
-    const pt_dyld_proc_info_sym_t *sym = pt_dyld_process_info_get_cache_sym();
-    return (pt_dyld_process_info_get_cache_fn)(sym->underscored_fn != NULL ? sym->underscored_fn : sym->plain_fn);
+    if (&pt_orig_sym_dyld_process_info_get_cache != NULL) {
+        return pt_orig_sym_dyld_process_info_get_cache;
+    }
+    return (pt_dyld_process_info_get_cache_fn)pt_dyld_process_info_get_cache_sym()->plain_fn;
 }
 
 static const pt_dyld_proc_info_sym_t *pt_dyld_process_info_get_state_sym(void) {
     static pt_dyld_proc_info_sym_t s_sym = { NULL, NULL };
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        pt_resolve_dual_dyld_sym(&s_sym, "dyld_process_info_get_state", "_dyld_process_info_get_state");
+        pt_resolve_dual_dyld_sym(&s_sym, "dyld_process_info_get_state", (void *)&pt_orig_sym_dyld_process_info_get_state);
     });
     return &s_sym;
 }
 
 static pt_dyld_process_info_get_state_fn pt_resolve_dyld_process_info_get_state(void) {
-    const pt_dyld_proc_info_sym_t *sym = pt_dyld_process_info_get_state_sym();
-    return (pt_dyld_process_info_get_state_fn)(sym->underscored_fn != NULL ? sym->underscored_fn : sym->plain_fn);
+    if (&pt_orig_sym_dyld_process_info_get_state != NULL) {
+        return pt_orig_sym_dyld_process_info_get_state;
+    }
+    return (pt_dyld_process_info_get_state_fn)pt_dyld_process_info_get_state_sym()->plain_fn;
 }
 
 static pt_dyld_process_info_t pt_dyld_process_info_create(task_t task, uint64_t timestamp, kern_return_t *kernelError) {
@@ -1714,8 +1973,9 @@ static BOOL s_post13_range_overflow = NO;
 static uintptr_t s_post13_dsc_start = 0;
 static uintptr_t s_post13_dsc_end = 0;
 static _Atomic uint32_t s_post13_cached_image_count = 0;
+static _Atomic uint64_t s_post13_cached_dyld_gen = UINT64_MAX;
 
-static void pt_rebuild_post13_range_cache(uint32_t cur_ic) {
+static void pt_rebuild_post13_range_cache(uint32_t cur_ic, uint64_t cur_gen) {
     // Collect ranges outside s_post13_range_lock to avoid ABBA lock inversion with dyld.
     PTPost13AddrRange local_ranges[PT_POST13_MAX_RANGES];
     uint32_t local_count = 0;
@@ -1778,6 +2038,7 @@ static void pt_rebuild_post13_range_cache(uint32_t cur_ic) {
     s_post13_dsc_start = local_dsc_start;
     s_post13_dsc_end = local_dsc_end;
     atomic_store_explicit(&s_post13_cached_image_count, cur_ic, memory_order_release);
+    atomic_store_explicit(&s_post13_cached_dyld_gen, cur_gen, memory_order_release);
     os_unfair_lock_unlock(&s_post13_range_lock);
 }
 
@@ -1786,8 +2047,10 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_post13_7_class(Class cls
         return NO;
     }
     uint32_t cur_ic = _dyld_image_count();
-    if (cur_ic != atomic_load_explicit(&s_post13_cached_image_count, memory_order_acquire)) {
-        pt_rebuild_post13_range_cache(cur_ic);
+    uint64_t cur_gen = atomic_load_explicit(&s_dyld_generation, memory_order_acquire);
+    if (cur_ic != atomic_load_explicit(&s_post13_cached_image_count, memory_order_acquire) ||
+        cur_gen != atomic_load_explicit(&s_post13_cached_dyld_gen, memory_order_acquire)) {
+        pt_rebuild_post13_range_cache(cur_ic, cur_gen);
     }
 
     uintptr_t addr = (uintptr_t)cls;
@@ -1822,8 +2085,9 @@ static uintptr_t s_hidden_img_dsc_start = 0;
 static uintptr_t s_hidden_img_dsc_end = 0;
 static _Atomic uint32_t s_hidden_img_cached_image_count = 0;
 static _Atomic uint64_t s_hidden_img_cached_reg_gen = UINT64_MAX;
+static _Atomic uint64_t s_hidden_img_cached_dyld_gen = UINT64_MAX;
 
-static void pt_rebuild_hidden_img_range_cache(uint32_t cur_ic, uint64_t cur_reg_gen) {
+static void pt_rebuild_hidden_img_range_cache(uint32_t cur_ic, uint64_t cur_reg_gen, uint64_t cur_dyld_gen) {
     // Collect ranges outside s_hidden_img_range_lock to avoid ABBA lock inversion with dyld/PTRegistration.
     PTPost13AddrRange *local_ranges =
         (PTPost13AddrRange *)malloc(PT_HIDDEN_IMG_MAX_RANGES * sizeof(PTPost13AddrRange));
@@ -1892,6 +2156,7 @@ static void pt_rebuild_hidden_img_range_cache(uint32_t cur_ic, uint64_t cur_reg_
     s_hidden_img_dsc_end = local_dsc_end;
     atomic_store_explicit(&s_hidden_img_cached_image_count, cur_ic, memory_order_release);
     atomic_store_explicit(&s_hidden_img_cached_reg_gen, cur_reg_gen, memory_order_release);
+    atomic_store_explicit(&s_hidden_img_cached_dyld_gen, cur_dyld_gen, memory_order_release);
     os_unfair_lock_unlock(&s_hidden_img_range_lock);
     free(local_ranges);
 }
@@ -1902,9 +2167,11 @@ __attribute__((visibility("hidden"))) BOOL pt_is_class_in_hidden_image(Class cls
     }
     uint32_t cur_ic = _dyld_image_count();
     uint64_t cur_reg_gen = pt_hidden_registry_generation();
+    uint64_t cur_dyld_gen = atomic_load_explicit(&s_dyld_generation, memory_order_acquire);
     if (cur_ic != atomic_load_explicit(&s_hidden_img_cached_image_count, memory_order_acquire) ||
-        cur_reg_gen != atomic_load_explicit(&s_hidden_img_cached_reg_gen, memory_order_acquire)) {
-        pt_rebuild_hidden_img_range_cache(cur_ic, cur_reg_gen);
+        cur_reg_gen != atomic_load_explicit(&s_hidden_img_cached_reg_gen, memory_order_acquire) ||
+        cur_dyld_gen != atomic_load_explicit(&s_hidden_img_cached_dyld_gen, memory_order_acquire)) {
+        pt_rebuild_hidden_img_range_cache(cur_ic, cur_reg_gen, cur_dyld_gen);
     }
     uintptr_t addr = (uintptr_t)cls;
     os_unfair_lock_lock(&s_hidden_img_range_lock);
@@ -1990,40 +2257,468 @@ static bool pt_dyld_shared_cache_contains_path(const char *path) {
     return pt_orig_dyld_shared_cache_contains_path(path);
 }
 
-static void *pt_dlsym_resolve_shared_cache_real_path(void) {
-    return (pt_resolve_dyld_shared_cache_real_path() != NULL) ? (void *)&pt_dyld_shared_cache_real_path : NULL;
+__attribute__((visibility("hidden"))) const char *pt_dyld_sanitize_or_hide_image_path(const char *path) {
+    if (path == NULL) {
+        return NULL;
+    }
+    if (pt_should_hide_dyld_image(path)) {
+        return NULL;
+    }
+    return pt_sanitize_image_path_for_app(path);
 }
 
-static void *pt_dlsym_resolve_shared_cache_overridden(void) {
-    return (pt_resolve_dyld_shared_cache_some_image_overridden() != NULL)
-               ? (void *)&pt_dyld_shared_cache_some_image_overridden
-               : NULL;
+extern bool pt_orig_dyld_is_memory_immutable(const void *addr, size_t length)
+    __asm__("__dyld_is_memory_immutable") __attribute__((weak_import));
+
+static bool pt_dyld_is_memory_immutable(const void *addr, size_t length) {
+    if (pt_orig_dyld_is_memory_immutable == NULL) {
+        return false;
+    }
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        addr = pt_resolve_interposed_target(addr);
+        const struct mach_header *mh = dyld_image_header_containing_address(addr);
+        if (mh != NULL && pt_is_hidden_dyld_image_header(mh)) {
+            return false;
+        }
+        const char *path = dyld_image_path_containing_address(addr);
+        if (path != NULL && pt_should_hide_dyld_image(path)) {
+            return false;
+        }
+    }
+    return pt_orig_dyld_is_memory_immutable(addr, length);
 }
 
-static void *pt_dlsym_resolve_prog_image_header(void) {
-    return (pt_resolve_dyld_get_prog_image_header() != NULL) ? (void *)&pt_dyld_get_prog_image_header : NULL;
+typedef struct {
+    uuid_t uuid;
+    uint64_t offsetInImage;
+    const struct mach_header *image;
+} pt_dyld_image_uuid_offset_t;
+
+extern void pt_orig_dyld_images_for_addresses(unsigned count,
+                                              const void *addresses[],
+                                              pt_dyld_image_uuid_offset_t infos[])
+    __asm__("__dyld_images_for_addresses") __attribute__((weak_import));
+
+static void pt_dyld_images_for_addresses(unsigned count,
+                                         const void *addresses[],
+                                         pt_dyld_image_uuid_offset_t infos[]) {
+    if (pt_orig_dyld_images_for_addresses == NULL || count == 0 || addresses == NULL || infos == NULL) {
+        return;
+    }
+    BOOL appCaller = (pt_is_bypass_enabled() &&
+                      !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
+    if (!appCaller) {
+        pt_orig_dyld_images_for_addresses(count, addresses, infos);
+        return;
+    }
+    const void *stack_addrs[64];
+    const void **resolved_addrs = stack_addrs;
+    const void **heap_addrs = NULL;
+    if (count > 64U) {
+        heap_addrs = (const void **)malloc((size_t)count * sizeof(const void *));
+        if (heap_addrs == NULL) {
+            pt_orig_dyld_images_for_addresses(count, addresses, infos);
+            return;
+        }
+        resolved_addrs = heap_addrs;
+    }
+    for (unsigned i = 0; i < count; i++) {
+        resolved_addrs[i] = pt_resolve_interposed_target(addresses[i]);
+    }
+    pt_orig_dyld_images_for_addresses(count, resolved_addrs, infos);
+    free(heap_addrs);
+
+    const struct mach_header *fb_hdr = _dyld_get_image_header(pt_fallback_system_image_index());
+    for (unsigned i = 0; i < count; i++) {
+        const struct mach_header *mh = infos[i].image;
+        if (mh == NULL) {
+            continue;
+        }
+        const char *path = pt_dyld_lookup_image_name_for_mh(mh);
+        if (pt_is_hidden_dyld_image_header(mh) || (path != NULL && pt_should_hide_dyld_image(path))) {
+            memset(infos[i].uuid, 0, sizeof(infos[i].uuid));
+            infos[i].offsetInImage = 0;
+            infos[i].image = fb_hdr;
+        }
+    }
 }
 
-static void *pt_dlsym_resolve_find_unwind_sections(void) {
-    return (pt_resolve_dyld_find_unwind_sections() != NULL) ? (void *)&pt_dyld_find_unwind_sections : NULL;
+typedef void (*pt_dyld_load_notify_fn)(const struct mach_header *mh, const char *path, bool unloadable);
+typedef void (*pt_dyld_bulk_notify_fn)(unsigned count, const struct mach_header *mhs[], const char *paths[]);
+
+extern void pt_orig_dyld_register_for_image_loads(pt_dyld_load_notify_fn func)
+    __asm__("__dyld_register_for_image_loads") __attribute__((weak_import));
+extern void pt_orig_dyld_register_for_bulk_image_loads(pt_dyld_bulk_notify_fn func)
+    __asm__("__dyld_register_for_bulk_image_loads") __attribute__((weak_import));
+
+typedef struct {
+    const struct mach_header *mh;
+    const char *path;
+    bool unloadable;
+} pt_dyld_load_rec_t;
+
+static pthread_mutex_t s_load_notify_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pt_dyld_load_rec_t *s_visible_load_recs = NULL;
+static size_t s_visible_load_count = 0;
+static size_t s_visible_load_cap = 0;
+static pt_dyld_load_notify_fn s_app_load_cbs[64];
+static uint32_t s_app_load_cb_count = 0;
+static pt_dyld_bulk_notify_fn s_app_bulk_cbs[64];
+static uint32_t s_app_bulk_cb_count = 0;
+static _Atomic BOOL s_load_master_replaying = NO;
+static dispatch_once_t s_load_master_once;
+static dispatch_once_t s_bulk_master_once;
+
+static void pt_append_visible_load_rec_locked(const struct mach_header *mh, const char *path, bool unloadable) {
+    for (size_t i = 0; i < s_visible_load_count; i++) {
+        if (s_visible_load_recs[i].mh == mh) {
+            return;
+        }
+    }
+    if (s_visible_load_count >= s_visible_load_cap) {
+        size_t new_cap = (s_visible_load_cap == 0) ? 128U : (s_visible_load_cap * 2U);
+        pt_dyld_load_rec_t *grown = (pt_dyld_load_rec_t *)realloc(s_visible_load_recs, new_cap * sizeof(pt_dyld_load_rec_t));
+        if (grown == NULL) {
+            return;
+        }
+        s_visible_load_recs = grown;
+        s_visible_load_cap = new_cap;
+    }
+    s_visible_load_recs[s_visible_load_count++] = (pt_dyld_load_rec_t){
+        .mh = mh,
+        .path = path,
+        .unloadable = unloadable
+    };
+}
+
+static void pt_master_dyld_load_cb(const struct mach_header *mh, const char *path, bool unloadable) {
+    if (mh == NULL) {
+        return;
+    }
+    const char *lookup_path = (path != NULL) ? path : pt_dyld_lookup_image_name_for_mh(mh);
+    if (pt_is_hidden_dyld_image_header(mh) || (lookup_path != NULL && pt_should_hide_dyld_image(lookup_path))) {
+        return;
+    }
+    const char *clean_path = (lookup_path != NULL) ? pt_sanitize_image_path_for_app(lookup_path) : NULL;
+    pthread_mutex_lock(&s_load_notify_mutex);
+    size_t prev_count = s_visible_load_count;
+    pt_append_visible_load_rec_locked(mh, clean_path, unloadable);
+    BOOL is_new = (s_visible_load_count > prev_count);
+    BOOL replaying = atomic_load_explicit(&s_load_master_replaying, memory_order_acquire);
+    pt_dyld_load_notify_fn cbs[64];
+    uint32_t cb_n = (!replaying && is_new) ? s_app_load_cb_count : 0;
+    if (cb_n > 0) {
+        memcpy(cbs, s_app_load_cbs, cb_n * sizeof(pt_dyld_load_notify_fn));
+    }
+    pthread_mutex_unlock(&s_load_notify_mutex);
+    for (uint32_t i = 0; i < cb_n; i++) {
+        if (cbs[i] != NULL) {
+            cbs[i](mh, clean_path, unloadable);
+        }
+    }
+}
+
+static void pt_master_dyld_bulk_cb(unsigned count, const struct mach_header *mhs[], const char *paths[]) {
+    if (count == 0 || mhs == NULL) {
+        return;
+    }
+    const struct mach_header **clean_mhs = (const struct mach_header **)malloc((size_t)count * sizeof(const struct mach_header *));
+    const char **clean_paths = (const char **)malloc((size_t)count * sizeof(const char *));
+    if (clean_mhs == NULL || clean_paths == NULL) {
+        free(clean_mhs);
+        free(clean_paths);
+        return;
+    }
+    unsigned kept = 0;
+    for (unsigned i = 0; i < count; i++) {
+        const struct mach_header *mh = mhs[i];
+        const char *raw_p = (paths != NULL && paths[i] != NULL) ? paths[i] : pt_dyld_lookup_image_name_for_mh(mh);
+        if (mh == NULL || pt_is_hidden_dyld_image_header(mh) || (raw_p != NULL && pt_should_hide_dyld_image(raw_p))) {
+            continue;
+        }
+        clean_mhs[kept] = mh;
+        clean_paths[kept] = (raw_p != NULL) ? pt_sanitize_image_path_for_app(raw_p) : NULL;
+        kept++;
+    }
+    if (kept > 0) {
+        pt_dyld_bulk_notify_fn cbs[64];
+        uint32_t cb_n = 0;
+        pthread_mutex_lock(&s_load_notify_mutex);
+        cb_n = s_app_bulk_cb_count;
+        if (cb_n > 0) {
+            memcpy(cbs, s_app_bulk_cbs, cb_n * sizeof(pt_dyld_bulk_notify_fn));
+        }
+        pthread_mutex_unlock(&s_load_notify_mutex);
+        for (uint32_t i = 0; i < cb_n; i++) {
+            if (cbs[i] != NULL) {
+                cbs[i](kept, clean_mhs, clean_paths);
+            }
+        }
+    }
+    free(clean_mhs);
+    free(clean_paths);
+}
+
+static void pt_ensure_load_notify_master(void) {
+    dispatch_once(&s_load_master_once, ^{
+        if (pt_orig_dyld_register_for_image_loads != NULL) {
+            atomic_store_explicit(&s_load_master_replaying, YES, memory_order_release);
+            pt_orig_dyld_register_for_image_loads(pt_master_dyld_load_cb);
+            atomic_store_explicit(&s_load_master_replaying, NO, memory_order_release);
+        }
+    });
+}
+
+static void pt_dyld_register_for_image_loads(pt_dyld_load_notify_fn func) {
+    if (pt_orig_dyld_register_for_image_loads == NULL || func == NULL) {
+        return;
+    }
+    if (!pt_is_bypass_enabled() || pt_is_system_or_playtools_caller((const void *)func)) {
+        pt_orig_dyld_register_for_image_loads(func);
+        return;
+    }
+    pt_ensure_load_notify_master();
+    pthread_mutex_lock(&s_load_notify_mutex);
+    size_t count = s_visible_load_count;
+    pt_dyld_load_rec_t *snap = (count > 0) ? (pt_dyld_load_rec_t *)malloc(count * sizeof(pt_dyld_load_rec_t)) : NULL;
+    if (snap != NULL) {
+        memcpy(snap, s_visible_load_recs, count * sizeof(pt_dyld_load_rec_t));
+    } else {
+        count = 0;
+    }
+    if (s_app_load_cb_count < 64) {
+        s_app_load_cbs[s_app_load_cb_count++] = func;
+    }
+    pthread_mutex_unlock(&s_load_notify_mutex);
+    for (size_t i = 0; i < count; i++) {
+        func(snap[i].mh, snap[i].path, snap[i].unloadable);
+    }
+    free(snap);
+}
+
+static void pt_dyld_register_for_bulk_image_loads(pt_dyld_bulk_notify_fn func) {
+    if (pt_orig_dyld_register_for_bulk_image_loads == NULL || func == NULL) {
+        return;
+    }
+    if (!pt_is_bypass_enabled() || pt_is_system_or_playtools_caller((const void *)func)) {
+        pt_orig_dyld_register_for_bulk_image_loads(func);
+        return;
+    }
+    pthread_mutex_lock(&s_load_notify_mutex);
+    if (s_app_bulk_cb_count < 64) {
+        s_app_bulk_cbs[s_app_bulk_cb_count++] = func;
+    }
+    pthread_mutex_unlock(&s_load_notify_mutex);
+    dispatch_once(&s_bulk_master_once, ^{
+        pt_orig_dyld_register_for_bulk_image_loads(pt_master_dyld_bulk_cb);
+    });
+}
+
+extern void pt_orig_dyld_process_info_for_each_segment(
+    pt_dyld_process_info_t info,
+    uint64_t machHeaderAddress,
+    void (^callback)(uint64_t segmentAddress, uint64_t segmentSize, const char *segmentName))
+    __asm__("__dyld_process_info_for_each_segment") __attribute__((weak_import));
+
+static void pt_dyld_process_info_for_each_segment(
+    pt_dyld_process_info_t info,
+    uint64_t machHeaderAddress,
+    void (^callback)(uint64_t segmentAddress, uint64_t segmentSize, const char *segmentName)) {
+    if (pt_orig_dyld_process_info_for_each_segment == NULL || info == NULL || callback == NULL) {
+        return;
+    }
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        const struct mach_header *mh = (const struct mach_header *)(uintptr_t)machHeaderAddress;
+        if (mh != NULL) {
+            const char *path = pt_dyld_lookup_image_name_for_mh(mh);
+            if (pt_is_hidden_dyld_image_header(mh) || (path != NULL && pt_should_hide_dyld_image(path))) {
+                return;
+            }
+        }
+    }
+    pt_orig_dyld_process_info_for_each_segment(info, machHeaderAddress, callback);
+}
+
+extern const struct mach_header *pt_orig_dyld_get_dlopen_image_header(void *handle)
+    __asm__("__dyld_get_dlopen_image_header") __attribute__((weak_import));
+
+static const struct mach_header *pt_dyld_get_dlopen_image_header(void *handle) {
+    if (pt_orig_dyld_get_dlopen_image_header == NULL) {
+        return NULL;
+    }
+    const struct mach_header *mh = pt_orig_dyld_get_dlopen_image_header(handle);
+    if (mh != NULL && pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (pt_is_compat13_7_active()) {
+            return NULL;
+        }
+        const char *path = pt_dyld_lookup_image_name_for_mh(mh);
+        if (pt_is_hidden_dyld_image_header(mh) || (path != NULL && pt_should_hide_dyld_image(path))) {
+            return NULL;
+        }
+    }
+    return mh;
+}
+
+extern void *pt_orig_dyld_process_create_for_current_task(void)
+    __asm__("_dyld_process_create_for_current_task") __attribute__((weak_import));
+extern void *pt_orig_dyld_process_create_for_task(task_t task, kern_return_t *kr)
+    __asm__("_dyld_process_create_for_task") __attribute__((weak_import));
+extern void *pt_orig_dyld_process_snapshot_create_for_process(void *process, kern_return_t *kr)
+    __asm__("_dyld_process_snapshot_create_for_process") __attribute__((weak_import));
+extern void pt_orig_dyld_process_snapshot_for_each_image(void *snapshot, void (^block)(void *image))
+    __asm__("_dyld_process_snapshot_for_each_image") __attribute__((weak_import));
+extern void *pt_orig_dyld_process_snapshot_get_shared_cache(void *snapshot)
+    __asm__("_dyld_process_snapshot_get_shared_cache") __attribute__((weak_import));
+extern void pt_orig_dyld_shared_cache_for_each_image(void *cache, void (^block)(void *image))
+    __asm__("_dyld_shared_cache_for_each_image") __attribute__((weak_import));
+extern const char *pt_orig_dyld_image_get_file_path(void *image)
+    __asm__("_dyld_image_get_file_path") __attribute__((weak_import));
+extern const char *pt_orig_dyld_image_get_installname(void *image)
+    __asm__("_dyld_image_get_installname") __attribute__((weak_import));
+
+static void *pt_dyld_process_create_for_current_task(void) {
+    if (pt_orig_dyld_process_create_for_current_task == NULL) {
+        return NULL;
+    }
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_is_compat13_7_active()) {
+        return NULL;
+    }
+    return pt_orig_dyld_process_create_for_current_task();
+}
+
+static void *pt_dyld_process_create_for_task(task_t task, kern_return_t *kr) {
+    if (pt_orig_dyld_process_create_for_task == NULL) {
+        if (kr != NULL) *kr = KERN_NOT_SUPPORTED;
+        return NULL;
+    }
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_is_compat13_7_active()) {
+        if (kr != NULL) *kr = KERN_NOT_SUPPORTED;
+        return NULL;
+    }
+    return pt_orig_dyld_process_create_for_task(task, kr);
+}
+
+static void *pt_dyld_process_snapshot_create_for_process(void *process, kern_return_t *kr) {
+    if (pt_orig_dyld_process_snapshot_create_for_process == NULL) {
+        if (kr != NULL) *kr = KERN_NOT_SUPPORTED;
+        return NULL;
+    }
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (pt_is_compat13_7_active()) {
+            if (kr != NULL) *kr = KERN_NOT_SUPPORTED;
+            return NULL;
+        }
+        pt_dyld_set_force_task_dyld_sanitize(YES);
+        void *snap = pt_orig_dyld_process_snapshot_create_for_process(process, kr);
+        pt_dyld_set_force_task_dyld_sanitize(NO);
+        return snap;
+    }
+    return pt_orig_dyld_process_snapshot_create_for_process(process, kr);
+}
+
+static void *pt_dyld_process_snapshot_get_shared_cache(void *snapshot) {
+    if (pt_orig_dyld_process_snapshot_get_shared_cache == NULL || snapshot == NULL) {
+        return NULL;
+    }
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_is_compat13_7_active()) {
+        return NULL;
+    }
+    return pt_orig_dyld_process_snapshot_get_shared_cache(snapshot);
+}
+
+static BOOL pt_dyld_image_t_should_hide(void *image) {
+    if (image == NULL) {
+        return YES;
+    }
+    const char *fp = (pt_orig_dyld_image_get_file_path != NULL) ? pt_orig_dyld_image_get_file_path(image) : NULL;
+    if (fp != NULL && pt_should_hide_dyld_image(fp)) {
+        return YES;
+    }
+    const char *inst = (pt_orig_dyld_image_get_installname != NULL) ? pt_orig_dyld_image_get_installname(image) : NULL;
+    if (inst != NULL && pt_should_hide_dyld_image(inst)) {
+        return YES;
+    }
+    return NO;
+}
+
+static void pt_dyld_process_snapshot_for_each_image(void *snapshot, void (^block)(void *image)) {
+    if (pt_orig_dyld_process_snapshot_for_each_image == NULL || snapshot == NULL || block == NULL) {
+        return;
+    }
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (pt_is_compat13_7_active()) {
+            return;
+        }
+        pt_orig_dyld_process_snapshot_for_each_image(snapshot, ^(void *image) {
+            if (!pt_dyld_image_t_should_hide(image)) {
+                block(image);
+            }
+        });
+        return;
+    }
+    pt_orig_dyld_process_snapshot_for_each_image(snapshot, block);
+}
+
+static void pt_dyld_shared_cache_for_each_image(void *cache, void (^block)(void *image)) {
+    if (pt_orig_dyld_shared_cache_for_each_image == NULL || cache == NULL || block == NULL) {
+        return;
+    }
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (pt_is_compat13_7_active()) {
+            return;
+        }
+        pt_orig_dyld_shared_cache_for_each_image(cache, ^(void *image) {
+            if (!pt_dyld_image_t_should_hide(image)) {
+                block(image);
+            }
+        });
+        return;
+    }
+    pt_orig_dyld_shared_cache_for_each_image(cache, block);
+}
+
+static const char *pt_dyld_image_get_file_path(void *image) {
+    if (pt_orig_dyld_image_get_file_path == NULL || image == NULL) {
+        return NULL;
+    }
+    const char *raw = pt_orig_dyld_image_get_file_path(image);
+    if (raw != NULL && pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return pt_dyld_sanitize_or_hide_image_path(raw);
+    }
+    return raw;
+}
+
+static const char *pt_dyld_image_get_installname(void *image) {
+    if (pt_orig_dyld_image_get_installname == NULL || image == NULL) {
+        return NULL;
+    }
+    const char *raw = pt_orig_dyld_image_get_installname(image);
+    if (raw != NULL && pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return pt_dyld_sanitize_or_hide_image_path(raw);
+    }
+    return raw;
 }
 
 static void *pt_dlsym_resolve_proc_info_create_plain(void) {
     return (pt_dyld_process_info_create_sym()->plain_fn != NULL) ? (void *)&pt_dyld_process_info_create : NULL;
 }
 
-static void *pt_dlsym_resolve_proc_info_create_underscored(void) {
-    return (pt_dyld_process_info_create_sym()->underscored_fn != NULL) ? (void *)&pt_dyld_process_info_create : NULL;
-}
-
 static void *pt_dlsym_resolve_proc_info_for_each_plain(void) {
     return (pt_dyld_process_info_for_each_image_sym()->plain_fn != NULL)
-               ? (void *)&pt_dyld_process_info_for_each_image
-               : NULL;
-}
-
-static void *pt_dlsym_resolve_proc_info_for_each_underscored(void) {
-    return (pt_dyld_process_info_for_each_image_sym()->underscored_fn != NULL)
                ? (void *)&pt_dyld_process_info_for_each_image
                : NULL;
 }
@@ -2034,20 +2729,8 @@ static void *pt_dlsym_resolve_proc_info_platform_plain(void) {
                : NULL;
 }
 
-static void *pt_dlsym_resolve_proc_info_platform_underscored(void) {
-    return (pt_dyld_process_info_get_platform_sym()->underscored_fn != NULL)
-               ? (void *)&pt_dyld_process_info_get_platform
-               : NULL;
-}
-
 static void *pt_dlsym_resolve_proc_info_cache_plain(void) {
     return (pt_dyld_process_info_get_cache_sym()->plain_fn != NULL)
-               ? (void *)&pt_dyld_process_info_get_cache
-               : NULL;
-}
-
-static void *pt_dlsym_resolve_proc_info_cache_underscored(void) {
-    return (pt_dyld_process_info_get_cache_sym()->underscored_fn != NULL)
                ? (void *)&pt_dyld_process_info_get_cache
                : NULL;
 }
@@ -2058,29 +2741,25 @@ static void *pt_dlsym_resolve_proc_info_state_plain(void) {
                : NULL;
 }
 
-static void *pt_dlsym_resolve_proc_info_state_underscored(void) {
-    return (pt_dyld_process_info_get_state_sym()->underscored_fn != NULL)
-               ? (void *)&pt_dyld_process_info_get_state
-               : NULL;
-}
+PT_INTERPOSE_WEAK_NAMED(pt_dyld_shared_cache_real_path, pt_orig_sym_dyld_shared_cache_real_path, "_dyld_shared_cache_real_path")
+PT_INTERPOSE_WEAK_NAMED(pt_dyld_shared_cache_some_image_overridden, pt_orig_sym_dyld_shared_cache_some_image_overridden, "dyld_shared_cache_some_image_overridden")
+PT_INTERPOSE_WEAK_NAMED(pt_dyld_get_prog_image_header, pt_orig_sym_dyld_get_prog_image_header, "_dyld_get_prog_image_header")
+PT_INTERPOSE_WEAK_NAMED(pt_dyld_find_unwind_sections, pt_orig_sym_dyld_find_unwind_sections, "_dyld_find_unwind_sections")
+PT_INTERPOSE_WEAK_NAMED(pt_dyld_process_info_create, pt_orig_sym_dyld_process_info_create, "_dyld_process_info_create")
+PT_INTERPOSE_WEAK_NAMED(pt_dyld_process_info_for_each_image, pt_orig_sym_dyld_process_info_for_each_image, "_dyld_process_info_for_each_image")
+PT_INTERPOSE_WEAK_NAMED(pt_dyld_process_info_get_platform, pt_orig_sym_dyld_process_info_get_platform, "_dyld_process_info_get_platform")
+PT_INTERPOSE_WEAK_NAMED(pt_dyld_process_info_get_cache, pt_orig_sym_dyld_process_info_get_cache, "_dyld_process_info_get_cache")
+PT_INTERPOSE_WEAK_NAMED(pt_dyld_process_info_get_state, pt_orig_sym_dyld_process_info_get_state, "_dyld_process_info_get_state")
 
-PT_DLSYM_DYNAMIC("_dyld_shared_cache_real_path", pt_dlsym_resolve_shared_cache_real_path)
-PT_DLSYM_DYNAMIC("dyld_shared_cache_some_image_overridden", pt_dlsym_resolve_shared_cache_overridden)
-PT_DLSYM_DYNAMIC("_dyld_get_prog_image_header", pt_dlsym_resolve_prog_image_header)
-PT_DLSYM_DYNAMIC("_dyld_find_unwind_sections", pt_dlsym_resolve_find_unwind_sections)
 PT_DLSYM_DYNAMIC("dyld_process_info_create", pt_dlsym_resolve_proc_info_create_plain)
-PT_DLSYM_DYNAMIC("_dyld_process_info_create", pt_dlsym_resolve_proc_info_create_underscored)
 PT_DLSYM_DYNAMIC("dyld_process_info_for_each_image", pt_dlsym_resolve_proc_info_for_each_plain)
-PT_DLSYM_DYNAMIC("_dyld_process_info_for_each_image", pt_dlsym_resolve_proc_info_for_each_underscored)
 PT_DLSYM_DYNAMIC("dyld_process_info_get_platform", pt_dlsym_resolve_proc_info_platform_plain)
-PT_DLSYM_DYNAMIC("_dyld_process_info_get_platform", pt_dlsym_resolve_proc_info_platform_underscored)
 PT_DLSYM_DYNAMIC("dyld_process_info_get_cache", pt_dlsym_resolve_proc_info_cache_plain)
-PT_DLSYM_DYNAMIC("_dyld_process_info_get_cache", pt_dlsym_resolve_proc_info_cache_underscored)
 PT_DLSYM_DYNAMIC("dyld_process_info_get_state", pt_dlsym_resolve_proc_info_state_plain)
-PT_DLSYM_DYNAMIC("_dyld_process_info_get_state", pt_dlsym_resolve_proc_info_state_underscored)
 
 PT_INTERPOSE_WEAK(pt_dyld_get_active_platform, dyld_get_active_platform)
 PT_INTERPOSE_WEAK(pt_dyld_get_base_platform, dyld_get_base_platform)
+PT_INTERPOSE_WEAK_NAMED(pt_dyld_has_inserted_or_interposing_libraries, pt_orig_dyld_has_inserted_or_interposing_libraries, "dyld_has_inserted_or_interposing_libraries")
 PT_INTERPOSE_WEAK_NAMED(pt_dyld_get_image_versions, pt_orig_dyld_get_image_versions, "dyld_get_image_versions")
 PT_INTERPOSE_WEAK_NAMED(pt_dyld_sdk_at_least, pt_orig_dyld_sdk_at_least, "dyld_sdk_at_least")
 PT_INTERPOSE_WEAK_NAMED(pt_dyld_minos_at_least, pt_orig_dyld_minos_at_least, "dyld_minos_at_least")
@@ -2090,5 +2769,24 @@ PT_INTERPOSE_WEAK_NAMED(pt_dyld_get_program_sdk_version, pt_orig_dyld_get_progra
 PT_INTERPOSE_WEAK_NAMED(pt_dyld_get_program_min_os_version, pt_orig_dyld_get_program_min_os_version, "dyld_get_program_min_os_version")
 PT_INTERPOSE_WEAK_NAMED(pt_dyld_program_sdk_at_least, pt_orig_dyld_program_sdk_at_least, "dyld_program_sdk_at_least")
 PT_INTERPOSE_WEAK_NAMED(pt_dyld_program_minos_at_least, pt_orig_dyld_program_minos_at_least, "dyld_program_minos_at_least")
+PT_INTERPOSE_WEAK_NAMED(pt_dyld_get_program_sdk_version_token, pt_orig_dyld_get_program_sdk_version_token, "dyld_get_program_sdk_version_token")
+PT_INTERPOSE_WEAK_NAMED(pt_dyld_get_program_minos_version_token, pt_orig_dyld_get_program_minos_version_token, "dyld_get_program_minos_version_token")
+PT_INTERPOSE_WEAK_NAMED(pt_dyld_version_token_get_platform, pt_orig_dyld_version_token_get_platform, "dyld_version_token_get_platform")
+PT_INTERPOSE_WEAK_NAMED(pt_dyld_version_token_at_least, pt_orig_dyld_version_token_at_least, "dyld_version_token_at_least")
+PT_INTERPOSE_WEAK_NAMED(pt_dyld_is_memory_immutable, pt_orig_dyld_is_memory_immutable, "_dyld_is_memory_immutable")
+PT_INTERPOSE_WEAK_NAMED(pt_dyld_images_for_addresses, pt_orig_dyld_images_for_addresses, "_dyld_images_for_addresses")
+PT_INTERPOSE_WEAK_NAMED(pt_dyld_register_for_image_loads, pt_orig_dyld_register_for_image_loads, "_dyld_register_for_image_loads")
+PT_INTERPOSE_WEAK_NAMED(pt_dyld_register_for_bulk_image_loads, pt_orig_dyld_register_for_bulk_image_loads, "_dyld_register_for_bulk_image_loads")
+PT_INTERPOSE_WEAK_NAMED(pt_dyld_process_info_for_each_segment, pt_orig_dyld_process_info_for_each_segment, "_dyld_process_info_for_each_segment")
+PT_INTERPOSE_WEAK_NAMED_FLAGS(pt_dyld_get_dlopen_image_header, pt_orig_dyld_get_dlopen_image_header, "_dyld_get_dlopen_image_header", PT_DLSYM_FLAG_HIDE_IN_COMPAT13_7)
+PT_INTERPOSE_WEAK_NAMED_FLAGS(pt_dyld_process_create_for_current_task, pt_orig_dyld_process_create_for_current_task, "dyld_process_create_for_current_task", PT_DLSYM_FLAG_HIDE_IN_COMPAT13_7)
+PT_INTERPOSE_WEAK_NAMED_FLAGS(pt_dyld_process_create_for_task, pt_orig_dyld_process_create_for_task, "dyld_process_create_for_task", PT_DLSYM_FLAG_HIDE_IN_COMPAT13_7)
+PT_INTERPOSE_WEAK_NAMED_FLAGS(pt_dyld_process_snapshot_create_for_process, pt_orig_dyld_process_snapshot_create_for_process, "dyld_process_snapshot_create_for_process", PT_DLSYM_FLAG_HIDE_IN_COMPAT13_7)
+PT_INTERPOSE_WEAK_NAMED_FLAGS(pt_dyld_process_snapshot_for_each_image, pt_orig_dyld_process_snapshot_for_each_image, "dyld_process_snapshot_for_each_image", PT_DLSYM_FLAG_HIDE_IN_COMPAT13_7)
+PT_INTERPOSE_WEAK_NAMED_FLAGS(pt_dyld_process_snapshot_get_shared_cache, pt_orig_dyld_process_snapshot_get_shared_cache, "dyld_process_snapshot_get_shared_cache", PT_DLSYM_FLAG_HIDE_IN_COMPAT13_7)
+PT_INTERPOSE_WEAK_NAMED_FLAGS(pt_dyld_shared_cache_for_each_image, pt_orig_dyld_shared_cache_for_each_image, "dyld_shared_cache_for_each_image", PT_DLSYM_FLAG_HIDE_IN_COMPAT13_7)
+PT_INTERPOSE_WEAK_NAMED_FLAGS(pt_dyld_image_get_file_path, pt_orig_dyld_image_get_file_path, "dyld_image_get_file_path", PT_DLSYM_FLAG_HIDE_IN_COMPAT13_7)
+PT_INTERPOSE_WEAK_NAMED_FLAGS(pt_dyld_image_get_installname, pt_orig_dyld_image_get_installname, "dyld_image_get_installname", PT_DLSYM_FLAG_HIDE_IN_COMPAT13_7)
 PT_INTERPOSE_WEAK(pt_dyld_shared_cache_file_path, dyld_shared_cache_file_path)
-PT_INTERPOSE_NAMED(pt_dyld_shared_cache_contains_path, pt_orig_dyld_shared_cache_contains_path, "_dyld_shared_cache_contains_path")
+PT_INTERPOSE_WEAK_NAMED_FLAGS(pt_dyld_shared_cache_contains_path, pt_orig_dyld_shared_cache_contains_path, "_dyld_shared_cache_contains_path", PT_DLSYM_FLAG_HIDE_IN_COMPAT13_7)
+PT_DLSYM_REGISTER_RAW("_dyld_shared_cache_file_path_containing_address", NULL, NULL, PT_DLSYM_FLAG_HIDE_IN_COMPAT13_7)

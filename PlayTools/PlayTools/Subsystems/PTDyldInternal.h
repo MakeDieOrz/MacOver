@@ -58,6 +58,7 @@ __attribute__((visibility("hidden"))) BOOL pt_is_macos_only_framework_path(const
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_post13_7_class(Class cls);
 __attribute__((visibility("hidden"))) BOOL pt_is_class_in_hidden_image(Class cls);
 __attribute__((visibility("hidden"))) BOOL pt_should_hide_resolved_objc_class(const char *name, Class cls);
+__attribute__((visibility("hidden"))) const char *pt_dyld_sanitize_or_hide_image_path(const char *path);
 
 #ifdef __cplusplus
 }

@@ -43,6 +43,8 @@ typedef struct {
     size_t slot_capacity;
 } pt_dlsym_index_t;
 
+#define PT_DLSYM_HIDDEN_SENTINEL ((void *)(uintptr_t)-1)
+
 #define PT_REG_CAT_IMPL(a, b) a##b
 #define PT_REG_CAT(a, b) PT_REG_CAT_IMPL(a, b)
 
@@ -91,6 +93,7 @@ typedef struct {
                           PT_DLSYM_FLAG_DYNAMIC_RESOLVER)
 
 __attribute__((visibility("hidden"))) void *pt_interpose_registry_lookup(const char *symbol, bool compat13_7_active);
+__attribute__((visibility("hidden"))) const char *pt_interpose_registry_symbol_for_target(const void *stripped_target);
 __attribute__((visibility("hidden"))) size_t pt_interpose_registry_count(void);
 __attribute__((visibility("hidden"))) size_t pt_interpose_registry_duplicate_count(void);
 
