@@ -42,6 +42,10 @@ __attribute__((visibility("hidden"))) bool pt_is_secondary_en_ifname_cstr(const 
 
 __attribute__((visibility("hidden"))) bool pt_is_hidden_desktop_font_name_cstr(const char *name);
 __attribute__((visibility("hidden"))) bool pt_is_post13_7_sf_symbol_name_cstr(const char *s);
+__attribute__((visibility("hidden"))) bool
+pt_is_hidden_swift_mangled_type_name_cstr(const char *typeNameStart, size_t typeNameLength, bool compat13_7);
+__attribute__((visibility("hidden"))) bool pt_is_hidden_swift_qualified_token_cstr(const char *tok, size_t len,
+                                                                                   bool compat13_7);
 
 #ifdef __cplusplus
 }

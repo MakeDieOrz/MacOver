@@ -713,100 +713,13 @@ extern const void *swift_conformsToProtocolWithExecutionContext(const void *type
                                                               const void *ctx)
     __attribute__((weak_import));
 
-static BOOL pt_memmem_lit(const char *buf, size_t len, const char *lit, size_t lit_len) {
-    return (buf != NULL && len >= lit_len && memmem(buf, len, lit, lit_len) != NULL);
-}
-
 static BOOL pt_is_hidden_swift_mangled_type_name(const char *typeNameStart, size_t typeNameLength) {
     if (typeNameStart == NULL || typeNameLength == 0 || !pt_is_valid_user_pointer(typeNameStart)) {
         return NO;
     }
     size_t scan_len = (typeNameLength > 4096U) ? 4096U : typeNameLength;
-    if (pt_memmem_lit(typeNameStart, scan_len, "9PlayTools", 10) ||
-        pt_memmem_lit(typeNameStart, scan_len, "PlayTools.", 10) ||
-        pt_memmem_lit(typeNameStart, scan_len, "11AKInterface", 13) ||
-        pt_memmem_lit(typeNameStart, scan_len, "AKInterface.", 12) ||
-        pt_memmem_lit(typeNameStart, scan_len, "9PlayCover", 10) ||
-        pt_memmem_lit(typeNameStart, scan_len, "8AKPlugin", 9) ||
-        pt_memmem_lit(typeNameStart, scan_len, "6AppKit", 7) ||
-        pt_memmem_lit(typeNameStart, scan_len, "AppKit.", 7) ||
-        pt_memmem_lit(typeNameStart, scan_len, "14UIKitMacHelper", 16) ||
-        pt_memmem_lit(typeNameStart, scan_len, "UIKitMacHelper.", 15) ||
-        pt_memmem_lit(typeNameStart, scan_len, "10ViewBridge", 12) ||
-        pt_memmem_lit(typeNameStart, scan_len, "ViewBridge.", 11) ||
-        pt_memmem_lit(typeNameStart, scan_len, "8SkyLight", 9) ||
-        pt_memmem_lit(typeNameStart, scan_len, "SkyLight.", 9) ||
-        pt_memmem_lit(typeNameStart, scan_len, "16ScreenCaptureKit", 18) ||
-        pt_memmem_lit(typeNameStart, scan_len, "ScreenCaptureKit.", 17) ||
-        pt_memmem_lit(typeNameStart, scan_len, "6Carbon", 7) ||
-        pt_memmem_lit(typeNameStart, scan_len, "9HIToolbox", 10) ||
-        pt_memmem_lit(typeNameStart, scan_len, "5Cocoa", 6)) {
+    if (pt_is_hidden_swift_mangled_type_name_cstr(typeNameStart, scan_len, pt_is_compat13_7_active())) {
         return YES;
-    }
-    if (pt_is_compat13_7_active()) {
-#define PT_MEMMEM_LIT(buf, len, lit) pt_memmem_lit((buf), (len), (lit), sizeof(lit) - 1U)
-        if (PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI10LazyVStack") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI12ProgressView") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI10LazyHStack") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI9LazyVGrid") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI9LazyHGrid") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI10TextEditor") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI11ColorPicker") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI10AsyncImage") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI15NavigationStack") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI19NavigationSplitViewV") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI4GridV") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI7GridRowV") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI10AppStorage") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI11StateObject") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI12SceneStorage") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI12ScaledMetric") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI3AppP") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI5SceneP") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI11WindowGroupV") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI6CanvasV") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI12TimelineViewV") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI5LabelV") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "7SwiftUI4LinkV") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "10Foundation16AttributedString") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "10Foundation11FormatStyle") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "10Foundation10Morphology") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "8StoreKit7Product") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "8StoreKit11Transaction") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "17_StringProcessing") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "11Observation") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "12_Concurrency") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "22UniformTypeIdentifiers6UTType") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "5OSLog6Logger") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "s8DurationV") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "s15ContinuousClockV") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "s15SuspendingClockV") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "s8SendableP") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "SwiftUI.LazyVStack") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "SwiftUI.ProgressView") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "SwiftUI.App") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "SwiftUI.WindowGroup") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "SwiftUI.Canvas") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "SwiftUI.TimelineView") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "SwiftUI.Label") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "SwiftUI.Link") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "SwiftUI.GridRow") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "SwiftUI.NavigationSplitView") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "Foundation.AttributedString") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "Foundation.FormatStyle") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "Foundation.Morphology") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "StoreKit.Product") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "StoreKit.Transaction") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "_StringProcessing.Regex") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "Observation.Observable") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "Swift.Duration") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "Swift.ContinuousClock") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "Swift.SuspendingClock") ||
-            PT_MEMMEM_LIT(typeNameStart, scan_len, "_Concurrency.Task") ||
-            (scan_len >= 3 && strncmp(typeNameStart, "ScT", 3) == 0)) {
-            return YES;
-        }
-#undef PT_MEMMEM_LIT
     }
     if (pt_registered_hidden_module_count() > 0) {
         char tmp[1024];
@@ -823,6 +736,16 @@ static BOOL pt_is_hidden_swift_mangled_type_name(const char *typeNameStart, size
     return NO;
 }
 
+static size_t pt_strip_metatype_suffix_len(const char *buf, size_t len) {
+    if (len > 5U && memcmp(buf + len - 5U, ".Type", 5U) == 0) {
+        return len - 5U;
+    }
+    if (len > 9U && memcmp(buf + len - 9U, ".Protocol", 9U) == 0) {
+        return len - 9U;
+    }
+    return len;
+}
+
 static BOOL pt_swift_qualified_token_is_hidden(const char *tok, size_t len) {
     if (tok == NULL || len == 0 || len >= 512U) {
         return NO;
@@ -830,50 +753,42 @@ static BOOL pt_swift_qualified_token_is_hidden(const char *tok, size_t len) {
     char buf[512];
     memcpy(buf, tok, len);
     buf[len] = '\0';
-    if (strncmp(buf, "__C.", 4) == 0) {
-        const char *objc_name = buf + 4;
-        return pt_is_hidden_objc_class(objc_name);
+
+    size_t base_len = pt_strip_metatype_suffix_len(buf, len);
+    char base_buf[512];
+    memcpy(base_buf, buf, base_len);
+    base_buf[base_len] = '\0';
+
+    if (strncmp(base_buf, "__C.", 4) == 0) {
+        return pt_is_hidden_objc_class(base_buf + 4);
     }
-    if (pt_is_hidden_swift_mangled_type_name(buf, len) ||
-        PT_HAS_PREFIX_LIT(buf, "PlayTools.") ||
-        PT_HAS_PREFIX_LIT(buf, "AKInterface.") ||
-        PT_HAS_PREFIX_LIT(buf, "PlayCover.") ||
-        PT_HAS_PREFIX_LIT(buf, "AppKit.") ||
-        PT_HAS_PREFIX_LIT(buf, "UIKitMacHelper.") ||
-        PT_HAS_PREFIX_LIT(buf, "ViewBridge.") ||
-        PT_HAS_PREFIX_LIT(buf, "SkyLight.") ||
-        PT_HAS_PREFIX_LIT(buf, "ScreenCaptureKit.") ||
-        PT_HAS_PREFIX_LIT(buf, "Carbon.") ||
-        PT_HAS_PREFIX_LIT(buf, "HIToolbox.") ||
-        PT_HAS_PREFIX_LIT(buf, "Cocoa.") ||
-        PT_HAS_PREFIX_LIT(buf, "IOBluetooth.")) {
+    if (pt_is_hidden_swift_qualified_token_cstr(buf, len, pt_is_compat13_7_active())) {
         return YES;
     }
-    if (pt_is_compat13_7_active()) {
-        if (PT_HAS_PREFIX_LIT(buf, "_Concurrency.") ||
-            PT_HAS_PREFIX_LIT(buf, "_StringProcessing.") ||
-            PT_HAS_PREFIX_LIT(buf, "Observation.") ||
-            PT_HAS_PREFIX_LIT(buf, "UniformTypeIdentifiers.") ||
-            PT_HAS_PREFIX_LIT(buf, "Swift.Duration") ||
-            PT_HAS_PREFIX_LIT(buf, "Swift.ContinuousClock") ||
-            PT_HAS_PREFIX_LIT(buf, "Swift.SuspendingClock") ||
-            strcmp(buf, "Swift.Sendable") == 0 ||
-            strcmp(buf, "OSLog.Logger") == 0) {
+    if (pt_registered_hidden_module_count() > 0) {
+        const char *first_dot = (const char *)memchr(base_buf, '.', base_len);
+        if (first_dot != NULL) {
+            size_t mod_len = (size_t)(first_dot - base_buf);
+            if (mod_len > 0 && mod_len < sizeof(buf)) {
+                char mod_buf[512];
+                memcpy(mod_buf, base_buf, mod_len);
+                mod_buf[mod_len] = '\0';
+                if (pt_is_registered_hidden_module(mod_buf)) {
+                    return YES;
+                }
+            }
+        } else if (pt_is_registered_hidden_module(base_buf)) {
             return YES;
         }
     }
-    if (pt_is_hidden_objc_class(buf)) {
-        return YES;
-    }
-    const char *dot = strrchr(buf, '.');
-    if (dot != NULL && dot[1] != '\0' && pt_is_hidden_objc_class(dot + 1)) {
+    if (memchr(base_buf, '.', base_len) == NULL && pt_is_hidden_objc_class(base_buf)) {
         return YES;
     }
     return NO;
 }
 
-static BOOL pt_should_hide_swift_metadata_ptr(const void *meta) {
-    if (meta == NULL || (((uintptr_t)meta & 0x7U) != 0) || !pt_is_valid_user_pointer(meta)) {
+static BOOL pt_should_hide_swift_metadata_ptr_depth(const void *meta, int depth) {
+    if (depth > 4 || meta == NULL || (((uintptr_t)meta & 0x7U) != 0) || !pt_is_valid_user_pointer(meta)) {
         return NO;
     }
     const char *img = dyld_image_path_containing_address(meta);
@@ -894,6 +809,14 @@ static BOOL pt_should_hide_swift_metadata_ptr(const void *meta) {
                 return YES;
             }
         }
+    } else if (kind == 0x301U || kind == 0x302U) {
+        // MetadataKind::Metatype (0x301) / ExistentialMetatype (0x302) store InstanceType at offset 1 word.
+        const void *instance_meta = NULL;
+        memcpy(&instance_meta, (const uint8_t *)meta + sizeof(uintptr_t), sizeof(instance_meta));
+        if (instance_meta != NULL && (((uintptr_t)instance_meta & 0x7U) == 0) &&
+            pt_is_valid_user_pointer(instance_meta)) {
+            return pt_should_hide_swift_metadata_ptr_depth(instance_meta, depth + 1);
+        }
     }
     if (img != NULL && !pt_is_system_or_playtools_caller(meta)) {
         return NO;
@@ -911,9 +834,6 @@ static BOOL pt_should_hide_swift_metadata_ptr(const void *meta) {
             size_t flen = (tname.length >= sizeof(full_buf)) ? (sizeof(full_buf) - 1U) : tname.length;
             memcpy(full_buf, tname.data, flen);
             full_buf[flen] = '\0';
-            if (pt_is_hidden_swift_mangled_type_name(full_buf, flen)) {
-                return YES;
-            }
             const char *p = full_buf;
             while (*p != '\0') {
                 while (*p != '\0' && (*p == '<' || *p == '>' || *p == ',' || *p == '(' || *p == ')' ||
@@ -937,6 +857,10 @@ static BOOL pt_should_hide_swift_metadata_ptr(const void *meta) {
         }
     }
     return NO;
+}
+
+static BOOL pt_should_hide_swift_metadata_ptr(const void *meta) {
+    return pt_should_hide_swift_metadata_ptr_depth(meta, 0);
 }
 
 static BOOL pt_is_swift_type_lookup_app_caller(const void *ret_addr) {

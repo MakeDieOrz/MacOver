@@ -1408,6 +1408,83 @@ static void test_production_c_modules_extra(void) {
     assert(pt_wrapper_cache_slot(pt_caller_compound_key(0x104008000ULL, 0x104008010ULL)) < PT_WRAPPER_CACHE_SIZE);
 }
 
+static void test_swift_hidden_type_boundary_rules(void) {
+    /* App-defined classes ending with ViewBridge / AppKit / SkyLight / PlayTools must NEVER be hidden */
+    static const char *const kAllowedTypes[] = {
+        "AppMod.CustomWebViewBridge.Type",
+        "AppMod.ViewBridge.Type",
+        "AppMod.MyAppKit.Config",
+        "AppMod.MySkyLight.Renderer",
+        "AppMod.MyScreenCaptureKit.Helper",
+        "AppMod.MyPlayTools.Helper",
+        "Swift.Optional<AppMod.CustomWebViewBridge.Type>",
+        "16AppKitControllerC",
+        "15CocoaLumberjackC",
+        "26CarbonCopyC",
+        "19PlayToolsHelperC",
+        "18SkyLightRendererC",
+        "19HIToolboxWrapperC",
+    };
+    for (size_t i = 0; i < sizeof(kAllowedTypes) / sizeof(kAllowedTypes[0]); i++) {
+        const char *s = kAllowedTypes[i];
+        size_t len = strlen(s);
+        assert(!pt_is_hidden_swift_mangled_type_name_cstr(s, len, false));
+        assert(!pt_is_hidden_swift_mangled_type_name_cstr(s, len, true));
+        assert(!pt_is_hidden_swift_qualified_token_cstr(s, len, false));
+        assert(!pt_is_hidden_swift_qualified_token_cstr(s, len, true));
+    }
+
+    assert(!pt_is_hidden_swift_mangled_type_name_cstr("AppMod.MySwiftUI.App", 20U, true));
+    assert(!pt_is_hidden_swift_qualified_token_cstr("AppMod.MySwiftUI.App", 20U, true));
+    assert(!pt_is_hidden_swift_qualified_token_cstr("Swift.Optional<ViewBridge.NSRemoteView>", 39U, false));
+
+    /* Genuine host / PlayTools mangled and qualified types MUST remain hidden */
+    static const char *const kHiddenMangledOrQualified[] = {
+        "9PlayTools12PlaySettingsC",
+        "11AKInterface9AKPluginC",
+        "6AppKit8NSWindowC",
+        "10ViewBridge12NSRemoteViewC",
+        "5Cocoa11NSWorkspaceC",
+        "PlayTools.PlaySettings",
+        "ViewBridge.NSRemoteView",
+        "ViewBridge.NSRemoteView.Type",
+        "AppKit.NSWindow.Type",
+        "Swift.Optional<ViewBridge.NSRemoteView>",
+        "Swift.Array<AppKit.NSWindow>",
+    };
+    for (size_t i = 0; i < sizeof(kHiddenMangledOrQualified) / sizeof(kHiddenMangledOrQualified[0]); i++) {
+        const char *s = kHiddenMangledOrQualified[i];
+        assert(pt_is_hidden_swift_mangled_type_name_cstr(s, strlen(s), false));
+        assert(pt_is_hidden_swift_mangled_type_name_cstr(s, strlen(s), true));
+    }
+
+    static const char *const kHiddenQualifiedTokens[] = {
+        "PlayTools.PlaySettings",
+        "ViewBridge.NSRemoteView",
+        "ViewBridge.NSRemoteView.Type",
+        "AppKit.NSWindow.Type",
+    };
+    for (size_t i = 0; i < sizeof(kHiddenQualifiedTokens) / sizeof(kHiddenQualifiedTokens[0]); i++) {
+        const char *s = kHiddenQualifiedTokens[i];
+        assert(pt_is_hidden_swift_qualified_token_cstr(s, strlen(s), false));
+        assert(pt_is_hidden_swift_qualified_token_cstr(s, strlen(s), true));
+    }
+
+    /* compat13_7 gating for modern SwiftUI / stdlib types */
+    static const char *const kCompat13OnlyMangled[] = {
+        "7SwiftUI10LazyVStackV", "SwiftUI.LazyVStack", "SwiftUI.App", "Swift.Duration", "s8DurationV", "ScT",
+    };
+    for (size_t i = 0; i < sizeof(kCompat13OnlyMangled) / sizeof(kCompat13OnlyMangled[0]); i++) {
+        const char *s = kCompat13OnlyMangled[i];
+        assert(!pt_is_hidden_swift_mangled_type_name_cstr(s, strlen(s), false));
+        assert(pt_is_hidden_swift_mangled_type_name_cstr(s, strlen(s), true));
+    }
+    assert(!pt_is_hidden_swift_qualified_token_cstr("SwiftUI.App", 11U, false));
+    assert(pt_is_hidden_swift_qualified_token_cstr("SwiftUI.App", 11U, true));
+    assert(!pt_is_hidden_swift_qualified_token_cstr("Swift.Duration", 14U, false));
+    assert(pt_is_hidden_swift_qualified_token_cstr("Swift.Duration", 14U, true));
+}
+
 int main(void) {
     test_der_entitlements_encoding_and_superblob_rewrite();
     test_attr_ref_zero_fill();
@@ -1435,6 +1512,7 @@ int main(void) {
     test_v105_macos_frameworks_and_vm_read_got_sanitize();
     test_v105_batch2_sysctl_iokit_mig_and_metal();
     test_production_c_modules_extra();
+    test_swift_hidden_type_boundary_rules();
     printf("All compat104 unit tests passed.\n");
     return 0;
 }

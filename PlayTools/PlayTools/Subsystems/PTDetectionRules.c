@@ -814,3 +814,269 @@ __attribute__((visibility("hidden"))) bool pt_is_post13_7_sf_symbol_name_cstr(co
     }
     return true;
 }
+
+static const char *pt_find_substr(const char *hay, size_t hay_len, const char *needle, size_t needle_len) {
+    if (hay == NULL || needle == NULL || needle_len == 0 || hay_len < needle_len) {
+        return NULL;
+    }
+    const char *end = hay + (hay_len - needle_len) + 1U;
+    const char *cur = hay;
+    while (cur < end) {
+        const char *hit = (const char *)memchr(cur, (unsigned char)needle[0], (size_t)(end - cur));
+        if (hit == NULL) {
+            return NULL;
+        }
+        if (needle_len == 1U || memcmp(hit + 1, needle + 1, needle_len - 1U) == 0) {
+            return hit;
+        }
+        cur = hit + 1;
+    }
+    return NULL;
+}
+
+static bool pt_is_swift_type_delimiter(unsigned char ch) {
+    switch (ch) {
+    case '<':
+    case '>':
+    case ',':
+    case '(':
+    case ')':
+    case '[':
+    case ']':
+    case ':':
+    case '?':
+    case '!':
+    case '&':
+    case ' ':
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool pt_mangled_contains_len_token(const char *buf, size_t len, const char *lit, size_t lit_len) {
+    if (buf == NULL || lit == NULL || lit_len == 0 || len < lit_len) {
+        return false;
+    }
+    const char *cur = buf;
+    size_t rem = len;
+    while (rem >= lit_len) {
+        const char *pos = pt_find_substr(cur, rem, lit, lit_len);
+        if (pos == NULL) {
+            return false;
+        }
+        if (pos == buf || !isdigit((unsigned char)pos[-1])) {
+            return true;
+        }
+        size_t adv = (size_t)(pos - cur) + 1U;
+        cur += adv;
+        rem -= adv;
+    }
+    return false;
+}
+
+static bool pt_has_qualified_module_prefix(const char *buf, size_t len, const char *lit, size_t lit_len) {
+    if (buf == NULL || lit == NULL || lit_len == 0 || len < lit_len) {
+        return false;
+    }
+    const char *cur = buf;
+    size_t rem = len;
+    while (rem >= lit_len) {
+        const char *pos = pt_find_substr(cur, rem, lit, lit_len);
+        if (pos == NULL) {
+            return false;
+        }
+        if (pos == buf || pt_is_swift_type_delimiter((unsigned char)pos[-1])) {
+            return true;
+        }
+        size_t adv = (size_t)(pos - cur) + 1U;
+        cur += adv;
+        rem -= adv;
+    }
+    return false;
+}
+
+static bool pt_has_qualified_type_token(const char *buf, size_t len, const char *lit, size_t lit_len) {
+    if (buf == NULL || lit == NULL || lit_len == 0 || len < lit_len) {
+        return false;
+    }
+    const char *cur = buf;
+    size_t rem = len;
+    while (rem >= lit_len) {
+        const char *pos = pt_find_substr(cur, rem, lit, lit_len);
+        if (pos == NULL) {
+            return false;
+        }
+        bool start_ok = (pos == buf || pt_is_swift_type_delimiter((unsigned char)pos[-1]));
+        const char *end = pos + lit_len;
+        bool end_ok = (end == buf + len || pt_is_swift_type_delimiter((unsigned char)*end) || *end == '.');
+        if (start_ok && end_ok) {
+            return true;
+        }
+        size_t adv = (size_t)(pos - cur) + 1U;
+        cur += adv;
+        rem -= adv;
+    }
+    return false;
+}
+
+static const char *const kHiddenSwiftAlwaysDottedModules[] = {
+    "PlayTools.", "AKInterface.",      "PlayCover.", "AppKit.",    "UIKitMacHelper.", "ViewBridge.",
+    "SkyLight.",  "ScreenCaptureKit.", "Carbon.",    "HIToolbox.", "Cocoa.",          "IOBluetooth.",
+};
+
+static const char *const kHiddenSwiftCompat13QualifiedTypes[] = {
+    "SwiftUI.LazyVStack",
+    "SwiftUI.ProgressView",
+    "SwiftUI.App",
+    "SwiftUI.WindowGroup",
+    "SwiftUI.Canvas",
+    "SwiftUI.TimelineView",
+    "SwiftUI.Label",
+    "SwiftUI.Link",
+    "SwiftUI.GridRow",
+    "SwiftUI.NavigationSplitView",
+    "Foundation.AttributedString",
+    "Foundation.FormatStyle",
+    "Foundation.Morphology",
+    "StoreKit.Product",
+    "StoreKit.Transaction",
+    "_StringProcessing.Regex",
+    "Observation.Observable",
+    "Swift.Duration",
+    "Swift.ContinuousClock",
+    "Swift.SuspendingClock",
+    "_Concurrency.Task",
+    "Swift.Sendable",
+    "OSLog.Logger",
+};
+
+__attribute__((visibility("hidden"))) bool
+pt_is_hidden_swift_mangled_type_name_cstr(const char *typeNameStart, size_t typeNameLength, bool compat13_7) {
+    if (typeNameStart == NULL || typeNameLength == 0) {
+        return false;
+    }
+    size_t scan_len = (typeNameLength > 4096U) ? 4096U : typeNameLength;
+
+    static const char *const kAlwaysMangledLenTokens[] = {
+        "9PlayTools",   "11AKInterface", "9PlayCover",         "8AKPlugin", "6AppKit",    "14UIKitMacHelper",
+        "10ViewBridge", "8SkyLight",     "16ScreenCaptureKit", "6Carbon",   "9HIToolbox", "5Cocoa",
+    };
+    for (size_t i = 0; i < sizeof(kAlwaysMangledLenTokens) / sizeof(kAlwaysMangledLenTokens[0]); i++) {
+        const char *tok = kAlwaysMangledLenTokens[i];
+        if (pt_mangled_contains_len_token(typeNameStart, scan_len, tok, strlen(tok))) {
+            return true;
+        }
+    }
+    for (size_t i = 0; i < sizeof(kHiddenSwiftAlwaysDottedModules) / sizeof(kHiddenSwiftAlwaysDottedModules[0]); i++) {
+        const char *mod = kHiddenSwiftAlwaysDottedModules[i];
+        if (pt_has_qualified_module_prefix(typeNameStart, scan_len, mod, strlen(mod))) {
+            return true;
+        }
+    }
+
+    if (compat13_7) {
+        static const char *const kCompat13MangledLenTokens[] = {
+            "7SwiftUI10LazyVStack",
+            "7SwiftUI12ProgressView",
+            "7SwiftUI10LazyHStack",
+            "7SwiftUI9LazyVGrid",
+            "7SwiftUI9LazyHGrid",
+            "7SwiftUI10TextEditor",
+            "7SwiftUI11ColorPicker",
+            "7SwiftUI10AsyncImage",
+            "7SwiftUI15NavigationStack",
+            "7SwiftUI19NavigationSplitViewV",
+            "7SwiftUI4GridV",
+            "7SwiftUI7GridRowV",
+            "7SwiftUI10AppStorage",
+            "7SwiftUI11StateObject",
+            "7SwiftUI12SceneStorage",
+            "7SwiftUI12ScaledMetric",
+            "7SwiftUI3AppP",
+            "7SwiftUI5SceneP",
+            "7SwiftUI11WindowGroupV",
+            "7SwiftUI6CanvasV",
+            "7SwiftUI12TimelineViewV",
+            "7SwiftUI5LabelV",
+            "7SwiftUI4LinkV",
+            "10Foundation16AttributedString",
+            "10Foundation11FormatStyle",
+            "10Foundation10Morphology",
+            "8StoreKit7Product",
+            "8StoreKit11Transaction",
+            "17_StringProcessing",
+            "11Observation",
+            "12_Concurrency",
+            "22UniformTypeIdentifiers6UTType",
+            "5OSLog6Logger",
+        };
+        for (size_t i = 0; i < sizeof(kCompat13MangledLenTokens) / sizeof(kCompat13MangledLenTokens[0]); i++) {
+            const char *tok = kCompat13MangledLenTokens[i];
+            if (pt_mangled_contains_len_token(typeNameStart, scan_len, tok, strlen(tok))) {
+                return true;
+            }
+        }
+        static const char *const kCompat13StdlibTokens[] = {
+            "s8DurationV",
+            "s15ContinuousClockV",
+            "s15SuspendingClockV",
+            "s8SendableP",
+        };
+        for (size_t i = 0; i < sizeof(kCompat13StdlibTokens) / sizeof(kCompat13StdlibTokens[0]); i++) {
+            const char *tok = kCompat13StdlibTokens[i];
+            if (pt_find_substr(typeNameStart, scan_len, tok, strlen(tok)) != NULL) {
+                return true;
+            }
+        }
+        for (size_t i = 0;
+             i < sizeof(kHiddenSwiftCompat13QualifiedTypes) / sizeof(kHiddenSwiftCompat13QualifiedTypes[0]); i++) {
+            const char *qtype = kHiddenSwiftCompat13QualifiedTypes[i];
+            if (pt_has_qualified_type_token(typeNameStart, scan_len, qtype, strlen(qtype))) {
+                return true;
+            }
+        }
+        if (scan_len >= 3U && strncmp(typeNameStart, "ScT", 3) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+__attribute__((visibility("hidden"))) bool pt_is_hidden_swift_qualified_token_cstr(const char *tok, size_t len,
+                                                                                   bool compat13_7) {
+    if (tok == NULL || len == 0) {
+        return false;
+    }
+    for (size_t i = 0; i < sizeof(kHiddenSwiftAlwaysDottedModules) / sizeof(kHiddenSwiftAlwaysDottedModules[0]); i++) {
+        const char *mod = kHiddenSwiftAlwaysDottedModules[i];
+        size_t mlen = strlen(mod);
+        if (len >= mlen && memcmp(tok, mod, mlen) == 0) {
+            return true;
+        }
+    }
+    if (compat13_7) {
+        static const char *const kCompat13DottedModules[] = {
+            "_Concurrency.",
+            "_StringProcessing.",
+            "Observation.",
+            "UniformTypeIdentifiers.",
+        };
+        for (size_t i = 0; i < sizeof(kCompat13DottedModules) / sizeof(kCompat13DottedModules[0]); i++) {
+            const char *mod = kCompat13DottedModules[i];
+            size_t mlen = strlen(mod);
+            if (len >= mlen && memcmp(tok, mod, mlen) == 0) {
+                return true;
+            }
+        }
+        for (size_t i = 0;
+             i < sizeof(kHiddenSwiftCompat13QualifiedTypes) / sizeof(kHiddenSwiftCompat13QualifiedTypes[0]); i++) {
+            const char *qtype = kHiddenSwiftCompat13QualifiedTypes[i];
+            size_t qlen = strlen(qtype);
+            if (len >= qlen && memcmp(tok, qtype, qlen) == 0 && (len == qlen || tok[qlen] == '.')) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
