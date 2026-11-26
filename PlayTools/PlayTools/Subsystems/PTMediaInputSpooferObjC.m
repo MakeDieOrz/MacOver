@@ -5,6 +5,7 @@
 
 #import "PSInternal.h"
 #import "PTDetectionRules.h"
+#import "PTSystemSpooferInternal.h"
 @import CoreGraphics;
 @import CoreText;
 @import JavaScriptCore;
@@ -125,6 +126,19 @@ static CFArrayRef pt_CTFontManagerCopyAvailablePostScriptNames(void) CF_RETURNS_
                                             __builtin_return_address(0));
 }
 
+static BOOL ps_is_hidden_desktop_font_url(NSURL *url) {
+    if (![url isKindOfClass:[NSURL class]]) {
+        return NO;
+    }
+    NSString *path = url.path;
+    if (path.length > 0 &&
+        ([path hasPrefix:@"/Users/"] || [path hasPrefix:@"/Library/Fonts/"])) {
+        return YES;
+    }
+    NSString *stem = url.URLByDeletingPathExtension.lastPathComponent;
+    return ps_is_hidden_desktop_font_name(stem);
+}
+
 static BOOL ps_is_hidden_desktop_font_descriptor(CTFontDescriptorRef desc) {
     if (desc == NULL) {
         return NO;
@@ -146,6 +160,26 @@ static BOOL ps_is_hidden_desktop_font_descriptor(CTFontDescriptorRef desc) {
                 hidden = YES;
             }
             CFRelease(psName);
+        }
+    }
+    if (!hidden) {
+        CFTypeRef dispName = CTFontDescriptorCopyAttribute(desc, kCTFontDisplayNameAttribute);
+        if (dispName != NULL) {
+            if (CFGetTypeID(dispName) == CFStringGetTypeID() &&
+                ps_is_hidden_desktop_font_name((__bridge NSString *)dispName)) {
+                hidden = YES;
+            }
+            CFRelease(dispName);
+        }
+    }
+    if (!hidden) {
+        CFTypeRef fontURL = CTFontDescriptorCopyAttribute(desc, kCTFontURLAttribute);
+        if (fontURL != NULL) {
+            if (CFGetTypeID(fontURL) == CFURLGetTypeID() &&
+                ps_is_hidden_desktop_font_url((__bridge NSURL *)fontURL)) {
+                hidden = YES;
+            }
+            CFRelease(fontURL);
         }
     }
     return hidden;
@@ -325,17 +359,102 @@ static CGFontRef _Nullable pt_CGFontCreateWithFontName(CFStringRef _Nullable nam
 extern CFArrayRef _Nullable pt_orig_CTFontManagerCopyAvailableFontURLs(void)
     __asm("_CTFontManagerCopyAvailableFontURLs") __attribute__((weak_import)) CF_RETURNS_RETAINED;
 
-static BOOL ps_is_hidden_desktop_font_url(NSURL *url) {
-    if (![url isKindOfClass:[NSURL class]]) {
+static BOOL ps_is_hidden_desktop_ctfont(CTFontRef font) {
+    if (font == NULL) {
         return NO;
     }
-    NSString *path = url.path;
-    if (path.length > 0 &&
-        ([path hasPrefix:@"/Users/"] || [path hasPrefix:@"/Library/Fonts/"])) {
-        return YES;
+    BOOL hidden = NO;
+    CFStringRef fam = CTFontCopyFamilyName(font);
+    if (fam != NULL) {
+        hidden = ps_is_hidden_desktop_font_name((__bridge NSString *)fam);
+        CFRelease(fam);
     }
-    NSString *stem = url.URLByDeletingPathExtension.lastPathComponent;
-    return ps_is_hidden_desktop_font_name(stem);
+    if (!hidden) {
+        CFStringRef psName = CTFontCopyPostScriptName(font);
+        if (psName != NULL) {
+            hidden = ps_is_hidden_desktop_font_name((__bridge NSString *)psName);
+            CFRelease(psName);
+        }
+    }
+    return hidden;
+}
+
+static CFArrayRef _Nullable pt_CTFontCollectionCreateMatchingFontDescriptorsWithOptions(
+    CTFontCollectionRef collection,
+    CFDictionaryRef _Nullable options) CF_RETURNS_RETAINED {
+    if (collection == NULL) {
+        return NULL;
+    }
+    return ps_filter_desktop_font_descriptor_cfarray(
+        CTFontCollectionCreateMatchingFontDescriptorsWithOptions(collection, options),
+        __builtin_return_address(0));
+}
+
+static CTFontRef _Nullable pt_CTFontCreateCopyWithAttributes(
+    CTFontRef font,
+    CGFloat size,
+    const CGAffineTransform * _Nullable matrix,
+    CTFontDescriptorRef _Nullable attributes) CF_RETURNS_RETAINED {
+    if (font == NULL) {
+        return NULL;
+    }
+    const void *caller = __builtin_return_address(0);
+    BOOL bypass = pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(caller);
+    CTFontRef baseFont = font;
+    BOOL releasedBase = NO;
+    if (bypass) {
+        @autoreleasepool {
+            if (ps_is_hidden_desktop_ctfont(font)) {
+                CTFontRef fb = CTFontCreateWithName(CFSTR("Helvetica"), (size > 0.0) ? size : CTFontGetSize(font), matrix);
+                if (fb != NULL) {
+                    baseFont = fb;
+                    releasedBase = YES;
+                }
+            }
+        }
+    }
+    BOOL allocDesc = NO;
+    CTFontDescriptorRef effAttr = bypass
+        ? ps_sanitize_ctfont_descriptor(attributes, size, caller, &allocDesc)
+        : attributes;
+    CTFontRef res = CTFontCreateCopyWithAttributes(baseFont, size, matrix, effAttr);
+    if (allocDesc && effAttr != NULL) {
+        CFRelease(effAttr);
+    }
+    if (releasedBase && baseFont != NULL) {
+        CFRelease(baseFont);
+    }
+    return res;
+}
+
+static CTFontRef _Nullable pt_CTFontCreateCopyWithSymbolicTraits(
+    CTFontRef font,
+    CGFloat size,
+    const CGAffineTransform * _Nullable matrix,
+    CTFontSymbolicTraits symTraitValue,
+    CTFontSymbolicTraits symTraitMask) CF_RETURNS_RETAINED {
+    if (font == NULL) {
+        return NULL;
+    }
+    const void *caller = __builtin_return_address(0);
+    CTFontRef baseFont = font;
+    BOOL releasedBase = NO;
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(caller)) {
+        @autoreleasepool {
+            if (ps_is_hidden_desktop_ctfont(font)) {
+                CTFontRef fb = CTFontCreateWithName(CFSTR("Helvetica"), (size > 0.0) ? size : CTFontGetSize(font), matrix);
+                if (fb != NULL) {
+                    baseFont = fb;
+                    releasedBase = YES;
+                }
+            }
+        }
+    }
+    CTFontRef res = CTFontCreateCopyWithSymbolicTraits(baseFont, size, matrix, symTraitValue, symTraitMask);
+    if (releasedBase && baseFont != NULL) {
+        CFRelease(baseFont);
+    }
+    return res;
 }
 
 static CFArrayRef _Nullable pt_CTFontManagerCopyAvailableFontURLs(void) CF_RETURNS_RETAINED {
@@ -396,9 +515,12 @@ PT_INTERPOSE_WEAK_NAMED(pt_CTFontManagerCopyAvailableFontURLs, pt_orig_CTFontMan
 PT_INTERPOSE(pt_CTFontManagerCopyAvailableFontFamilyNames, CTFontManagerCopyAvailableFontFamilyNames)
 PT_INTERPOSE(pt_CTFontManagerCopyAvailablePostScriptNames, CTFontManagerCopyAvailablePostScriptNames)
 PT_INTERPOSE(pt_CTFontCollectionCreateMatchingFontDescriptors, CTFontCollectionCreateMatchingFontDescriptors)
+PT_INTERPOSE(pt_CTFontCollectionCreateMatchingFontDescriptorsWithOptions, CTFontCollectionCreateMatchingFontDescriptorsWithOptions)
 PT_INTERPOSE(pt_CTFontCollectionCreateMatchingFontDescriptorsSortedWithCallback, CTFontCollectionCreateMatchingFontDescriptorsSortedWithCallback)
 PT_INTERPOSE(pt_CTFontDescriptorCreateMatchingFontDescriptors, CTFontDescriptorCreateMatchingFontDescriptors)
 PT_INTERPOSE(pt_CTFontDescriptorCreateMatchingFontDescriptor, CTFontDescriptorCreateMatchingFontDescriptor)
+PT_INTERPOSE(pt_CTFontCreateCopyWithAttributes, CTFontCreateCopyWithAttributes)
+PT_INTERPOSE(pt_CTFontCreateCopyWithSymbolicTraits, CTFontCreateCopyWithSymbolicTraits)
 
 static void ps_sanitize_jsc_global_context_ref(JSGlobalContextRef ctx, const void *caller) {
     static _Thread_local BOOL s_tls_in_jsc_c_sanitize = NO;
@@ -413,15 +535,20 @@ static void ps_sanitize_jsc_global_context_ref(JSGlobalContextRef ctx, const voi
         "delete globalThis.WeakRef;"
         "delete globalThis.FinalizationRegistry;"
         "delete globalThis.BigInt;"
+        "delete globalThis.BigInt64Array;"
+        "delete globalThis.BigUint64Array;"
         "delete globalThis.AggregateError;"
         "delete globalThis.structuredClone;"
         "delete globalThis.Float16Array;"
-        "if(typeof Promise==='function'){delete Promise.any;}"
+        "delete globalThis.Iterator;"
+        "if(typeof Promise==='function'){delete Promise.any;delete Promise.withResolvers;}"
         "if(typeof Object==='function'){delete Object.hasOwn;delete Object.groupBy;}"
         "if(typeof Map==='function'){delete Map.groupBy;}"
-        "if(typeof RegExp==='function'){delete RegExp.escape;}"
+        "if(typeof RegExp==='function'){delete RegExp.escape;if(RegExp.prototype)delete RegExp.prototype.hasIndices;}"
         "if(typeof Error==='function'){delete Error.isError;}"
-        "if(typeof Array==='function'&&Array.prototype){"
+        "if(typeof Array==='function'){"
+        "delete Array.fromAsync;"
+        "if(Array.prototype){"
         "delete Array.prototype.at;"
         "delete Array.prototype.findLast;"
         "delete Array.prototype.findLastIndex;"
@@ -429,6 +556,26 @@ static void ps_sanitize_jsc_global_context_ref(JSGlobalContextRef ctx, const voi
         "delete Array.prototype.toReversed;"
         "delete Array.prototype.toSpliced;"
         "delete Array.prototype.with;"
+        "}"
+        "}"
+        "if(typeof Int8Array==='function'&&Int8Array.prototype){"
+        "var _ta=Object.getPrototypeOf(Int8Array.prototype);"
+        "if(_ta){"
+        "delete _ta.at;"
+        "delete _ta.findLast;"
+        "delete _ta.findLastIndex;"
+        "delete _ta.toReversed;"
+        "delete _ta.toSorted;"
+        "delete _ta.with;"
+        "}"
+        "}"
+        "if(typeof Uint8Array==='function'){"
+        "delete Uint8Array.fromBase64;"
+        "delete Uint8Array.fromHex;"
+        "if(Uint8Array.prototype){"
+        "delete Uint8Array.prototype.toBase64;"
+        "delete Uint8Array.prototype.toHex;"
+        "}"
         "}"
         "if(typeof String==='function'&&String.prototype){"
         "delete String.prototype.at;"
@@ -449,6 +596,16 @@ static void ps_sanitize_jsc_global_context_ref(JSGlobalContextRef ctx, const voi
         "delete Intl.DisplayNames;"
         "delete Intl.ListFormat;"
         "delete Intl.DurationFormat;"
+        "delete Intl.Locale;"
+        "delete Intl.supportedValuesOf;"
+        "if(typeof Intl.DateTimeFormat==='function'&&Intl.DateTimeFormat.prototype){"
+        "delete Intl.DateTimeFormat.prototype.formatRange;"
+        "delete Intl.DateTimeFormat.prototype.formatRangeToParts;"
+        "}"
+        "}"
+        "if(typeof WebAssembly==='object'&&WebAssembly){"
+        "delete WebAssembly.Exception;"
+        "delete WebAssembly.Tag;"
         "}"
         "}catch(e){}";
     s_tls_in_jsc_c_sanitize = YES;
@@ -676,10 +833,19 @@ static NSString *ps_sanitize_audio_port_string(NSString *orig, NSString *portTyp
         if ([res caseInsensitiveCompare:pluralSpeakers] == NSOrderedSame) {
             return @"Speaker";
         }
+        NSString *zhSpeakers = [NSString stringWithFormat:@"%@ 扬声器", devWord];
         NSString *compactSpeaker = [NSString stringWithFormat:@"%@扬声器", devWord];
+        if ([res caseInsensitiveCompare:zhSpeakers] == NSOrderedSame ||
+            [res caseInsensitiveCompare:compactSpeaker] == NSOrderedSame) {
+            return @"扬声器";
+        }
+        if ([res rangeOfString:zhSpeakers].location != NSNotFound) {
+            res = [res stringByReplacingOccurrencesOfString:zhSpeakers
+                                                 withString:@"扬声器"];
+        }
         if ([res rangeOfString:compactSpeaker].location != NSNotFound) {
             res = [res stringByReplacingOccurrencesOfString:compactSpeaker
-                                                 withString:[NSString stringWithFormat:@"%@ 扬声器", devWord]];
+                                                 withString:@"扬声器"];
         }
         NSString *compactMic = [NSString stringWithFormat:@"%@麦克风", devWord];
         if ([res rangeOfString:compactMic].location != NSNotFound) {
@@ -696,6 +862,152 @@ static NSString *ps_audio_port_type(id portDesc) {
         return ((NSString *(*)(id, SEL))objc_msgSend)(portDesc, ptSel);
     }
     return nil;
+}
+
+static BOOL ps_av_string_is_virtual_desktop_audio(NSString *s);
+
+static BOOL ps_audio_port_is_virtual_desktop(id port) {
+    if (port == nil) {
+        return NO;
+    }
+    NSString *rawName = nil;
+    if (atomic_load_explicit(&s_audio_port_name_swizzled, memory_order_acquire) &&
+        [port respondsToSelector:@selector(pm_ps_portName)]) {
+        rawName = ((NSString *(*)(id, SEL))objc_msgSend)(port, @selector(pm_ps_portName));
+    } else {
+        SEL pnSel = NSSelectorFromString(@"portName");
+        if ([port respondsToSelector:pnSel]) {
+            rawName = ((NSString *(*)(id, SEL))objc_msgSend)(port, pnSel);
+        }
+    }
+    if ([rawName isKindOfClass:[NSString class]] && ps_av_string_is_virtual_desktop_audio(rawName)) {
+        return YES;
+    }
+    NSString *rawUID = nil;
+    if (atomic_load_explicit(&s_audio_port_uid_swizzled, memory_order_acquire) &&
+        [port respondsToSelector:@selector(pm_ps_UID)]) {
+        rawUID = ((NSString *(*)(id, SEL))objc_msgSend)(port, @selector(pm_ps_UID));
+    } else {
+        SEL uidSel = NSSelectorFromString(@"UID");
+        if ([port respondsToSelector:uidSel]) {
+            rawUID = ((NSString *(*)(id, SEL))objc_msgSend)(port, uidSel);
+        }
+    }
+    if ([rawUID isKindOfClass:[NSString class]] && ps_av_string_is_virtual_desktop_audio(rawUID)) {
+        return YES;
+    }
+    return NO;
+}
+
+static NSArray *ps_filter_audio_ports_array(NSArray *ports, BOOL keepOneFallback) {
+    if (![ports isKindOfClass:[NSArray class]] || ports.count == 0) {
+        return ports;
+    }
+    NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:ports.count];
+    for (id port in ports) {
+        if (!ps_audio_port_is_virtual_desktop(port)) {
+            [filtered addObject:port];
+        }
+    }
+    if (keepOneFallback && filtered.count == 0 && ports.count > 0) {
+        [filtered addObject:ports.firstObject];
+    }
+    return [filtered copy];
+}
+
+- (NSArray *) pm_ps_avsession_availableInputs {
+    NSArray *orig = [self pm_ps_avsession_availableInputs];
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return ps_filter_audio_ports_array(orig, NO);
+    }
+    return orig;
+}
+
+- (NSArray *) pm_ps_audio_route_inputs {
+    NSArray *orig = [self pm_ps_audio_route_inputs];
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return ps_filter_audio_ports_array(orig, NO);
+    }
+    return orig;
+}
+
+- (NSArray *) pm_ps_audio_route_outputs {
+    NSArray *orig = [self pm_ps_audio_route_outputs];
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return ps_filter_audio_ports_array(orig, YES);
+    }
+    return orig;
+}
+
+typedef struct {
+    uint32_t componentType;
+    uint32_t componentSubType;
+    uint32_t componentManufacturer;
+    uint32_t componentFlags;
+    uint32_t componentFlagsMask;
+} PSAudioComponentDescABI;
+
+static NSArray *ps_filter_av_audio_unit_components(NSArray *components) {
+    if (![components isKindOfClass:[NSArray class]] || components.count == 0) {
+        return components;
+    }
+    SEL acSel = sel_registerName("audioComponent");
+    NSMutableArray *filtered = nil;
+    for (NSUInteger i = 0; i < components.count; i++) {
+        id comp = components[i];
+        BOOL hidden = NO;
+        if (comp != nil && [comp respondsToSelector:acSel]) {
+            struct OpaqueAudioComponent *ac =
+                ((struct OpaqueAudioComponent *(*)(id, SEL))objc_msgSend)(comp, acSel);
+            if (ac != NULL && pt_is_hidden_audio_component(ac)) {
+                hidden = YES;
+            }
+        }
+        if (hidden) {
+            if (filtered == nil) {
+                filtered = [NSMutableArray arrayWithCapacity:components.count - 1];
+                for (NSUInteger j = 0; j < i; j++) {
+                    [filtered addObject:components[j]];
+                }
+            }
+        } else if (filtered != nil) {
+            [filtered addObject:comp];
+        }
+    }
+    return (filtered != nil) ? [filtered copy] : components;
+}
+
+- (NSArray *) pm_ps_avau_componentsMatchingDescription:(PSAudioComponentDescABI)description {
+    NSArray *orig = [self pm_ps_avau_componentsMatchingDescription:description];
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return ps_filter_av_audio_unit_components(orig);
+    }
+    return orig;
+}
+
+- (NSArray *) pm_ps_avau_componentsPassingTest:(BOOL (^)(id component, BOOL *stop))testHandler {
+    const void *caller = __builtin_return_address(0);
+    if (testHandler != nil &&
+        pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(caller)) {
+        BOOL (^userTest)(id, BOOL *) = [testHandler copy];
+        SEL acSel = sel_registerName("audioComponent");
+        return [self pm_ps_avau_componentsPassingTest:^BOOL(id component, BOOL *stop) {
+            if (component != nil && [component respondsToSelector:acSel]) {
+                struct OpaqueAudioComponent *ac =
+                    ((struct OpaqueAudioComponent *(*)(id, SEL))objc_msgSend)(component, acSel);
+                if (ac != NULL && pt_is_hidden_audio_component(ac)) {
+                    return NO;
+                }
+            }
+            return userTest(component, stop);
+        }];
+    }
+    return [self pm_ps_avau_componentsPassingTest:testHandler];
 }
 
 - (NSString *) pm_ps_portName {
@@ -750,6 +1062,12 @@ static CFMutableDictionaryRef s_av_orig_desc_imps = NULL;
 static CFMutableDictionaryRef s_av_orig_fov_imps = NULL;
 static CFMutableDictionaryRef s_av_orig_flash_imps = NULL;
 static CFMutableDictionaryRef s_av_orig_torch_imps = NULL;
+static CFMutableDictionaryRef s_av_orig_mfr_imps = NULL;
+static CFMutableDictionaryRef s_av_orig_transport_imps = NULL;
+static os_unfair_lock s_ch_swizzle_lock = OS_UNFAIR_LOCK_INIT;
+static CFMutableDictionaryRef s_ch_orig_supports_haptics_imps = NULL;
+static atomic_bool s_gc_app_bg_events = false;
+static atomic_bool s_gc_app_bg_events_set = false;
 static os_unfair_lock s_av_uid_map_lock = OS_UNFAIR_LOCK_INIT;
 static NSMutableDictionary<NSString *, NSString *> *ps_av_synth_uid_map(void) {
     static NSMutableDictionary<NSString *, NSString *> *s_map = nil;
@@ -869,6 +1187,14 @@ static void ps_swizzle_capture_device_class(Class cls) {
         ps_swizzle_class_sel_storing_imp(&s_av_swizzle_lock, &s_av_orig_torch_imps, cls,
                                          sel_registerName("hasTorch"), @selector(pm_ps_av_hasTorch));
     }
+    if (class_getInstanceMethod(cls, sel_registerName("manufacturer")) != NULL) {
+        ps_swizzle_class_sel_storing_imp(&s_av_swizzle_lock, &s_av_orig_mfr_imps, cls,
+                                         sel_registerName("manufacturer"), @selector(pm_ps_av_manufacturer));
+    }
+    if (class_getInstanceMethod(cls, sel_registerName("transportType")) != NULL) {
+        ps_swizzle_class_sel_storing_imp(&s_av_swizzle_lock, &s_av_orig_transport_imps, cls,
+                                         sel_registerName("transportType"), @selector(pm_ps_av_transportType));
+    }
 }
 
 static BOOL ps_av_string_is_virtual_desktop_audio(NSString *s) {
@@ -884,6 +1210,7 @@ static BOOL ps_av_string_is_virtual_desktop_audio(NSString *s) {
             @"ZoomAudioDevice",
             @"TeamsAudioDevice",
             @"Aggregate",
+            @"CADefaultDeviceAggregate",
             @"Soundflower",
             @"VB-Cable",
             @"OBS Virtual",
@@ -955,24 +1282,6 @@ static NSString *ps_sanitize_capture_device_string(id dev, NSString *orig, BOOL 
     if (orig.length == 0) {
         return orig;
     }
-    static NSArray<NSString *> *s_cameraMacKeywords = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        s_cameraMacKeywords = @[
-            @"FaceTime",
-            @"MacBook Air",
-            @"MacBook Pro",
-            @"MacBook",
-            @"Mac mini",
-            @"Mac Studio",
-            @"Mac Pro",
-            @"iMac",
-            @"Studio Display",
-            @"Pro Display",
-            @"Apple Display",
-            @"LG UltraFine"
-        ];
-    });
     BOOL isCamera = NO;
     SEL hasMediaSel = sel_registerName("hasMediaType:");
     if ([dev respondsToSelector:hasMediaSel]) {
@@ -980,24 +1289,21 @@ static NSString *ps_sanitize_capture_device_string(id dev, NSString *orig, BOOL 
     }
     if (isCamera ||
         [orig rangeOfString:@"FaceTime" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-        [orig rangeOfString:@"Camera" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+        [orig rangeOfString:@"Camera" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+        [orig rangeOfString:@"UVC" options:NSCaseInsensitiveSearch].location != NSNotFound) {
         NSInteger pos = 0;
         SEL posSel = sel_registerName("position");
         if ([dev respondsToSelector:posSel]) {
             pos = ((NSInteger (*)(id, SEL))objc_msgSend)(dev, posSel);
         }
-        for (NSString *kw in s_cameraMacKeywords) {
-            if ([orig rangeOfString:kw options:NSCaseInsensitiveSearch].location != NSNotFound) {
-                if (pos == 1) {
-                    return isModelID
-                        ? @"com.apple.avfoundation.avcapturedevice.built-in_video:0"
-                        : @"Back Camera";
-                }
-                return isModelID
-                    ? @"com.apple.avfoundation.avcapturedevice.built-in_video:1"
-                    : @"Front Camera";
-            }
+        if (pos == 1) {
+            return isModelID
+                ? @"com.apple.avfoundation.avcapturedevice.built-in_video:0"
+                : @"Back Camera";
         }
+        return isModelID
+            ? @"com.apple.avfoundation.avcapturedevice.built-in_video:1"
+            : @"Front Camera";
     }
     return ps_sanitize_audio_port_string(orig, nil, isModelID);
 }
@@ -1168,6 +1474,42 @@ static NSArray *ps_filter_capture_devices(NSArray *devices, BOOL isAppCaller) {
     return orig;
 }
 
+- (NSString *) pm_ps_av_manufacturer {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return @"Apple Inc.";
+    }
+    SEL sel = sel_registerName("manufacturer");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_av_swizzle_lock, s_av_orig_mfr_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            return ((NSString *(*)(id, SEL))origIMP)(self, sel);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    return @"Apple Inc.";
+}
+
+- (int32_t) pm_ps_av_transportType {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return 0x626C746E; // 'bltn' (kIOAudioDeviceTransportTypeBuiltIn)
+    }
+    SEL sel = sel_registerName("transportType");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_av_swizzle_lock, s_av_orig_transport_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            return ((int32_t (*)(id, SEL))origIMP)(self, sel);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    return 0x626C746E;
+}
+
 - (NSString *) pm_ps_av_description {
     BOOL pushed = NO;
     IMP origIMP = ps_lookup_orig_imp_and_push(&s_av_swizzle_lock, s_av_orig_desc_imps, self, &pushed);
@@ -1316,8 +1658,9 @@ static BOOL ps_is_faceid_device_model(void) {
     if (m == NULL || m[0] == '\0') {
         return NO;
     }
-    // Exclude Touch ID iPhone SE models before matching iPhone12+/14+ prefixes
-    if (strcmp(m, "iPhone12,8") == 0 || strcmp(m, "iPhone14,6") == 0) {
+    // Exclude Touch ID iPhone SE and iPad mini (A17 Pro) models before matching iPhone12+/14+/iPad16+ prefixes
+    if (strcmp(m, "iPhone12,8") == 0 || strcmp(m, "iPhone14,6") == 0 ||
+        strcmp(m, "iPad16,1") == 0 || strcmp(m, "iPad16,2") == 0) {
         return NO;
     }
     if (strncmp(m, "iPad8,", 6) == 0 ||
@@ -1359,13 +1702,172 @@ static BOOL ps_is_faceid_device_model(void) {
     return [self pm_ps_uifont_fontWithName:fontName size:fontSize];
 }
 
++ (UIFont *) pm_ps_uifont_fontWithDescriptor:(UIFontDescriptor *)descriptor size:(CGFloat)pointSize {
+    const void *caller = __builtin_return_address(0);
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(caller) &&
+        descriptor != nil &&
+        ps_is_hidden_desktop_font_descriptor((__bridge CTFontDescriptorRef)descriptor)) {
+        CGFloat effSize = (pointSize > 0.0) ? pointSize : 12.0;
+        UIFontDescriptor *fallbackDesc = [UIFontDescriptor fontDescriptorWithName:@"Helvetica" size:effSize];
+        if (fallbackDesc != nil) {
+            return [self pm_ps_uifont_fontWithDescriptor:fallbackDesc size:pointSize];
+        }
+    }
+    return [self pm_ps_uifont_fontWithDescriptor:descriptor size:pointSize];
+}
+
+static NSArray<UIFontDescriptor *> *ps_filter_matching_uifont_descriptors(NSArray *orig, const void *caller) {
+    if (orig.count == 0 ||
+        !pt_is_bypass_enabled() ||
+        ps_is_effective_system_or_playtools_caller(caller)) {
+        return orig;
+    }
+    NSMutableArray *filtered = nil;
+    for (NSUInteger i = 0; i < orig.count; i++) {
+        id entry = orig[i];
+        BOOL hidden = (entry != nil &&
+                       ps_is_hidden_desktop_font_descriptor((__bridge CTFontDescriptorRef)entry));
+        if (hidden) {
+            if (filtered == nil) {
+                filtered = [NSMutableArray arrayWithCapacity:orig.count - 1];
+                for (NSUInteger j = 0; j < i; j++) {
+                    [filtered addObject:orig[j]];
+                }
+            }
+        } else if (filtered != nil) {
+            [filtered addObject:entry];
+        }
+    }
+    return (filtered != nil) ? [filtered copy] : orig;
+}
+
+- (NSArray<UIFontDescriptor *> *) pm_ps_uifontdesc_matchingFontDescriptorsWithMandatoryKeys:(NSSet *)mandatoryKeys {
+    NSArray *orig = [self pm_ps_uifontdesc_matchingFontDescriptorsWithMandatoryKeys:mandatoryKeys];
+    return ps_filter_matching_uifont_descriptors(orig, __builtin_return_address(0));
+}
+
+- (NSArray<UIFontDescriptor *> *) pm_ps_ctfontdesc_matchingFontDescriptorsWithMandatoryKeys:(NSSet *)mandatoryKeys {
+    NSArray *orig = [self pm_ps_ctfontdesc_matchingFontDescriptorsWithMandatoryKeys:mandatoryKeys];
+    return ps_filter_matching_uifont_descriptors(orig, __builtin_return_address(0));
+}
+
+- (NSArray<UIFontDescriptor *> *) pm_ps_uictfontdesc_matchingFontDescriptorsWithMandatoryKeys:(NSSet *)mandatoryKeys {
+    NSArray *orig = [self pm_ps_uictfontdesc_matchingFontDescriptorsWithMandatoryKeys:mandatoryKeys];
+    return ps_filter_matching_uifont_descriptors(orig, __builtin_return_address(0));
+}
+
+- (BOOL) pm_ps_ch_supportsHaptics {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return ps_is_iphone_device_model();
+    }
+    SEL sel = sel_registerName("supportsHaptics");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_ch_swizzle_lock, s_ch_orig_supports_haptics_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            return ((BOOL (*)(id, SEL))origIMP)(self, sel);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    return NO;
+}
+
++ (id) pm_ps_ch_capabilitiesForHardware {
+    id cap = [self pm_ps_ch_capabilitiesForHardware];
+    if (cap != nil) {
+        SEL shSel = sel_registerName("supportsHaptics");
+        Class cls = object_getClass(cap);
+        if (cls != Nil && class_getInstanceMethod(cls, shSel) != NULL) {
+            ps_swizzle_class_sel_storing_imp(&s_ch_swizzle_lock,
+                                             &s_ch_orig_supports_haptics_imps,
+                                             cls,
+                                             shSel,
+                                             @selector(pm_ps_ch_supportsHaptics));
+        }
+    }
+    return cap;
+}
+
+- (BOOL) pm_ps_ch_startAndReturnError:(NSError **)error {
+    BOOL ok = [self pm_ps_ch_startAndReturnError:error];
+    if (!ok &&
+        pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        ps_is_iphone_device_model()) {
+        if (error != NULL) {
+            *error = nil;
+        }
+        return YES;
+    }
+    return ok;
+}
+
+- (void) pm_ps_ch_startWithCompletionHandler:(void (^)(NSError *error))completionHandler {
+    BOOL isAppCaller = pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        ps_is_iphone_device_model();
+    if (isAppCaller && completionHandler != nil) {
+        void (^userHandler)(NSError *) = [completionHandler copy];
+        [self pm_ps_ch_startWithCompletionHandler:^(NSError *error) {
+            (void)error;
+            userHandler(nil);
+        }];
+        return;
+    }
+    [self pm_ps_ch_startWithCompletionHandler:completionHandler];
+}
+
+static NSError *ps_la_watch_unavailable_error(void) {
+    return [NSError errorWithDomain:@"com.apple.LocalAuthentication"
+                               code:-11
+                           userInfo:@{ NSLocalizedDescriptionKey : @"Apple Watch authentication is not available." }];
+}
+
 - (BOOL) pm_ps_la_canEvaluatePolicy:(NSInteger)policy error:(NSError **)error {
+    const void *caller = __builtin_return_address(0);
+    BOOL isAppCaller = pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(caller);
+    if (isAppCaller && policy >= 3) {
+        if (error != NULL) {
+            *error = ps_la_watch_unavailable_error();
+        }
+        return NO;
+    }
     BOOL ok = [self pm_ps_la_canEvaluatePolicy:policy error:error];
     objc_setAssociatedObject(self,
                              &kPSLAContextEvaluatedKey,
                              @YES,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (!ok && isAppCaller && (policy == 1 || policy == 2) &&
+        error != NULL && *error != nil &&
+        [(*error).domain isEqualToString:@"com.apple.LocalAuthentication"] &&
+        (*error).code == -6) {
+        *error = [NSError errorWithDomain:@"com.apple.LocalAuthentication"
+                                     code:-7
+                                 userInfo:@{ NSLocalizedDescriptionKey : @"No identities are enrolled." }];
+    }
     return ok;
+}
+
+- (void) pm_ps_la_evaluatePolicy:(NSInteger)policy
+                 localizedReason:(NSString *)localizedReason
+                           reply:(void (^)(BOOL success, NSError *error))reply {
+    const void *caller = __builtin_return_address(0);
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(caller) &&
+        policy >= 3) {
+        if (reply != nil) {
+            reply(NO, ps_la_watch_unavailable_error());
+        }
+        return;
+    }
+    objc_setAssociatedObject(self,
+                             &kPSLAContextEvaluatedKey,
+                             @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [self pm_ps_la_evaluatePolicy:policy localizedReason:localizedReason reply:reply];
 }
 
 - (NSInteger) pm_ps_la_biometryType {
@@ -1376,6 +1878,13 @@ static BOOL ps_is_faceid_device_model(void) {
         if (orig == 4) {
             return 0;
         }
+        if (orig == 0) {
+            NSNumber *eval = objc_getAssociatedObject(self, &kPSLAContextEvaluatedKey);
+            if ([eval boolValue]) {
+                return ps_is_faceid_device_model() ? 2 : 1;
+            }
+            return 0;
+        }
         if (ps_is_faceid_device_model() && orig == 1) {
             NSNumber *eval = objc_getAssociatedObject(self, &kPSLAContextEvaluatedKey);
             return [eval boolValue] ? 2 : 0;
@@ -1384,10 +1893,45 @@ static BOOL ps_is_faceid_device_model(void) {
     return orig;
 }
 
+- (NSInteger) pm_ps_la_domain_biometryType {
+    NSInteger orig = [self pm_ps_la_domain_biometryType];
+    const void *caller = __builtin_return_address(0);
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(caller)) {
+        if (orig == 4) {
+            return 0;
+        }
+        if (orig == 0) {
+            return ps_is_faceid_device_model() ? 2 : 1;
+        }
+        if (ps_is_faceid_device_model() && orig == 1) {
+            return 2;
+        }
+    }
+    return orig;
+}
+
++ (void) pm_ps_gc_setShouldMonitorBackgroundEvents:(BOOL)shouldMonitor {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (pt_is_compat13_7_active()) {
+            return;
+        }
+        atomic_store_explicit(&s_gc_app_bg_events, shouldMonitor ? true : false, memory_order_release);
+        atomic_store_explicit(&s_gc_app_bg_events_set, true, memory_order_release);
+    }
+    [self pm_ps_gc_setShouldMonitorBackgroundEvents:shouldMonitor];
+}
+
 + (BOOL) pm_ps_gc_shouldMonitorBackgroundEvents {
     if (pt_is_bypass_enabled() &&
         !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        return NO;
+        if (pt_is_compat13_7_active()) {
+            return NO;
+        }
+        return atomic_load_explicit(&s_gc_app_bg_events_set, memory_order_acquire)
+            ? (atomic_load_explicit(&s_gc_app_bg_events, memory_order_acquire) ? YES : NO)
+            : NO;
     }
     return [self pm_ps_gc_shouldMonitorBackgroundEvents];
 }
@@ -1452,15 +1996,20 @@ static void ps_sanitize_jscontext_for_compat13(id ctx, const void *caller) {
              "delete globalThis.WeakRef;"
              "delete globalThis.FinalizationRegistry;"
              "delete globalThis.BigInt;"
+             "delete globalThis.BigInt64Array;"
+             "delete globalThis.BigUint64Array;"
              "delete globalThis.AggregateError;"
              "delete globalThis.structuredClone;"
              "delete globalThis.Float16Array;"
-             "if(typeof Promise==='function'){delete Promise.any;}"
+             "delete globalThis.Iterator;"
+             "if(typeof Promise==='function'){delete Promise.any;delete Promise.withResolvers;}"
              "if(typeof Object==='function'){delete Object.hasOwn;delete Object.groupBy;}"
              "if(typeof Map==='function'){delete Map.groupBy;}"
-             "if(typeof RegExp==='function'){delete RegExp.escape;}"
+             "if(typeof RegExp==='function'){delete RegExp.escape;if(RegExp.prototype)delete RegExp.prototype.hasIndices;}"
              "if(typeof Error==='function'){delete Error.isError;}"
-             "if(typeof Array==='function'&&Array.prototype){"
+             "if(typeof Array==='function'){"
+             "delete Array.fromAsync;"
+             "if(Array.prototype){"
              "delete Array.prototype.at;"
              "delete Array.prototype.findLast;"
              "delete Array.prototype.findLastIndex;"
@@ -1468,6 +2017,26 @@ static void ps_sanitize_jscontext_for_compat13(id ctx, const void *caller) {
              "delete Array.prototype.toReversed;"
              "delete Array.prototype.toSpliced;"
              "delete Array.prototype.with;"
+             "}"
+             "}"
+             "if(typeof Int8Array==='function'&&Int8Array.prototype){"
+             "var _ta=Object.getPrototypeOf(Int8Array.prototype);"
+             "if(_ta){"
+             "delete _ta.at;"
+             "delete _ta.findLast;"
+             "delete _ta.findLastIndex;"
+             "delete _ta.toReversed;"
+             "delete _ta.toSorted;"
+             "delete _ta.with;"
+             "}"
+             "}"
+             "if(typeof Uint8Array==='function'){"
+             "delete Uint8Array.fromBase64;"
+             "delete Uint8Array.fromHex;"
+             "if(Uint8Array.prototype){"
+             "delete Uint8Array.prototype.toBase64;"
+             "delete Uint8Array.prototype.toHex;"
+             "}"
              "}"
              "if(typeof String==='function'&&String.prototype){"
              "delete String.prototype.at;"
@@ -1488,6 +2057,16 @@ static void ps_sanitize_jscontext_for_compat13(id ctx, const void *caller) {
              "delete Intl.DisplayNames;"
              "delete Intl.ListFormat;"
              "delete Intl.DurationFormat;"
+             "delete Intl.Locale;"
+             "delete Intl.supportedValuesOf;"
+             "if(typeof Intl.DateTimeFormat==='function'&&Intl.DateTimeFormat.prototype){"
+             "delete Intl.DateTimeFormat.prototype.formatRange;"
+             "delete Intl.DateTimeFormat.prototype.formatRangeToParts;"
+             "}"
+             "}"
+             "if(typeof WebAssembly==='object'&&WebAssembly){"
+             "delete WebAssembly.Exception;"
+             "delete WebAssembly.Tag;"
              "}"
              "}catch(e){}";
         (void)((id (*)(id, SEL, NSString *))objc_msgSend)(ctx, evalSel, cleanupJS);
@@ -1576,6 +2155,27 @@ static BOOL ps_is_post13_7_sf_symbol_name(NSString *name) {
     return [self pm_ps_uiimage_systemImageNamed:name variableValue:value withConfiguration:configuration];
 }
 
++ (UIImage *) pm_ps_uiimage_priv_systemImageNamed:(NSString *)name {
+    if (pt_is_bypass_enabled() &&
+        pt_is_compat13_7_active() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        ps_is_post13_7_sf_symbol_name(name)) {
+        return nil;
+    }
+    return [self pm_ps_uiimage_priv_systemImageNamed:name];
+}
+
++ (UIImage *) pm_ps_uiimage_priv_systemImageNamed:(NSString *)name
+                            withConfiguration:(UIImageConfiguration *)configuration {
+    if (pt_is_bypass_enabled() &&
+        pt_is_compat13_7_active() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        ps_is_post13_7_sf_symbol_name(name)) {
+        return nil;
+    }
+    return [self pm_ps_uiimage_priv_systemImageNamed:name withConfiguration:configuration];
+}
+
 + (NSArray<NSString *> *) pm_ps_uifont_familyNames {
     NSArray<NSString *> *orig = [self pm_ps_uifont_familyNames];
     if (orig.count == 0 ||
@@ -1619,6 +2219,7 @@ static BOOL ps_is_post13_7_sf_symbol_name(NSString *name) {
 static os_unfair_lock s_audio_port_swizzle_lock = OS_UNFAIR_LOCK_INIT;
 static BOOL s_audio_port_hooks_installed = NO;
 static BOOL s_audio_route_hooks_installed = NO;
+static BOOL s_audio_session_avail_hooks_installed = NO;
 
 __attribute__((visibility("hidden"))) void ps_install_audio_session_port_hooks(void) {
     os_unfair_lock_lock(&s_audio_port_swizzle_lock);
@@ -1647,10 +2248,66 @@ __attribute__((visibility("hidden"))) void ps_install_audio_session_port_hooks(v
             if (class_getInstanceMethod(routeCls, @selector(description)) != NULL) {
                 ps_swizzle_instance_method(routeCls, @selector(description), @selector(pm_ps_audio_route_description));
             }
+            SEL inputsSel = sel_registerName("inputs");
+            if (class_getInstanceMethod(routeCls, inputsSel) != NULL) {
+                ps_swizzle_instance_method(routeCls, inputsSel, @selector(pm_ps_audio_route_inputs));
+            }
+            SEL outputsSel = sel_registerName("outputs");
+            if (class_getInstanceMethod(routeCls, outputsSel) != NULL) {
+                ps_swizzle_instance_method(routeCls, outputsSel, @selector(pm_ps_audio_route_outputs));
+            }
             s_audio_route_hooks_installed = YES;
         }
     }
+    if (!s_audio_session_avail_hooks_installed) {
+        Class sessCls = NSClassFromString(@"AVAudioSession");
+        if (sessCls != Nil) {
+            SEL availSel = sel_registerName("availableInputs");
+            if (class_getInstanceMethod(sessCls, availSel) != NULL) {
+                ps_swizzle_instance_method(sessCls, availSel, @selector(pm_ps_avsession_availableInputs));
+            }
+            s_audio_session_avail_hooks_installed = YES;
+        }
+    }
     os_unfair_lock_unlock(&s_audio_port_swizzle_lock);
+}
+
+__attribute__((visibility("hidden"))) void ps_install_avfoundation_audio_unit_hooks_if_loaded(void) {
+    Class mgrCls = NSClassFromString(@"AVAudioUnitComponentManager");
+    if (mgrCls != Nil) {
+        static dispatch_once_t avauOnce;
+        dispatch_once(&avauOnce, ^{
+            SEL matchSel = sel_registerName("componentsMatchingDescription:");
+            if (class_getInstanceMethod(mgrCls, matchSel) != NULL) {
+                ps_swizzle_instance_method(mgrCls, matchSel, @selector(pm_ps_avau_componentsMatchingDescription:));
+            }
+            SEL passSel = sel_registerName("componentsPassingTest:");
+            if (class_getInstanceMethod(mgrCls, passSel) != NULL) {
+                ps_swizzle_instance_method(mgrCls, passSel, @selector(pm_ps_avau_componentsPassingTest:));
+            }
+        });
+    }
+}
+
+__attribute__((visibility("hidden"))) void ps_install_corehaptics_hooks_if_loaded(void) {
+    Class chCls = NSClassFromString(@"CHHapticEngine");
+    if (chCls != Nil) {
+        static dispatch_once_t chOnce;
+        dispatch_once(&chOnce, ^{
+            SEL capSel = sel_registerName("capabilitiesForHardware");
+            if (class_getClassMethod(chCls, capSel) != NULL) {
+                ps_swizzle_class_method(chCls, capSel, @selector(pm_ps_ch_capabilitiesForHardware));
+            }
+            SEL startErrSel = sel_registerName("startAndReturnError:");
+            if (class_getInstanceMethod(chCls, startErrSel) != NULL) {
+                ps_swizzle_instance_method(chCls, startErrSel, @selector(pm_ps_ch_startAndReturnError:));
+            }
+            SEL startCompSel = sel_registerName("startWithCompletionHandler:");
+            if (class_getInstanceMethod(chCls, startCompSel) != NULL) {
+                ps_swizzle_instance_method(chCls, startCompSel, @selector(pm_ps_ch_startWithCompletionHandler:));
+            }
+        });
+    }
 }
 
 static os_unfair_lock s_av_hooks_lock = OS_UNFAIR_LOCK_INIT;
@@ -1761,6 +2418,37 @@ __attribute__((visibility("hidden"))) void ps_install_uifont_hooks_if_loaded(voi
                                         @selector(fontWithName:size:),
                                         @selector(pm_ps_uifont_fontWithName:size:));
             }
+            SEL withDescSel = sel_registerName("fontWithDescriptor:size:");
+            if (class_getClassMethod(fontCls, withDescSel) != NULL) {
+                ps_swizzle_class_method(fontCls,
+                                        withDescSel,
+                                        @selector(pm_ps_uifont_fontWithDescriptor:size:));
+            }
+        });
+    }
+    Class descCls = objc_getClass("UIFontDescriptor");
+    if (descCls != Nil) {
+        static dispatch_once_t descOnce;
+        dispatch_once(&descOnce, ^{
+            SEL matchSel = sel_registerName("matchingFontDescriptorsWithMandatoryKeys:");
+            if (class_getInstanceMethod(descCls, matchSel) != NULL) {
+                ps_swizzle_instance_method(descCls,
+                                           matchSel,
+                                           @selector(pm_ps_uifontdesc_matchingFontDescriptorsWithMandatoryKeys:));
+            }
+            Class ctDescCls = objc_getClass("NSCTFontDescriptor");
+            if (ctDescCls != Nil && ctDescCls != descCls && ps_class_defines_instance_method(ctDescCls, matchSel)) {
+                ps_swizzle_instance_method(ctDescCls,
+                                           matchSel,
+                                           @selector(pm_ps_ctfontdesc_matchingFontDescriptorsWithMandatoryKeys:));
+            }
+            Class uiCtDescCls = objc_getClass("UICTFontDescriptor");
+            if (uiCtDescCls != Nil && uiCtDescCls != descCls && uiCtDescCls != ctDescCls &&
+                ps_class_defines_instance_method(uiCtDescCls, matchSel)) {
+                ps_swizzle_instance_method(uiCtDescCls,
+                                           matchSel,
+                                           @selector(pm_ps_uictfontdesc_matchingFontDescriptorsWithMandatoryKeys:));
+            }
         });
     }
 }
@@ -1777,11 +2465,29 @@ __attribute__((visibility("hidden"))) void ps_install_local_auth_hooks_if_loaded
                                            canEvalSel,
                                            @selector(pm_ps_la_canEvaluatePolicy:error:));
             }
+            SEL evalSel = NSSelectorFromString(@"evaluatePolicy:localizedReason:reply:");
+            if (class_getInstanceMethod(laCtxCls, evalSel) != NULL) {
+                ps_swizzle_instance_method(laCtxCls,
+                                           evalSel,
+                                           @selector(pm_ps_la_evaluatePolicy:localizedReason:reply:));
+            }
             SEL biometrySel = NSSelectorFromString(@"biometryType");
             if (class_getInstanceMethod(laCtxCls, biometrySel) != NULL) {
                 ps_swizzle_instance_method(laCtxCls,
                                            biometrySel,
                                            @selector(pm_ps_la_biometryType));
+            }
+        });
+    }
+    Class domainBiometryCls = NSClassFromString(@"LADomainStateBiometry");
+    if (domainBiometryCls != Nil) {
+        static dispatch_once_t domainBioOnce;
+        dispatch_once(&domainBioOnce, ^{
+            SEL biometrySel = NSSelectorFromString(@"biometryType");
+            if (class_getInstanceMethod(domainBiometryCls, biometrySel) != NULL) {
+                ps_swizzle_instance_method(domainBiometryCls,
+                                           biometrySel,
+                                           @selector(pm_ps_la_domain_biometryType));
             }
         });
     }
@@ -1817,6 +2523,12 @@ __attribute__((visibility("hidden"))) void ps_install_game_controller_hooks_if_l
                 ps_swizzle_class_method(gcCls,
                                         bgSel,
                                         @selector(pm_ps_gc_shouldMonitorBackgroundEvents));
+            }
+            SEL setBgSel = NSSelectorFromString(@"setShouldMonitorBackgroundEvents:");
+            if (class_getClassMethod(gcCls, setBgSel) != NULL) {
+                ps_swizzle_class_method(gcCls,
+                                        setBgSel,
+                                        @selector(pm_ps_gc_setShouldMonitorBackgroundEvents:));
             }
             if (class_getClassMethod(gcCls, @selector(respondsToSelector:)) != NULL) {
                 ps_swizzle_class_method(gcCls,

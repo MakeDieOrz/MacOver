@@ -1282,6 +1282,123 @@ static NSMutableDictionary *ps_copy_merged_proxy_dictionary(CFDictionaryRef orig
     return merged;
 }
 
+static BOOL ps_nw_is_app_caller(const void *caller) {
+    if (!ps_is_effective_system_or_playtools_caller(caller)) {
+        return YES;
+    }
+    if (caller != NULL && !pt_is_address_in_playtools(caller)) {
+        const char *img = dyld_image_path_containing_address(caller);
+        if (img != NULL && strstr(img, "libswiftNetwork") != NULL) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static nw_interface_type_t pt_nw_interface_get_type(nw_interface_t interface) {
+    nw_interface_type_t t = nw_interface_get_type(interface);
+    if (t == nw_interface_type_wired &&
+        pt_is_bypass_enabled() &&
+        ps_nw_is_app_caller(__builtin_return_address(0))) {
+        return nw_interface_type_wifi;
+    }
+    return t;
+}
+
+static bool pt_nw_path_uses_interface_type(nw_path_t path, nw_interface_type_t interface_type) {
+    if (pt_is_bypass_enabled() && ps_nw_is_app_caller(__builtin_return_address(0))) {
+        if (interface_type == nw_interface_type_wired) {
+            return false;
+        }
+        if (interface_type == nw_interface_type_wifi) {
+            return nw_path_uses_interface_type(path, nw_interface_type_wifi) ||
+                   nw_path_uses_interface_type(path, nw_interface_type_wired);
+        }
+    }
+    return nw_path_uses_interface_type(path, interface_type);
+}
+
+static void pt_nw_path_enumerate_interfaces(nw_path_t path,
+                                            nw_path_enumerate_interfaces_block_t enumerate_block) {
+    if (enumerate_block == nil) {
+        return;
+    }
+    if (pt_is_bypass_enabled() &&
+        ps_nw_is_app_caller(__builtin_return_address(0))) {
+        nw_path_enumerate_interfaces(path, ^bool(nw_interface_t interface) {
+            if (interface != nil) {
+                const char *ifname = nw_interface_get_name(interface);
+                if (ifname != NULL && ifname[0] != '\0' && pt_is_hidden_network_ifname(ifname)) {
+                    return true;
+                }
+            }
+            return enumerate_block(interface);
+        });
+        return;
+    }
+    nw_path_enumerate_interfaces(path, enumerate_block);
+}
+
+extern CFArrayRef _Nullable pt_orig_CNCopySupportedInterfaces(void)
+    __asm__("_CNCopySupportedInterfaces") __attribute__((weak_import)) CF_RETURNS_RETAINED;
+
+static CFArrayRef _Nullable pt_CNCopySupportedInterfaces(void) CF_RETURNS_RETAINED {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return (__bridge_retained CFArrayRef)@[@"en0"];
+    }
+    return (&pt_orig_CNCopySupportedInterfaces != NULL) ? pt_orig_CNCopySupportedInterfaces() : NULL;
+}
+
+@implementation PSSwizzleHooks (PlayShadowCoreTelephony)
+
+- (NSDictionary *) pm_ps_ct_serviceSubscriberCellularProviders {
+    NSDictionary *orig = [self pm_ps_ct_serviceSubscriberCellularProviders];
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (pt_get_spoofed_device_is_ipad()) {
+            return @{};
+        }
+        return orig ?: @{};
+    }
+    return orig;
+}
+
+- (BOOL) pm_ps_ct_allowsVOIP {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return YES;
+    }
+    return [self pm_ps_ct_allowsVOIP];
+}
+
+@end
+
+__attribute__((visibility("hidden"))) void ps_install_coretelephony_hooks_if_loaded(void) {
+    Class ctCls = objc_getClass("CTTelephonyNetworkInfo");
+    if (ctCls != Nil) {
+        static dispatch_once_t ctOnce;
+        dispatch_once(&ctOnce, ^{
+            SEL provSel = sel_registerName("serviceSubscriberCellularProviders");
+            if (class_getInstanceMethod(ctCls, provSel) != NULL) {
+                ps_swizzle_instance_method(ctCls,
+                                           provSel,
+                                           @selector(pm_ps_ct_serviceSubscriberCellularProviders));
+            }
+        });
+    }
+    Class carrierCls = objc_getClass("CTCarrier");
+    if (carrierCls != Nil) {
+        static dispatch_once_t carrierOnce;
+        dispatch_once(&carrierOnce, ^{
+            SEL voipSel = sel_registerName("allowsVOIP");
+            if (class_getInstanceMethod(carrierCls, voipSel) != NULL) {
+                ps_swizzle_instance_method(carrierCls, voipSel, @selector(pm_ps_ct_allowsVOIP));
+            }
+        });
+    }
+}
+
 static CFDictionaryRef pt_CFNetworkCopySystemProxySettings(void) {
     const void *caller = __builtin_return_address(0);
     PSNetworkRuleSnapshot *snap = [PTSafeMode isActive] ? nil : ps_get_network_snapshot();
@@ -1294,6 +1411,34 @@ static CFDictionaryRef pt_CFNetworkCopySystemProxySettings(void) {
         NSMutableDictionary *merged = ps_copy_merged_proxy_dictionary(orig, snap);
         if (orig != NULL) CFRelease(orig);
         return CFDictionaryCreateCopy(kCFAllocatorDefault, (__bridge CFDictionaryRef)merged);
+    }
+    if (orig != NULL &&
+        pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(caller)) {
+        NSDictionary *origDict = (__bridge NSDictionary *)orig;
+        id scopedObj = origDict[@"__SCOPED__"];
+        if ([scopedObj isKindOfClass:[NSDictionary class]]) {
+            NSDictionary *scopedDict = (NSDictionary *)scopedObj;
+            NSMutableDictionary *cleanedScoped = [NSMutableDictionary dictionaryWithCapacity:scopedDict.count];
+            [scopedDict enumerateKeysAndObjectsUsingBlock:^(id key, id obj, BOOL *stop) {
+                (void)stop;
+                if ([key isKindOfClass:[NSString class]] &&
+                    pt_is_hidden_network_ifname([(NSString *)key UTF8String])) {
+                    return;
+                }
+                cleanedScoped[key] = obj;
+            }];
+            if (cleanedScoped.count != scopedDict.count) {
+                NSMutableDictionary *mut = [origDict mutableCopy];
+                if (cleanedScoped.count > 0) {
+                    mut[@"__SCOPED__"] = [cleanedScoped copy];
+                } else {
+                    [mut removeObjectForKey:@"__SCOPED__"];
+                }
+                CFRelease(orig);
+                return CFDictionaryCreateCopy(kCFAllocatorDefault, (__bridge CFDictionaryRef)mut);
+            }
+        }
     }
     return orig;
 }
@@ -1373,5 +1518,9 @@ PT_INTERPOSE(pt_SecTrustEvaluateAsync, SecTrustEvaluateAsync)
 PT_INTERPOSE(pt_nw_tls_create_options, nw_tls_create_options)
 PT_INTERPOSE(pt_nw_parameters_create_secure_tcp, nw_parameters_create_secure_tcp)
 PT_INTERPOSE(pt_nw_connection_create, nw_connection_create)
+PT_INTERPOSE(pt_nw_interface_get_type, nw_interface_get_type)
+PT_INTERPOSE(pt_nw_path_uses_interface_type, nw_path_uses_interface_type)
+PT_INTERPOSE(pt_nw_path_enumerate_interfaces, nw_path_enumerate_interfaces)
+PT_INTERPOSE_WEAK_NAMED(pt_CNCopySupportedInterfaces, pt_orig_CNCopySupportedInterfaces, "CNCopySupportedInterfaces")
 PT_INTERPOSE(pt_CFNetworkCopySystemProxySettings, CFNetworkCopySystemProxySettings)
 PT_INTERPOSE(pt_CFNetworkCopyProxiesForURL, CFNetworkCopyProxiesForURL)

@@ -7,6 +7,42 @@
 #import <QuartzCore/QuartzCore.h>
 #include <math.h>
 
+typedef NS_ENUM(NSUInteger, PSMTLEncoderStage) {
+    PSMTLEncoderStageCompute = 0,
+    PSMTLEncoderStageFragment = 1,
+    PSMTLEncoderStageVertex = 2,
+};
+
+@interface PSMTLSamplerBindEntry : NSObject {
+@public
+    id _sampler;
+    BOOL _hasLod;
+    float _lodMin;
+    float _lodMax;
+}
+@end
+
+@implementation PSMTLSamplerBindEntry
+@end
+
+@interface PSMTLEncoderBindingState : NSObject {
+@public
+    NSMutableSet<NSNumber *> *_tex32FSlots;
+    NSMutableDictionary<NSNumber *, PSMTLSamplerBindEntry *> *_samplersByStageSlot;
+}
+@end
+
+@implementation PSMTLEncoderBindingState
+- (instancetype) init {
+    self = [super init];
+    if (self != nil) {
+        _tex32FSlots = [[NSMutableSet alloc] init];
+        _samplersByStageSlot = [[NSMutableDictionary alloc] init];
+    }
+    return self;
+}
+@end
+
 @implementation PSSwizzleHooks (PlayShadowGraphics)
 
 typedef struct {
@@ -55,10 +91,42 @@ static CFMutableDictionaryRef s_mtl_orig_arch_name_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_new_lib_sync_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_new_lib_async_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_new_texture_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_new_sampler_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_new_cmdqueue_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_new_cmdqueue_cnt_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_new_dynlib_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_new_binarch_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_new_accel_struct_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_new_counter_buf_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_new_intersect_tbl_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_cq_cmdbuf_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_cq_cmdbuf_unret_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_cb_comp_enc_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_cb_comp_enc_desc_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_cb_comp_enc_disp_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_cb_rend_enc_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_cenc_set_tex_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_cenc_set_texs_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_cenc_set_samp_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_cenc_set_samp_lod_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_cenc_set_samps_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_renc_set_ftex_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_renc_set_ftexs_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_renc_set_fsamp_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_renc_set_fsamp_lod_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_renc_set_fsamps_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_renc_set_vtex_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_renc_set_vtexs_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_renc_set_vsamp_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_renc_set_vsamp_lod_imps = NULL;
+static CFMutableDictionaryRef s_mtl_orig_renc_set_vsamps_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_opts_langver_imps = NULL;
 static CFMutableDictionaryRef s_mtl_orig_opts_set_langver_imps = NULL;
+static CFMutableSetRef s_mtl_swizzled_classes = NULL;
 static const char kPSMTLCompileOptionsExplicitLangVerKey = 0;
-static _Atomic BOOL s_mtl_app_created_32f_texture = NO;
+static const char kPSMTLTextureIs32FKey = 0;
+static const char kPSMTLSamplerNearestFallbackKey = 0;
+static const char kPSMTLEncoderStateKey = 0;
 
 static void pt_mtl_line_and_col_for_location(NSString *source, NSUInteger loc, NSUInteger *outLine, NSUInteger *outCol) {
     NSUInteger line = 1;
@@ -206,6 +274,27 @@ static BOOL pt_mtl_should_reject_source_for_compat13(NSString *source, id option
     return YES;
 }
 
+static void ps_swizzle_mtl_command_queue_class(Class cls);
+static void ps_swizzle_mtl_command_buffer_class(Class cls);
+static void ps_swizzle_mtl_compute_encoder_class(Class cls);
+static void ps_swizzle_mtl_render_encoder_class(Class cls);
+
+static BOOL pt_mtl_class_already_swizzled(Class cls) {
+    if (cls == Nil) {
+        return YES;
+    }
+    os_unfair_lock_lock(&s_mtl_swizzle_lock);
+    if (s_mtl_swizzled_classes == NULL) {
+        s_mtl_swizzled_classes = CFSetCreateMutable(kCFAllocatorDefault, 0, NULL);
+    }
+    BOOL seen = (s_mtl_swizzled_classes != NULL && CFSetContainsValue(s_mtl_swizzled_classes, (__bridge const void *)cls));
+    if (!seen && s_mtl_swizzled_classes != NULL) {
+        CFSetAddValue(s_mtl_swizzled_classes, (__bridge const void *)cls);
+    }
+    os_unfair_lock_unlock(&s_mtl_swizzle_lock);
+    return seen;
+}
+
 static NSString *pt_mtl_rewrite_source_for_apple5_32f(NSString *source, const void *caller) {
     if (source == nil || ![source isKindOfClass:[NSString class]] ||
         !pt_is_bypass_enabled() ||
@@ -213,30 +302,234 @@ static NSString *pt_mtl_rewrite_source_for_apple5_32f(NSString *source, const vo
         (!pt_is_compat13_7_active() && pt_get_spoofed_max_apple_gpu_family() >= 1007)) {
         return source;
     }
-    BOOL shouldRewrite = atomic_load_explicit(&s_mtl_app_created_32f_texture, memory_order_acquire) ||
-        ([source containsString:@"kernel "] && [source containsString:@"texture"]);
-    if (!shouldRewrite) {
+    static NSRegularExpression *s_constexprSamplerRegex = nil;
+    static NSRegularExpression *s_linearFilterRegex = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        s_constexprSamplerRegex = [NSRegularExpression
+            regularExpressionWithPattern:@"constexpr\\s+sampler\\b[^;]*;"
+                                 options:NSRegularExpressionDotMatchesLineSeparators
+                                   error:nil];
+        s_linearFilterRegex = [NSRegularExpression
+            regularExpressionWithPattern:@"\\b(min_filter|mag_filter|filter)\\s*::\\s*linear\\b"
+                                 options:0
+                                   error:nil];
+    });
+    if (s_constexprSamplerRegex == nil || s_linearFilterRegex == nil) {
         return source;
     }
-    if (![source containsString:@"filter::linear"] &&
-        ![source containsString:@"min_filter::linear"] &&
-        ![source containsString:@"mag_filter::linear"]) {
+    NSArray<NSTextCheckingResult *> *matches =
+        [s_constexprSamplerRegex matchesInString:source options:0 range:NSMakeRange(0, source.length)];
+    if (matches.count == 0) {
         return source;
     }
-    NSMutableString *rewritten = [source mutableCopy];
-    [rewritten replaceOccurrencesOfString:@"min_filter::linear"
-                               withString:@"min_filter::nearest"
-                                  options:0
-                                    range:NSMakeRange(0, rewritten.length)];
-    [rewritten replaceOccurrencesOfString:@"mag_filter::linear"
-                               withString:@"mag_filter::nearest"
-                                  options:0
-                                    range:NSMakeRange(0, rewritten.length)];
-    [rewritten replaceOccurrencesOfString:@"filter::linear"
-                               withString:@"filter::nearest"
-                                  options:0
-                                    range:NSMakeRange(0, rewritten.length)];
-    return rewritten;
+    NSMutableString *rewritten = nil;
+    for (NSInteger i = (NSInteger)matches.count - 1; i >= 0; i--) {
+        NSRange declRange = matches[(NSUInteger)i].range;
+        NSString *decl = [source substringWithRange:declRange];
+        NSString *patchedDecl = [s_linearFilterRegex
+            stringByReplacingMatchesInString:decl
+                                     options:0
+                                       range:NSMakeRange(0, decl.length)
+                                withTemplate:@"$1::nearest"];
+        if (![patchedDecl isEqualToString:decl]) {
+            if (rewritten == nil) {
+                rewritten = [source mutableCopy];
+            }
+            [rewritten replaceCharactersInRange:declRange withString:patchedDecl];
+        }
+    }
+    return (rewritten != nil) ? rewritten : source;
+}
+
+static void pt_mtl_prepare_options_and_source(NSString *source,
+                                              id options,
+                                              const void *caller,
+                                              NSString **outSource,
+                                              id *outOptions) {
+    NSString *finalSource = source;
+    id finalOptions = options;
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(caller)) {
+        if (finalSource != nil && [finalSource isKindOfClass:[NSString class]]) {
+            finalSource = pt_mtl_rewrite_source_for_apple5_32f(finalSource, caller);
+            if (![finalSource hasPrefix:@"#undef __METAL_MACOS__\n"]) {
+                finalSource = [@"#undef __METAL_MACOS__\n#define __METAL_IOS__ 1\n#line 1\n"
+                    stringByAppendingString:finalSource];
+            }
+        }
+        if (pt_is_compat13_7_active()) {
+            if (finalOptions == nil) {
+                Class optsCls = NSClassFromString(@"MTLCompileOptions");
+                if (optsCls != Nil) {
+                    finalOptions = [optsCls new];
+                }
+            } else if (objc_getAssociatedObject(finalOptions, &kPSMTLCompileOptionsExplicitLangVerKey) == nil &&
+                       [finalOptions respondsToSelector:@selector(copy)]) {
+                finalOptions = [finalOptions copy];
+            }
+            if (finalOptions != nil &&
+                objc_getAssociatedObject(options ?: finalOptions, &kPSMTLCompileOptionsExplicitLangVerKey) == nil) {
+                SEL setLangSel = sel_registerName("setLanguageVersion:");
+                if ([finalOptions respondsToSelector:setLangSel]) {
+                    ((void (*)(id, SEL, NSUInteger))objc_msgSend)(finalOptions, setLangSel, ((2U << 16) | 2U));
+                }
+            }
+        }
+    }
+    if (outSource != NULL) {
+        *outSource = finalSource;
+    }
+    if (outOptions != NULL) {
+        *outOptions = finalOptions;
+    }
+}
+
+static NSError *pt_mtl_make_compat13_unsupported_error(NSString *domain, NSInteger code, NSString *feature) {
+    return [NSError errorWithDomain:domain
+                                code:code
+                            userInfo:@{
+                                NSLocalizedDescriptionKey : [NSString stringWithFormat:@"%@ is unsupported on this device", feature]
+                            }];
+}
+
+static inline uint64_t ps_mtl_stage_slot_key(PSMTLEncoderStage stage, NSUInteger index) {
+    return (((uint64_t)stage & 0xFULL) << 32) | ((uint64_t)index & 0xFFFFFFFFULL);
+}
+
+static PSMTLEncoderBindingState *ps_mtl_encoder_state(id encoder, BOOL createIfMissing) {
+    if (encoder == nil) {
+        return nil;
+    }
+    PSMTLEncoderBindingState *state = objc_getAssociatedObject(encoder, &kPSMTLEncoderStateKey);
+    if (state == nil && createIfMissing) {
+        state = [[PSMTLEncoderBindingState alloc] init];
+        objc_setAssociatedObject(encoder, &kPSMTLEncoderStateKey, state, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return state;
+}
+
+static void ps_mtl_encoder_apply_sampler(id encoder,
+                                         PSMTLEncoderStage stage,
+                                         NSUInteger index,
+                                         PSMTLSamplerBindEntry *entry,
+                                         id samplerToBind) {
+    if (encoder == nil || entry == nil) {
+        return;
+    }
+    CFMutableDictionaryRef dict = NULL;
+    SEL sel = NULL;
+    if (stage == PSMTLEncoderStageCompute) {
+        dict = entry->_hasLod ? s_mtl_orig_cenc_set_samp_lod_imps : s_mtl_orig_cenc_set_samp_imps;
+        sel = entry->_hasLod ? sel_registerName("setSamplerState:lodMinClamp:lodMaxClamp:atIndex:")
+                             : sel_registerName("setSamplerState:atIndex:");
+    } else if (stage == PSMTLEncoderStageFragment) {
+        dict = entry->_hasLod ? s_mtl_orig_renc_set_fsamp_lod_imps : s_mtl_orig_renc_set_fsamp_imps;
+        sel = entry->_hasLod ? sel_registerName("setFragmentSamplerState:lodMinClamp:lodMaxClamp:atIndex:")
+                             : sel_registerName("setFragmentSamplerState:atIndex:");
+    } else if (stage == PSMTLEncoderStageVertex) {
+        dict = entry->_hasLod ? s_mtl_orig_renc_set_vsamp_lod_imps : s_mtl_orig_renc_set_vsamp_imps;
+        sel = entry->_hasLod ? sel_registerName("setVertexSamplerState:lodMinClamp:lodMaxClamp:atIndex:")
+                             : sel_registerName("setVertexSamplerState:atIndex:");
+    }
+    if (dict == NULL || sel == NULL) {
+        return;
+    }
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, dict, encoder, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            if (entry->_hasLod) {
+                ((void (*)(id, SEL, id, float, float, NSUInteger))origIMP)(
+                    encoder, sel, samplerToBind, entry->_lodMin, entry->_lodMax, index);
+            } else {
+                ((void (*)(id, SEL, id, NSUInteger))origIMP)(encoder, sel, samplerToBind, index);
+            }
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+}
+
+static void ps_mtl_encoder_record_textures(id encoder,
+                                           PSMTLEncoderStage stage,
+                                           const id __unsafe_unretained *textures,
+                                           NSRange range) {
+    if (encoder == nil ||
+        !pt_is_bypass_enabled() ||
+        (!pt_is_compat13_7_active() && pt_get_spoofed_max_apple_gpu_family() >= 1007)) {
+        return;
+    }
+    PSMTLEncoderBindingState *state = ps_mtl_encoder_state(encoder, YES);
+    NSMutableArray *updates = nil;
+    @synchronized (state) {
+        BOOL had32F = (state->_tex32FSlots.count > 0);
+        for (NSUInteger i = 0; i < range.length; i++) {
+            id tex = (textures != NULL) ? textures[i] : nil;
+            BOOL is32F = (tex != nil && objc_getAssociatedObject(tex, &kPSMTLTextureIs32FKey) != nil);
+            NSNumber *slotKey = @(ps_mtl_stage_slot_key(stage, range.location + i));
+            if (is32F) {
+                [state->_tex32FSlots addObject:slotKey];
+            } else {
+                [state->_tex32FSlots removeObject:slotKey];
+            }
+        }
+        BOOL has32F = (state->_tex32FSlots.count > 0);
+        if (had32F != has32F && state->_samplersByStageSlot.count > 0) {
+            updates = [NSMutableArray arrayWithCapacity:state->_samplersByStageSlot.count * 3];
+            [state->_samplersByStageSlot enumerateKeysAndObjectsUsingBlock:^(NSNumber *key, PSMTLSamplerBindEntry *entry, BOOL *stop) {
+                (void)stop;
+                id fallback = objc_getAssociatedObject(entry->_sampler, &kPSMTLSamplerNearestFallbackKey);
+                id target = has32F ? (fallback ?: entry->_sampler) : entry->_sampler;
+                if (target != nil) {
+                    [updates addObject:key];
+                    [updates addObject:entry];
+                    [updates addObject:target];
+                }
+            }];
+        }
+    }
+    for (NSUInteger i = 0; i + 2 < updates.count; i += 3) {
+        uint64_t k = ((NSNumber *)updates[i]).unsignedLongLongValue;
+        PSMTLEncoderStage s = (PSMTLEncoderStage)((k >> 32) & 0xFULL);
+        NSUInteger idx = (NSUInteger)(k & 0xFFFFFFFFULL);
+        ps_mtl_encoder_apply_sampler(encoder, s, idx, updates[i + 1], updates[i + 2]);
+    }
+}
+
+static id ps_mtl_encoder_record_sampler(id encoder,
+                                        PSMTLEncoderStage stage,
+                                        id sampler,
+                                        BOOL hasLod,
+                                        float lodMin,
+                                        float lodMax,
+                                        NSUInteger index) {
+    if (encoder == nil ||
+        !pt_is_bypass_enabled() ||
+        (!pt_is_compat13_7_active() && pt_get_spoofed_max_apple_gpu_family() >= 1007)) {
+        return sampler;
+    }
+    id fallback = (sampler != nil) ? objc_getAssociatedObject(sampler, &kPSMTLSamplerNearestFallbackKey) : nil;
+    PSMTLEncoderBindingState *state = ps_mtl_encoder_state(encoder, (fallback != nil));
+    if (state == nil) {
+        return sampler;
+    }
+    NSNumber *slotKey = @(ps_mtl_stage_slot_key(stage, index));
+    @synchronized (state) {
+        if (fallback != nil) {
+            PSMTLSamplerBindEntry *entry = [[PSMTLSamplerBindEntry alloc] init];
+            entry->_sampler = sampler;
+            entry->_hasLod = hasLod;
+            entry->_lodMin = lodMin;
+            entry->_lodMax = lodMax;
+            state->_samplersByStageSlot[slotKey] = entry;
+            if (state->_tex32FSlots.count > 0) {
+                return fallback;
+            }
+        } else {
+            [state->_samplersByStageSlot removeObjectForKey:slotKey];
+        }
+    }
+    return sampler;
 }
 
 static uint64_t ps_mtl_memory_cap(void) {
@@ -984,7 +1277,7 @@ static uint64_t ps_mtl_memory_cap(void) {
             }
             return nil;
         }
-        source = pt_mtl_rewrite_source_for_apple5_32f(source, caller);
+        pt_mtl_prepare_options_and_source(source, options, caller, &source, &options);
     }
     SEL sel = sel_registerName("newLibraryWithSource:options:error:");
     BOOL pushed = NO;
@@ -1012,7 +1305,7 @@ static uint64_t ps_mtl_memory_cap(void) {
             }
             return;
         }
-        source = pt_mtl_rewrite_source_for_apple5_32f(source, caller);
+        pt_mtl_prepare_options_and_source(source, options, caller, &source, &options);
     }
     SEL sel = sel_registerName("newLibraryWithSource:options:completionHandler:");
     BOOL pushed = NO;
@@ -1027,29 +1320,668 @@ static uint64_t ps_mtl_memory_cap(void) {
 }
 
 - (id) pm_ps_mtl_newTextureWithDescriptor:(id)descriptor NS_RETURNS_RETAINED {
-    if (descriptor != nil &&
+    const void *caller = __builtin_return_address(0);
+    SEL sel = sel_registerName("newTextureWithDescriptor:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_new_texture_imps, self, &pushed);
+    id tex = nil;
+    if (origIMP != NULL) {
+        typedef id (*PTMTLNewTexOrigFn)(id, SEL, id) NS_RETURNS_RETAINED;
+        @try {
+            tex = ((PTMTLNewTexOrigFn)origIMP)(self, sel, descriptor);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    if (tex != nil && descriptor != nil &&
         pt_is_bypass_enabled() &&
-        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        !ps_is_effective_system_or_playtools_caller(caller)) {
         SEL pfSel = sel_registerName("pixelFormat");
         if ([descriptor respondsToSelector:pfSel]) {
             NSUInteger pf = ((NSUInteger (*)(id, SEL))objc_msgSend)(descriptor, pfSel);
             if (pf == 55U || pf == 105U || pf == 125U) {
-                atomic_store_explicit(&s_mtl_app_created_32f_texture, YES, memory_order_release);
+                objc_setAssociatedObject(tex, &kPSMTLTextureIs32FKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             }
         }
     }
-    SEL sel = sel_registerName("newTextureWithDescriptor:");
+    return tex;
+}
+
+- (id) pm_ps_mtl_newSamplerStateWithDescriptor:(id)descriptor NS_RETURNS_RETAINED {
+    const void *caller = __builtin_return_address(0);
+    SEL sel = sel_registerName("newSamplerStateWithDescriptor:");
     BOOL pushed = NO;
-    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_new_texture_imps, self, &pushed);
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_new_sampler_imps, self, &pushed);
+    id sampler = nil;
+    typedef id (*PTMTLNewSamplerOrigFn)(id, SEL, id) NS_RETURNS_RETAINED;
     if (origIMP != NULL) {
-        typedef id (*PTMTLNewTexOrigFn)(id, SEL, id) NS_RETURNS_RETAINED;
         @try {
-            return ((PTMTLNewTexOrigFn)origIMP)(self, sel, descriptor);
+            sampler = ((PTMTLNewSamplerOrigFn)origIMP)(self, sel, descriptor);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    if (origIMP != NULL && sampler != nil && descriptor != nil &&
+        pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(caller) &&
+        (pt_is_compat13_7_active() || pt_get_spoofed_max_apple_gpu_family() < 1007) &&
+        [descriptor respondsToSelector:@selector(copy)]) {
+        SEL minSel = sel_registerName("minFilter");
+        SEL magSel = sel_registerName("magFilter");
+        SEL mipSel = sel_registerName("mipFilter");
+        NSUInteger minF = [descriptor respondsToSelector:minSel] ? ((NSUInteger (*)(id, SEL))objc_msgSend)(descriptor, minSel) : 0U;
+        NSUInteger magF = [descriptor respondsToSelector:magSel] ? ((NSUInteger (*)(id, SEL))objc_msgSend)(descriptor, magSel) : 0U;
+        NSUInteger mipF = [descriptor respondsToSelector:mipSel] ? ((NSUInteger (*)(id, SEL))objc_msgSend)(descriptor, mipSel) : 0U;
+        if (minF == 1U || magF == 1U || mipF == 2U) {
+            id patchedDesc = [descriptor copy];
+            if (patchedDesc != nil) {
+                SEL setMinSel = sel_registerName("setMinFilter:");
+                SEL setMagSel = sel_registerName("setMagFilter:");
+                SEL setMipSel = sel_registerName("setMipFilter:");
+                if (minF == 1U && [patchedDesc respondsToSelector:setMinSel]) {
+                    ((void (*)(id, SEL, NSUInteger))objc_msgSend)(patchedDesc, setMinSel, 0U);
+                }
+                if (magF == 1U && [patchedDesc respondsToSelector:setMagSel]) {
+                    ((void (*)(id, SEL, NSUInteger))objc_msgSend)(patchedDesc, setMagSel, 0U);
+                }
+                if (mipF == 2U && [patchedDesc respondsToSelector:setMipSel]) {
+                    ((void (*)(id, SEL, NSUInteger))objc_msgSend)(patchedDesc, setMipSel, 1U);
+                }
+                BOOL pushedFallback = NO;
+                IMP fallbackIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_new_sampler_imps, self, &pushedFallback);
+                if (fallbackIMP != NULL) {
+                    id fallback = nil;
+                    @try {
+                        fallback = ((PTMTLNewSamplerOrigFn)fallbackIMP)(self, sel, patchedDesc);
+                    } @finally {
+                        ps_pop_orig_imp_frame(pushedFallback);
+                    }
+                    if (fallback != nil) {
+                        objc_setAssociatedObject(sampler, &kPSMTLSamplerNearestFallbackKey, fallback,
+                                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    }
+                }
+            }
+        }
+    }
+    return sampler;
+}
+
+- (id) pm_ps_mtl_newCommandQueue NS_RETURNS_RETAINED {
+    SEL sel = sel_registerName("newCommandQueue");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_new_cmdqueue_imps, self, &pushed);
+    id queue = nil;
+    if (origIMP != NULL) {
+        typedef id (*PTMTLNewCQOrigFn)(id, SEL) NS_RETURNS_RETAINED;
+        @try {
+            queue = ((PTMTLNewCQOrigFn)origIMP)(self, sel);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    if (queue != nil) {
+        ps_swizzle_mtl_command_queue_class(object_getClass(queue));
+    }
+    return queue;
+}
+
+- (id) pm_ps_mtl_newCommandQueueWithMaxCommandBufferCount:(NSUInteger)count NS_RETURNS_RETAINED {
+    SEL sel = sel_registerName("newCommandQueueWithMaxCommandBufferCount:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_new_cmdqueue_cnt_imps, self, &pushed);
+    id queue = nil;
+    if (origIMP != NULL) {
+        typedef id (*PTMTLNewCQCntOrigFn)(id, SEL, NSUInteger) NS_RETURNS_RETAINED;
+        @try {
+            queue = ((PTMTLNewCQCntOrigFn)origIMP)(self, sel, count);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    if (queue != nil) {
+        ps_swizzle_mtl_command_queue_class(object_getClass(queue));
+    }
+    return queue;
+}
+
+- (id) pm_ps_mtl_newDynamicLibrary:(id)library error:(NSError **)error NS_RETURNS_RETAINED {
+    if (pt_is_bypass_enabled() &&
+        pt_is_compat13_7_active() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (error != NULL) {
+            *error = pt_mtl_make_compat13_unsupported_error(@"MTLLibraryErrorDomain", 1, @"Dynamic Metal libraries");
+        }
+        return nil;
+    }
+    SEL sel = sel_registerName("newDynamicLibrary:error:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_new_dynlib_imps, self, &pushed);
+    if (origIMP != NULL) {
+        typedef id (*PTMTLNewDynLibOrigFn)(id, SEL, id, NSError **) NS_RETURNS_RETAINED;
+        @try {
+            return ((PTMTLNewDynLibOrigFn)origIMP)(self, sel, library, error);
         } @finally {
             ps_pop_orig_imp_frame(pushed);
         }
     }
     return nil;
+}
+
+- (id) pm_ps_mtl_newBinaryArchiveWithDescriptor:(id)descriptor error:(NSError **)error NS_RETURNS_RETAINED {
+    if (pt_is_bypass_enabled() &&
+        pt_is_compat13_7_active() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (error != NULL) {
+            *error = pt_mtl_make_compat13_unsupported_error(@"MTLBinaryArchiveErrorDomain", 1, @"Binary archives");
+        }
+        return nil;
+    }
+    SEL sel = sel_registerName("newBinaryArchiveWithDescriptor:error:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_new_binarch_imps, self, &pushed);
+    if (origIMP != NULL) {
+        typedef id (*PTMTLNewBinArchOrigFn)(id, SEL, id, NSError **) NS_RETURNS_RETAINED;
+        @try {
+            return ((PTMTLNewBinArchOrigFn)origIMP)(self, sel, descriptor, error);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    return nil;
+}
+
+- (id) pm_ps_mtl_newAccelerationStructureWithDescriptor:(id)descriptor NS_RETURNS_RETAINED {
+    if (pt_is_bypass_enabled() &&
+        pt_is_compat13_7_active() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return nil;
+    }
+    SEL sel = sel_registerName("newAccelerationStructureWithDescriptor:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_new_accel_struct_imps, self, &pushed);
+    if (origIMP != NULL) {
+        typedef id (*PTMTLNewAccelOrigFn)(id, SEL, id) NS_RETURNS_RETAINED;
+        @try {
+            return ((PTMTLNewAccelOrigFn)origIMP)(self, sel, descriptor);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    return nil;
+}
+
+- (id) pm_ps_mtl_newCounterSampleBufferWithDescriptor:(id)descriptor error:(NSError **)error NS_RETURNS_RETAINED {
+    if (pt_is_bypass_enabled() &&
+        pt_is_compat13_7_active() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (error != NULL) {
+            *error = pt_mtl_make_compat13_unsupported_error(@"MTLCounterErrorDomain", 1, @"Counter sample buffers");
+        }
+        return nil;
+    }
+    SEL sel = sel_registerName("newCounterSampleBufferWithDescriptor:error:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_new_counter_buf_imps, self, &pushed);
+    if (origIMP != NULL) {
+        typedef id (*PTMTLNewCounterOrigFn)(id, SEL, id, NSError **) NS_RETURNS_RETAINED;
+        @try {
+            return ((PTMTLNewCounterOrigFn)origIMP)(self, sel, descriptor, error);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    return nil;
+}
+
+- (id) pm_ps_mtl_newIntersectionFunctionTableWithDescriptor:(id)descriptor NS_RETURNS_RETAINED {
+    if (pt_is_bypass_enabled() &&
+        pt_is_compat13_7_active() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return nil;
+    }
+    SEL sel = sel_registerName("newIntersectionFunctionTableWithDescriptor:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_new_intersect_tbl_imps, self, &pushed);
+    if (origIMP != NULL) {
+        typedef id (*PTMTLNewIntersectOrigFn)(id, SEL, id) NS_RETURNS_RETAINED;
+        @try {
+            return ((PTMTLNewIntersectOrigFn)origIMP)(self, sel, descriptor);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    return nil;
+}
+
+- (id) pm_ps_mtl_cq_commandBuffer {
+    SEL sel = sel_registerName("commandBuffer");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_cq_cmdbuf_imps, self, &pushed);
+    id cb = nil;
+    if (origIMP != NULL) {
+        @try {
+            cb = ((id (*)(id, SEL))origIMP)(self, sel);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    if (cb != nil) {
+        ps_swizzle_mtl_command_buffer_class(object_getClass(cb));
+    }
+    return cb;
+}
+
+- (id) pm_ps_mtl_cq_commandBufferWithUnretainedReferences {
+    SEL sel = sel_registerName("commandBufferWithUnretainedReferences");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_cq_cmdbuf_unret_imps, self, &pushed);
+    id cb = nil;
+    if (origIMP != NULL) {
+        @try {
+            cb = ((id (*)(id, SEL))origIMP)(self, sel);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    if (cb != nil) {
+        ps_swizzle_mtl_command_buffer_class(object_getClass(cb));
+    }
+    return cb;
+}
+
+- (id) pm_ps_mtl_cb_computeCommandEncoder {
+    SEL sel = sel_registerName("computeCommandEncoder");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_cb_comp_enc_imps, self, &pushed);
+    id enc = nil;
+    if (origIMP != NULL) {
+        @try {
+            enc = ((id (*)(id, SEL))origIMP)(self, sel);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    if (enc != nil) {
+        ps_swizzle_mtl_compute_encoder_class(object_getClass(enc));
+    }
+    return enc;
+}
+
+- (id) pm_ps_mtl_cb_computeCommandEncoderWithDescriptor:(id)descriptor {
+    SEL sel = sel_registerName("computeCommandEncoderWithDescriptor:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_cb_comp_enc_desc_imps, self, &pushed);
+    id enc = nil;
+    if (origIMP != NULL) {
+        @try {
+            enc = ((id (*)(id, SEL, id))origIMP)(self, sel, descriptor);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    if (enc != nil) {
+        ps_swizzle_mtl_compute_encoder_class(object_getClass(enc));
+    }
+    return enc;
+}
+
+- (id) pm_ps_mtl_cb_computeCommandEncoderWithDispatchType:(NSUInteger)dispatchType {
+    SEL sel = sel_registerName("computeCommandEncoderWithDispatchType:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_cb_comp_enc_disp_imps, self, &pushed);
+    id enc = nil;
+    if (origIMP != NULL) {
+        @try {
+            enc = ((id (*)(id, SEL, NSUInteger))origIMP)(self, sel, dispatchType);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    if (enc != nil) {
+        ps_swizzle_mtl_compute_encoder_class(object_getClass(enc));
+    }
+    return enc;
+}
+
+- (id) pm_ps_mtl_cb_renderCommandEncoderWithDescriptor:(id)descriptor {
+    SEL sel = sel_registerName("renderCommandEncoderWithDescriptor:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_cb_rend_enc_imps, self, &pushed);
+    id enc = nil;
+    if (origIMP != NULL) {
+        @try {
+            enc = ((id (*)(id, SEL, id))origIMP)(self, sel, descriptor);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    if (enc != nil) {
+        ps_swizzle_mtl_render_encoder_class(object_getClass(enc));
+    }
+    return enc;
+}
+
+- (void) pm_ps_mtl_cenc_setTexture:(id)texture atIndex:(NSUInteger)index {
+    const void *caller = __builtin_return_address(0);
+    SEL sel = sel_registerName("setTexture:atIndex:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_cenc_set_tex_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            ((void (*)(id, SEL, id, NSUInteger))origIMP)(self, sel, texture, index);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    if (!ps_is_effective_system_or_playtools_caller(caller)) {
+        id __unsafe_unretained singleTex = texture;
+        ps_mtl_encoder_record_textures(self, PSMTLEncoderStageCompute, &singleTex, NSMakeRange(index, 1));
+    }
+}
+
+- (void) pm_ps_mtl_cenc_setTextures:(const id __unsafe_unretained *)textures withRange:(NSRange)range {
+    const void *caller = __builtin_return_address(0);
+    SEL sel = sel_registerName("setTextures:withRange:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_cenc_set_texs_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            ((void (*)(id, SEL, const id __unsafe_unretained *, NSRange))origIMP)(self, sel, textures, range);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    if (!ps_is_effective_system_or_playtools_caller(caller) && range.length > 0) {
+        ps_mtl_encoder_record_textures(self, PSMTLEncoderStageCompute, textures, range);
+    }
+}
+
+- (void) pm_ps_mtl_cenc_setSamplerState:(id)sampler atIndex:(NSUInteger)index {
+    const void *caller = __builtin_return_address(0);
+    id effSampler = ps_is_effective_system_or_playtools_caller(caller)
+        ? sampler
+        : ps_mtl_encoder_record_sampler(self, PSMTLEncoderStageCompute, sampler, NO, 0.0f, 0.0f, index);
+    SEL sel = sel_registerName("setSamplerState:atIndex:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_cenc_set_samp_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            ((void (*)(id, SEL, id, NSUInteger))origIMP)(self, sel, effSampler, index);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+}
+
+- (void) pm_ps_mtl_cenc_setSamplerState:(id)sampler
+                            lodMinClamp:(float)lodMinClamp
+                            lodMaxClamp:(float)lodMaxClamp
+                                atIndex:(NSUInteger)index {
+    const void *caller = __builtin_return_address(0);
+    id effSampler = ps_is_effective_system_or_playtools_caller(caller)
+        ? sampler
+        : ps_mtl_encoder_record_sampler(self, PSMTLEncoderStageCompute, sampler, YES, lodMinClamp, lodMaxClamp, index);
+    SEL sel = sel_registerName("setSamplerState:lodMinClamp:lodMaxClamp:atIndex:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_cenc_set_samp_lod_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            ((void (*)(id, SEL, id, float, float, NSUInteger))origIMP)(
+                self, sel, effSampler, lodMinClamp, lodMaxClamp, index);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+}
+
+- (void) pm_ps_mtl_cenc_setSamplerStates:(const id __unsafe_unretained *)samplers withRange:(NSRange)range {
+    const void *caller = __builtin_return_address(0);
+    SEL sel = sel_registerName("setSamplerStates:withRange:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_cenc_set_samps_imps, self, &pushed);
+    if (origIMP == NULL) {
+        return;
+    }
+    const id __unsafe_unretained *effSamplers = samplers;
+    if (!ps_is_effective_system_or_playtools_caller(caller) && samplers != NULL && range.length > 0 && range.length <= 256) {
+        id __unsafe_unretained stackBuf[256];
+        BOOL changed = NO;
+        for (NSUInteger i = 0; i < range.length; i++) {
+            id origS = samplers[i];
+            id effS = ps_mtl_encoder_record_sampler(self, PSMTLEncoderStageCompute, origS, NO, 0.0f, 0.0f, range.location + i);
+            stackBuf[i] = effS;
+            if (effS != origS) {
+                changed = YES;
+            }
+        }
+        effSamplers = changed ? stackBuf : samplers;
+        @try {
+            ((void (*)(id, SEL, const id __unsafe_unretained *, NSRange))origIMP)(self, sel, effSamplers, range);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+        return;
+    }
+    @try {
+        ((void (*)(id, SEL, const id __unsafe_unretained *, NSRange))origIMP)(self, sel, samplers, range);
+    } @finally {
+        ps_pop_orig_imp_frame(pushed);
+    }
+}
+
+- (void) pm_ps_mtl_renc_setFragmentTexture:(id)texture atIndex:(NSUInteger)index {
+    const void *caller = __builtin_return_address(0);
+    SEL sel = sel_registerName("setFragmentTexture:atIndex:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_renc_set_ftex_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            ((void (*)(id, SEL, id, NSUInteger))origIMP)(self, sel, texture, index);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    if (!ps_is_effective_system_or_playtools_caller(caller)) {
+        id __unsafe_unretained singleTex = texture;
+        ps_mtl_encoder_record_textures(self, PSMTLEncoderStageFragment, &singleTex, NSMakeRange(index, 1));
+    }
+}
+
+- (void) pm_ps_mtl_renc_setFragmentTextures:(const id __unsafe_unretained *)textures withRange:(NSRange)range {
+    const void *caller = __builtin_return_address(0);
+    SEL sel = sel_registerName("setFragmentTextures:withRange:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_renc_set_ftexs_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            ((void (*)(id, SEL, const id __unsafe_unretained *, NSRange))origIMP)(self, sel, textures, range);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    if (!ps_is_effective_system_or_playtools_caller(caller) && range.length > 0) {
+        ps_mtl_encoder_record_textures(self, PSMTLEncoderStageFragment, textures, range);
+    }
+}
+
+- (void) pm_ps_mtl_renc_setFragmentSamplerState:(id)sampler atIndex:(NSUInteger)index {
+    const void *caller = __builtin_return_address(0);
+    id effSampler = ps_is_effective_system_or_playtools_caller(caller)
+        ? sampler
+        : ps_mtl_encoder_record_sampler(self, PSMTLEncoderStageFragment, sampler, NO, 0.0f, 0.0f, index);
+    SEL sel = sel_registerName("setFragmentSamplerState:atIndex:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_renc_set_fsamp_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            ((void (*)(id, SEL, id, NSUInteger))origIMP)(self, sel, effSampler, index);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+}
+
+- (void) pm_ps_mtl_renc_setFragmentSamplerState:(id)sampler
+                                    lodMinClamp:(float)lodMinClamp
+                                    lodMaxClamp:(float)lodMaxClamp
+                                        atIndex:(NSUInteger)index {
+    const void *caller = __builtin_return_address(0);
+    id effSampler = ps_is_effective_system_or_playtools_caller(caller)
+        ? sampler
+        : ps_mtl_encoder_record_sampler(self, PSMTLEncoderStageFragment, sampler, YES, lodMinClamp, lodMaxClamp, index);
+    SEL sel = sel_registerName("setFragmentSamplerState:lodMinClamp:lodMaxClamp:atIndex:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_renc_set_fsamp_lod_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            ((void (*)(id, SEL, id, float, float, NSUInteger))origIMP)(
+                self, sel, effSampler, lodMinClamp, lodMaxClamp, index);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+}
+
+- (void) pm_ps_mtl_renc_setFragmentSamplerStates:(const id __unsafe_unretained *)samplers withRange:(NSRange)range {
+    const void *caller = __builtin_return_address(0);
+    SEL sel = sel_registerName("setFragmentSamplerStates:withRange:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_renc_set_fsamps_imps, self, &pushed);
+    if (origIMP == NULL) {
+        return;
+    }
+    if (!ps_is_effective_system_or_playtools_caller(caller) && samplers != NULL && range.length > 0 && range.length <= 256) {
+        id __unsafe_unretained stackBuf[256];
+        BOOL changed = NO;
+        for (NSUInteger i = 0; i < range.length; i++) {
+            id origS = samplers[i];
+            id effS = ps_mtl_encoder_record_sampler(self, PSMTLEncoderStageFragment, origS, NO, 0.0f, 0.0f, range.location + i);
+            stackBuf[i] = effS;
+            if (effS != origS) {
+                changed = YES;
+            }
+        }
+        const id __unsafe_unretained *effSamplers = changed ? stackBuf : samplers;
+        @try {
+            ((void (*)(id, SEL, const id __unsafe_unretained *, NSRange))origIMP)(self, sel, effSamplers, range);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+        return;
+    }
+    @try {
+        ((void (*)(id, SEL, const id __unsafe_unretained *, NSRange))origIMP)(self, sel, samplers, range);
+    } @finally {
+        ps_pop_orig_imp_frame(pushed);
+    }
+}
+
+- (void) pm_ps_mtl_renc_setVertexTexture:(id)texture atIndex:(NSUInteger)index {
+    const void *caller = __builtin_return_address(0);
+    SEL sel = sel_registerName("setVertexTexture:atIndex:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_renc_set_vtex_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            ((void (*)(id, SEL, id, NSUInteger))origIMP)(self, sel, texture, index);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    if (!ps_is_effective_system_or_playtools_caller(caller)) {
+        id __unsafe_unretained singleTex = texture;
+        ps_mtl_encoder_record_textures(self, PSMTLEncoderStageVertex, &singleTex, NSMakeRange(index, 1));
+    }
+}
+
+- (void) pm_ps_mtl_renc_setVertexTextures:(const id __unsafe_unretained *)textures withRange:(NSRange)range {
+    const void *caller = __builtin_return_address(0);
+    SEL sel = sel_registerName("setVertexTextures:withRange:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_renc_set_vtexs_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            ((void (*)(id, SEL, const id __unsafe_unretained *, NSRange))origIMP)(self, sel, textures, range);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+    if (!ps_is_effective_system_or_playtools_caller(caller) && range.length > 0) {
+        ps_mtl_encoder_record_textures(self, PSMTLEncoderStageVertex, textures, range);
+    }
+}
+
+- (void) pm_ps_mtl_renc_setVertexSamplerState:(id)sampler atIndex:(NSUInteger)index {
+    const void *caller = __builtin_return_address(0);
+    id effSampler = ps_is_effective_system_or_playtools_caller(caller)
+        ? sampler
+        : ps_mtl_encoder_record_sampler(self, PSMTLEncoderStageVertex, sampler, NO, 0.0f, 0.0f, index);
+    SEL sel = sel_registerName("setVertexSamplerState:atIndex:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_renc_set_vsamp_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            ((void (*)(id, SEL, id, NSUInteger))origIMP)(self, sel, effSampler, index);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+}
+
+- (void) pm_ps_mtl_renc_setVertexSamplerState:(id)sampler
+                                  lodMinClamp:(float)lodMinClamp
+                                  lodMaxClamp:(float)lodMaxClamp
+                                      atIndex:(NSUInteger)index {
+    const void *caller = __builtin_return_address(0);
+    id effSampler = ps_is_effective_system_or_playtools_caller(caller)
+        ? sampler
+        : ps_mtl_encoder_record_sampler(self, PSMTLEncoderStageVertex, sampler, YES, lodMinClamp, lodMaxClamp, index);
+    SEL sel = sel_registerName("setVertexSamplerState:lodMinClamp:lodMaxClamp:atIndex:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_renc_set_vsamp_lod_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try {
+            ((void (*)(id, SEL, id, float, float, NSUInteger))origIMP)(
+                self, sel, effSampler, lodMinClamp, lodMaxClamp, index);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+    }
+}
+
+- (void) pm_ps_mtl_renc_setVertexSamplerStates:(const id __unsafe_unretained *)samplers withRange:(NSRange)range {
+    const void *caller = __builtin_return_address(0);
+    SEL sel = sel_registerName("setVertexSamplerStates:withRange:");
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_mtl_swizzle_lock, s_mtl_orig_renc_set_vsamps_imps, self, &pushed);
+    if (origIMP == NULL) {
+        return;
+    }
+    if (!ps_is_effective_system_or_playtools_caller(caller) && samplers != NULL && range.length > 0 && range.length <= 256) {
+        id __unsafe_unretained stackBuf[256];
+        BOOL changed = NO;
+        for (NSUInteger i = 0; i < range.length; i++) {
+            id origS = samplers[i];
+            id effS = ps_mtl_encoder_record_sampler(self, PSMTLEncoderStageVertex, origS, NO, 0.0f, 0.0f, range.location + i);
+            stackBuf[i] = effS;
+            if (effS != origS) {
+                changed = YES;
+            }
+        }
+        const id __unsafe_unretained *effSamplers = changed ? stackBuf : samplers;
+        @try {
+            ((void (*)(id, SEL, const id __unsafe_unretained *, NSRange))origIMP)(self, sel, effSamplers, range);
+        } @finally {
+            ps_pop_orig_imp_frame(pushed);
+        }
+        return;
+    }
+    @try {
+        ((void (*)(id, SEL, const id __unsafe_unretained *, NSRange))origIMP)(self, sel, samplers, range);
+    } @finally {
+        ps_pop_orig_imp_frame(pushed);
+    }
 }
 
 - (void) pm_ps_mtl_opts_setLanguageVersion:(NSUInteger)ver {
@@ -1236,6 +2168,117 @@ static void ps_swizzle_mtl_device_class(Class cls) {
     ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_new_texture_imps, cls,
                                      sel_registerName("newTextureWithDescriptor:"),
                                      @selector(pm_ps_mtl_newTextureWithDescriptor:));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_new_sampler_imps, cls,
+                                     sel_registerName("newSamplerStateWithDescriptor:"),
+                                     @selector(pm_ps_mtl_newSamplerStateWithDescriptor:));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_new_cmdqueue_imps, cls,
+                                     sel_registerName("newCommandQueue"),
+                                     @selector(pm_ps_mtl_newCommandQueue));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_new_cmdqueue_cnt_imps, cls,
+                                     sel_registerName("newCommandQueueWithMaxCommandBufferCount:"),
+                                     @selector(pm_ps_mtl_newCommandQueueWithMaxCommandBufferCount:));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_new_dynlib_imps, cls,
+                                     sel_registerName("newDynamicLibrary:error:"),
+                                     @selector(pm_ps_mtl_newDynamicLibrary:error:));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_new_binarch_imps, cls,
+                                     sel_registerName("newBinaryArchiveWithDescriptor:error:"),
+                                     @selector(pm_ps_mtl_newBinaryArchiveWithDescriptor:error:));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_new_accel_struct_imps, cls,
+                                     sel_registerName("newAccelerationStructureWithDescriptor:"),
+                                     @selector(pm_ps_mtl_newAccelerationStructureWithDescriptor:));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_new_counter_buf_imps, cls,
+                                     sel_registerName("newCounterSampleBufferWithDescriptor:error:"),
+                                     @selector(pm_ps_mtl_newCounterSampleBufferWithDescriptor:error:));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_new_intersect_tbl_imps, cls,
+                                     sel_registerName("newIntersectionFunctionTableWithDescriptor:"),
+                                     @selector(pm_ps_mtl_newIntersectionFunctionTableWithDescriptor:));
+}
+
+static void ps_swizzle_mtl_command_queue_class(Class cls) {
+    if (pt_mtl_class_already_swizzled(cls)) {
+        return;
+    }
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_cq_cmdbuf_imps, cls,
+                                     sel_registerName("commandBuffer"),
+                                     @selector(pm_ps_mtl_cq_commandBuffer));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_cq_cmdbuf_unret_imps, cls,
+                                     sel_registerName("commandBufferWithUnretainedReferences"),
+                                     @selector(pm_ps_mtl_cq_commandBufferWithUnretainedReferences));
+}
+
+static void ps_swizzle_mtl_command_buffer_class(Class cls) {
+    if (pt_mtl_class_already_swizzled(cls)) {
+        return;
+    }
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_cb_comp_enc_imps, cls,
+                                     sel_registerName("computeCommandEncoder"),
+                                     @selector(pm_ps_mtl_cb_computeCommandEncoder));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_cb_comp_enc_desc_imps, cls,
+                                     sel_registerName("computeCommandEncoderWithDescriptor:"),
+                                     @selector(pm_ps_mtl_cb_computeCommandEncoderWithDescriptor:));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_cb_comp_enc_disp_imps, cls,
+                                     sel_registerName("computeCommandEncoderWithDispatchType:"),
+                                     @selector(pm_ps_mtl_cb_computeCommandEncoderWithDispatchType:));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_cb_rend_enc_imps, cls,
+                                     sel_registerName("renderCommandEncoderWithDescriptor:"),
+                                     @selector(pm_ps_mtl_cb_renderCommandEncoderWithDescriptor:));
+}
+
+static void ps_swizzle_mtl_compute_encoder_class(Class cls) {
+    if (pt_mtl_class_already_swizzled(cls)) {
+        return;
+    }
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_cenc_set_tex_imps, cls,
+                                     sel_registerName("setTexture:atIndex:"),
+                                     @selector(pm_ps_mtl_cenc_setTexture:atIndex:));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_cenc_set_texs_imps, cls,
+                                     sel_registerName("setTextures:withRange:"),
+                                     @selector(pm_ps_mtl_cenc_setTextures:withRange:));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_cenc_set_samp_imps, cls,
+                                     sel_registerName("setSamplerState:atIndex:"),
+                                     @selector(pm_ps_mtl_cenc_setSamplerState:atIndex:));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_cenc_set_samp_lod_imps, cls,
+                                     sel_registerName("setSamplerState:lodMinClamp:lodMaxClamp:atIndex:"),
+                                     @selector(pm_ps_mtl_cenc_setSamplerState:lodMinClamp:lodMaxClamp:atIndex:));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_cenc_set_samps_imps, cls,
+                                     sel_registerName("setSamplerStates:withRange:"),
+                                     @selector(pm_ps_mtl_cenc_setSamplerStates:withRange:));
+}
+
+static void ps_swizzle_mtl_render_encoder_class(Class cls) {
+    if (pt_mtl_class_already_swizzled(cls)) {
+        return;
+    }
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_renc_set_ftex_imps, cls,
+                                     sel_registerName("setFragmentTexture:atIndex:"),
+                                     @selector(pm_ps_mtl_renc_setFragmentTexture:atIndex:));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_renc_set_ftexs_imps, cls,
+                                     sel_registerName("setFragmentTextures:withRange:"),
+                                     @selector(pm_ps_mtl_renc_setFragmentTextures:withRange:));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_renc_set_fsamp_imps, cls,
+                                     sel_registerName("setFragmentSamplerState:atIndex:"),
+                                     @selector(pm_ps_mtl_renc_setFragmentSamplerState:atIndex:));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_renc_set_fsamp_lod_imps, cls,
+                                     sel_registerName("setFragmentSamplerState:lodMinClamp:lodMaxClamp:atIndex:"),
+                                     @selector(pm_ps_mtl_renc_setFragmentSamplerState:lodMinClamp:lodMaxClamp:atIndex:));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_renc_set_fsamps_imps, cls,
+                                     sel_registerName("setFragmentSamplerStates:withRange:"),
+                                     @selector(pm_ps_mtl_renc_setFragmentSamplerStates:withRange:));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_renc_set_vtex_imps, cls,
+                                     sel_registerName("setVertexTexture:atIndex:"),
+                                     @selector(pm_ps_mtl_renc_setVertexTexture:atIndex:));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_renc_set_vtexs_imps, cls,
+                                     sel_registerName("setVertexTextures:withRange:"),
+                                     @selector(pm_ps_mtl_renc_setVertexTextures:withRange:));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_renc_set_vsamp_imps, cls,
+                                     sel_registerName("setVertexSamplerState:atIndex:"),
+                                     @selector(pm_ps_mtl_renc_setVertexSamplerState:atIndex:));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_renc_set_vsamp_lod_imps, cls,
+                                     sel_registerName("setVertexSamplerState:lodMinClamp:lodMaxClamp:atIndex:"),
+                                     @selector(pm_ps_mtl_renc_setVertexSamplerState:lodMinClamp:lodMaxClamp:atIndex:));
+    ps_swizzle_class_sel_storing_imp(&s_mtl_swizzle_lock, &s_mtl_orig_renc_set_vsamps_imps, cls,
+                                     sel_registerName("setVertexSamplerStates:withRange:"),
+                                     @selector(pm_ps_mtl_renc_setVertexSamplerStates:withRange:));
 }
 
 __attribute__((visibility("hidden"))) void ps_install_metal_hooks_if_loaded(void) {

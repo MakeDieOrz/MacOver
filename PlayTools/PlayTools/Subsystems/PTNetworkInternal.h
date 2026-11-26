@@ -67,7 +67,14 @@ __attribute__((visibility("hidden"))) void ps_swizzle_cfg_instance_methods_if_ne
 __attribute__((visibility("hidden"))) void ps_notify_dynamic_image_loaded(void);
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_network_ifname(const char *name);
 __attribute__((visibility("hidden"))) void pt_network_notify_fd_dup(int oldfd, int newfd);
+__attribute__((visibility("hidden"))) void pt_network_notify_fd_close(int fd);
 __attribute__((visibility("hidden"))) int pt_network_ioctl_with_caller(int fd, unsigned long request, uintptr_t arg, const void *caller);
+__attribute__((visibility("hidden"))) int pt_network_bind_with_caller(int socket, const struct sockaddr *address, socklen_t address_len, int raw_syscall_num, const void *caller);
+__attribute__((visibility("hidden"))) int pt_network_connect_with_caller(int socket, const struct sockaddr *address, socklen_t address_len, int raw_syscall_num, const void *caller);
+__attribute__((visibility("hidden"))) int pt_network_accept_with_caller(int socket, struct sockaddr * __restrict address, socklen_t * __restrict address_len, int raw_syscall_num, const void *caller);
+__attribute__((visibility("hidden"))) ssize_t pt_network_sendto_with_caller(int socket, const void *buffer, size_t length, int flags, const struct sockaddr *dest_addr, socklen_t dest_len, int raw_syscall_num, const void *caller);
+__attribute__((visibility("hidden"))) int pt_network_getsockname_with_caller(int socket, struct sockaddr * __restrict address, socklen_t * __restrict address_len, int raw_syscall_num, const void *caller);
+__attribute__((visibility("hidden"))) int pt_network_getpeername_with_caller(int socket, struct sockaddr * __restrict address, socklen_t * __restrict address_len, int raw_syscall_num, const void *caller);
 
 __attribute__((visibility("hidden"))) void ps_install_network_blocker_hooks(void);
 __attribute__((visibility("hidden"))) void ps_install_webkit_network_hooks_if_loaded(void);

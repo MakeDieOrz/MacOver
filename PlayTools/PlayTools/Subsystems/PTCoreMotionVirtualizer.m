@@ -22,6 +22,9 @@ __attribute__((visibility("hidden")))
 @property (nonatomic, assign) BOOL hasExplicitMagUpdateInterval;
 @property (nonatomic, assign) NSTimeInterval explicitMagUpdateInterval;
 @property (nonatomic, assign) CMAttitudeReferenceFrame dmReferenceFrame;
+@property (nonatomic, assign) CMQuaternion simQuat;
+@property (nonatomic, assign) BOOL hasSimQuat;
+@property (nonatomic, assign) double simLastTs;
 @property (nonatomic, strong) id lastAccelSample;
 @property (nonatomic, assign) double lastAccelMonoSec;
 @property (nonatomic, strong) id lastGyroSample;
@@ -59,13 +62,30 @@ __attribute__((visibility("hidden")))
 }
 @end
 
+__attribute__((visibility("hidden")))
+@interface PSVirtualPedometerState : NSObject
+@property (nonatomic, assign) BOOL active;
+@property (nonatomic, assign) uint64_t generation;
+@property (nonatomic, strong) NSDate *startDate;
+@property (nonatomic, strong) dispatch_source_t timer;
+@end
+
+@implementation PSVirtualPedometerState
+- (void)dealloc {
+    if (_timer) { dispatch_source_cancel(_timer); _timer = nil; }
+}
+@end
+
 static const char kPSMotionStateAssocKey = 0;
 static const char kPSAltimeterStateAssocKey = 0;
+static const char kPSPedometerStateAssocKey = 0;
 static const char kPSMotionSamplePayloadKey = 0;
+static const char kPSMotionSampleRefFrameKey = 0;
 static const char kPSAttitudePayloadKey = 0;
 static const char kPSRealAlignedTimestampKey = 0;
 static const char kPSRealAlignedContinuousTimestampKey = 0;
 static const char kPSRealDMMagneticFieldKey = 0;
+static const char kPSPedometerPayloadKey = 0;
 static _Atomic uint64_t s_ps_motion_tick = 1ULL;
 
 static os_unfair_lock s_ps_cm_clock_lock = OS_UNFAIR_LOCK_INIT;
@@ -101,6 +121,15 @@ static CFMutableDictionaryRef s_cm_orig_dm_sensorLoc_imps = NULL;
 static CFMutableDictionaryRef s_cm_orig_dm_isInit_imps = NULL;
 static CFMutableDictionaryRef s_cm_orig_alt_rel_imps = NULL;
 static CFMutableDictionaryRef s_cm_orig_alt_press_imps = NULL;
+static CFMutableDictionaryRef s_cm_orig_ped_startDate_imps = NULL;
+static CFMutableDictionaryRef s_cm_orig_ped_endDate_imps = NULL;
+static CFMutableDictionaryRef s_cm_orig_ped_steps_imps = NULL;
+static CFMutableDictionaryRef s_cm_orig_ped_dist_imps = NULL;
+static CFMutableDictionaryRef s_cm_orig_ped_floorsAsc_imps = NULL;
+static CFMutableDictionaryRef s_cm_orig_ped_floorsDesc_imps = NULL;
+static CFMutableDictionaryRef s_cm_orig_ped_curPace_imps = NULL;
+static CFMutableDictionaryRef s_cm_orig_ped_curCadence_imps = NULL;
+static CFMutableDictionaryRef s_cm_orig_ped_avgPace_imps = NULL;
 
 __attribute__((visibility("hidden")))
 @interface PSVirtualAttitudePayload : NSObject {
@@ -137,6 +166,7 @@ __attribute__((visibility("hidden")))
     CMAcceleration _userAcceleration;
     CMCalibratedMagneticField _calibratedMagneticField;
     double _heading;
+    double _headingAccuracy;
     CMAttitude *_attitude;
     NSNumber *_relativeAltitude;
     NSNumber *_pressure;
@@ -148,10 +178,62 @@ __attribute__((visibility("hidden")))
     self = [super init];
     if (self != nil) {
         _lock = OS_UNFAIR_LOCK_INIT;
+        _heading = -1.0;
+        _headingAccuracy = -1.0;
     }
     return self;
 }
 @end
+
+__attribute__((visibility("hidden")))
+@interface PSVirtualPedometerPayload : NSObject {
+@public
+    NSDate *_startDate;
+    NSDate *_endDate;
+    NSNumber *_numberOfSteps;
+    NSNumber *_distance;
+    NSNumber *_floorsAscended;
+    NSNumber *_floorsDescended;
+    NSNumber *_currentPace;
+    NSNumber *_currentCadence;
+    NSNumber *_averageActivePace;
+}
+@end
+
+@implementation PSVirtualPedometerPayload
+@end
+
+static PSVirtualPedometerState *ps_pedometer_state(id ped, BOOL createIfMissing) {
+    if (ped == nil) {
+        return nil;
+    }
+    @synchronized (ped) {
+        PSVirtualPedometerState *st = objc_getAssociatedObject(ped, &kPSPedometerStateAssocKey);
+        if (st == nil && createIfMissing) {
+            st = [[PSVirtualPedometerState alloc] init];
+            objc_setAssociatedObject(ped, &kPSPedometerStateAssocKey, st, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        return st;
+    }
+}
+
+static PSVirtualPedometerPayload *ps_pedometer_payload(id data) {
+    if (data == nil) {
+        return nil;
+    }
+    return objc_getAssociatedObject(data, &kPSPedometerPayloadKey);
+}
+
+static BOOL ps_cm_ref_frame_has_north(CMAttitudeReferenceFrame frame) {
+    return (frame & (CMAttitudeReferenceFrameXMagneticNorthZVertical |
+                     CMAttitudeReferenceFrameXTrueNorthZVertical)) != 0;
+}
+
+static BOOL ps_cm_ref_frame_has_calibrated_mag(CMAttitudeReferenceFrame frame) {
+    return (frame & (CMAttitudeReferenceFrameXArbitraryCorrectedZVertical |
+                     CMAttitudeReferenceFrameXMagneticNorthZVertical |
+                     CMAttitudeReferenceFrameXTrueNorthZVertical)) != 0;
+}
 
 static PSVirtualMotionState *ps_motion_state(id mgr, BOOL createIfMissing) {
     if (mgr == nil) {
@@ -356,7 +438,9 @@ static CMAttitude *ps_make_virtual_attitude_with_quaternion(CMQuaternion q) {
     return att;
 }
 
-static PSVirtualMotionSamplePayload *ps_make_initialized_motion_payload(BOOL includeAttitude) {
+static PSVirtualMotionSamplePayload *ps_make_initialized_motion_payload_for_state(
+    BOOL includeAttitude,
+    PSVirtualMotionState *state) {
     PSVirtualMotionSamplePayload *payload = [[PSVirtualMotionSamplePayload alloc] init];
     uint64_t t = atomic_fetch_add_explicit(&s_ps_motion_tick, 1ULL, memory_order_relaxed);
     payload->_timestamp = ps_cm_next_virtual_timestamp();
@@ -386,11 +470,29 @@ static PSVirtualMotionSamplePayload *ps_make_initialized_motion_payload(BOOL inc
         .y = ps_motion_micro_jitter(t ^ 0x88ULL, 0.0003),
         .z = ps_motion_micro_jitter(t ^ 0x99ULL, 0.0003)
     };
-    payload->_calibratedMagneticField = (CMCalibratedMagneticField){
-        .field = payload->_magneticField,
-        .accuracy = CMMagneticFieldCalibrationAccuracyHigh
-    };
-    payload->_heading = 18.6 + ps_motion_micro_jitter(t ^ 0xABULL, 0.08);
+    CMAttitudeReferenceFrame refFrame = (state != nil && state.dmReferenceFrame != 0)
+        ? state.dmReferenceFrame
+        : CMAttitudeReferenceFrameXArbitraryZVertical;
+    BOOL hasCalibratedMag = ps_cm_ref_frame_has_calibrated_mag(refFrame);
+    BOOL hasNorth = ps_cm_ref_frame_has_north(refFrame);
+    if (hasCalibratedMag) {
+        payload->_calibratedMagneticField = (CMCalibratedMagneticField){
+            .field = payload->_magneticField,
+            .accuracy = CMMagneticFieldCalibrationAccuracyHigh
+        };
+    } else {
+        payload->_calibratedMagneticField = (CMCalibratedMagneticField){
+            .field = { .x = 0.0, .y = 0.0, .z = 0.0 },
+            .accuracy = CMMagneticFieldCalibrationAccuracyUncalibrated
+        };
+    }
+    if (hasNorth) {
+        payload->_heading = 18.6 + ps_motion_micro_jitter(t ^ 0xABULL, 0.08);
+        payload->_headingAccuracy = 15.0;
+    } else {
+        payload->_heading = -1.0;
+        payload->_headingAccuracy = -1.0;
+    }
     if (includeAttitude) {
         CMQuaternion q = {
             .x = 0.00425 + ps_motion_micro_jitter(t ^ 0xAAULL, 0.00005),
@@ -398,6 +500,52 @@ static PSVirtualMotionSamplePayload *ps_make_initialized_motion_payload(BOOL inc
             .z = ps_motion_micro_jitter(t ^ 0xCCULL, 0.00005),
             .w = 0.99999079
         };
+        if (state != nil) {
+            if (!state.hasSimQuat) {
+                state.simQuat = q;
+                state.hasSimQuat = YES;
+                state.simLastTs = payload->_timestamp;
+            } else {
+                double dt = payload->_timestamp - state.simLastTs;
+                state.simLastTs = payload->_timestamp;
+                if (dt > 0.0) {
+                    if (dt > 0.2) {
+                        dt = 0.2;
+                    }
+                    double wx = payload->_rotationRate.x;
+                    double wy = payload->_rotationRate.y;
+                    double wz = payload->_rotationRate.z;
+                    double omega = sqrt(wx * wx + wy * wy + wz * wz);
+                    double theta = omega * dt;
+                    CMQuaternion dq;
+                    if (theta > 1e-8 && omega > 0.0) {
+                        double s = sin(0.5 * theta) / omega;
+                        dq = (CMQuaternion){ .x = wx * s, .y = wy * s, .z = wz * s, .w = cos(0.5 * theta) };
+                    } else {
+                        dq = (CMQuaternion){ .x = 0.5 * wx * dt, .y = 0.5 * wy * dt, .z = 0.5 * wz * dt, .w = 1.0 };
+                    }
+                    CMQuaternion q0 = state.simQuat;
+                    CMQuaternion q1 = {
+                        .w = q0.w * dq.w - q0.x * dq.x - q0.y * dq.y - q0.z * dq.z,
+                        .x = q0.w * dq.x + q0.x * dq.w + q0.y * dq.z - q0.z * dq.y,
+                        .y = q0.w * dq.y - q0.x * dq.z + q0.y * dq.w + q0.z * dq.x,
+                        .z = q0.w * dq.z + q0.x * dq.y - q0.y * dq.x + q0.z * dq.w
+                    };
+                    double norm = sqrt(q1.x * q1.x + q1.y * q1.y + q1.z * q1.z + q1.w * q1.w);
+                    if (isfinite(norm) && norm > 1e-12) {
+                        double inv = 1.0 / norm;
+                        q1.x *= inv;
+                        q1.y *= inv;
+                        q1.z *= inv;
+                        q1.w *= inv;
+                        q = q1;
+                        state.simQuat = q1;
+                    }
+                } else {
+                    q = state.simQuat;
+                }
+            }
+        }
         payload->_attitude = ps_make_virtual_attitude_with_quaternion(q);
         PSVirtualAttitudePayload *attP = ps_attitude_payload(payload->_attitude, NO);
         if (attP != nil) {
@@ -406,11 +554,22 @@ static PSVirtualMotionSamplePayload *ps_make_initialized_motion_payload(BOOL inc
                 .y = -attP->_rotationMatrix.m32,
                 .z = -attP->_rotationMatrix.m33
             };
+            if (hasNorth) {
+                double deg = fmod(18.6 - attP->_yaw * (180.0 / M_PI), 360.0);
+                if (deg < 0.0) {
+                    deg += 360.0;
+                }
+                payload->_heading = deg;
+            }
         }
     }
     payload->_relativeAltitude = @(0.0);
     payload->_pressure = @(101.325);
     return payload;
+}
+
+static PSVirtualMotionSamplePayload *ps_make_initialized_motion_payload(BOOL includeAttitude) {
+    return ps_make_initialized_motion_payload_for_state(includeAttitude, nil);
 }
 
 static PSVirtualMotionSamplePayload *ps_motion_sample_payload(id sample, BOOL createIfMissing) {
@@ -422,14 +581,14 @@ static PSVirtualMotionSamplePayload *ps_motion_sample_payload(id sample, BOOL cr
         if (payload == nil && createIfMissing) {
             Class dmCls = objc_getClass("CMDeviceMotion");
             BOOL needAtt = (dmCls != Nil && [sample isKindOfClass:dmCls]);
-            payload = ps_make_initialized_motion_payload(needAtt);
+            payload = ps_make_initialized_motion_payload_for_state(needAtt, nil);
             objc_setAssociatedObject(sample, &kPSMotionSamplePayloadKey, payload, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
         return payload;
     }
 }
 
-static id ps_make_virtual_sample_instance(Class cls) {
+static id ps_make_virtual_sample_instance_with_state(Class cls, PSVirtualMotionState *state) {
     if (cls == Nil) {
         return nil;
     }
@@ -437,10 +596,20 @@ static id ps_make_virtual_sample_instance(Class cls) {
     if (instance != nil) {
         Class dmCls = objc_getClass("CMDeviceMotion");
         BOOL needAtt = (dmCls != Nil && [cls isSubclassOfClass:dmCls]);
-        PSVirtualMotionSamplePayload *payload = ps_make_initialized_motion_payload(needAtt);
+        PSVirtualMotionSamplePayload *payload = ps_make_initialized_motion_payload_for_state(needAtt, state);
         objc_setAssociatedObject(instance, &kPSMotionSamplePayloadKey, payload, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (needAtt) {
+            CMAttitudeReferenceFrame refFrame = (state != nil && state.dmReferenceFrame != 0)
+                ? state.dmReferenceFrame
+                : CMAttitudeReferenceFrameXArbitraryZVertical;
+            objc_setAssociatedObject(instance, &kPSMotionSampleRefFrameKey, @(refFrame), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
     }
     return instance;
+}
+
+static id ps_make_virtual_sample_instance(Class cls) {
+    return ps_make_virtual_sample_instance_with_state(cls, nil);
 }
 
 static CMAltitudeData *ps_make_virtual_altitude_sample(BOOL isFirstSample) {
@@ -1209,7 +1378,11 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
             ps_pop_orig_imp_frame(pushed);
         }
     }
-    if (orig.accuracy == CMMagneticFieldCalibrationAccuracyUncalibrated &&
+    NSNumber *refNum = objc_getAssociatedObject(self, &kPSMotionSampleRefFrameKey);
+    CMAttitudeReferenceFrame refFrame = (refNum != nil) ? (CMAttitudeReferenceFrame)refNum.unsignedIntegerValue : 0;
+    BOOL hasCalibratedMag = ps_cm_ref_frame_has_calibrated_mag(refFrame);
+    if (hasCalibratedMag &&
+        orig.accuracy == CMMagneticFieldCalibrationAccuracyUncalibrated &&
         orig.field.x == 0.0 &&
         orig.field.y == 0.0 &&
         orig.field.z == 0.0 &&
@@ -1236,6 +1409,13 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
             return synth;
         }
     }
+    if (refNum != nil && !hasCalibratedMag && pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return (CMCalibratedMagneticField){
+            .field = { .x = 0.0, .y = 0.0, .z = 0.0 },
+            .accuracy = CMMagneticFieldCalibrationAccuracyUncalibrated
+        };
+    }
     return orig;
 }
 
@@ -1243,6 +1423,13 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
     PSVirtualMotionSamplePayload *payload = ps_motion_sample_payload(self, NO);
     if (payload != nil) {
         return payload->_heading;
+    }
+    NSNumber *refNum = objc_getAssociatedObject(self, &kPSMotionSampleRefFrameKey);
+    if (refNum != nil &&
+        !ps_cm_ref_frame_has_north((CMAttitudeReferenceFrame)refNum.unsignedIntegerValue) &&
+        pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return -1.0;
     }
     BOOL pushed = NO;
     IMP origIMP = ps_lookup_orig_imp_and_push(&s_cm_swizzle_lock, s_cm_orig_dm_heading_imps, self, &pushed);
@@ -1257,8 +1444,16 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
 }
 
 - (double) pm_ps_cm_dm_headingAccuracy {
-    if (ps_motion_sample_payload(self, NO) != nil) {
-        return 15.0;
+    PSVirtualMotionSamplePayload *payload = ps_motion_sample_payload(self, NO);
+    if (payload != nil) {
+        return payload->_headingAccuracy;
+    }
+    NSNumber *refNum = objc_getAssociatedObject(self, &kPSMotionSampleRefFrameKey);
+    if (refNum != nil &&
+        !ps_cm_ref_frame_has_north((CMAttitudeReferenceFrame)refNum.unsignedIntegerValue) &&
+        pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return -1.0;
     }
     BOOL pushed = NO;
     IMP origIMP = ps_lookup_orig_imp_and_push(&s_cm_swizzle_lock, s_cm_orig_dm_headingAcc_imps, self, &pushed);
@@ -1318,6 +1513,226 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
         return YES;
     }
     return [self pm_ps_cm_ped_isPedometerEventTrackingAvailable];
+}
+
++ (CMAuthorizationStatus) pm_ps_cm_ped_authorizationStatus {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return CMAuthorizationStatusAuthorized;
+    }
+    return [self pm_ps_cm_ped_authorizationStatus];
+}
+
+static id ps_make_virtual_pedometer_data(NSDate *startDate, NSDate *endDate, NSInteger steps) {
+    Class dataCls = objc_getClass("CMPedometerData");
+    if (dataCls == Nil) {
+        return nil;
+    }
+    id instance = [[dataCls alloc] init];
+    if (instance != nil) {
+        PSVirtualPedometerPayload *p = [[PSVirtualPedometerPayload alloc] init];
+        p->_startDate = startDate ?: [NSDate date];
+        p->_endDate = endDate ?: [NSDate date];
+        p->_numberOfSteps = @(steps > 0 ? steps : 0);
+        p->_distance = @((double)(steps > 0 ? steps : 0) * 0.72);
+        p->_floorsAscended = @(0);
+        p->_floorsDescended = @(0);
+        p->_currentPace = @(0.0);
+        p->_currentCadence = @(0.0);
+        p->_averageActivePace = @(0.0);
+        objc_setAssociatedObject(instance, &kPSPedometerPayloadKey, p, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return instance;
+}
+
+- (NSDate *) pm_ps_cm_ped_data_startDate {
+    PSVirtualPedometerPayload *p = ps_pedometer_payload(self);
+    if (p != nil) { return p->_startDate; }
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_cm_swizzle_lock, s_cm_orig_ped_startDate_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try { return ((NSDate *(*)(id, SEL))origIMP)(self, @selector(startDate)); }
+        @finally { ps_pop_orig_imp_frame(pushed); }
+    }
+    return nil;
+}
+
+- (NSDate *) pm_ps_cm_ped_data_endDate {
+    PSVirtualPedometerPayload *p = ps_pedometer_payload(self);
+    if (p != nil) { return p->_endDate; }
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_cm_swizzle_lock, s_cm_orig_ped_endDate_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try { return ((NSDate *(*)(id, SEL))origIMP)(self, @selector(endDate)); }
+        @finally { ps_pop_orig_imp_frame(pushed); }
+    }
+    return nil;
+}
+
+- (NSNumber *) pm_ps_cm_ped_data_numberOfSteps {
+    PSVirtualPedometerPayload *p = ps_pedometer_payload(self);
+    if (p != nil) { return p->_numberOfSteps; }
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_cm_swizzle_lock, s_cm_orig_ped_steps_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try { return ((NSNumber *(*)(id, SEL))origIMP)(self, @selector(numberOfSteps)); }
+        @finally { ps_pop_orig_imp_frame(pushed); }
+    }
+    return @(0);
+}
+
+- (NSNumber *) pm_ps_cm_ped_data_distance {
+    PSVirtualPedometerPayload *p = ps_pedometer_payload(self);
+    if (p != nil) { return p->_distance; }
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_cm_swizzle_lock, s_cm_orig_ped_dist_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try { return ((NSNumber *(*)(id, SEL))origIMP)(self, @selector(distance)); }
+        @finally { ps_pop_orig_imp_frame(pushed); }
+    }
+    return @(0.0);
+}
+
+- (NSNumber *) pm_ps_cm_ped_data_floorsAscended {
+    PSVirtualPedometerPayload *p = ps_pedometer_payload(self);
+    if (p != nil) { return p->_floorsAscended; }
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_cm_swizzle_lock, s_cm_orig_ped_floorsAsc_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try { return ((NSNumber *(*)(id, SEL))origIMP)(self, @selector(floorsAscended)); }
+        @finally { ps_pop_orig_imp_frame(pushed); }
+    }
+    return @(0);
+}
+
+- (NSNumber *) pm_ps_cm_ped_data_floorsDescended {
+    PSVirtualPedometerPayload *p = ps_pedometer_payload(self);
+    if (p != nil) { return p->_floorsDescended; }
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_cm_swizzle_lock, s_cm_orig_ped_floorsDesc_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try { return ((NSNumber *(*)(id, SEL))origIMP)(self, @selector(floorsDescended)); }
+        @finally { ps_pop_orig_imp_frame(pushed); }
+    }
+    return @(0);
+}
+
+- (NSNumber *) pm_ps_cm_ped_data_currentPace {
+    PSVirtualPedometerPayload *p = ps_pedometer_payload(self);
+    if (p != nil) { return p->_currentPace; }
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_cm_swizzle_lock, s_cm_orig_ped_curPace_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try { return ((NSNumber *(*)(id, SEL))origIMP)(self, @selector(currentPace)); }
+        @finally { ps_pop_orig_imp_frame(pushed); }
+    }
+    return nil;
+}
+
+- (NSNumber *) pm_ps_cm_ped_data_currentCadence {
+    PSVirtualPedometerPayload *p = ps_pedometer_payload(self);
+    if (p != nil) { return p->_currentCadence; }
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_cm_swizzle_lock, s_cm_orig_ped_curCadence_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try { return ((NSNumber *(*)(id, SEL))origIMP)(self, @selector(currentCadence)); }
+        @finally { ps_pop_orig_imp_frame(pushed); }
+    }
+    return nil;
+}
+
+- (NSNumber *) pm_ps_cm_ped_data_averageActivePace {
+    PSVirtualPedometerPayload *p = ps_pedometer_payload(self);
+    if (p != nil) { return p->_averageActivePace; }
+    BOOL pushed = NO;
+    IMP origIMP = ps_lookup_orig_imp_and_push(&s_cm_swizzle_lock, s_cm_orig_ped_avgPace_imps, self, &pushed);
+    if (origIMP != NULL) {
+        @try { return ((NSNumber *(*)(id, SEL))origIMP)(self, @selector(averageActivePace)); }
+        @finally { ps_pop_orig_imp_frame(pushed); }
+    }
+    return nil;
+}
+
+- (void) pm_ps_cm_ped_queryPedometerDataFromDate:(NSDate *)start
+                                         toDate:(NSDate *)end
+                                    withHandler:(CMPedometerHandler)handler {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (handler != nil) {
+            NSDate *effStart = start ?: [NSDate date];
+            NSDate *effEnd = end ?: [NSDate date];
+            CMPedometerData *sample = ps_make_virtual_pedometer_data(effStart, effEnd, 0);
+            CMPedometerHandler userHandler = [handler copy];
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+                userHandler(sample, nil);
+            });
+        }
+        return;
+    }
+    [self pm_ps_cm_ped_queryPedometerDataFromDate:start toDate:end withHandler:handler];
+}
+
+- (void) pm_ps_cm_ped_startPedometerUpdatesFromDate:(NSDate *)start withHandler:(CMPedometerHandler)handler {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        PSVirtualPedometerState *st = ps_pedometer_state(self, YES);
+        if (st != nil) {
+            @synchronized (st) {
+                st.active = YES;
+                st.startDate = start ?: [NSDate date];
+                uint64_t gen = ++st.generation;
+                if (st.timer != nil) {
+                    dispatch_source_cancel(st.timer);
+                    st.timer = nil;
+                }
+                if (handler != nil) {
+                    CMPedometerHandler userHandler = [handler copy];
+                    NSDate *effStart = st.startDate;
+                    dispatch_source_t timer = ps_create_suspended_motion_timer(self, 2.0, nil, ^(id strongPed) {
+                        PSVirtualPedometerState *cur = ps_pedometer_state(strongPed, NO);
+                        BOOL emit = NO;
+                        if (cur != nil) {
+                            @synchronized (cur) {
+                                emit = (cur.active && cur.generation == gen);
+                            }
+                        }
+                        if (!emit) {
+                            return;
+                        }
+                        CMPedometerData *sample = ps_make_virtual_pedometer_data(effStart, [NSDate date], 0);
+                        if (sample != nil) {
+                            userHandler(sample, nil);
+                        }
+                    });
+                    if (timer != nil) {
+                        st.timer = timer;
+                        dispatch_resume(timer);
+                    }
+                    CMPedometerData *initial = ps_make_virtual_pedometer_data(effStart, [NSDate date], 0);
+                    dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+                        userHandler(initial, nil);
+                    });
+                }
+            }
+        }
+        return;
+    }
+    [self pm_ps_cm_ped_startPedometerUpdatesFromDate:start withHandler:handler];
+}
+
+- (void) pm_ps_cm_ped_stopPedometerUpdates {
+    PSVirtualPedometerState *st = ps_pedometer_state(self, NO);
+    if (st != nil) {
+        @synchronized (st) {
+            st.active = NO;
+            st.generation++;
+            if (st.timer != nil) {
+                dispatch_source_cancel(st.timer);
+                st.timer = nil;
+            }
+        }
+    }
+    [self pm_ps_cm_ped_stopPedometerUpdates];
 }
 
 + (BOOL) pm_ps_cm_activity_isActivityAvailable {
@@ -1427,6 +1842,33 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
         return YES;
     }
     return [self pm_ps_cm_isRelativeAltitudeAvailable];
+}
+
++ (BOOL) pm_ps_cm_isAbsoluteAltitudeAvailable {
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (pt_is_compat13_7_active()) {
+            return NO;
+        }
+        const char *m = pt_get_device_model_cstr();
+        if (m == NULL) {
+            return NO;
+        }
+        if (strncmp(m, "iPhone", 6) == 0) {
+            int major = atoi(m + 6);
+            return (major >= 13);
+        }
+        if (strncmp(m, "iPad", 4) == 0) {
+            int major = atoi(m + 4);
+            int minor = 0;
+            const char *comma = strchr(m + 4, ',');
+            if (comma != NULL) {
+                minor = atoi(comma + 1);
+            }
+            return (major >= 14) || (major == 13 && minor >= 4);
+        }
+        return NO;
+    }
+    return [self pm_ps_cm_isAbsoluteAltitudeAvailable];
 }
 
 static CMAttitudeReferenceFrame ps_cm_default_reference_frames_mask(void) {
@@ -1661,20 +2103,34 @@ static inline id ps_cm_cached_pull_sample(BOOL active,
 - (CMDeviceMotion *) pm_ps_cm_deviceMotion {
     CMDeviceMotion *orig = [self pm_ps_cm_deviceMotion];
     ps_cm_observe_real_sample(orig);
-    if (orig == nil && pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    const void *caller = __builtin_return_address(0);
+    if (orig != nil && pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(caller)) {
+        PSVirtualMotionState *st = ps_motion_state(self, NO);
+        CMAttitudeReferenceFrame frame = (st != nil && st.dmReferenceFrame != 0)
+            ? st.dmReferenceFrame
+            : CMAttitudeReferenceFrameXArbitraryZVertical;
+        objc_setAssociatedObject(orig, &kPSMotionSampleRefFrameKey, @(frame), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return orig;
+    }
+    if (orig == nil && pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(caller)) {
         PSVirtualMotionState *st = ps_motion_state(self, NO);
         if (st != nil) {
             NSTimeInterval iv = ((CMMotionManager *)self).deviceMotionUpdateInterval;
             @synchronized (st) {
-                return ps_cm_cached_pull_sample(st.dmActive,
-                                                st.lastDMSample,
-                                                st.lastDMMonoSec,
-                                                iv,
-                                                "CMDeviceMotion",
-                                                ^(id sample, double mono) {
-                                                    st.lastDMSample = sample;
-                                                    st.lastDMMonoSec = mono;
-                                                });
+                if (!st.dmActive) {
+                    return nil;
+                }
+                double eff = (isfinite(iv) && iv >= 0.01) ? iv : 0.01;
+                double now = [[NSProcessInfo processInfo] systemUptime];
+                if (st.lastDMSample != nil && now >= st.lastDMMonoSec && (now - st.lastDMMonoSec) < eff) {
+                    return st.lastDMSample;
+                }
+                CMDeviceMotion *fresh = ps_make_virtual_sample_instance_with_state(objc_getClass("CMDeviceMotion"), st);
+                if (fresh != nil) {
+                    st.lastDMSample = fresh;
+                    st.lastDMMonoSec = now;
+                }
+                return fresh;
             }
         }
     }
@@ -1913,71 +2369,82 @@ static inline id ps_cm_cached_pull_sample(BOOL active,
 }
 
 - (void) pm_ps_cm_startDeviceMotionUpdates {
-    if (pt_is_bypass_enabled() &&
-        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
-        ![self pm_ps_cm_isDeviceMotionAvailable]) {
+    const void *caller = __builtin_return_address(0);
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(caller)) {
         PSVirtualMotionState *st = ps_motion_state(self, YES);
+        BOOL nativeAvail = [self pm_ps_cm_isDeviceMotionAvailable];
         @synchronized (st) {
-            st.dmActive = YES;
             st.dmReferenceFrame = CMAttitudeReferenceFrameXArbitraryZVertical;
-            st.lastDMSample = nil;
-            st.lastDMMonoSec = 0.0;
+            st.hasSimQuat = NO;
+            st.simLastTs = 0.0;
+            if (!nativeAvail) {
+                st.dmActive = YES;
+                st.lastDMSample = nil;
+                st.lastDMMonoSec = 0.0;
+            }
         }
     }
     [self pm_ps_cm_startDeviceMotionUpdates];
 }
 
 - (void) pm_ps_cm_startDeviceMotionUpdatesUsingReferenceFrame:(CMAttitudeReferenceFrame)frame {
-    if (pt_is_bypass_enabled() &&
-        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
-        ![self pm_ps_cm_isDeviceMotionAvailable]) {
+    const void *caller = __builtin_return_address(0);
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(caller)) {
         PSVirtualMotionState *st = ps_motion_state(self, YES);
+        BOOL nativeAvail = [self pm_ps_cm_isDeviceMotionAvailable];
         @synchronized (st) {
-            st.dmActive = YES;
             st.dmReferenceFrame = (frame != 0) ? frame : CMAttitudeReferenceFrameXArbitraryZVertical;
-            st.lastDMSample = nil;
-            st.lastDMMonoSec = 0.0;
+            st.hasSimQuat = NO;
+            st.simLastTs = 0.0;
+            if (!nativeAvail) {
+                st.dmActive = YES;
+                st.lastDMSample = nil;
+                st.lastDMMonoSec = 0.0;
+            }
         }
     }
     [self pm_ps_cm_startDeviceMotionUpdatesUsingReferenceFrame:frame];
 }
 
 - (void) pm_ps_cm_startDeviceMotionUpdatesToQueue:(NSOperationQueue *)queue withHandler:(CMDeviceMotionHandler)handler {
-    if (pt_is_bypass_enabled() &&
-        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
-        ![self pm_ps_cm_isDeviceMotionAvailable]) {
+    const void *caller = __builtin_return_address(0);
+    CMAttitudeReferenceFrame effectiveFrame = CMAttitudeReferenceFrameXArbitraryZVertical;
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(caller)) {
         PSVirtualMotionState *st = ps_motion_state(self, YES);
+        BOOL nativeAvail = [self pm_ps_cm_isDeviceMotionAvailable];
         @synchronized (st) {
-            st.dmActive = YES;
-            st.dmReferenceFrame = CMAttitudeReferenceFrameXArbitraryZVertical;
-            st.lastDMSample = nil;
-            st.lastDMMonoSec = 0.0;
-            uint64_t gen = ++st.dmGen;
-            if (st.dmTimer) { dispatch_source_cancel(st.dmTimer); st.dmTimer = nil; }
-            if (handler != nil) {
-                CMDeviceMotionHandler userHandler = [handler copy];
-                NSTimeInterval iv = ((CMMotionManager *)self).deviceMotionUpdateInterval;
-                dispatch_source_t timer = ps_create_suspended_motion_timer(self, iv, queue, ^(id mgr) {
-                    PSVirtualMotionState *curSt = ps_motion_state(mgr, NO);
-                    BOOL shouldEmit = NO;
-                    if (curSt != nil) {
-                        @synchronized (curSt) {
-                            shouldEmit = (curSt.dmActive && curSt.dmGen == gen);
+            st.dmReferenceFrame = effectiveFrame;
+            st.hasSimQuat = NO;
+            st.simLastTs = 0.0;
+            if (!nativeAvail) {
+                st.dmActive = YES;
+                st.lastDMSample = nil;
+                st.lastDMMonoSec = 0.0;
+                uint64_t gen = ++st.dmGen;
+                if (st.dmTimer) { dispatch_source_cancel(st.dmTimer); st.dmTimer = nil; }
+                if (handler != nil) {
+                    CMDeviceMotionHandler userHandler = [handler copy];
+                    NSTimeInterval iv = ((CMMotionManager *)self).deviceMotionUpdateInterval;
+                    dispatch_source_t timer = ps_create_suspended_motion_timer(self, iv, queue, ^(id mgr) {
+                        PSVirtualMotionState *curSt = ps_motion_state(mgr, NO);
+                        CMDeviceMotion *sample = nil;
+                        if (curSt != nil) {
+                            @synchronized (curSt) {
+                                if (curSt.dmActive && curSt.dmGen == gen) {
+                                    sample = ps_make_virtual_sample_instance_with_state(objc_getClass("CMDeviceMotion"), curSt);
+                                }
+                            }
                         }
+                        if (sample != nil) {
+                            userHandler(sample, nil);
+                        }
+                    });
+                    if (timer != nil) {
+                        st.dmTimer = timer;
+                        dispatch_resume(timer);
                     }
-                    if (!shouldEmit) {
-                        return;
-                    }
-                    CMDeviceMotion *sample = ps_make_virtual_sample_instance(objc_getClass("CMDeviceMotion"));
-                    if (sample != nil) {
-                        userHandler(sample, nil);
-                    }
-                });
-                if (timer != nil) {
-                    st.dmTimer = timer;
-                    dispatch_resume(timer);
+                    return;
                 }
-                return;
             }
         }
     }
@@ -1985,6 +2452,9 @@ static inline id ps_cm_cached_pull_sample(BOOL active,
         CMDeviceMotionHandler userHandler = [handler copy];
         [self pm_ps_cm_startDeviceMotionUpdatesToQueue:queue withHandler:^(CMDeviceMotion *motion, NSError *error) {
             ps_cm_observe_real_sample(motion);
+            if (motion != nil) {
+                objc_setAssociatedObject(motion, &kPSMotionSampleRefFrameKey, @(effectiveFrame), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
             userHandler(motion, error);
         }];
         return;
@@ -1995,41 +2465,44 @@ static inline id ps_cm_cached_pull_sample(BOOL active,
 - (void) pm_ps_cm_startDeviceMotionUpdatesUsingReferenceFrame:(CMAttitudeReferenceFrame)frame
                                                       toQueue:(NSOperationQueue *)queue
                                                   withHandler:(CMDeviceMotionHandler)handler {
-    if (pt_is_bypass_enabled() &&
-        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
-        ![self pm_ps_cm_isDeviceMotionAvailable]) {
+    const void *caller = __builtin_return_address(0);
+    CMAttitudeReferenceFrame effectiveFrame = (frame != 0) ? frame : CMAttitudeReferenceFrameXArbitraryZVertical;
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(caller)) {
         PSVirtualMotionState *st = ps_motion_state(self, YES);
+        BOOL nativeAvail = [self pm_ps_cm_isDeviceMotionAvailable];
         @synchronized (st) {
-            st.dmActive = YES;
-            st.dmReferenceFrame = (frame != 0) ? frame : CMAttitudeReferenceFrameXArbitraryZVertical;
-            st.lastDMSample = nil;
-            st.lastDMMonoSec = 0.0;
-            uint64_t gen = ++st.dmGen;
-            if (st.dmTimer) { dispatch_source_cancel(st.dmTimer); st.dmTimer = nil; }
-            if (handler != nil) {
-                CMDeviceMotionHandler userHandler = [handler copy];
-                NSTimeInterval iv = ((CMMotionManager *)self).deviceMotionUpdateInterval;
-                dispatch_source_t timer = ps_create_suspended_motion_timer(self, iv, queue, ^(id mgr) {
-                    PSVirtualMotionState *curSt = ps_motion_state(mgr, NO);
-                    BOOL shouldEmit = NO;
-                    if (curSt != nil) {
-                        @synchronized (curSt) {
-                            shouldEmit = (curSt.dmActive && curSt.dmGen == gen);
+            st.dmReferenceFrame = effectiveFrame;
+            st.hasSimQuat = NO;
+            st.simLastTs = 0.0;
+            if (!nativeAvail) {
+                st.dmActive = YES;
+                st.lastDMSample = nil;
+                st.lastDMMonoSec = 0.0;
+                uint64_t gen = ++st.dmGen;
+                if (st.dmTimer) { dispatch_source_cancel(st.dmTimer); st.dmTimer = nil; }
+                if (handler != nil) {
+                    CMDeviceMotionHandler userHandler = [handler copy];
+                    NSTimeInterval iv = ((CMMotionManager *)self).deviceMotionUpdateInterval;
+                    dispatch_source_t timer = ps_create_suspended_motion_timer(self, iv, queue, ^(id mgr) {
+                        PSVirtualMotionState *curSt = ps_motion_state(mgr, NO);
+                        CMDeviceMotion *sample = nil;
+                        if (curSt != nil) {
+                            @synchronized (curSt) {
+                                if (curSt.dmActive && curSt.dmGen == gen) {
+                                    sample = ps_make_virtual_sample_instance_with_state(objc_getClass("CMDeviceMotion"), curSt);
+                                }
+                            }
                         }
+                        if (sample != nil) {
+                            userHandler(sample, nil);
+                        }
+                    });
+                    if (timer != nil) {
+                        st.dmTimer = timer;
+                        dispatch_resume(timer);
                     }
-                    if (!shouldEmit) {
-                        return;
-                    }
-                    CMDeviceMotion *sample = ps_make_virtual_sample_instance(objc_getClass("CMDeviceMotion"));
-                    if (sample != nil) {
-                        userHandler(sample, nil);
-                    }
-                });
-                if (timer != nil) {
-                    st.dmTimer = timer;
-                    dispatch_resume(timer);
+                    return;
                 }
-                return;
             }
         }
     }
@@ -2037,6 +2510,9 @@ static inline id ps_cm_cached_pull_sample(BOOL active,
         CMDeviceMotionHandler userHandler = [handler copy];
         [self pm_ps_cm_startDeviceMotionUpdatesUsingReferenceFrame:frame toQueue:queue withHandler:^(CMDeviceMotion *motion, NSError *error) {
             ps_cm_observe_real_sample(motion);
+            if (motion != nil) {
+                objc_setAssociatedObject(motion, &kPSMotionSampleRefFrameKey, @(effectiveFrame), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
             userHandler(motion, error);
         }];
         return;
@@ -2051,6 +2527,8 @@ static inline id ps_cm_cached_pull_sample(BOOL active,
             st.dmActive = NO;
             st.dmGen++;
             st.dmReferenceFrame = 0;
+            st.hasSimQuat = NO;
+            st.simLastTs = 0.0;
             st.lastDMSample = nil;
             st.lastDMMonoSec = 0.0;
             if (st.dmTimer) { dispatch_source_cancel(st.dmTimer); st.dmTimer = nil; }
@@ -2197,6 +2675,18 @@ __attribute__((visibility("hidden"))) void ps_install_coremotion_hooks_if_loaded
                 ps_swizzle_cm_sel_if_defined(&s_cm_orig_alt_rel_imps, altDataCls, @selector(relativeAltitude), @selector(pm_ps_cm_alt_relativeAltitude));
                 ps_swizzle_cm_sel_if_defined(&s_cm_orig_alt_press_imps, altDataCls, @selector(pressure), @selector(pm_ps_cm_alt_pressure));
             }
+            Class pedDataCls = objc_getClass("CMPedometerData");
+            if (pedDataCls != Nil) {
+                ps_swizzle_cm_sel_if_defined(&s_cm_orig_ped_startDate_imps, pedDataCls, @selector(startDate), @selector(pm_ps_cm_ped_data_startDate));
+                ps_swizzle_cm_sel_if_defined(&s_cm_orig_ped_endDate_imps, pedDataCls, @selector(endDate), @selector(pm_ps_cm_ped_data_endDate));
+                ps_swizzle_cm_sel_if_defined(&s_cm_orig_ped_steps_imps, pedDataCls, @selector(numberOfSteps), @selector(pm_ps_cm_ped_data_numberOfSteps));
+                ps_swizzle_cm_sel_if_defined(&s_cm_orig_ped_dist_imps, pedDataCls, @selector(distance), @selector(pm_ps_cm_ped_data_distance));
+                ps_swizzle_cm_sel_if_defined(&s_cm_orig_ped_floorsAsc_imps, pedDataCls, @selector(floorsAscended), @selector(pm_ps_cm_ped_data_floorsAscended));
+                ps_swizzle_cm_sel_if_defined(&s_cm_orig_ped_floorsDesc_imps, pedDataCls, @selector(floorsDescended), @selector(pm_ps_cm_ped_data_floorsDescended));
+                ps_swizzle_cm_sel_if_defined(&s_cm_orig_ped_curPace_imps, pedDataCls, @selector(currentPace), @selector(pm_ps_cm_ped_data_currentPace));
+                ps_swizzle_cm_sel_if_defined(&s_cm_orig_ped_curCadence_imps, pedDataCls, @selector(currentCadence), @selector(pm_ps_cm_ped_data_currentCadence));
+                ps_swizzle_cm_sel_if_defined(&s_cm_orig_ped_avgPace_imps, pedDataCls, @selector(averageActivePace), @selector(pm_ps_cm_ped_data_averageActivePace));
+            }
         });
     }
     Class cmCls = objc_getClass("CMMotionManager");
@@ -2206,25 +2696,33 @@ __attribute__((visibility("hidden"))) void ps_install_coremotion_hooks_if_loaded
             char frameTypes[32];
             snprintf(frameTypes, sizeof(frameTypes), "%s@:", @encode(CMAttitudeReferenceFrame));
             SEL availFramesSel = sel_registerName("availableAttitudeReferenceFrames");
+            Method refMethod = class_getInstanceMethod(cmCls, @selector(isDeviceMotionAvailable));
+            IMP refOrigImp = (refMethod != NULL) ? method_getImplementation(refMethod) : NULL;
             if (class_getClassMethod(cmCls, availFramesSel) != NULL) {
                 ps_swizzle_class_method(cmCls, availFramesSel, @selector(pm_ps_cm_availableAttitudeReferenceFrames));
             } else {
                 Class metaCls = object_getClass(cmCls);
                 if (metaCls != Nil) {
-                    class_addMethod(metaCls,
-                                    availFramesSel,
-                                    (IMP)ps_cm_fallback_availableAttitudeReferenceFrames,
-                                    frameTypes);
+                    if (class_addMethod(metaCls,
+                                        availFramesSel,
+                                        (IMP)ps_cm_fallback_availableAttitudeReferenceFrames,
+                                        frameTypes) && refOrigImp != NULL) {
+                        pt_register_swizzled_imp((const void *)ps_cm_fallback_availableAttitudeReferenceFrames,
+                                                 (const void *)refOrigImp);
+                    }
                 }
             }
             SEL attFrameSel = sel_registerName("attitudeReferenceFrame");
             if (class_getInstanceMethod(cmCls, attFrameSel) != NULL) {
                 ps_swizzle_instance_method(cmCls, attFrameSel, @selector(pm_ps_cm_attitudeReferenceFrame));
             } else {
-                class_addMethod(cmCls,
-                                attFrameSel,
-                                (IMP)ps_cm_fallback_attitudeReferenceFrame,
-                                frameTypes);
+                if (class_addMethod(cmCls,
+                                    attFrameSel,
+                                    (IMP)ps_cm_fallback_attitudeReferenceFrame,
+                                    frameTypes) && refOrigImp != NULL) {
+                    pt_register_swizzled_imp((const void *)ps_cm_fallback_attitudeReferenceFrame,
+                                             (const void *)refOrigImp);
+                }
             }
             ps_swizzle_instance_method(cmCls, @selector(isAccelerometerAvailable), @selector(pm_ps_cm_isAccelerometerAvailable));
             ps_swizzle_instance_method(cmCls, @selector(isGyroAvailable), @selector(pm_ps_cm_isGyroAvailable));
@@ -2261,6 +2759,10 @@ __attribute__((visibility("hidden"))) void ps_install_coremotion_hooks_if_loaded
         static dispatch_once_t altOnce;
         dispatch_once(&altOnce, ^{
             ps_swizzle_class_method(altCls, @selector(isRelativeAltitudeAvailable), @selector(pm_ps_cm_isRelativeAltitudeAvailable));
+            SEL absAltSel = sel_registerName("isAbsoluteAltitudeAvailable");
+            if (class_getClassMethod(altCls, absAltSel) != NULL) {
+                ps_swizzle_class_method(altCls, absAltSel, @selector(pm_ps_cm_isAbsoluteAltitudeAvailable));
+            }
             if (class_getInstanceMethod(altCls, @selector(startRelativeAltitudeUpdatesToQueue:withHandler:)) != NULL) {
                 ps_swizzle_instance_method(altCls,
                                            @selector(startRelativeAltitudeUpdatesToQueue:withHandler:),
@@ -2286,13 +2788,29 @@ __attribute__((visibility("hidden"))) void ps_install_coremotion_hooks_if_loaded
                 { "isFloorCountingAvailable", @selector(pm_ps_cm_ped_isFloorCountingAvailable) },
                 { "isPaceAvailable", @selector(pm_ps_cm_ped_isPaceAvailable) },
                 { "isCadenceAvailable", @selector(pm_ps_cm_ped_isCadenceAvailable) },
-                { "isPedometerEventTrackingAvailable", @selector(pm_ps_cm_ped_isPedometerEventTrackingAvailable) }
+                { "isPedometerEventTrackingAvailable", @selector(pm_ps_cm_ped_isPedometerEventTrackingAvailable) },
+                { "authorizationStatus", @selector(pm_ps_cm_ped_authorizationStatus) }
             };
             for (size_t i = 0; i < sizeof(kPedSwizzles) / sizeof(kPedSwizzles[0]); i++) {
                 SEL s = sel_registerName(kPedSwizzles[i].origName);
                 if (class_getClassMethod(pedCls, s) != NULL) {
                     ps_swizzle_class_method(pedCls, s, kPedSwizzles[i].hookSel);
                 }
+            }
+            if (class_getInstanceMethod(pedCls, @selector(queryPedometerDataFromDate:toDate:withHandler:)) != NULL) {
+                ps_swizzle_instance_method(pedCls,
+                                           @selector(queryPedometerDataFromDate:toDate:withHandler:),
+                                           @selector(pm_ps_cm_ped_queryPedometerDataFromDate:toDate:withHandler:));
+            }
+            if (class_getInstanceMethod(pedCls, @selector(startPedometerUpdatesFromDate:withHandler:)) != NULL) {
+                ps_swizzle_instance_method(pedCls,
+                                           @selector(startPedometerUpdatesFromDate:withHandler:),
+                                           @selector(pm_ps_cm_ped_startPedometerUpdatesFromDate:withHandler:));
+            }
+            if (class_getInstanceMethod(pedCls, @selector(stopPedometerUpdates)) != NULL) {
+                ps_swizzle_instance_method(pedCls,
+                                           @selector(stopPedometerUpdates),
+                                           @selector(pm_ps_cm_ped_stopPedometerUpdates));
             }
         });
     }

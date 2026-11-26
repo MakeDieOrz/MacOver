@@ -5,6 +5,7 @@
 
 #import "PSInternal.h"
 #import "PTDetectionRules.h"
+#import "PTSystemSpooferInternal.h"
 #include <ctype.h>
 #include <ifaddrs.h>
 #include <net/if.h>
@@ -735,13 +736,18 @@ static void pt_virtualize_unix_sockaddr_out(int socket_fd,
     }
 }
 
-static int pt_bind(int socket, const struct sockaddr *address, socklen_t address_len) {
+__attribute__((visibility("hidden")))
+int pt_network_bind_with_caller(int socket,
+                                const struct sockaddr *address,
+                                socklen_t address_len,
+                                int raw_syscall_num,
+                                const void *caller) {
     struct sockaddr_un mapped;
     socklen_t mapped_len = address_len;
     pt_unix_fchdir_guard_t guard;
     char leaf_buf[sizeof(mapped.sun_path)];
     char virt_buf[sizeof(mapped.sun_path)];
-    int prep = pt_prepare_unix_sockaddr(address, address_len, __builtin_return_address(0),
+    int prep = pt_prepare_unix_sockaddr(address, address_len, caller,
                                           &mapped, &mapped_len, &guard,
                                           leaf_buf, sizeof(leaf_buf), virt_buf, sizeof(virt_buf));
     if (prep < 0) {
@@ -749,21 +755,34 @@ static int pt_bind(int socket, const struct sockaddr *address, socklen_t address
     }
     const struct sockaddr *use_addr = (prep > 0) ? (const struct sockaddr *)&mapped : address;
     socklen_t use_len = (prep > 0) ? mapped_len : address_len;
-    int ret = bind(socket, use_addr, use_len);
+    int ret = (raw_syscall_num >= 0)
+        ? (int)pt_orig_syscall(raw_syscall_num, (uintptr_t)socket, (uintptr_t)use_addr, (uintptr_t)use_len, 0, 0, 0, 0, 0)
+        : bind(socket, use_addr, use_len);
+    int saved_err = errno;
     pt_end_unix_fchdir(&guard);
     if (ret == 0 && virt_buf[0] != '\0') {
         pt_unix_record_sock_path(socket, NO, leaf_buf, virt_buf);
     }
+    errno = saved_err;
     return ret;
 }
 
-static int pt_connect(int socket, const struct sockaddr *address, socklen_t address_len) {
+static int pt_bind(int socket, const struct sockaddr *address, socklen_t address_len) {
+    return pt_network_bind_with_caller(socket, address, address_len, -1, __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
+int pt_network_connect_with_caller(int socket,
+                                   const struct sockaddr *address,
+                                   socklen_t address_len,
+                                   int raw_syscall_num,
+                                   const void *caller) {
     struct sockaddr_un mapped;
     socklen_t mapped_len = address_len;
     pt_unix_fchdir_guard_t guard;
     char leaf_buf[sizeof(mapped.sun_path)];
     char virt_buf[sizeof(mapped.sun_path)];
-    int prep = pt_prepare_unix_sockaddr(address, address_len, __builtin_return_address(0),
+    int prep = pt_prepare_unix_sockaddr(address, address_len, caller,
                                           &mapped, &mapped_len, &guard,
                                           leaf_buf, sizeof(leaf_buf), virt_buf, sizeof(virt_buf));
     if (prep < 0) {
@@ -771,25 +790,71 @@ static int pt_connect(int socket, const struct sockaddr *address, socklen_t addr
     }
     const struct sockaddr *use_addr = (prep > 0) ? (const struct sockaddr *)&mapped : address;
     socklen_t use_len = (prep > 0) ? mapped_len : address_len;
-    int ret = connect(socket, use_addr, use_len);
+    int ret = (raw_syscall_num >= 0)
+        ? (int)pt_orig_syscall(raw_syscall_num, (uintptr_t)socket, (uintptr_t)use_addr, (uintptr_t)use_len, 0, 0, 0, 0, 0)
+        : connect(socket, use_addr, use_len);
     int saved_err = errno;
     pt_end_unix_fchdir(&guard);
     if ((ret == 0 || (ret < 0 && saved_err == EINPROGRESS)) && virt_buf[0] != '\0') {
         pt_unix_record_sock_path(socket, YES, leaf_buf, virt_buf);
-        errno = saved_err;
+    }
+    errno = saved_err;
+    return ret;
+}
+
+static int pt_connect(int socket, const struct sockaddr *address, socklen_t address_len) {
+    return pt_network_connect_with_caller(socket, address, address_len, -1, __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
+int pt_network_accept_with_caller(int socket,
+                                  struct sockaddr * __restrict address,
+                                  socklen_t * __restrict address_len,
+                                  int raw_syscall_num,
+                                  const void *caller) {
+    socklen_t caller_cap = (address_len != NULL) ? *address_len : 0;
+    int ret = (raw_syscall_num >= 0)
+        ? (int)pt_orig_syscall(raw_syscall_num, (uintptr_t)socket, (uintptr_t)address, (uintptr_t)address_len, 0, 0, 0, 0, 0)
+        : accept(socket, address, address_len);
+    if (ret >= 0) {
+        pt_unix_copy_local_for_accept(socket, ret);
+        if (address != NULL && address_len != NULL) {
+            pt_virtualize_unix_sockaddr_out(ret, YES, address, address_len, caller_cap, caller);
+        }
     }
     return ret;
 }
 
 static int pt_accept(int socket, struct sockaddr * __restrict address, socklen_t * __restrict address_len) {
-    socklen_t caller_cap = (address_len != NULL) ? *address_len : 0;
-    int ret = accept(socket, address, address_len);
-    if (ret >= 0) {
-        pt_unix_copy_local_for_accept(socket, ret);
-        if (address != NULL && address_len != NULL) {
-            pt_virtualize_unix_sockaddr_out(ret, YES, address, address_len, caller_cap, __builtin_return_address(0));
-        }
+    return pt_network_accept_with_caller(socket, address, address_len, -1, __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
+ssize_t pt_network_sendto_with_caller(int socket,
+                                      const void *buffer,
+                                      size_t length,
+                                      int flags,
+                                      const struct sockaddr *dest_addr,
+                                      socklen_t dest_len,
+                                      int raw_syscall_num,
+                                      const void *caller) {
+    struct sockaddr_un mapped;
+    socklen_t mapped_len = dest_len;
+    pt_unix_fchdir_guard_t guard;
+    int prep = pt_prepare_unix_sockaddr(dest_addr, dest_len, caller,
+                                          &mapped, &mapped_len, &guard,
+                                          NULL, 0, NULL, 0);
+    if (prep < 0) {
+        return -1;
     }
+    const struct sockaddr *use_addr = (prep > 0) ? (const struct sockaddr *)&mapped : dest_addr;
+    socklen_t use_len = (prep > 0) ? mapped_len : dest_len;
+    ssize_t ret = (raw_syscall_num >= 0)
+        ? (ssize_t)pt_orig_syscall(raw_syscall_num, (uintptr_t)socket, (uintptr_t)buffer, (uintptr_t)length, (uintptr_t)flags, (uintptr_t)use_addr, (uintptr_t)use_len, 0, 0)
+        : sendto(socket, buffer, length, flags, use_addr, use_len);
+    int saved_err = errno;
+    pt_end_unix_fchdir(&guard);
+    errno = saved_err;
     return ret;
 }
 
@@ -799,59 +864,71 @@ static ssize_t pt_sendto(int socket,
                          int flags,
                          const struct sockaddr *dest_addr,
                          socklen_t dest_len) {
-    struct sockaddr_un mapped;
-    socklen_t mapped_len = dest_len;
-    pt_unix_fchdir_guard_t guard;
-    int prep = pt_prepare_unix_sockaddr(dest_addr, dest_len, __builtin_return_address(0),
-                                          &mapped, &mapped_len, &guard,
-                                          NULL, 0, NULL, 0);
-    if (prep < 0) {
-        return -1;
-    }
-    const struct sockaddr *use_addr = (prep > 0) ? (const struct sockaddr *)&mapped : dest_addr;
-    socklen_t use_len = (prep > 0) ? mapped_len : dest_len;
-    ssize_t ret = sendto(socket, buffer, length, flags, use_addr, use_len);
-    pt_end_unix_fchdir(&guard);
-    return ret;
+    return pt_network_sendto_with_caller(socket, buffer, length, flags, dest_addr, dest_len, -1, __builtin_return_address(0));
 }
 
-static int pt_getsockname(int socket, struct sockaddr * __restrict address, socklen_t * __restrict address_len) {
+__attribute__((visibility("hidden")))
+int pt_network_getsockname_with_caller(int socket,
+                                       struct sockaddr * __restrict address,
+                                       socklen_t * __restrict address_len,
+                                       int raw_syscall_num,
+                                       const void *caller) {
     if (address == NULL || address_len == NULL) {
         errno = EFAULT;
         return -1;
     }
     socklen_t caller_cap = *address_len;
-    int ret = getsockname(socket, address, address_len);
+    int ret = (raw_syscall_num >= 0)
+        ? (int)pt_orig_syscall(raw_syscall_num, (uintptr_t)socket, (uintptr_t)address, (uintptr_t)address_len, 0, 0, 0, 0, 0)
+        : getsockname(socket, address, address_len);
     if (ret == 0) {
-        pt_virtualize_unix_sockaddr_out(socket, NO, address, address_len, caller_cap, __builtin_return_address(0));
+        pt_virtualize_unix_sockaddr_out(socket, NO, address, address_len, caller_cap, caller);
+    }
+    return ret;
+}
+
+static int pt_getsockname(int socket, struct sockaddr * __restrict address, socklen_t * __restrict address_len) {
+    return pt_network_getsockname_with_caller(socket, address, address_len, -1, __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
+int pt_network_getpeername_with_caller(int socket,
+                                       struct sockaddr * __restrict address,
+                                       socklen_t * __restrict address_len,
+                                       int raw_syscall_num,
+                                       const void *caller) {
+    if (address == NULL || address_len == NULL) {
+        errno = EFAULT;
+        return -1;
+    }
+    socklen_t caller_cap = *address_len;
+    int ret = (raw_syscall_num >= 0)
+        ? (int)pt_orig_syscall(raw_syscall_num, (uintptr_t)socket, (uintptr_t)address, (uintptr_t)address_len, 0, 0, 0, 0, 0)
+        : getpeername(socket, address, address_len);
+    if (ret == 0) {
+        pt_virtualize_unix_sockaddr_out(socket, YES, address, address_len, caller_cap, caller);
     }
     return ret;
 }
 
 static int pt_getpeername(int socket, struct sockaddr * __restrict address, socklen_t * __restrict address_len) {
-    if (address == NULL || address_len == NULL) {
-        errno = EFAULT;
-        return -1;
-    }
-    socklen_t caller_cap = *address_len;
-    int ret = getpeername(socket, address, address_len);
-    if (ret == 0) {
-        pt_virtualize_unix_sockaddr_out(socket, YES, address, address_len, caller_cap, __builtin_return_address(0));
-    }
-    return ret;
+    return pt_network_getpeername_with_caller(socket, address, address_len, -1, __builtin_return_address(0));
 }
 
-static int pt_close(int fd) {
+__attribute__((visibility("hidden")))
+void pt_network_notify_fd_close(int fd) {
     if (fd >= 0 && atomic_load_explicit(&s_unix_sock_tracked_count, memory_order_acquire) > 0) {
         pt_unix_forget_fd(fd);
     }
+}
+
+static int pt_close(int fd) {
+    pt_network_notify_fd_close(fd);
     return close(fd);
 }
 
 static int pt_close_nocancel(int fd) {
-    if (fd >= 0 && atomic_load_explicit(&s_unix_sock_tracked_count, memory_order_acquire) > 0) {
-        pt_unix_forget_fd(fd);
-    }
+    pt_network_notify_fd_close(fd);
     return pt_orig_close_nocancel(fd);
 }
 
@@ -1028,7 +1105,11 @@ BOOL pt_is_hidden_network_ifname(const char *name) {
         return YES;
     }
     if (pt_is_secondary_en_ifname_cstr(name)) {
-        return pt_network_ifname_is_inactive(name);
+        if (pt_network_ifname_is_inactive(name)) {
+            return YES;
+        }
+        // Hide active secondary wired/dock en1+ interfaces when primary en0 is active
+        return !pt_network_ifname_is_inactive("en0");
     }
     return NO;
 }
@@ -1315,6 +1396,45 @@ int pt_network_ioctl_with_caller(int fd, unsigned long request, uintptr_t arg, c
             request == SIOCGIFBRDADDR ||
             request == SIOCGIFDSTADDR ||
             request == SIOCGIFMTU
+#ifdef SIOCGIFINDEX
+            || request == SIOCGIFINDEX
+#endif
+#ifdef SIOCGIFTYPE
+            || request == SIOCGIFTYPE
+#endif
+#ifdef SIOCGIFPHYS
+            || request == SIOCGIFPHYS
+#endif
+#ifdef SIOCGIFMETRIC
+            || request == SIOCGIFMETRIC
+#endif
+#ifdef SIOCGIFVLAN
+            || request == SIOCGIFVLAN
+#endif
+#ifdef SIOCGIFBOND
+            || request == SIOCGIFBOND
+#endif
+#ifdef SIOCGIFDESC
+            || request == SIOCGIFDESC
+#endif
+#ifdef SIOCGIFWAKEFLAGS
+            || request == SIOCGIFWAKEFLAGS
+#endif
+#ifdef SIOCGIFALIFETIME_IN6
+            || request == SIOCGIFALIFETIME_IN6
+#endif
+#ifdef SIOCGIFFUNCTIONALTYPE
+            || request == SIOCGIFFUNCTIONALTYPE
+#endif
+#ifdef SIOCGIFSTATUS
+            || request == SIOCGIFSTATUS
+#endif
+#ifdef SIOCGIFALTMTU
+            || request == SIOCGIFALTMTU
+#endif
+#ifdef SIOCGIFGENERIC
+            || request == SIOCGIFGENERIC
+#endif
 #ifdef SIOCGIFMEDIA
             || request == SIOCGIFMEDIA
 #endif
@@ -1351,8 +1471,44 @@ int pt_network_ioctl_with_caller(int fd, unsigned long request, uintptr_t arg, c
         }
     }
     int ret = has_arg ? ioctl(fd, request, (void *)arg) : ioctl(fd, request);
-    if (ret == 0 && filter && request == SIOCGIFCONF && arg != 0 && pt_is_valid_user_pointer((const void *)arg)) {
-        pt_filter_ifconf_buffer((struct ifconf *)arg);
+    if (ret == 0 && filter && arg != 0 && pt_is_valid_user_pointer((const void *)arg)) {
+        if (request == SIOCGIFCONF) {
+            pt_filter_ifconf_buffer((struct ifconf *)arg);
+        }
+#if defined(SIOCGIFMEDIA) || defined(SIOCGIFXMEDIA)
+        else if (
+#ifdef SIOCGIFMEDIA
+            request == SIOCGIFMEDIA
+#endif
+#if defined(SIOCGIFMEDIA) && defined(SIOCGIFXMEDIA)
+            ||
+#endif
+#ifdef SIOCGIFXMEDIA
+            request == SIOCGIFXMEDIA
+#endif
+        ) {
+            struct ifmediareq *ifmr = (struct ifmediareq *)arg;
+            char namebuf[IFNAMSIZ + 1];
+            memcpy(namebuf, ifmr->ifm_name, IFNAMSIZ);
+            namebuf[IFNAMSIZ] = '\0';
+            if (strcmp(namebuf, "en0") == 0 &&
+                (IFM_TYPE(ifmr->ifm_active) == IFM_ETHER || IFM_TYPE(ifmr->ifm_current) == IFM_ETHER)) {
+                int wifiMedia = IFM_IEEE80211 | IFM_AUTO;
+                ifmr->ifm_current = wifiMedia;
+                ifmr->ifm_active = wifiMedia;
+                ifmr->ifm_status = IFM_AVALID | IFM_ACTIVE;
+                if (ifmr->ifm_ulist != NULL && ifmr->ifm_count > 0 &&
+                    pt_is_valid_user_pointer((const void *)ifmr->ifm_ulist)) {
+                    int n = (ifmr->ifm_count < 256) ? ifmr->ifm_count : 256;
+                    for (int i = 0; i < n; i++) {
+                        if (IFM_TYPE(ifmr->ifm_ulist[i]) == IFM_ETHER) {
+                            ifmr->ifm_ulist[i] = wifiMedia;
+                        }
+                    }
+                }
+            }
+        }
+#endif
     }
     return ret;
 }

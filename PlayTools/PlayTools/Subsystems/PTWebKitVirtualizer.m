@@ -1133,10 +1133,18 @@ static id ps_cached_wk_vfile_user_script(void) {
     return s_vfileScript;
 }
 
-static id ps_create_wk_user_script(NSString *source) {
+static id ps_create_wk_user_script_in_world(NSString *source, id contentWorld) {
     Class usCls = objc_getClass("WKUserScript");
     if (usCls == nil || source.length == 0) {
         return nil;
+    }
+    if (contentWorld != nil) {
+        SEL worldInitSel = NSSelectorFromString(@"initWithSource:injectionTime:forMainFrameOnly:inContentWorld:");
+        id allocWorldObj = [usCls alloc];
+        if (allocWorldObj != nil && [allocWorldObj respondsToSelector:worldInitSel]) {
+            return ((id (*)(id, SEL, NSString *, NSInteger, BOOL, id))objc_msgSend)(
+                allocWorldObj, worldInitSel, source, 0, NO, contentWorld);
+        }
     }
     SEL initSel = NSSelectorFromString(@"initWithSource:injectionTime:forMainFrameOnly:");
     id allocObj = [usCls alloc];
@@ -1144,6 +1152,57 @@ static id ps_create_wk_user_script(NSString *source) {
         return ((id (*)(id, SEL, NSString *, NSInteger, BOOL))objc_msgSend)(allocObj, initSel, source, 0, NO);
     }
     return nil;
+}
+
+static id ps_create_wk_user_script(NSString *source) {
+    return ps_create_wk_user_script_in_world(source, nil);
+}
+
+static const char kPSWKUCCInjectedWorldsKey = 0;
+
+static BOOL ps_is_wk_page_content_world(id contentWorld) {
+    if (contentWorld == nil) {
+        return YES;
+    }
+    Class worldCls = objc_getClass("WKContentWorld");
+    SEL pageSel = NSSelectorFromString(@"pageWorld");
+    if (worldCls != Nil && [worldCls respondsToSelector:pageSel]) {
+        id pageWorld = ((id (*)(id, SEL))objc_msgSend)((id)worldCls, pageSel);
+        if (contentWorld == pageWorld) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static void ps_ensure_playtools_env_in_world(id ucc, id contentWorld) {
+    if (ucc == nil || ps_is_wk_page_content_world(contentWorld)) {
+        return;
+    }
+    BOOL needAdd = NO;
+    @synchronized (ucc) {
+        NSHashTable *worlds = objc_getAssociatedObject(ucc, &kPSWKUCCInjectedWorldsKey);
+        if (worlds == nil) {
+            worlds = [NSHashTable weakObjectsHashTable];
+            objc_setAssociatedObject(ucc, &kPSWKUCCInjectedWorldsKey, worlds, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        if (![worlds containsObject:contentWorld]) {
+            [worlds addObject:contentWorld];
+            needAdd = YES;
+        }
+    }
+    if (needAdd) {
+        id script = ps_create_wk_user_script_in_world(ps_build_wk_env_user_script_source(), contentWorld);
+        if (script != nil) {
+            SEL origAddSel = @selector(pm_wk_addUserScript:);
+            SEL addSel = NSSelectorFromString(@"addUserScript:");
+            if ([ucc respondsToSelector:origAddSel]) {
+                ((void (*)(id, SEL, id))objc_msgSend)(ucc, origAddSel, script);
+            } else if ([ucc respondsToSelector:addSel]) {
+                ((void (*)(id, SEL, id))objc_msgSend)(ucc, addSel, script);
+            }
+        }
+    }
 }
 
 static BOOL ps_ucc_has_script_with_marker(id ucc, NSString *marker) {
@@ -1404,8 +1463,25 @@ static void ps_sync_wkwebview_for_scope(id webView, PSVirtualFileReadScope *scop
     return filtered != nil ? [filtered copy] : scripts;
 }
 
+- (void) pm_wk_addUserScript:(id)userScript {
+    if (userScript != nil &&
+        pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        SEL cwSel = NSSelectorFromString(@"contentWorld");
+        if (![userScript respondsToSelector:cwSel]) {
+            cwSel = NSSelectorFromString(@"_contentWorld");
+        }
+        if ([userScript respondsToSelector:cwSel]) {
+            id world = ((id (*)(id, SEL))objc_msgSend)(userScript, cwSel);
+            ps_ensure_playtools_env_in_world(self, world);
+        }
+    }
+    [self pm_wk_addUserScript:userScript];
+}
+
 - (void) pm_wk_removeAllUserScripts {
     [self pm_wk_removeAllUserScripts];
+    objc_setAssociatedObject(self, &kPSWKUCCInjectedWorldsKey, nil, OBJC_ASSOCIATION_RETAIN);
     NSNumber *mode = objc_getAssociatedObject(self, &kPSWKUCCManagedModeKey);
     if (mode != nil) {
         objc_setAssociatedObject(self, &kPSWKUCCManagedModeKey, nil, OBJC_ASSOCIATION_RETAIN);
@@ -1413,6 +1489,63 @@ static void ps_sync_wkwebview_for_scope(id webView, PSVirtualFileReadScope *scop
                          !atomic_load_explicit(&s_wk_custom_protocol_handles_file, memory_order_relaxed);
         ps_apply_playtools_scripts_to_ucc(self, wantVFile);
     }
+}
+
+- (void) pm_wk_evaluateJavaScript:(NSString *)javaScriptString
+                          inFrame:(id)frame
+                   inContentWorld:(id)contentWorld
+                completionHandler:(void (^)(id, NSError *))completionHandler {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        !ps_is_wk_page_content_world(contentWorld)) {
+        if ([self respondsToSelector:@selector(configuration)]) {
+            id cfg = ((id (*)(id, SEL))objc_msgSend)(self, @selector(configuration));
+            SEL uccSel = NSSelectorFromString(@"userContentController");
+            if (cfg != nil && [cfg respondsToSelector:uccSel]) {
+                id ucc = ((id (*)(id, SEL))objc_msgSend)(cfg, uccSel);
+                ps_ensure_playtools_env_in_world(ucc, contentWorld);
+            }
+        }
+        [self pm_wk_evaluateJavaScript:ps_build_wk_env_user_script_source()
+                               inFrame:frame
+                        inContentWorld:contentWorld
+                     completionHandler:nil];
+    }
+    [self pm_wk_evaluateJavaScript:javaScriptString
+                           inFrame:frame
+                    inContentWorld:contentWorld
+                 completionHandler:completionHandler];
+}
+
+- (void) pm_wk_callAsyncJavaScript:(NSString *)functionBody
+                         arguments:(NSDictionary<NSString *, id> *)arguments
+                           inFrame:(id)frame
+                    inContentWorld:(id)contentWorld
+                 completionHandler:(void (^)(id, NSError *))completionHandler {
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        !ps_is_wk_page_content_world(contentWorld)) {
+        if ([self respondsToSelector:@selector(configuration)]) {
+            id cfg = ((id (*)(id, SEL))objc_msgSend)(self, @selector(configuration));
+            SEL uccSel = NSSelectorFromString(@"userContentController");
+            if (cfg != nil && [cfg respondsToSelector:uccSel]) {
+                id ucc = ((id (*)(id, SEL))objc_msgSend)(cfg, uccSel);
+                ps_ensure_playtools_env_in_world(ucc, contentWorld);
+            }
+        }
+        SEL origEvalSel = @selector(pm_wk_evaluateJavaScript:inFrame:inContentWorld:completionHandler:);
+        if ([self respondsToSelector:origEvalSel]) {
+            [self pm_wk_evaluateJavaScript:ps_build_wk_env_user_script_source()
+                                   inFrame:frame
+                            inContentWorld:contentWorld
+                         completionHandler:nil];
+        }
+    }
+    [self pm_wk_callAsyncJavaScript:functionBody
+                          arguments:arguments
+                            inFrame:frame
+                     inContentWorld:contentWorld
+                  completionHandler:completionHandler];
 }
 
 static void ps_prepare_wk_configuration(id cfg) {
@@ -1857,6 +1990,16 @@ __attribute__((visibility("hidden"))) void ps_install_webkit_hooks_if_loaded(voi
                                        @selector(pm_wk_loadHTMLString:baseURL:));
             ps_swizzle_instance_method(wkCls, NSSelectorFromString(@"loadData:MIMEType:characterEncodingName:baseURL:"),
                                        @selector(pm_wk_loadData:MIMEType:characterEncodingName:baseURL:));
+            SEL evalWorldSel = NSSelectorFromString(@"evaluateJavaScript:inFrame:inContentWorld:completionHandler:");
+            if (class_getInstanceMethod(wkCls, evalWorldSel) != NULL) {
+                ps_swizzle_instance_method(wkCls, evalWorldSel,
+                                           @selector(pm_wk_evaluateJavaScript:inFrame:inContentWorld:completionHandler:));
+            }
+            SEL callAsyncSel = NSSelectorFromString(@"callAsyncJavaScript:arguments:inFrame:inContentWorld:completionHandler:");
+            if (class_getInstanceMethod(wkCls, callAsyncSel) != NULL) {
+                ps_swizzle_instance_method(wkCls, callAsyncSel,
+                                           @selector(pm_wk_callAsyncJavaScript:arguments:inFrame:inContentWorld:completionHandler:));
+            }
 
             Class navActionCls = objc_getClass("WKNavigationAction");
             if (navActionCls != Nil && class_getInstanceMethod(navActionCls, @selector(request)) != NULL) {
@@ -1869,6 +2012,10 @@ __attribute__((visibility("hidden"))) void ps_install_webkit_hooks_if_loaded(voi
 
             Class uccCls = objc_getClass("WKUserContentController");
             if (uccCls != nil) {
+                SEL addScriptSel = NSSelectorFromString(@"addUserScript:");
+                if (class_getInstanceMethod(uccCls, addScriptSel) != NULL) {
+                    ps_swizzle_instance_method(uccCls, addScriptSel, @selector(pm_wk_addUserScript:));
+                }
                 if (class_getInstanceMethod(uccCls, NSSelectorFromString(@"userScripts")) != NULL) {
                     ps_swizzle_instance_method(uccCls, NSSelectorFromString(@"userScripts"),
                                                @selector(pm_wk_userScripts));
