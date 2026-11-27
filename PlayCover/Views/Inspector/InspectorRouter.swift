@@ -6,8 +6,8 @@
 import SwiftUI
 
 struct InspectorRouter: View {
-    @EnvironmentObject var appsVM: AppsVM
-    @EnvironmentObject var navState: AppNavigationState
+    @Environment(AppsVM.self) var appsVM
+    @Environment(AppNavigationState.self) var navState
 
     private var configApp: PlayApp? {
         guard let targetID = navState.configTargetID else { return nil }

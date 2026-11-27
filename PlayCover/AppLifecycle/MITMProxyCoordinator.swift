@@ -1,16 +1,18 @@
 import Foundation
+import Observation
 import PlayCoverCore
 import PlayCoverMachO
 import PlayCoverNetwork
 import SwiftUI
 
 @MainActor
-final class MITMProxyCoordinator: ObservableObject {
+@Observable
+final class MITMProxyCoordinator {
     let certificateStore: PerAppCertificateStore
 
-    @Published private(set) var activePorts: [String: UInt16] = [:]
-    @Published private(set) var capturedEntries: [String: [MITMCaptureEntry]] = [:]
-    @Published private(set) var certificateRevisions: [String: Int] = [:]
+    private(set) var activePorts: [String: UInt16] = [:]
+    private(set) var capturedEntries: [String: [MITMCaptureEntry]] = [:]
+    private(set) var certificateRevisions: [String: Int] = [:]
 
     private var servers: [String: LocalMITMProxyServer] = [:]
     private var captureStores: [String: TrafficCaptureStore] = [:]

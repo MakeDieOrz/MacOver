@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Observation
 
 enum URLTypes: Int, Equatable {
     case source
@@ -21,12 +22,15 @@ enum URLAction: Int, Equatable {
     case open
 }
 
-class URLObservable: ObservableObject {
-    @Published var url: String?
-    @Published var type: URLTypes?
-    @Published var action: URLAction?
+@MainActor
+@Observable
+final class URLObservable {
+    var url: String?
+    var type: URLTypes?
+    var action: URLAction?
 }
 
+@MainActor
 final class URLHandler {
     weak var dependencies: PlayCoverDependencies?
 

@@ -6,7 +6,7 @@
 import SwiftUI
 
 struct GlassToastStack: View {
-    @EnvironmentObject var toastVM: ToastVM
+    @Environment(ToastVM.self) var toastVM
 
     private var visibleToasts: [ToastInfo] {
         Array(toastVM.toasts.suffix(3))

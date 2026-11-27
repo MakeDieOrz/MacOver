@@ -7,7 +7,7 @@ import PlayCoverCore
 import SwiftUI
 
 struct ConfigDevicePane: View {
-    @ObservedObject var settings: AppSettings
+    @Bindable var settings: AppSettings
     var onOpenStrictMode: (() -> Void)?
 
     private var currentModel: String {

@@ -7,7 +7,7 @@ import Sparkle
 import SwiftUI
 
 struct UpdateSettings: View {
-    @ObservedObject var updaterViewModel: UpdaterViewModel
+    var updaterViewModel: UpdaterViewModel
     @AppStorage("SUEnableAutomaticChecks") var autoUpdate = false
 
     var body: some View {

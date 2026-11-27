@@ -3,23 +3,21 @@
 //  PlayCover
 //
 
-import Combine
 import SwiftUI
 
 struct LibrarySidebar: View {
-    @EnvironmentObject var appsVM: AppsVM
-    @EnvironmentObject var storeVM: StoreVM
-    @EnvironmentObject var navState: AppNavigationState
+    @Environment(AppsVM.self) var appsVM
+    @Environment(StoreVM.self) var storeVM
+    @Environment(AppNavigationState.self) var navState
 
     @State private var showSources = true
-    @State private var refreshToken = 0
 
     private var runningApps: [PlayApp] {
-        _ = refreshToken
-        return appsVM.apps.filter(\.isRunning)
+        appsVM.apps.filter(\.isRunning)
     }
 
     var body: some View {
+        @Bindable var navState = navState
         List(selection: $navState.sidebarDestination) {
             Section("sidebar.section.library") {
                 Label("sidebar.appLibrary", systemImage: "square.grid.2x2")
@@ -53,15 +51,12 @@ struct LibrarySidebar: View {
         }
         .listStyle(.sidebar)
         .searchable(text: $navState.searchText, placement: .sidebar)
-        .onReceive(Publishers.MergeMany(appsVM.apps.map(\.objectWillChange))) { _ in
-            refreshToken &+= 1
-        }
     }
 }
 
 private struct SidebarRunningAppRow: View {
-    @EnvironmentObject var navState: AppNavigationState
-    @ObservedObject var app: PlayApp
+    @Environment(AppNavigationState.self) var navState
+    var app: PlayApp
 
     var body: some View {
         HStack(spacing: 8) {

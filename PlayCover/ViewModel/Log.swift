@@ -5,10 +5,11 @@
 
 import Foundation
 import SwiftUI
+import Synchronization
 
-class Log: ObservableObject, @unchecked Sendable {
+final class Log: Sendable {
 
-    private weak var alertPresenter: AlertPresenter?
+    private let alertPresenter: AlertPresenter?
 
     init(alertPresenter: AlertPresenter? = nil) {
         self.alertPresenter = alertPresenter
@@ -49,15 +50,22 @@ class Log: ObservableObject, @unchecked Sendable {
         }
     }
 
-    var logdata = "\(ProcessInfo.processInfo.operatingSystemVersionString)\n"
+    private let logLock = Mutex<String>("\(ProcessInfo.processInfo.operatingSystemVersionString)\n")
+
+    var logdata: String {
+        get { logLock.withLock { $0 } }
+        set { logLock.withLock { $0 = newValue } }
+    }
 
     func log(_ str: String, isError: Bool = false) {
         print(str)
-        if isError {
-            logdata.append("ERROR: ")
+        logLock.withLock { buffer in
+            if isError {
+                buffer.append("ERROR: ")
+            }
+            buffer.append(str)
+            buffer.append("\n")
         }
-        logdata.append(str)
-        logdata.append("\n")
     }
 
     @MainActor
@@ -79,5 +87,4 @@ class Log: ObservableObject, @unchecked Sendable {
         )
     }
 
-    required init() { }
 }

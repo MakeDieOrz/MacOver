@@ -10,10 +10,10 @@ enum KeymapNameValidation {
 }
 
 struct ConfigInputPane: View {
-    @ObservedObject var app: PlayApp
-    @ObservedObject var settings: AppSettings
+    var app: PlayApp
+    @Bindable var settings: AppSettings
 
-    @StateObject private var keymapVM: KeymapViewVM
+    @State private var keymapVM: KeymapViewVM
 
     @State private var newKeymapName = ""
     @State private var renamingURL: URL?
@@ -22,7 +22,7 @@ struct ConfigInputPane: View {
     init(app: PlayApp, settings: AppSettings) {
         self.app = app
         self.settings = settings
-        _keymapVM = StateObject(wrappedValue: KeymapViewVM(app: app))
+        _keymapVM = State(initialValue: KeymapViewVM(app: app))
     }
 
     private func validateKeymapName(_ candidate: String) -> KeymapNameValidation {

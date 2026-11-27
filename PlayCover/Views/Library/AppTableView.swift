@@ -7,8 +7,8 @@ import PlayCoverCore
 import SwiftUI
 
 struct AppTableView: View {
-    @EnvironmentObject var appsVM: AppsVM
-    @EnvironmentObject var navState: AppNavigationState
+    @Environment(AppsVM.self) var appsVM
+    @Environment(AppNavigationState.self) var navState
 
     let apps: [PlayApp]
     let onClearPreferences: (PlayApp) -> Void
@@ -24,6 +24,7 @@ struct AppTableView: View {
     }
 
     var body: some View {
+        @Bindable var navState = navState
         Table(sortedApps, selection: $navState.selectedAppID, sortOrder: $sortOrder) {
             TableColumn("library.table.app", value: \.sortName) { app in
                 TableAppNameCell(app: app)
@@ -73,7 +74,7 @@ struct AppTableView: View {
 }
 
 private struct TableAppNameCell: View {
-    @ObservedObject var app: PlayApp
+    var app: PlayApp
 
     var body: some View {
         HStack(spacing: 10) {
@@ -90,7 +91,7 @@ private struct TableAppNameCell: View {
 }
 
 private struct TableAppDeviceCell: View {
-    @ObservedObject var settings: AppSettings
+    var settings: AppSettings
 
     var body: some View {
         HStack(spacing: 4) {
@@ -110,7 +111,7 @@ private struct TableAppDeviceCell: View {
 }
 
 private struct TableAppLoadCell: View {
-    @ObservedObject var settings: AppSettings
+    var settings: AppSettings
 
     var body: some View {
         let budget = settings.settings.pixelBudget
@@ -131,7 +132,7 @@ private struct TableAppLoadCell: View {
 }
 
 private struct TableAppStatusCell: View {
-    @ObservedObject var app: PlayApp
+    var app: PlayApp
     @State private var hasPlayTools = true
 
     var body: some View {

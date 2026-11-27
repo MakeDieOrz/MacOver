@@ -3,12 +3,10 @@
 //  PlayCover
 //
 
-import CachedAsyncImage
-import DataCache
 import SwiftUI
 
 struct AppIconView: View {
-    @EnvironmentObject var dependencies: PlayCoverDependencies
+    @Environment(PlayCoverDependencies.self) var dependencies
 
     let app: PlayApp
     var size: CGFloat = 64
@@ -61,13 +59,14 @@ struct AppIconView: View {
 }
 
 struct StoreAppIconView: View {
-    @EnvironmentObject var dependencies: PlayCoverDependencies
+    @Environment(PlayCoverDependencies.self) var dependencies
 
     let app: SourceAppsData
     var size: CGFloat = 64
     var cornerRadius: CGFloat = 15
 
     @State private var onlineIcon: String?
+    @State private var loadedRemoteImage: NSImage?
     @State private var localIcon: NSImage?
     @State private var finishedFallbackWait = false
 
@@ -100,31 +99,28 @@ struct StoreAppIconView: View {
     }
 
     var body: some View {
-        CachedAsyncImageWrapper(
-            url: onlineIcon,
-            placeholder: { _ in
-                placeholderView
-            },
-            image: { image in
-                Image(nsImage: image)
+        Group {
+            if let loadedRemoteImage {
+                Image(nsImage: loadedRemoteImage)
                     .resizable()
                     .scaledToFit()
-            },
-            error: { _, _ in
+            } else {
                 placeholderView
             }
-        )
+        }
         .frame(width: size, height: size)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .shadow(color: .black.opacity(0.14), radius: 2, y: 1)
         .task(id: app.itunesLookup) {
-            let cache = DataCache.instance
+            loadedRemoteImage = nil
+            let cache = dependencies.cacher.cache
             if !cache.hasData(forKey: app.itunesLookup) {
                 await dependencies.cacher.resolveITunesData(app.itunesLookup)
             }
             if let response: ITunesResponse = try? cache.readCodable(forKey: app.itunesLookup),
                let artwork = response.results.first?.artworkUrl512 {
                 onlineIcon = artwork
+                loadedRemoteImage = await dependencies.cacher.loadRemoteImage(from: artwork)
             } else {
                 localIcon = dependencies.cacher.getLocalIcon(bundleId: app.bundleID)
             }

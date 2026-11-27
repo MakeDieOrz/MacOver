@@ -7,7 +7,7 @@ import PlayCoverCore
 import SwiftUI
 
 struct ConfigDisplayPane: View {
-    @ObservedObject var settings: AppSettings
+    @Bindable var settings: AppSettings
     var onOpenStrictMode: (() -> Void)?
 
     @State private var customWidth = 1920

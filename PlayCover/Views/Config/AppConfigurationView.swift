@@ -34,10 +34,10 @@ struct ConfigAsyncToggleStyle: ToggleStyle {
 }
 
 struct AppConfigurationView: View {
-    @EnvironmentObject var navState: AppNavigationState
+    @Environment(AppNavigationState.self) var navState
 
-    @ObservedObject var app: PlayApp
-    @ObservedObject var settings: AppSettings
+    var app: PlayApp
+    var settings: AppSettings
 
     @State private var hasPlayTools = true
     @State private var blockingTask: ConfigBlockingTask = .none

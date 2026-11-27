@@ -39,8 +39,8 @@ struct IPASourceSettings: View {
     @State var selectedNotEmpty = false
     @State var addSourceSheet = false
     @State var triggerUpdate = false
-    @EnvironmentObject var storeVM: StoreVM
-    @EnvironmentObject var urlObservable: URLObservable
+    @Environment(StoreVM.self) var storeVM
+    @Environment(URLObservable.self) var urlObservable
 
     var body: some View {
         Form {
@@ -93,15 +93,15 @@ struct IPASourceSettings: View {
                 }
             }
         }
-        .onChange(of: selected) { data in
+        .onChange(of: selected) { _, data in
             selectedNotEmpty = data.count > 0
         }
         .padding(20)
         .frame(width: 600, height: 300, alignment: .center)
         .sheet(isPresented: $addSourceSheet) {
             AddSourceView(addSourceSheet: $addSourceSheet)
-                .environmentObject(storeVM)
-                .environmentObject(urlObservable)
+                .environment(storeVM)
+                .environment(urlObservable)
         }
     }
 }
@@ -110,7 +110,7 @@ struct SourceView: View {
     var source: SourceData
     @State var isEnabled: Bool
     @State var showingPopover = false
-    @EnvironmentObject var storeVM: StoreVM
+    @Environment(StoreVM.self) var storeVM
 
     var body: some View {
         HStack {
@@ -155,7 +155,7 @@ struct SourceView: View {
                 }
             }
         }
-        .onChange(of: isEnabled) { value in
+        .onChange(of: isEnabled) { _, value in
             storeVM.enableSourceToggle(source: source, value: value)
             storeVM.updateSourcesApps()
         }
@@ -192,8 +192,8 @@ struct AddSourceView: View {
     @State var newSourceURL: URL?
     @State var sourceValidationState = SourceValidation.empty
     @Binding var addSourceSheet: Bool
-    @EnvironmentObject var storeVM: StoreVM
-    @EnvironmentObject var urlObservable: URLObservable
+    @Environment(StoreVM.self) var storeVM
+    @Environment(URLObservable.self) var urlObservable
 
     @State var checkTask: Task<Void, Error>?
     @State var urlSessionTask: URLSessionTask?
@@ -254,7 +254,7 @@ struct AddSourceView: View {
         }
         .padding()
         .frame(width: 600, height: 100)
-        .onChange(of: newSource) { source in
+        .onChange(of: newSource) { _, source in
             if let task = checkTask, !task.isCancelled {
                 if let session = urlSessionTask {
                     session.cancel()

@@ -7,17 +7,17 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct RootSplitView: View {
-    @EnvironmentObject var dependencies: PlayCoverDependencies
-    @EnvironmentObject var appsVM: AppsVM
-    @EnvironmentObject var storeVM: StoreVM
-    @EnvironmentObject var integrity: AppIntegrity
-    @EnvironmentObject var alertPresenter: AlertPresenter
-    @EnvironmentObject var keyCoverObserved: KeyCoverObservable
-    @EnvironmentObject var startupAlerts: StartupAlertCenter
-    @EnvironmentObject var urlObserved: URLObservable
-    @EnvironmentObject var installVM: InstallVM
-    @EnvironmentObject var downloadVM: DownloadVM
-    @EnvironmentObject var navState: AppNavigationState
+    @Environment(PlayCoverDependencies.self) var dependencies
+    @Environment(AppsVM.self) var appsVM
+    @Environment(StoreVM.self) var storeVM
+    @Environment(AppIntegrity.self) var integrity
+    @Environment(AlertPresenter.self) var alertPresenter
+    @Environment(KeyCoverObservable.self) var keyCoverObserved
+    @Environment(StartupAlertCenter.self) var startupAlerts
+    @Environment(URLObservable.self) var urlObserved
+    @Environment(InstallVM.self) var installVM
+    @Environment(DownloadVM.self) var downloadVM
+    @Environment(AppNavigationState.self) var navState
 
     var autoFetchOnAppear: Bool = true
 
@@ -30,6 +30,10 @@ struct RootSplitView: View {
     }
 
     var body: some View {
+        @Bindable var navState = navState
+        @Bindable var integrity = integrity
+        @Bindable var keyCoverObserved = keyCoverObserved
+        @Bindable var startupAlerts = startupAlerts
         NavigationSplitView(columnVisibility: $columnVisibility) {
             Group {
                 if let app = configTargetApp {
@@ -90,8 +94,8 @@ struct RootSplitView: View {
         }
         .sheet(isPresented: $keyCoverObserved.isKeyCoverUnlockingPromptShown) {
             KeyCoverUnlockingPrompt()
-                .environmentObject(dependencies)
-                .environmentObject(keyCoverObserved)
+                .environment(dependencies)
+                .environment(keyCoverObserved)
         }
         .background(alertSheetHost)
         .alert("alert.moveAppToApplications.title", isPresented: $integrity.integrityOff) {

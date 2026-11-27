@@ -4,6 +4,7 @@
 //
 
 import Foundation
+import Observation
 import SwiftUI
 
 enum SidebarDestination: Hashable {
@@ -46,21 +47,22 @@ enum LibraryLayoutMode: String, Hashable {
 }
 
 @MainActor
-final class AppNavigationState: ObservableObject {
+@Observable
+final class AppNavigationState {
     private static let layoutDefaultsKey = "AppLibraryLayoutMode"
     private static let legacyListDefaultsKey = "AppLibraryView"
 
-    @Published var sidebarDestination: SidebarDestination? = .library
-    @Published var configTargetID: PlayApp.ID?
-    @Published var activeConfigPane: ConfigPane = .overview
-    @Published var selectedAppID: PlayApp.ID?
-    @Published var selectedStoreApp: SourceAppsData?
-    @Published var showInspector: Bool = true
-    @Published var isSigningSetupShown: Bool = false
-    @Published var isActivityPopoverShown: Bool = false
-    @Published var searchText: String = ""
-    @Published var pendingImportIPATrigger: UUID?
-    @Published var libraryLayout: LibraryLayoutMode {
+    var sidebarDestination: SidebarDestination? = .library
+    var configTargetID: PlayApp.ID?
+    var activeConfigPane: ConfigPane = .overview
+    var selectedAppID: PlayApp.ID?
+    var selectedStoreApp: SourceAppsData?
+    var showInspector: Bool = true
+    var isSigningSetupShown: Bool = false
+    var isActivityPopoverShown: Bool = false
+    var searchText: String = ""
+    var pendingImportIPATrigger: UUID?
+    var libraryLayout: LibraryLayoutMode {
         didSet {
             UserDefaults.standard.set(libraryLayout.rawValue, forKey: Self.layoutDefaultsKey)
             UserDefaults.standard.set(libraryLayout == .table, forKey: Self.legacyListDefaultsKey)

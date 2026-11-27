@@ -6,10 +6,10 @@
 import SwiftUI
 
 struct ConfigSidebar: View {
-    @EnvironmentObject var navState: AppNavigationState
+    @Environment(AppNavigationState.self) var navState
 
-    @ObservedObject var app: PlayApp
-    @ObservedObject var settings: AppSettings
+    var app: PlayApp
+    var settings: AppSettings
 
     private var troubleshootingCount: Int {
         let lsEnv = app.info.lsEnvironment["DYLD_LIBRARY_PATH"] ?? ""
@@ -21,6 +21,7 @@ struct ConfigSidebar: View {
     }
 
     var body: some View {
+        @Bindable var navState = navState
         VStack(alignment: .leading, spacing: 10) {
             Button {
                 app.settings.flush()

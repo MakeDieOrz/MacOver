@@ -33,6 +33,7 @@ class Uninstaller {
         Uninstaller.libraryUrl.appendingPathComponent("Saved Application State")
     ]
 
+    @MainActor
     private static func createButtonView(
         _ yaxis: CGFloat,
         _ text: String,

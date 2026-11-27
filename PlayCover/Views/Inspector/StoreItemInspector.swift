@@ -6,9 +6,9 @@
 import SwiftUI
 
 struct StoreItemInspector: View {
-    @EnvironmentObject var dependencies: PlayCoverDependencies
-    @EnvironmentObject var appsVM: AppsVM
-    @EnvironmentObject var downloadVM: DownloadVM
+    @Environment(PlayCoverDependencies.self) var dependencies
+    @Environment(AppsVM.self) var appsVM
+    @Environment(DownloadVM.self) var downloadVM
 
     let app: SourceAppsData
 

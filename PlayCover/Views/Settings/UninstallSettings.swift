@@ -6,12 +6,13 @@
 import SwiftUI
 
 struct UninstallSettings: View {
-    @EnvironmentObject var uninstallPreferences: UninstallPreferences
-    @EnvironmentObject var appsVM: AppsVM
+    @Environment(UninstallPreferences.self) var uninstallPreferences
+    @Environment(AppsVM.self) var appsVM
 
     @State private var showPruneFileAlert = false
 
     var body: some View {
+        @Bindable var uninstallPreferences = uninstallPreferences
         Form {
             Section("preferences.whenUninstalling") {
                 Toggle("preferences.toggle.showUninstall", isOn: $uninstallPreferences.showUninstallPopup)

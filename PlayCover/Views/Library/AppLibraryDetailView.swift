@@ -6,11 +6,11 @@
 import SwiftUI
 
 struct AppLibraryDetailView: View {
-    @EnvironmentObject var dependencies: PlayCoverDependencies
-    @EnvironmentObject var appsVM: AppsVM
-    @EnvironmentObject var installVM: InstallVM
-    @EnvironmentObject var downloadVM: DownloadVM
-    @EnvironmentObject var navState: AppNavigationState
+    @Environment(PlayCoverDependencies.self) var dependencies
+    @Environment(AppsVM.self) var appsVM
+    @Environment(InstallVM.self) var installVM
+    @Environment(DownloadVM.self) var downloadVM
+    @Environment(AppNavigationState.self) var navState
 
     @State private var clearPrefsApp: PlayApp?
     @State private var clearPlayChainApp: PlayApp?
@@ -26,6 +26,7 @@ struct AppLibraryDetailView: View {
     }
 
     var body: some View {
+        @Bindable var navState = navState
         Group {
             if !appsVM.apps.isEmpty || appsVM.updatingApps {
                 if navState.libraryLayout == .table {

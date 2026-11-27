@@ -6,9 +6,10 @@
 import SwiftUI
 
 struct InstallSettings: View {
-    @EnvironmentObject var installPreferences: InstallPreferences
+    @Environment(InstallPreferences.self) var installPreferences
 
     var body: some View {
+        @Bindable var installPreferences = installPreferences
         Form {
             Section {
                 Picker("settings.applicationCategoryType", selection: $installPreferences.defaultAppType) {

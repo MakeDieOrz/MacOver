@@ -7,10 +7,10 @@ import PlayCoverSandbox
 import SwiftUI
 
 struct ActivityCapsule: View {
-    @EnvironmentObject var installVM: InstallVM
-    @EnvironmentObject var downloadVM: DownloadVM
-    @EnvironmentObject var dependencies: PlayCoverDependencies
-    @EnvironmentObject var navState: AppNavigationState
+    @Environment(InstallVM.self) var installVM
+    @Environment(DownloadVM.self) var downloadVM
+    @Environment(PlayCoverDependencies.self) var dependencies
+    @Environment(AppNavigationState.self) var navState
 
     private var isBusy: Bool {
         installVM.inProgress || downloadVM.inProgress
@@ -39,6 +39,7 @@ struct ActivityCapsule: View {
     }
 
     var body: some View {
+        @Bindable var navState = navState
         Button {
             navState.isActivityPopoverShown.toggle()
         } label: {
@@ -78,9 +79,9 @@ struct ActivityCapsule: View {
         )
         .popover(isPresented: $navState.isActivityPopoverShown, arrowEdge: .trailing) {
             ActivityCenterView()
-                .environmentObject(installVM)
-                .environmentObject(downloadVM)
-                .environmentObject(dependencies)
+                .environment(installVM)
+                .environment(downloadVM)
+                .environment(dependencies)
         }
     }
 }
@@ -92,7 +93,7 @@ private struct SigningBadgeDisplay {
 }
 
 struct SigningStatusCapsule: View {
-    @EnvironmentObject var navState: AppNavigationState
+    @Environment(AppNavigationState.self) var navState
 
     @State private var status: PrivilegePreFlightStatus?
 

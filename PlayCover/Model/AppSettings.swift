@@ -6,9 +6,10 @@
 //
 
 import AppKit
-import Combine
 import Foundation
+import Observation
 import PlayCoverCore
+import Synchronization
 import UniformTypeIdentifiers
 
 struct AppSettingsData: Codable, Equatable {
@@ -387,7 +388,8 @@ struct AppSettingsData: Codable, Equatable {
     }
 }
 
-class AppSettings: ObservableObject {
+@Observable
+final class AppSettings: @unchecked Sendable {
     static var appSettingsDir: URL {
         let settingsFolder =
             PlayTools.playCoverContainer.appendingPathComponent("App Settings")
@@ -406,10 +408,10 @@ class AppSettings: ObservableObject {
     let info: AppInfo
     let settingsUrl: URL
     var openWithLLDB: Bool = false {
-        didSet { notifyChangedOnMain() }
+        didSet { fireChangeObservers() }
     }
     var openLLDBWithTerminal: Bool = true {
-        didSet { notifyChangedOnMain() }
+        didSet { fireChangeObservers() }
     }
     var effectiveOpenWithLLDB: Bool {
         settings.effectiveOpenWithLLDB(openWithLLDB)
@@ -418,42 +420,40 @@ class AppSettings: ObservableObject {
         label: "app.makedie.MacOver.AppSettings.metalHUD",
         qos: .utility
     )
-    private static let metalHUDGenerationLock = NSLock()
-    private static var metalHUDGenerations: [String: UInt64] = [:]
+    private static let metalHUDGenerations = Mutex<[String: UInt64]>([:])
 
-    private struct PendingMetalHUDUpdate {
+    private struct PendingMetalHUDUpdate: Sendable {
         let bundleID: String
         let enabled: Bool
         let generation: UInt64
     }
 
-    private let lock = NSLock()
-    private let ioQueue = DispatchQueue(label: "app.makedie.MacOver.AppSettings.io", qos: .utility)
-    private var pendingSaveWorkItem: DispatchWorkItem?
-    private var hasPendingWrite = false
-    let debounceInterval: TimeInterval
-    private let metalHUDExecutor: (String, Bool) throws -> Void
-    private var suppressPersistence = false
-    private var isResetting = false
-    private var _settings: AppSettingsData
+    @ObservationIgnored private let lock = Mutex<Void>(())
+    @ObservationIgnored private let ioQueue = DispatchQueue(label: "app.makedie.MacOver.AppSettings.io", qos: .utility)
+    @ObservationIgnored private var pendingSaveWorkItem: DispatchWorkItem?
+    @ObservationIgnored private var hasPendingWrite = false
+    @ObservationIgnored let debounceInterval: TimeInterval
+    @ObservationIgnored private let metalHUDExecutor: @Sendable (String, Bool) throws -> Void
+    @ObservationIgnored private var suppressPersistence = false
+    @ObservationIgnored private var isResetting = false
+    @ObservationIgnored private var _settings: AppSettingsData
+    @ObservationIgnored private var changeObservers: [UUID: @Sendable () -> Void] = [:]
 
     private static func reserveMetalHUDGeneration(for bundleID: String) -> UInt64 {
-        metalHUDGenerationLock.lock()
-        defer { metalHUDGenerationLock.unlock() }
-        let next = (metalHUDGenerations[bundleID] ?? 0) &+ 1
-        metalHUDGenerations[bundleID] = next
-        return next
+        metalHUDGenerations.withLock { generations in
+            let next = (generations[bundleID] ?? 0) &+ 1
+            generations[bundleID] = next
+            return next
+        }
     }
 
     private static func isLatestMetalHUDGeneration(_ generation: UInt64, for bundleID: String) -> Bool {
-        metalHUDGenerationLock.lock()
-        defer { metalHUDGenerationLock.unlock() }
-        return metalHUDGenerations[bundleID] == generation
+        metalHUDGenerations.withLock { $0[bundleID] == generation }
     }
 
     private static func enqueueMetalHUDUpdate(
         _ pending: PendingMetalHUDUpdate,
-        executor: @escaping (String, Bool) throws -> Void
+        executor: @escaping @Sendable (String, Bool) throws -> Void
     ) {
         metalHUDQueue.async {
             guard isLatestMetalHUDGeneration(pending.generation, for: pending.bundleID) else { return }
@@ -468,7 +468,7 @@ class AppSettings: ObservableObject {
     static func syncMetalHUD(
         bundleID: String,
         enabled: Bool,
-        executor: @escaping (String, Bool) throws -> Void = { try Shell.setMetalHUD($0, enabled: $1) }
+        executor: @escaping @Sendable (String, Bool) throws -> Void = { try Shell.setMetalHUD($0, enabled: $1) }
     ) async {
         guard !bundleID.isEmpty else { return }
         let generation = reserveMetalHUDGeneration(for: bundleID)
@@ -481,21 +481,46 @@ class AppSettings: ObservableObject {
         }
     }
 
-    private func notifyChangedOnMain() {
+    @discardableResult
+    func addChangeObserver(_ observer: @escaping @Sendable () -> Void) -> UUID {
+        let id = UUID()
+        lock.withLock { _ in
+            changeObservers[id] = observer
+        }
+        return id
+    }
+
+    func removeChangeObserver(_ id: UUID) {
+        lock.withLock { _ in
+            _ = changeObservers.removeValue(forKey: id)
+        }
+    }
+
+    private func fireChangeObservers() {
+        let observers = lock.withLock { _ in Array(changeObservers.values) }
+        guard !observers.isEmpty else { return }
         if Thread.isMainThread {
-            objectWillChange.send()
+            for observer in observers {
+                observer()
+            }
         } else {
-            DispatchQueue.main.async { [weak self] in
-                self?.objectWillChange.send()
+            DispatchQueue.main.async {
+                for observer in observers {
+                    observer()
+                }
             }
         }
     }
 
+    private func notifyChangedOnMain() {
+        withMutation(keyPath: \.settings) {}
+        fireChangeObservers()
+    }
+
     var settings: AppSettingsData {
         get {
-            lock.lock()
-            defer { lock.unlock() }
-            return _settings
+            access(keyPath: \.settings)
+            return lock.withLock { _ in _settings }
         }
         set {
             update { $0 = newValue }
@@ -517,7 +542,7 @@ class AppSettings: ObservableObject {
         settingsUrl: URL,
         info: AppInfo,
         debounceInterval: TimeInterval = 0.5,
-        metalHUDExecutor: @escaping (String, Bool) throws -> Void = { try Shell.setMetalHUD($0, enabled: $1) }
+        metalHUDExecutor: @escaping @Sendable (String, Bool) throws -> Void = { try Shell.setMetalHUD($0, enabled: $1) }
     ) {
         self.info = info
         self.settingsUrl = settingsUrl
@@ -557,21 +582,23 @@ class AppSettings: ObservableObject {
     }
 
     func update(_ mutate: (inout AppSettingsData) -> Void) {
-        var pendingHUD: PendingMetalHUDUpdate?
-        lock.lock()
-        let previous = _settings
-        var updated = _settings
-        mutate(&updated)
-        guard updated != previous else {
-            lock.unlock()
-            return
+        let pendingHUD: PendingMetalHUDUpdate? = lock.withLock { _ in
+            let previous = _settings
+            var updated = _settings
+            mutate(&updated)
+            guard updated != previous else {
+                return nil
+            }
+            _settings = updated
+            let nextHUD: PendingMetalHUDUpdate?
+            if !suppressPersistence {
+                nextHUD = reserveMetalHUDIfNeededLocked(from: previous, to: updated)
+                scheduleDebouncedWriteLocked()
+            } else {
+                nextHUD = nil
+            }
+            return nextHUD
         }
-        _settings = updated
-        if !suppressPersistence {
-            pendingHUD = reserveMetalHUDIfNeededLocked(from: previous, to: updated)
-            scheduleDebouncedWriteLocked()
-        }
-        lock.unlock()
 
         notifyChangedOnMain()
 
@@ -591,24 +618,24 @@ class AppSettings: ObservableObject {
     }
 
     private func performScheduledWrite() {
-        lock.lock()
-        defer { lock.unlock() }
-        guard hasPendingWrite else { return }
-        pendingSaveWorkItem = nil
-        _ = encodeLocked()
-        hasPendingWrite = false
+        lock.withLock { _ in
+            guard hasPendingWrite else { return }
+            pendingSaveWorkItem = nil
+            _ = encodeLocked()
+            hasPendingWrite = false
+        }
     }
 
     @discardableResult
     public func flush() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        pendingSaveWorkItem?.cancel()
-        pendingSaveWorkItem = nil
-        guard hasPendingWrite else { return true }
-        let ok = encodeLocked()
-        hasPendingWrite = false
-        return ok
+        lock.withLock { _ in
+            pendingSaveWorkItem?.cancel()
+            pendingSaveWorkItem = nil
+            guard hasPendingWrite else { return true }
+            let ok = encodeLocked()
+            hasPendingWrite = false
+            return ok
+        }
     }
 
     public func sync() {
@@ -639,18 +666,18 @@ class AppSettings: ObservableObject {
     public func reset() {
         var defaults = AppSettingsData()
         defaults.bundleIdentifier = info.bundleIdentifier
-        var pendingHUD: PendingMetalHUDUpdate?
-        lock.lock()
-        pendingSaveWorkItem?.cancel()
-        pendingSaveWorkItem = nil
-        hasPendingWrite = false
-        let previous = _settings
-        isResetting = true
-        defer { isResetting = false }
-        _settings = defaults
-        pendingHUD = reserveMetalHUDIfNeededLocked(from: previous, to: defaults)
-        _ = encodeLocked()
-        lock.unlock()
+        let pendingHUD: PendingMetalHUDUpdate? = lock.withLock { _ in
+            pendingSaveWorkItem?.cancel()
+            pendingSaveWorkItem = nil
+            hasPendingWrite = false
+            let previous = _settings
+            isResetting = true
+            defer { isResetting = false }
+            _settings = defaults
+            let nextHUD = reserveMetalHUDIfNeededLocked(from: previous, to: defaults)
+            _ = encodeLocked()
+            return nextHUD
+        }
 
         notifyChangedOnMain()
 
@@ -661,22 +688,27 @@ class AppSettings: ObservableObject {
 
     @discardableResult
     public func decode() -> Bool {
-        lock.lock()
-        pendingSaveWorkItem?.cancel()
-        pendingSaveWorkItem = nil
-        hasPendingWrite = false
-        do {
-            let data = try Data(contentsOf: settingsUrl)
-            let decoded = try PropertyListDecoder().decode(AppSettingsData.self, from: data)
-            suppressPersistence = true
-            _settings = decoded
-            suppressPersistence = false
-            lock.unlock()
+        let decodeResult: Result<Void, Error> = lock.withLock { _ in
+            pendingSaveWorkItem?.cancel()
+            pendingSaveWorkItem = nil
+            hasPendingWrite = false
+            do {
+                let data = try Data(contentsOf: settingsUrl)
+                let decoded = try PropertyListDecoder().decode(AppSettingsData.self, from: data)
+                suppressPersistence = true
+                _settings = decoded
+                suppressPersistence = false
+                return .success(())
+            } catch {
+                suppressPersistence = false
+                return .failure(error)
+            }
+        }
+        switch decodeResult {
+        case .success:
             notifyChangedOnMain()
             return true
-        } catch {
-            suppressPersistence = false
-            lock.unlock()
+        case let .failure(error):
             if FileManager.default.fileExists(atPath: settingsUrl.path) {
                 PlayCoverDiagnostics.log(
                     "App settings decode failed for \(info.bundleIdentifier): \(error.localizedDescription)",
@@ -689,12 +721,12 @@ class AppSettings: ObservableObject {
 
     @discardableResult
     public func encode() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        pendingSaveWorkItem?.cancel()
-        pendingSaveWorkItem = nil
-        hasPendingWrite = false
-        return encodeLocked()
+        lock.withLock { _ in
+            pendingSaveWorkItem?.cancel()
+            pendingSaveWorkItem = nil
+            hasPendingWrite = false
+            return encodeLocked()
+        }
     }
 
     @discardableResult
@@ -776,19 +808,5 @@ extension NSScreen {
     public static func hasNotch() -> Bool {
         // check if any of the connected screens contains a notch
         return NSScreen.screens.contains { $0.safeAreaInsets.top != 0 }
-    }
-
-    private static func getMacModel() -> String? {
-        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPlatformExpertDevice"))
-        var modelIdentifier: String?
-
-        if let modelData = IORegistryEntryCreateCFProperty(service, "model" as CFString, kCFAllocatorDefault, 0)
-            .takeRetainedValue() as? Data {
-            if let modelIdentifierCString = String(data: modelData, encoding: .utf8)?.cString(using: .utf8) {
-                modelIdentifier = String(cString: modelIdentifierCString)
-            }
-        }
-        IOObjectRelease(service)
-        return modelIdentifier
     }
 }

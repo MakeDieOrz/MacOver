@@ -12,12 +12,13 @@ struct KeyCoverSettings: View {
     @State private var keyCoverUpdatePasswordShown = false
     @State private var keyCoverRemovalViewShown = false
 
-    @EnvironmentObject var dependencies: PlayCoverDependencies
-    @EnvironmentObject var keyCoverPreferences: KeyCoverPreferences
-    @EnvironmentObject var keyCoverObserved: KeyCoverObservable
-    @EnvironmentObject var modifierKeyObserver: ModifierKeyObserver
+    @Environment(PlayCoverDependencies.self) var dependencies
+    @Environment(KeyCoverPreferences.self) var keyCoverPreferences
+    @Environment(KeyCoverObservable.self) var keyCoverObserved
+    @Environment(ModifierKeyObserver.self) var modifierKeyObserver
 
     var body: some View {
+        @Bindable var keyCoverPreferences = keyCoverPreferences
         VStack {
             HStack {
                 HStack {
@@ -80,15 +81,15 @@ struct KeyCoverSettings: View {
         .frame(width: 600, height: 300)
         .sheet(isPresented: $keyCoverInitialSetupShown) {
             KeyCoverInitialSetupView(isPresented: $keyCoverInitialSetupShown)
-                .environmentObject(dependencies)
+                .environment(dependencies)
         }
         .sheet(isPresented: $keyCoverUpdatePasswordShown) {
             KeyCoverUpdatePasswordView(isPresented: $keyCoverUpdatePasswordShown)
-                .environmentObject(dependencies)
+                .environment(dependencies)
         }
         .sheet(isPresented: $keyCoverRemovalViewShown) {
             KeyCoverRemovalView(isPresented: $keyCoverRemovalViewShown)
-                .environmentObject(dependencies)
+                .environment(dependencies)
         }
     }
 }

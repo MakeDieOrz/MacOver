@@ -6,10 +6,10 @@
 import SwiftUI
 
 struct ConfigInfoPane: View {
-    @EnvironmentObject var dependencies: PlayCoverDependencies
-    @EnvironmentObject var navState: AppNavigationState
+    @Environment(PlayCoverDependencies.self) var dependencies
+    @Environment(AppNavigationState.self) var navState
 
-    @ObservedObject var app: PlayApp
+    var app: PlayApp
     let hasPlayTools: Bool
     @Binding var blockingTask: ConfigBlockingTask
 

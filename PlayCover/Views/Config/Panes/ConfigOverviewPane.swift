@@ -7,8 +7,8 @@ import PlayCoverCore
 import SwiftUI
 
 struct ConfigOverviewPane: View {
-    @ObservedObject var app: PlayApp
-    @ObservedObject var settings: AppSettings
+    var app: PlayApp
+    var settings: AppSettings
     let hasPlayTools: Bool
     var onOpenStrictMode: (() -> Void)?
 

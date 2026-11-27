@@ -4,12 +4,10 @@
 //
 
 import AppKit
-import Combine
-import DataCache
 import SwiftUI
 
 struct PlayCoverMenuView: Commands {
-    @ObservedObject var navState: AppNavigationState
+    var navState: AppNavigationState
     let dependencies: PlayCoverDependencies
 
     var body: some Commands {
@@ -27,7 +25,7 @@ struct PlayCoverMenuView: Commands {
 }
 
 struct PlayCoverHelpMenuView: Commands {
-    @ObservedObject var updaterViewModel: UpdaterViewModel
+    var updaterViewModel: UpdaterViewModel
 
     var body: some Commands {
         CommandGroup(after: .appInfo) {
@@ -67,7 +65,7 @@ struct PlayCoverHelpMenuView: Commands {
 }
 
 struct PlayCoverViewMenuView: Commands {
-    @ObservedObject var navState: AppNavigationState
+    var navState: AppNavigationState
     let dependencies: PlayCoverDependencies
 
     var body: some Commands {
@@ -97,7 +95,7 @@ struct PlayCoverViewMenuView: Commands {
         }
         CommandGroup(before: .sidebar) {
             Button("menubar.clearCache", systemImage: "eraser.fill") {
-                DataCache.instance.cleanAll()
+                LocalDataCache.shared.cleanAll()
                 dependencies.cacher.removeImageCache()
 
                 if let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first,
@@ -164,13 +162,10 @@ struct PlayCoverViewMenuView: Commands {
 
 struct PlayCoverMenuBarExtraContent: View {
     @Environment(\.openWindow) private var openWindow
-    @EnvironmentObject var appsVM: AppsVM
-
-    @State private var refreshToken = 0
+    @Environment(AppsVM.self) var appsVM
 
     private var runningApps: [PlayApp] {
-        _ = refreshToken
-        return appsVM.apps.filter(\.isRunning)
+        appsVM.apps.filter(\.isRunning)
     }
 
     var body: some View {
@@ -218,9 +213,6 @@ struct PlayCoverMenuBarExtraContent: View {
         Divider()
         Button("button.Quit") {
             NSApp.terminate(nil)
-        }
-        .onReceive(Publishers.MergeMany(appsVM.apps.map(\.objectWillChange))) { _ in
-            refreshToken &+= 1
         }
     }
 }

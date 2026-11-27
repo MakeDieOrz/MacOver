@@ -8,8 +8,8 @@ import PlayCoverCore
 import SwiftUI
 
 struct ConfigAdvancedPane: View {
-    @ObservedObject var app: PlayApp
-    @ObservedObject var settings: AppSettings
+    var app: PlayApp
+    @Bindable var settings: AppSettings
     let hasPlayTools: Bool
     @Binding var blockingTask: ConfigBlockingTask
 

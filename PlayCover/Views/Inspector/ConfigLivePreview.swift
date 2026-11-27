@@ -7,8 +7,8 @@ import PlayCoverCore
 import SwiftUI
 
 struct ConfigLivePreview: View {
-    @ObservedObject var app: PlayApp
-    @ObservedObject var settings: AppSettings
+    var app: PlayApp
+    var settings: AppSettings
 
     private var targetAspectRatio: CGFloat {
         let data = settings.settings

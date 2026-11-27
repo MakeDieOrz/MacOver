@@ -6,9 +6,9 @@
 import SwiftUI
 
 struct ConfigPluginsPane: View {
-    @EnvironmentObject var appsVM: AppsVM
+    @Environment(AppsVM.self) var appsVM
 
-    @ObservedObject var app: PlayApp
+    var app: PlayApp
     @Binding var hasPlayTools: Bool
     @Binding var blockingTask: ConfigBlockingTask
 

@@ -6,14 +6,18 @@
 //  Copied from https://sparkle-project.org/documentation/programmatic-setup/
 //
 
+import Observation
 import Sparkle
 import SwiftUI
 
 // This view model class manages Sparkle's updater and publishes when new updates are allowed to be checked
-final class UpdaterViewModel: ObservableObject {
-    private let updaterController: SPUStandardUpdaterController
+@MainActor
+@Observable
+final class UpdaterViewModel {
+    @ObservationIgnored private let updaterController: SPUStandardUpdaterController
+    @ObservationIgnored private var canCheckForUpdatesObservation: NSKeyValueObservation?
 
-    @Published var canCheckForUpdates = false
+    var canCheckForUpdates = false
 
     var automaticallyCheckForUpdates: Bool {
         get {
@@ -32,8 +36,15 @@ final class UpdaterViewModel: ObservableObject {
             updaterDelegate: nil,
             userDriverDelegate: nil)
 
-        updaterController.updater.publisher(for: \.canCheckForUpdates)
-            .assign(to: &$canCheckForUpdates)
+        canCheckForUpdatesObservation = updaterController.updater.observe(
+            \.canCheckForUpdates,
+            options: [.initial, .new]
+        ) { [weak self] _, change in
+            guard let canCheck = change.newValue else { return }
+            Task { @MainActor [weak self] in
+                self?.canCheckForUpdates = canCheck
+            }
+        }
 
         if startUpdater, automaticallyCheckForUpdates {
             updaterController.updater.checkForUpdatesInBackground()
@@ -49,7 +60,7 @@ final class UpdaterViewModel: ObservableObject {
 // This additional view is needed for the disabled state on the menu item to work properly before Monterey.
 // See https://stackoverflow.com/questions/68553092/menu-not-updating-swiftui-bug for more information
 struct CheckForUpdatesView: View {
-    @ObservedObject var updaterViewModel: UpdaterViewModel
+    var updaterViewModel: UpdaterViewModel
 
     var body: some View {
         Button(NSLocalizedString("menubar.checkForUpdates", comment: ""),

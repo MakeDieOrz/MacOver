@@ -4,8 +4,10 @@
 //
 
 import Foundation
+import Observation
 
-class AppsVM: ObservableObject {
+@Observable
+class AppsVM: @unchecked Sendable {
 
     public static let appDirectory = PlayTools.playCoverContainer.appendingPathComponent("Applications")
 
@@ -27,10 +29,10 @@ class AppsVM: ObservableObject {
         )
     }
 
-    @Published var filteredApps: [PlayApp] = []
-    @Published var apps: [PlayApp] = []
-    @Published var searchText: String = ""
-    @Published var updatingApps = true
+    var filteredApps: [PlayApp] = []
+    var apps: [PlayApp] = []
+    var searchText: String = ""
+    var updatingApps = true
 
     private var fetchTask: Task<Void, Never>?
 

@@ -6,8 +6,10 @@
 //
 
 import Foundation
+import Observation
 
-class StoreVM: ObservableObject, @unchecked Sendable {
+@Observable
+class StoreVM: @unchecked Sendable {
     private let plistSource: URL
 
     private var isDecoding = false
@@ -23,19 +25,19 @@ class StoreVM: ObservableObject, @unchecked Sendable {
         }
     }
 
-    @Published var sourcesList: [SourceData] {
+    var sourcesList: [SourceData] {
         didSet {
             if !isDecoding {
                 encode()
             }
         }
     }
-    @Published var sourcesData: [SourceJSON] = [] {
+    var sourcesData: [SourceJSON] = [] {
         didSet {
             updateSourcesApps()
         }
     }
-    @Published var sourcesApps: [SourceAppsData] = []
+    var sourcesApps: [SourceAppsData] = []
 
     private var resolveTask: Task<Void, Never>?
 

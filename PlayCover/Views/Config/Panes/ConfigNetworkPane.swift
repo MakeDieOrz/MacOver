@@ -16,9 +16,9 @@ private struct NetworkRuleStats {
 }
 
 struct ConfigNetworkPane: View {
-    @ObservedObject var app: PlayApp
-    @ObservedObject var settings: AppSettings
-    @EnvironmentObject var mitmCoordinator: MITMProxyCoordinator
+    var app: PlayApp
+    @Bindable var settings: AppSettings
+    @Environment(MITMProxyCoordinator.self) var mitmCoordinator
     @Environment(\.openWindow) private var openWindow
 
     @State private var newPattern = ""
@@ -636,7 +636,7 @@ private struct NetworkRuleRowView: View {
     let rule: String
     let isEditing: Bool
     @Binding var editingText: String
-    let onToggleEnabled: (Bool) -> Void
+    let onToggleEnabled: @MainActor @Sendable (Bool) -> Void
     let onStartEdit: () -> Void
     let onCommitEdit: () -> Void
     let onCancelEdit: () -> Void

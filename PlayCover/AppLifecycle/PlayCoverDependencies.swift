@@ -1,7 +1,9 @@
 import Foundation
+import Observation
 import SwiftUI
 
-final class PlayCoverDependencies: ObservableObject, @unchecked Sendable {
+@Observable
+final class PlayCoverDependencies: Sendable {
     let alertPresenter: AlertPresenter
     let startupAlerts: StartupAlertCenter
     let toastVM: ToastVM
@@ -26,6 +28,7 @@ final class PlayCoverDependencies: ObservableObject, @unchecked Sendable {
     let appIntegrity: AppIntegrity
     let mitmCoordinator: MITMProxyCoordinator
 
+    @MainActor
     init(
         userDefaults: UserDefaults = .standard,
         loadInitialData: Bool = !ProcessInfo.isRunningUnitTests,
@@ -63,7 +66,7 @@ final class PlayCoverDependencies: ObservableObject, @unchecked Sendable {
         let urlObservable = URLObservable()
         let urlHandler = URLHandler()
         let appIntegrity = AppIntegrity()
-        let mitmCoordinator = MainActor.assumeIsolated { MITMProxyCoordinator() }
+        let mitmCoordinator = MITMProxyCoordinator()
 
         self.alertPresenter = alertPresenter
         self.startupAlerts = startupAlerts

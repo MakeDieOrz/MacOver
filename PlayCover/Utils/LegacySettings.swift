@@ -8,7 +8,7 @@
 import Foundation
 
 class LegacySettings {
-    public static var monolithURL = FileManager.default.homeDirectoryForCurrentUser
+    public static let monolithURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library")
         .appendingPathComponent("Preferences")
         .appendingPathComponent("playcover")

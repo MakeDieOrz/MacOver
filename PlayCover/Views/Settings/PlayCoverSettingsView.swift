@@ -8,8 +8,8 @@ import Sparkle
 import SwiftUI
 
 struct PlayCoverSettingsView: View {
-    @ObservedObject var updaterViewModel: UpdaterViewModel
-    @EnvironmentObject var storeVM: StoreVM
+    var updaterViewModel: UpdaterViewModel
+    @Environment(StoreVM.self) var storeVM
 
     var body: some View {
         TabView {
@@ -27,7 +27,7 @@ struct PlayCoverSettingsView: View {
 
             Tab("preferences.tab.ipasource", systemImage: "list.bullet") {
                 IPASourceSettings()
-                    .environmentObject(storeVM)
+                    .environment(storeVM)
             }
 
             Tab("KeyCover", systemImage: "key.fill") {

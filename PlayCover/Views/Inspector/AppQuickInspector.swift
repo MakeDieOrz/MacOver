@@ -7,10 +7,10 @@ import PlayCoverCore
 import SwiftUI
 
 struct AppQuickInspector: View {
-    @EnvironmentObject var navState: AppNavigationState
+    @Environment(AppNavigationState.self) var navState
 
-    @ObservedObject var app: PlayApp
-    @ObservedObject var settings: AppSettings
+    var app: PlayApp
+    @Bindable var settings: AppSettings
 
     @State private var keymapURLs: [URL] = []
     @State private var defaultKeymapURL: URL?

@@ -5,7 +5,8 @@
 //  Created by Edoardo C. on 30/04/25.
 //
 
-class VersionCheck {
+@MainActor
+final class VersionCheck {
     weak var dependencies: PlayCoverDependencies?
 
     init(dependencies: PlayCoverDependencies? = nil) {

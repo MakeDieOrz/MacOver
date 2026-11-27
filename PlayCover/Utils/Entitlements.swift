@@ -6,10 +6,11 @@
 import Darwin
 import Foundation
 import Security
+import Synchronization
 import Yams
 
 class Entitlements {
-    static var critical = [
+    static let critical = [
         "/Developer",
         "/Library/Application Support/MacOver",
         "/Library/Application Support/PlayCover",
@@ -38,21 +39,24 @@ class Entitlements {
         "${HomeDirectory}/Library/Containers/io.playcover.PlayCover/Sources.plist"
     ]
 
-    private struct RulesCacheKey: Equatable {
+    private struct RulesCacheKey: Equatable, Sendable {
         let path: String
         let mtimeSec: Int
         let mtimeNSec: Int
         let fileSize: UInt64
     }
 
-    private struct CompositeRulesCacheKey: Equatable {
+    private struct CompositeRulesCacheKey: Equatable, Sendable {
         let bundled: RulesCacheKey?
         let custom: RulesCacheKey?
     }
 
-    private static let rulesCacheLock = NSLock()
-    private static var cachedDefaultRulesKey: CompositeRulesCacheKey?
-    private static var cachedDefaultRules: PlayRules?
+    private struct CachedDefaultRules: Sendable {
+        var key: CompositeRulesCacheKey?
+        var rules: PlayRules?
+    }
+
+    private static let cachedDefaultRulesState = Mutex(CachedDefaultRules())
 
     private static func mergeRuleLists(_ base: [String]?, _ extra: [String]?) -> [String]? {
         guard let extra, !extra.isEmpty else { return base }
@@ -522,9 +526,9 @@ class Entitlements {
             bundled: bundledURL.flatMap { cacheKey(for: $0) },
             custom: customExists ? cacheKey(for: customURL) : nil
         )
-        rulesCacheLock.lock()
-        let cached = (cachedDefaultRulesKey == compositeKey) ? cachedDefaultRules : nil
-        rulesCacheLock.unlock()
+        let cached = cachedDefaultRulesState.withLock { state -> PlayRules? in
+            (state.key == compositeKey) ? state.rules : nil
+        }
         if let cached {
             return cached
         }
@@ -558,10 +562,10 @@ class Entitlements {
             }
         }
 
-        rulesCacheLock.lock()
-        cachedDefaultRulesKey = compositeKey
-        cachedDefaultRules = merged
-        rulesCacheLock.unlock()
+        cachedDefaultRulesState.withLock { state in
+            state.key = compositeKey
+            state.rules = merged
+        }
         return merged
     }
 

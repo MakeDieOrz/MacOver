@@ -5,7 +5,7 @@ import UniformTypeIdentifiers
 
 struct MITMTrafficMonitorView: View {
     let bundleID: String
-    @EnvironmentObject var mitmCoordinator: MITMProxyCoordinator
+    @Environment(MITMProxyCoordinator.self) var mitmCoordinator
 
     @State private var searchText = ""
     @State private var dispositionFilter: DispositionFilter = .all

@@ -8,8 +8,8 @@ import SwiftUI
 @main
 struct PlayCoverApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @StateObject var updaterViewModel = UpdaterViewModel()
-    @StateObject private var navState = AppNavigationState()
+    @State var updaterViewModel = UpdaterViewModel()
+    @State private var navState = AppNavigationState()
     @AppStorage("showMenuBarExtra") private var showMenuBarExtra = true
 
     private var deps: PlayCoverDependencies { appDelegate.dependencies }
@@ -20,23 +20,23 @@ struct PlayCoverApp: App {
                 EmptyView()
             } else {
                 RootSplitView()
-                    .environmentObject(deps)
-                    .environmentObject(deps.installVM)
-                    .environmentObject(deps.downloadVM)
-                    .environmentObject(deps.appsVM)
-                    .environmentObject(deps.storeVM)
-                    .environmentObject(deps.toastVM)
-                    .environmentObject(deps.appIntegrity)
-                    .environmentObject(deps.alertPresenter)
-                    .environmentObject(deps.startupAlerts)
-                    .environmentObject(deps.keyCoverObservable)
-                    .environmentObject(deps.keyCoverPreferences)
-                    .environmentObject(deps.installPreferences)
-                    .environmentObject(deps.uninstallPreferences)
-                    .environmentObject(deps.urlObservable)
-                    .environmentObject(deps.modifierKeyObserver)
-                    .environmentObject(deps.mitmCoordinator)
-                    .environmentObject(navState)
+                    .environment(deps)
+                    .environment(deps.installVM)
+                    .environment(deps.downloadVM)
+                    .environment(deps.appsVM)
+                    .environment(deps.storeVM)
+                    .environment(deps.toastVM)
+                    .environment(deps.appIntegrity)
+                    .environment(deps.alertPresenter)
+                    .environment(deps.startupAlerts)
+                    .environment(deps.keyCoverObservable)
+                    .environment(deps.keyCoverPreferences)
+                    .environment(deps.installPreferences)
+                    .environment(deps.uninstallPreferences)
+                    .environment(deps.urlObservable)
+                    .environment(deps.modifierKeyObserver)
+                    .environment(deps.mitmCoordinator)
+                    .environment(navState)
                     .onAppear {
                         NSWindow.allowsAutomaticWindowTabbing = false
                         deps.soundDeviceService.prepareSoundDevice()
@@ -60,17 +60,17 @@ struct PlayCoverApp: App {
                 EmptyView()
             } else {
                 PlayCoverSettingsView(updaterViewModel: updaterViewModel)
-                    .environmentObject(deps)
-                    .environmentObject(deps.appsVM)
-                    .environmentObject(deps.storeVM)
-                    .environmentObject(deps.keyCoverObservable)
-                    .environmentObject(deps.keyCoverPreferences)
-                    .environmentObject(deps.installPreferences)
-                    .environmentObject(deps.uninstallPreferences)
-                    .environmentObject(deps.urlObservable)
-                    .environmentObject(deps.modifierKeyObserver)
-                    .environmentObject(deps.mitmCoordinator)
-                    .environmentObject(navState)
+                    .environment(deps)
+                    .environment(deps.appsVM)
+                    .environment(deps.storeVM)
+                    .environment(deps.keyCoverObservable)
+                    .environment(deps.keyCoverPreferences)
+                    .environment(deps.installPreferences)
+                    .environment(deps.uninstallPreferences)
+                    .environment(deps.urlObservable)
+                    .environment(deps.modifierKeyObserver)
+                    .environment(deps.mitmCoordinator)
+                    .environment(navState)
             }
         }
 
@@ -80,13 +80,13 @@ struct PlayCoverApp: App {
             isInserted: ProcessInfo.isRunningUnitTests ? .constant(false) : $showMenuBarExtra
         ) {
             PlayCoverMenuBarExtraContent()
-                .environmentObject(deps.appsVM)
+                .environment(deps.appsVM)
         }
 
         WindowGroup("mitm.monitor.windowTitle", id: "mitm-monitor", for: String.self) { $bundleID in
             if let bundleID, !bundleID.isEmpty, !ProcessInfo.isRunningUnitTests {
                 MITMTrafficMonitorView(bundleID: bundleID)
-                    .environmentObject(deps.mitmCoordinator)
+                    .environment(deps.mitmCoordinator)
             } else {
                 EmptyView()
             }

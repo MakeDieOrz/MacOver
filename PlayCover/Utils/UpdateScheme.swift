@@ -8,7 +8,7 @@
 class UpdateScheme {
     public static let versionsFile = PlayTools.playCoverContainer.appendingPathComponent("VERSION")
     public static var currentVersion: String {
-        (try? String(contentsOf: UpdateScheme.versionsFile)) ?? "3.1"
+        (try? String(contentsOf: UpdateScheme.versionsFile, encoding: .utf8)) ?? "3.1"
     }
     struct Version: Hashable {
         let components: [Int]
@@ -21,10 +21,10 @@ class UpdateScheme {
         }
     }
 
-    struct Migration {
+    struct Migration: Sendable {
         let fromVersion: String
         let toVersion: String
-        let action: () throws -> Void
+        let action: @Sendable () throws -> Void
     }
 
     private static let migrations: [Version: Migration] = [

@@ -8,8 +8,8 @@
 import SwiftUI
 
 struct KeyCoverUnlockingPrompt: View {
-    @EnvironmentObject var dependencies: PlayCoverDependencies
-    @EnvironmentObject var keyCoverObserved: KeyCoverObservable
+    @Environment(PlayCoverDependencies.self) var dependencies
+    @Environment(KeyCoverObservable.self) var keyCoverObserved
 
     @State private var password = ""
     @State private var passwordError = false

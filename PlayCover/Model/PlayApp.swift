@@ -4,13 +4,15 @@
 //
 
 import Cocoa
-import Combine
 import Darwin
 import Foundation
 import IOKit.pwr_mgt
+import Observation
 import PlayCoverCore
+import Synchronization
 
-class PlayApp: BaseApp, ObservableObject, Identifiable, Hashable {
+@Observable
+class PlayApp: BaseApp, Identifiable, Hashable, @unchecked Sendable {
     var id: URL { url }
 
     static func == (lhs: PlayApp, rhs: PlayApp) -> Bool {
@@ -26,7 +28,7 @@ class PlayApp: BaseApp, ObservableObject, Identifiable, Hashable {
 
     public static var bundleIDCache: [String] {
         get throws {
-            (try String(contentsOf: bundleIDCacheURL))
+            (try String(contentsOf: bundleIDCacheURL, encoding: .utf8))
                 .split(whereSeparator: \.isNewline)
                 .map { String($0) }
         }
@@ -42,8 +44,7 @@ class PlayApp: BaseApp, ObservableObject, Identifiable, Hashable {
         let playToolsMTimeNSec: Int
     }
 
-    private static let verifiedBundleLock = NSLock()
-    private static var verifiedBundleStamps: [String: VerifiedBundleStamp] = [:]
+    private static let verifiedBundleStamps = Mutex<[String: VerifiedBundleStamp]>([:])
 
     private static func fileStamp(for url: URL) -> (sec: Int, nsec: Int, ino: UInt64) {
         var st = stat()
@@ -67,20 +68,20 @@ class PlayApp: BaseApp, ObservableObject, Identifiable, Hashable {
     }
 
     private static func invalidateVerifiedBundleStamp(for bundleURL: URL) {
-        verifiedBundleLock.lock()
-        verifiedBundleStamps.removeValue(forKey: bundleURL.path)
-        verifiedBundleLock.unlock()
+        verifiedBundleStamps.withLock {
+            _ = $0.removeValue(forKey: bundleURL.path)
+        }
     }
 
     // MARK: - Instance State
-    private let assertionLock = NSLock()
-    var displaySleepAssertionID: IOPMAssertionID?
-    private var _isStarting = false
-    private var _sessionDisableKeychain = false
-    private var runningApplication: NSRunningApplication?
-    @Published var isRunning: Bool = false
-    @Published var launchSnapshot: AppSettingsData?
-    weak var dependencies: PlayCoverDependencies?
+    @ObservationIgnored private let assertionLock = Mutex<Void>(())
+    @ObservationIgnored var displaySleepAssertionID: IOPMAssertionID?
+    @ObservationIgnored private var _isStarting = false
+    @ObservationIgnored private var _sessionDisableKeychain = false
+    @ObservationIgnored private var runningApplication: NSRunningApplication?
+    var isRunning: Bool = false
+    var launchSnapshot: AppSettingsData?
+    @ObservationIgnored weak var dependencies: PlayCoverDependencies?
 
     var restartRequiredChanges: [PlayCoverRestartField] {
         guard isRunning, let launchSnapshot else { return [] }
@@ -88,29 +89,13 @@ class PlayApp: BaseApp, ObservableObject, Identifiable, Hashable {
     }
 
     public var isStarting: Bool {
-        get {
-            assertionLock.lock()
-            defer { assertionLock.unlock() }
-            return _isStarting
-        }
-        set {
-            assertionLock.lock()
-            _isStarting = newValue
-            assertionLock.unlock()
-        }
+        get { assertionLock.withLock { _ in _isStarting } }
+        set { assertionLock.withLock { _ in _isStarting = newValue } }
     }
 
     var sessionDisableKeychain: Bool {
-        get {
-            assertionLock.lock()
-            defer { assertionLock.unlock() }
-            return _sessionDisableKeychain
-        }
-        set {
-            assertionLock.lock()
-            _sessionDisableKeychain = newValue
-            assertionLock.unlock()
-        }
+        get { assertionLock.withLock { _ in _sessionDisableKeychain } }
+        set { assertionLock.withLock { _ in _sessionDisableKeychain = newValue } }
     }
 
     // MARK: - Init
@@ -141,11 +126,11 @@ class PlayApp: BaseApp, ObservableObject, Identifiable, Hashable {
             .appendingEscapedPathComponent(name)
             .appendingPathExtension("app")
     }
-    lazy var playChainURL = KeyCover.playChainPath.appendingPathComponent(info.bundleIdentifier)
+    @ObservationIgnored lazy var playChainURL = KeyCover.playChainPath.appendingPathComponent(info.bundleIdentifier)
 
-    lazy var settings = AppSettings(info)
-    lazy var keymapping = Keymapping(info, alertPresenter: dependencies?.alertPresenter)
-    lazy var container = AppContainer(bundleId: info.bundleIdentifier)
+    @ObservationIgnored lazy var settings = AppSettings(info)
+    @ObservationIgnored lazy var keymapping = Keymapping(info, alertPresenter: dependencies?.alertPresenter)
+    @ObservationIgnored lazy var container = AppContainer(bundleId: info.bundleIdentifier)
 
     // MARK: - Launch
     func launch(safeModeOneShot: Bool = false) async {
@@ -235,9 +220,9 @@ class PlayApp: BaseApp, ObservableObject, Identifiable, Hashable {
                 try signThrowing()
                 try Shell.verifyAppSignature(url)
                 let stamp = Self.currentBundleStamp(bundleURL: url, executableURL: executable)
-                Self.verifiedBundleLock.lock()
-                Self.verifiedBundleStamps[url.path] = stamp
-                Self.verifiedBundleLock.unlock()
+                Self.verifiedBundleStamps.withLock {
+                    $0[url.path] = stamp
+                }
             } else if binaryModified
                         || pluginsModified
                         || svcResult.modified
@@ -252,9 +237,9 @@ class PlayApp: BaseApp, ObservableObject, Identifiable, Hashable {
                     try Shell.verifyAppSignature(url)
                 }
                 let stamp = Self.currentBundleStamp(bundleURL: url, executableURL: executable)
-                Self.verifiedBundleLock.lock()
-                Self.verifiedBundleStamps[url.path] = stamp
-                Self.verifiedBundleLock.unlock()
+                Self.verifiedBundleStamps.withLock {
+                    $0[url.path] = stamp
+                }
             }
 
             if try (usesPlayTools && !PlayTools.isInstalled()) {
@@ -441,18 +426,13 @@ extension PlayApp {
                     }
                 }
                 let targetPID = runningApp.processIdentifier
-                var discordLinked = discordAlreadyLinked
-                let syncLock = NSLock()
+                let stateLock = Mutex<(discordLinked: Bool, resumed: Bool)>((discordAlreadyLinked, false))
 
-                let tryLinkDiscordIfNeeded = {
-                    syncLock.lock()
-                    let alreadyLinked = discordLinked
-                    syncLock.unlock()
+                let tryLinkDiscordIfNeeded: @Sendable () -> Void = {
+                    let alreadyLinked = stateLock.withLock { $0.discordLinked }
                     if !alreadyLinked && self.settings.settings.discordActivity.enable && self.container.doesExist() {
                         self.loadDiscordIPC()
-                        syncLock.lock()
-                        discordLinked = true
-                        syncLock.unlock()
+                        stateLock.withLock { $0.discordLinked = true }
                     }
                 }
 
@@ -465,16 +445,9 @@ extension PlayApp {
                 var activateObserver: NSObjectProtocol?
                 var deactivateObserver: NSObjectProtocol?
                 var terminateObserver: NSObjectProtocol?
-                var settingsObserver: AnyCancellable?
-                defer {
-                    settingsObserver?.cancel()
-                    if let activateObserver { wsCenter.removeObserver(activateObserver) }
-                    if let deactivateObserver { wsCenter.removeObserver(deactivateObserver) }
-                    if let terminateObserver { wsCenter.removeObserver(terminateObserver) }
-                }
-
-                settingsObserver = self.settings.objectWillChange.sink { [weak self] _ in
-                    guard let self, !runningApp.isTerminated else { return }
+                let appSettings = self.settings
+                let settingsObserverID = appSettings.addChangeObserver {
+                    guard !runningApp.isTerminated else { return }
                     if !self.settings.settings.disableTimeout {
                         self.enableTimeOut()
                     } else if runningApp.isActive {
@@ -486,18 +459,23 @@ extension PlayApp {
                         Task { await mitmCoordinator.updateLiveConfiguration(for: bid, settings: snapshot) }
                     }
                 }
+                defer {
+                    appSettings.removeChangeObserver(settingsObserverID)
+                    if let activateObserver { wsCenter.removeObserver(activateObserver) }
+                    if let deactivateObserver { wsCenter.removeObserver(deactivateObserver) }
+                    if let terminateObserver { wsCenter.removeObserver(terminateObserver) }
+                }
 
                 await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                    var resumed = false
-                    func completeTermination() {
-                        syncLock.lock()
-                        guard !resumed else {
-                            syncLock.unlock()
-                            return
+                    let completeTermination: @Sendable () -> Void = {
+                        let shouldResume = stateLock.withLock { state -> Bool in
+                            guard !state.resumed else { return false }
+                            state.resumed = true
+                            return true
                         }
-                        resumed = true
-                        syncLock.unlock()
-                        continuation.resume()
+                        if shouldResume {
+                            continuation.resume()
+                        }
                     }
 
                     activateObserver = wsCenter.addObserver(
@@ -558,13 +536,13 @@ extension PlayApp {
     }
 
     private func setRunningApplication(_ app: NSRunningApplication) {
-        assertionLock.withLock {
+        assertionLock.withLock { _ in
             runningApplication = app
         }
     }
 
     private func clearRunningApplicationIfMatches(processIdentifier: pid_t) -> Bool {
-        assertionLock.withLock {
+        assertionLock.withLock { _ in
             guard runningApplication?.processIdentifier == processIdentifier else {
                 return false
             }
@@ -574,7 +552,7 @@ extension PlayApp {
     }
 
     private func snapshotRunningApplication() -> NSRunningApplication? {
-        assertionLock.withLock { runningApplication }
+        assertionLock.withLock { _ in runningApplication }
     }
 
     func terminate() async {
@@ -635,30 +613,30 @@ extension PlayApp {
             enableTimeOut()
             return
         }
-        assertionLock.lock()
-        defer { assertionLock.unlock() }
-        guard let app = runningApplication, !app.isTerminated else { return }
-        if displaySleepAssertionID != nil { return }
+        assertionLock.withLock { _ in
+            guard let app = runningApplication, !app.isTerminated else { return }
+            if displaySleepAssertionID != nil { return }
 
-        let reason = "PlayCover: \(info.bundleIdentifier) is disabling sleep" as CFString
-        var assertionID: IOPMAssertionID = 0
-        let result = IOPMAssertionCreateWithName(
-            kIOPMAssertionTypeNoDisplaySleep as CFString,
-            IOPMAssertionLevel(kIOPMAssertionLevelOn),
-            reason,
-            &assertionID
-        )
-        if result == kIOReturnSuccess {
-            displaySleepAssertionID = assertionID
+            let reason = "PlayCover: \(info.bundleIdentifier) is disabling sleep" as CFString
+            var assertionID: IOPMAssertionID = 0
+            let result = IOPMAssertionCreateWithName(
+                kIOPMAssertionTypeNoDisplaySleep as CFString,
+                IOPMAssertionLevel(kIOPMAssertionLevelOn),
+                reason,
+                &assertionID
+            )
+            if result == kIOReturnSuccess {
+                displaySleepAssertionID = assertionID
+            }
         }
     }
 
     func enableTimeOut() {
-        assertionLock.lock()
-        defer { assertionLock.unlock() }
-        if let assertionID = displaySleepAssertionID {
-            IOPMAssertionRelease(assertionID)
-            displaySleepAssertionID = nil
+        assertionLock.withLock { _ in
+            if let assertionID = displaySleepAssertionID {
+                IOPMAssertionRelease(assertionID)
+                displaySleepAssertionID = nil
+            }
         }
     }
 }
@@ -882,16 +860,16 @@ extension PlayApp {
         do {
             guard try isInfoPlistSigned() else { return false }
             let stamp = Self.currentBundleStamp(bundleURL: url, executableURL: executable)
-            Self.verifiedBundleLock.lock()
-            let cached = Self.verifiedBundleStamps[url.path] == stamp
-            Self.verifiedBundleLock.unlock()
+            let cached = Self.verifiedBundleStamps.withLock {
+                $0[url.path] == stamp
+            }
             if cached {
                 return true
             }
             try Shell.verifyAppSignature(url)
-            Self.verifiedBundleLock.lock()
-            Self.verifiedBundleStamps[url.path] = stamp
-            Self.verifiedBundleLock.unlock()
+            Self.verifiedBundleStamps.withLock {
+                $0[url.path] = stamp
+            }
             return true
         } catch {
             return false

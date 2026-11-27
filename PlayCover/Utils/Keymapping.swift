@@ -8,7 +8,7 @@
 import Foundation
 import UniformTypeIdentifiers
 
-class Keymapping {
+final class Keymapping: @unchecked Sendable {
     static var keymappingDir: URL {
         let keymappingFolder = PlayTools.playCoverContainer.appendingPathComponent("Keymapping")
         if !FileManager.default.fileExists(atPath: keymappingFolder.path) {
@@ -206,7 +206,8 @@ class Keymapping {
         return keymapConfig
     }
 
-    public func importKeymap(name: String, success: @escaping (Bool) -> Void) {
+    @MainActor
+    public func importKeymap(name: String, success: @escaping @MainActor (Bool) -> Void) {
         let openPanel = NSOpenPanel()
         openPanel.canChooseFiles = true
         openPanel.allowsMultipleSelection = false
@@ -253,6 +254,7 @@ class Keymapping {
         }
     }
 
+    @MainActor
     public func exportKeymap(name: String) {
         let savePanel = NSSavePanel()
         savePanel.title = NSLocalizedString("playapp.exportKm", comment: "")

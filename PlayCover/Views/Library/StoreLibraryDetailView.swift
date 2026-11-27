@@ -7,13 +7,13 @@ import SwiftUI
 
 struct StoreLibraryDetailView: View {
     @Environment(\.appearsActive) private var appearsActive
-    @EnvironmentObject var dependencies: PlayCoverDependencies
-    @EnvironmentObject var storeVM: StoreVM
-    @EnvironmentObject var appsVM: AppsVM
-    @EnvironmentObject var downloadVM: DownloadVM
-    @EnvironmentObject var installVM: InstallVM
-    @EnvironmentObject var urlObserved: URLObservable
-    @EnvironmentObject var navState: AppNavigationState
+    @Environment(PlayCoverDependencies.self) var dependencies
+    @Environment(StoreVM.self) var storeVM
+    @Environment(AppsVM.self) var appsVM
+    @Environment(DownloadVM.self) var downloadVM
+    @Environment(InstallVM.self) var installVM
+    @Environment(URLObservable.self) var urlObserved
+    @Environment(AppNavigationState.self) var navState
 
     let sourceID: UUID?
 
@@ -156,8 +156,8 @@ struct StoreLibraryDetailView: View {
         }
         .sheet(isPresented: $addSourcePresented) {
             AddSourceView(addSourceSheet: $addSourcePresented)
-                .environmentObject(storeVM)
-                .environmentObject(urlObserved)
+                .environment(storeVM)
+                .environment(urlObserved)
         }
         .onChange(of: isList) { _, value in
             UserDefaults.standard.set(value, forKey: "IPALibraryView")
@@ -212,8 +212,8 @@ private struct StoreBadgeDisplay {
 }
 
 private struct StoreItemTileView: View {
-    @EnvironmentObject var appsVM: AppsVM
-    @EnvironmentObject var downloadVM: DownloadVM
+    @Environment(AppsVM.self) var appsVM
+    @Environment(DownloadVM.self) var downloadVM
 
     let app: SourceAppsData
     let isList: Bool

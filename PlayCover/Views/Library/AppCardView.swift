@@ -6,10 +6,10 @@
 import SwiftUI
 
 struct PlayAppContextMenu: View {
-    @EnvironmentObject var dependencies: PlayCoverDependencies
-    @EnvironmentObject var navState: AppNavigationState
+    @Environment(PlayCoverDependencies.self) var dependencies
+    @Environment(AppNavigationState.self) var navState
 
-    @ObservedObject var app: PlayApp
+    var app: PlayApp
     let onClearPreferences: (PlayApp) -> Void
     let onClearPlayChain: (PlayApp) -> Void
 
@@ -69,11 +69,11 @@ struct PlayAppContextMenu: View {
 
 struct AppCardView: View {
     @Environment(\.appearsActive) private var appearsActive
-    @EnvironmentObject var dependencies: PlayCoverDependencies
-    @EnvironmentObject var navState: AppNavigationState
+    @Environment(PlayCoverDependencies.self) var dependencies
+    @Environment(AppNavigationState.self) var navState
 
-    @ObservedObject var app: PlayApp
-    @ObservedObject var settings: AppSettings
+    var app: PlayApp
+    var settings: AppSettings
 
     let isSelected: Bool
     let onClearPreferences: (PlayApp) -> Void

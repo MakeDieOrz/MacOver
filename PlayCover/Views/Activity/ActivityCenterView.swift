@@ -7,9 +7,9 @@ import PlayCoverUI
 import SwiftUI
 
 struct ActivityCenterView: View {
-    @EnvironmentObject var installVM: InstallVM
-    @EnvironmentObject var downloadVM: DownloadVM
-    @EnvironmentObject var dependencies: PlayCoverDependencies
+    @Environment(InstallVM.self) var installVM
+    @Environment(DownloadVM.self) var downloadVM
+    @Environment(PlayCoverDependencies.self) var dependencies
 
     private static let installStages: [(step: InstallStepsNative, key: String)] = [
         (.unzip, "activity.stage.unzip"),
