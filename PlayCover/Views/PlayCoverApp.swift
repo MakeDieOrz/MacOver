@@ -39,8 +39,6 @@ struct PlayCoverApp: App {
                     .environment(navState)
                     .onAppear {
                         NSWindow.allowsAutomaticWindowTabbing = false
-                        deps.soundDeviceService.prepareSoundDevice()
-                        deps.notifyService.allowNotify()
                     }
             }
         }

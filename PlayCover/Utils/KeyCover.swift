@@ -174,7 +174,7 @@ final class KeyCoverObservable {
         self.preferences = preferences
         self.keyCover = keyCover
         self.keyCoverEnabled = preferences.keyCoverEnabled != .disabled
-        let initialKeychains = KeyCover.listKeychains()
+        let initialKeychains = preferences.keyCoverEnabled == .disabled ? [] : KeyCover.listKeychains()
         self.keychains = initialKeychains
         self.unlockedCount = KeyCover.unlockedCount(in: initialKeychains)
         self.isKeyCoverUnlockingPromptShown = preferences.keyCoverEnabled == .selfGeneratedPassword
@@ -247,6 +247,21 @@ final class KeyCoverObservable {
         keyCoverEnabled = keyCover?.isKeyCoverEnabled() ?? (preferences.keyCoverEnabled != .disabled)
         unlockedCount = KeyCover.unlockedCount(in: list)
         keychains = list
+    }
+
+    func refreshAsync() {
+        let currentKeyCover = keyCover
+        let fallbackEnabled = preferences.keyCoverEnabled != .disabled
+        Task.detached(priority: .utility) {
+            let list = currentKeyCover?.listKeychains() ?? KeyCover.listKeychains()
+            let unlocked = KeyCover.unlockedCount(in: list)
+            let enabled = currentKeyCover?.isKeyCoverEnabled() ?? fallbackEnabled
+            await MainActor.run {
+                self.keyCoverEnabled = enabled
+                self.unlockedCount = unlocked
+                self.keychains = list
+            }
+        }
     }
 }
 

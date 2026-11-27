@@ -60,4 +60,9 @@ nonisolated public class BaseApp {
         info = AppInfo(contentsOf: url.appendingPathComponent("Info")
                                       .appendingPathExtension("plist"))
     }
+
+    init(appUrl: URL, info: AppInfo) {
+        self.url = appUrl
+        self.info = info
+    }
 }

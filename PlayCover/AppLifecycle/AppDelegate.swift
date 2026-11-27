@@ -9,7 +9,6 @@ import Foundation
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let showLowPowerModeAlertKey = "ShowLowPowerModeAlert"
-    private static let showMenuBarExtraKey = "showMenuBarExtra"
 
     let dependencies: PlayCoverDependencies
 
@@ -35,10 +34,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         set {
             UserDefaults.standard.set(newValue, forKey: Self.showLowPowerModeAlertKey)
         }
-    }
-
-    private var isMenuBarExtraEnabled: Bool {
-        UserDefaults.standard.object(forKey: Self.showMenuBarExtraKey) as? Bool ?? true
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -67,7 +62,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if ProcessInfo.processInfo.isLowPowerModeEnabled {
             powerModal()
         }
-        URLCache.iconCache.removeAllCachedResponses()
 
         let launchedBefore = UserDefaults.standard.bool(forKey: "launchedBefore")
         if !launchedBefore {
@@ -84,12 +78,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        !isMenuBarExtraEnabled
+        false
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         guard !ProcessInfo.isRunningUnitTests else { return }
         let apps = dependencies.appsVM.apps
+        dependencies.runningAppsMonitor.shutdown()
         dependencies.mitmCoordinator.prepareForHostTermination(apps: apps)
         for app in apps {
             app.settings.flush()
@@ -117,9 +112,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @discardableResult
     private func bringMainWindowToFront(in application: NSApplication) -> Bool {
-        guard let mainWindow = application.windows.first(where: { window in
+        let primaryWindow = application.windows.first(where: { window in
+            guard window.canBecomeMain && !(window is NSPanel) else { return false }
+            let identifier = window.identifier?.rawValue ?? ""
+            return identifier == "main" || identifier.hasPrefix("main")
+        }) ?? application.windows.first(where: { window in
             window.canBecomeMain && !(window is NSPanel)
-        }) else {
+        })
+        guard let mainWindow = primaryWindow else {
             return false
         }
         if mainWindow.isMiniaturized {

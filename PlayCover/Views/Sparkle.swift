@@ -47,7 +47,10 @@ final class UpdaterViewModel {
         }
 
         if startUpdater, automaticallyCheckForUpdates {
-            updaterController.updater.checkForUpdatesInBackground()
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(3))
+                self?.updaterController.updater.checkForUpdatesInBackground()
+            }
         }
     }
 

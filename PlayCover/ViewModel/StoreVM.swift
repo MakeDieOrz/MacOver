@@ -40,6 +40,7 @@ class StoreVM {
     var sourcesApps: [SourceAppsData] = []
 
     private var resolveTask: Task<Void, Never>?
+    private var hasResolvedInitialSources = false
 
     public func getEnabledSources() -> [SourceJSON] {
         return sourcesData.filter { sourceJSON in
@@ -121,8 +122,14 @@ class StoreVM {
         }
     }
 
+    func resolveSourcesIfNeeded() {
+        guard !hasResolvedInitialSources else { return }
+        resolveSources()
+    }
+
     //
     func resolveSources() {
+        hasResolvedInitialSources = true
         resolveTask?.cancel()
         resolveTask = Task { @MainActor in
             guard !sourcesList.isEmpty else {
@@ -130,9 +137,7 @@ class StoreVM {
                 return
             }
 
-            let isConnected = await Task.detached(priority: .utility) {
-                NetworkVM.isConnectedToNetwork()
-            }.value
+            let isConnected = await NetworkVM.isConnectedToNetworkAsync()
             if Task.isCancelled { return }
 
             let sourcesCount = sourcesList.count
@@ -240,9 +245,7 @@ class StoreVM {
             if let isConnected {
                 networkAvailable = isConnected
             } else {
-                networkAvailable = await Task.detached(priority: .utility) {
-                    NetworkVM.isConnectedToNetwork()
-                }.value
+                networkAvailable = await NetworkVM.isConnectedToNetworkAsync()
             }
             guard networkAvailable else {
                 return (nil, .badurl)

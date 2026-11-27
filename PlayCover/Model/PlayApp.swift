@@ -71,26 +71,73 @@ nonisolated class PlayApp: BaseApp, Identifiable, Hashable, @unchecked Sendable 
         verifiedBundleStamps.withLock {
             _ = $0.removeValue(forKey: bundleURL.path)
         }
+        AppLaunchFingerprintStore.shared.invalidate(for: bundleURL.path)
     }
 
     // MARK: - Instance State
     @ObservationIgnored private let assertionLock = Mutex<Void>(())
     @ObservationIgnored var displaySleepAssertionID: IOPMAssertionID?
-    @ObservationIgnored private var _isStarting = false
+    @ObservationIgnored private let runStateMirror = Mutex<AppRunState>(.idle)
     @ObservationIgnored private var _sessionDisableKeychain = false
     @ObservationIgnored private var runningApplication: NSRunningApplication?
-    var isRunning: Bool = false
-    var launchSnapshot: AppSettingsData?
+    @MainActor var runState: AppRunState = .idle
+    @MainActor var hasPlayToolsCached: Bool = true
+    @MainActor var strictEmulationModeCached: Bool = false
+    @MainActor var effectiveIOSDeviceModelCached: String = "iPad13,8"
+    @MainActor var pixelBudgetRatioCached: Double = 0
+    @MainActor var launchSnapshot: AppSettingsData?
     @ObservationIgnored weak var dependencies: PlayCoverDependencies?
+    @ObservationIgnored private let settingsSummaryMirror = Mutex<(strict: Bool, device: String, ratio: Double)>(
+        (false, "iPad13,8", 0)
+    )
 
+    @MainActor
+    var isRunning: Bool {
+        get { runState.isRunning }
+        set { setRunState(newValue ? .running(isActive: false) : .idle) }
+    }
+
+    @MainActor
+    public var isStarting: Bool {
+        runState.isStarting
+    }
+
+    @MainActor
+    var isTerminating: Bool {
+        runState.isTerminating
+    }
+
+    @MainActor
+    var isBusy: Bool {
+        runState.isBusy
+    }
+
+    @MainActor
     var restartRequiredChanges: [PlayCoverRestartField] {
         guard isRunning, let launchSnapshot else { return [] }
         return settings.settings.restartRequiredChanges(comparedTo: launchSnapshot)
     }
 
-    public var isStarting: Bool {
-        get { assertionLock.withLock { _ in _isStarting } }
-        set { assertionLock.withLock { _ in _isStarting = newValue } }
+    func currentRunState() -> AppRunState {
+        runStateMirror.withLock { $0 }
+    }
+
+    @MainActor
+    func setRunState(_ next: AppRunState) {
+        let previous = runState
+        guard previous != next else { return }
+        runStateMirror.withLock { $0 = next }
+        runState = next
+        if previous.sortRank != next.sortRank {
+            dependencies?.appsVM.applyFilter()
+        }
+    }
+
+    @MainActor
+    private func beginLaunchIfIdle() -> Bool {
+        guard !runState.isRunning && !runState.isBusy else { return false }
+        setRunState(.preparing(.verifying))
+        return true
     }
 
     var sessionDisableKeychain: Bool {
@@ -102,6 +149,42 @@ nonisolated class PlayApp: BaseApp, Identifiable, Hashable, @unchecked Sendable 
     init(appUrl: URL, dependencies: PlayCoverDependencies? = nil) {
         self.dependencies = dependencies
         super.init(appUrl: appUrl)
+    }
+
+    init(appUrl: URL, info: AppInfo, dependencies: PlayCoverDependencies? = nil) {
+        self.dependencies = dependencies
+        super.init(appUrl: appUrl, info: info)
+    }
+
+    func applySettingsSummary(
+        strictEmulationMode: Bool,
+        effectiveIOSDeviceModel: String,
+        pixelBudgetRatio: Double
+    ) {
+        settingsSummaryMirror.withLock {
+            $0 = (strictEmulationMode, effectiveIOSDeviceModel, pixelBudgetRatio)
+        }
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                strictEmulationModeCached = strictEmulationMode
+                effectiveIOSDeviceModelCached = effectiveIOSDeviceModel
+                pixelBudgetRatioCached = pixelBudgetRatio
+            }
+        } else {
+            Task { @MainActor [weak self] in
+                self?.strictEmulationModeCached = strictEmulationMode
+                self?.effectiveIOSDeviceModelCached = effectiveIOSDeviceModel
+                self?.pixelBudgetRatioCached = pixelBudgetRatio
+            }
+        }
+    }
+
+    private func syncSettingsSummary(from data: AppSettingsData) {
+        applySettingsSummary(
+            strictEmulationMode: data.strictEmulationMode,
+            effectiveIOSDeviceModel: data.effectiveIOSDeviceModel,
+            pixelBudgetRatio: data.pixelBudget.ratio
+        )
     }
 
     // MARK: - Computed
@@ -132,12 +215,20 @@ nonisolated class PlayApp: BaseApp, Identifiable, Hashable, @unchecked Sendable 
 
     @ObservationIgnored private let settingsLock = Mutex<AppSettings?>(nil)
     var settings: AppSettings {
-        settingsLock.withLock { cached in
-            if let cached { return cached }
+        let (resolved, newlyCreated) = settingsLock.withLock { cached -> (AppSettings, Bool) in
+            if let cached { return (cached, false) }
             let created = AppSettings(info)
             cached = created
-            return created
+            return (created, true)
         }
+        if newlyCreated {
+            syncSettingsSummary(from: resolved.settings)
+            _ = resolved.addChangeObserver { [weak self, weak resolved] in
+                guard let self, let resolved else { return }
+                self.syncSettingsSummary(from: resolved.settings)
+            }
+        }
+        return resolved
     }
 
     @ObservationIgnored private let keymappingLock = Mutex<Keymapping?>(nil)
@@ -157,8 +248,16 @@ nonisolated class PlayApp: BaseApp, Identifiable, Hashable, @unchecked Sendable 
     // MARK: - Launch
     @concurrent
     func launch(safeModeOneShot: Bool = false) async {
-        isStarting = true
-        defer { isStarting = false }
+        guard await beginLaunchIfIdle() else { return }
+        let launchSpan = PerformanceSignpost.beginInterval("AppLaunchTotal")
+        defer {
+            PerformanceSignpost.endInterval("AppLaunchTotal", launchSpan)
+            if !currentRunState().isRunning {
+                Task { @MainActor in
+                    self.setRunState(.idle)
+                }
+            }
+        }
 
         do {
             if prohibitedToPlay {
@@ -185,83 +284,153 @@ nonisolated class PlayApp: BaseApp, Identifiable, Hashable, @unchecked Sendable 
                 : BaseApp.appBackupsRoot.appendingPathComponent(launchInfo.bundleIdentifier)
             try Installer.validateOrInvalidateAppBackupsForLaunch(at: launchBackupsDir, for: launchInfo)
 
-            let binaryInfo = try? Macho.inspectBinary(
-                atURL: executable,
-                playToolsPath: PlayTools.playToolsPath.path
-            )
-            let usesPlayTools = binaryInfo?.hasPlayTools ?? hasPlayTools()
-            var pluginsModified = false
-            if usesPlayTools {
-                await PlayTools.waitForSystemInstall()
-                pluginsModified = try PlayTools.installPluginInIPA(url)
-            }
-
-            let binaryModified = try Macho.fixLibrariesIfNeeded(atURL: executable)
             let svcBundleID = launchInfo.bundleIdentifier.isEmpty ? info.bundleIdentifier : launchInfo.bundleIdentifier
-            let shouldInterceptSVC = usesPlayTools
-                && !safeModeOneShot
-                && settings.settings.effectiveInterceptInlineSyscalls
-            let svcResult: InlineSyscallPatcher.ReconcileResult
-            if !svcBundleID.isEmpty {
-                svcResult = try InlineSyscallPatcher.reconcile(
-                    appBundleURL: url,
-                    bundleIdentifier: svcBundleID,
-                    manifestURL: BaseApp.svcPatchManifestURL(forBundleIdentifier: svcBundleID),
-                    enabled: shouldInterceptSVC
-                )
-            } else {
-                svcResult = InlineSyscallPatcher.ReconcileResult(
-                    modified: false,
-                    modifiedBinaryURLs: [],
-                    patchedSiteCount: 0
-                )
+            let currentSettings = settings.settings
+
+            await PlayTools.waitForSystemInstall()
+
+            let stampTarget = AppLaunchFingerprintStore.Target(
+                appURL: url,
+                executableURL: executable,
+                appEntitlementsURL: entitlements,
+                bundleID: svcBundleID
+            )
+            var fastPathHit = false
+            var cachedUsesPlayTools = true
+            if !safeModeOneShot,
+               let candidateStamp = AppLaunchFingerprintStore.currentStamp(
+                   target: stampTarget,
+                   settings: currentSettings,
+                   usesPlayTools: true,
+                   isCatalyst: true
+               ),
+               AppLaunchFingerprintStore.shared.matches(candidateStamp, for: url.path) {
+                fastPathHit = true
+                cachedUsesPlayTools = candidateStamp.usesPlayTools
+            } else if !safeModeOneShot,
+                      let nonPTStamp = AppLaunchFingerprintStore.currentStamp(
+                          target: stampTarget,
+                          settings: currentSettings,
+                          usesPlayTools: false,
+                          isCatalyst: true
+                      ),
+                      AppLaunchFingerprintStore.shared.matches(nonPTStamp, for: url.path) {
+                fastPathHit = true
+                cachedUsesPlayTools = false
             }
 
-            if svcResult.modified {
-                let execCanonical = executable.standardizedFileURL.resolvingSymlinksInPath()
-                for modifiedURL in svcResult.modifiedBinaryURLs where
-                    modifiedURL.standardizedFileURL.resolvingSymlinksInPath() != execCanonical {
-                    try Shell.signMacho(modifiedURL)
+            let usesPlayTools: Bool
+            if fastPathHit {
+                PerformanceSignpost.emitEvent("AppLaunchFastPathHit")
+                usesPlayTools = cachedUsesPlayTools
+                await MainActor.run {
+                    self.hasPlayToolsCached = usesPlayTools
                 }
-            }
+            } else {
+                let preflightSpan = PerformanceSignpost.beginInterval("AppLaunchSlowPreflight")
+                defer { PerformanceSignpost.endInterval("AppLaunchSlowPreflight", preflightSpan) }
 
-            let introspectionModified: Bool
-            if usesPlayTools && !safeModeOneShot {
-                if settings.settings.strictEmulationMode {
-                    introspectionModified = stripIntrospectionForStrictLaunch(launchInfo: launchInfo)
+                let binaryInfo = try? Macho.inspectBinary(
+                    atURL: executable,
+                    playToolsPath: PlayTools.playToolsPath.path
+                )
+                usesPlayTools = binaryInfo?.hasPlayTools ?? hasPlayTools()
+                await MainActor.run {
+                    self.hasPlayToolsCached = usesPlayTools
+                }
+
+                var pluginsModified = false
+                if usesPlayTools {
+                    pluginsModified = try PlayTools.installPluginInIPA(url)
+                }
+
+                let binaryModified = try Macho.fixLibrariesIfNeeded(atURL: executable)
+                let shouldInterceptSVC = usesPlayTools
+                    && !safeModeOneShot
+                    && currentSettings.effectiveInterceptInlineSyscalls
+                let svcResult: InlineSyscallPatcher.ReconcileResult
+                if !svcBundleID.isEmpty {
+                    svcResult = try InlineSyscallPatcher.reconcile(
+                        appBundleURL: url,
+                        bundleIdentifier: svcBundleID,
+                        manifestURL: BaseApp.svcPatchManifestURL(forBundleIdentifier: svcBundleID),
+                        enabled: shouldInterceptSVC
+                    )
                 } else {
-                    introspectionModified = restoreIntrospectionForNonStrictLaunch(launchInfo: launchInfo)
+                    svcResult = InlineSyscallPatcher.ReconcileResult(
+                        modified: false,
+                        modifiedBinaryURLs: [],
+                        patchedSiteCount: 0
+                    )
                 }
-            } else {
-                introspectionModified = false
-            }
 
-            let entitlementsInvalid = try !Entitlements.areEntitlementsValid(app: self)
-
-            if entitlementsInvalid {
-                Self.invalidateVerifiedBundleStamp(for: url)
-                try signThrowing()
-                try Shell.verifyAppSignature(url)
-                let stamp = Self.currentBundleStamp(bundleURL: url, executableURL: executable)
-                Self.verifiedBundleStamps.withLock {
-                    $0[url.path] = stamp
+                if svcResult.modified {
+                    let execCanonical = executable.standardizedFileURL.resolvingSymlinksInPath()
+                    for modifiedURL in svcResult.modifiedBinaryURLs where
+                        modifiedURL.standardizedFileURL.resolvingSymlinksInPath() != execCanonical {
+                        try Shell.signMacho(modifiedURL)
+                    }
                 }
-            } else if binaryModified
-                        || pluginsModified
-                        || svcResult.modified
-                        || introspectionModified
-                        || !isBundleSignatureStrictlyValid() {
-                Self.invalidateVerifiedBundleStamp(for: url)
-                do {
-                    try Shell.signApp(executable)
-                    try Shell.verifyAppSignature(url)
-                } catch {
+
+                let introspectionModified: Bool
+                if usesPlayTools && !safeModeOneShot {
+                    if currentSettings.strictEmulationMode {
+                        introspectionModified = stripIntrospectionForStrictLaunch(launchInfo: launchInfo)
+                    } else {
+                        introspectionModified = restoreIntrospectionForNonStrictLaunch(launchInfo: launchInfo)
+                    }
+                } else {
+                    introspectionModified = false
+                }
+
+                let entitlementsInvalid = try !Entitlements.areEntitlementsValid(app: self)
+
+                if entitlementsInvalid {
+                    Self.invalidateVerifiedBundleStamp(for: url)
                     try signThrowing()
                     try Shell.verifyAppSignature(url)
+                    let stamp = Self.currentBundleStamp(bundleURL: url, executableURL: executable)
+                    Self.verifiedBundleStamps.withLock {
+                        $0[url.path] = stamp
+                    }
+                } else if binaryModified
+                            || pluginsModified
+                            || svcResult.modified
+                            || introspectionModified
+                            || !isBundleSignatureStrictlyValid() {
+                    Self.invalidateVerifiedBundleStamp(for: url)
+                    do {
+                        try Shell.signApp(executable)
+                        try Shell.verifyAppSignature(url)
+                    } catch {
+                        try signThrowing()
+                        try Shell.verifyAppSignature(url)
+                    }
+                    let stamp = Self.currentBundleStamp(bundleURL: url, executableURL: executable)
+                    Self.verifiedBundleStamps.withLock {
+                        $0[url.path] = stamp
+                    }
                 }
-                let stamp = Self.currentBundleStamp(bundleURL: url, executableURL: executable)
-                Self.verifiedBundleStamps.withLock {
-                    $0[url.path] = stamp
+
+                let validArch: Bool
+                if !binaryModified, let binaryInfo {
+                    validArch = binaryInfo.isCatalyst
+                } else {
+                    validArch = try Macho.isMachoValidArch(executable)
+                }
+                if !validArch {
+                    PlayCoverDiagnostics.reportError("The app threw an error during conversion.")
+                    return
+                }
+
+                if !safeModeOneShot,
+                   let verifiedStamp = AppLaunchFingerprintStore.currentStamp(
+                       target: stampTarget,
+                       settings: settings.settings,
+                       usesPlayTools: usesPlayTools,
+                       isCatalyst: validArch
+                   ) {
+                    AppLaunchFingerprintStore.shared.record(verifiedStamp, for: url.path)
                 }
             }
 
@@ -277,17 +446,7 @@ nonisolated class PlayApp: BaseApp, Identifiable, Hashable, @unchecked Sendable 
                 return
             }
 
-            let validArch: Bool
-            if !binaryModified, let binaryInfo {
-                validArch = binaryInfo.isCatalyst
-            } else {
-                validArch = try Macho.isMachoValidArch(executable)
-            }
-            if !validArch {
-                PlayCoverDiagnostics.reportError("The app threw an error during conversion.")
-                return
-            }
-
+            await setRunState(.preparing(.unlocking))
             // Wait for keychain unlock to finish before continuing
             await unlockKeyCover()
 
@@ -301,6 +460,7 @@ nonisolated class PlayApp: BaseApp, Identifiable, Hashable, @unchecked Sendable 
                 releaseDiscordIPC()
             }
 
+            await setRunState(.preparing(.opening))
             do {
                 if !safeModeOneShot && !svcBundleID.isEmpty {
                     await AppSettings.syncMetalHUD(
@@ -376,6 +536,7 @@ nonisolated extension PlayApp {
 
         let targetURL = url
         let targetPath = targetURL.path
+        await setRunState(.launching)
         let runningApp: NSRunningApplication?
         do {
             runningApp = try await withCheckedThrowingContinuation { continuation in
@@ -403,157 +564,19 @@ nonisolated extension PlayApp {
         }
 
         if let runningApp {
-            setRunningApplication(runningApp)
-            await MainActor.run {
-                self.launchSnapshot = launchedSettings
-                self.isRunning = true
-            }
-
-            Task(priority: .utility) {
-                defer {
-                    let isSameProcess = self.clearRunningApplicationIfMatches(
-                        processIdentifier: runningApp.processIdentifier
-                    )
-                    if isSameProcess {
-                        Task { @MainActor in
-                            if self.snapshotRunningApplication() == nil {
-                                self.isRunning = false
-                                self.launchSnapshot = nil
-                            }
-                        }
-                        self.enableTimeOut()
-                        self.releaseDiscordIPC()
-                        self.lockKeyCover()
-                        if let mitmCoordinator = self.dependencies?.mitmCoordinator {
-                            let bid = self.info.bundleIdentifier
-                            let appSettings = self.settings
-                            Task { await mitmCoordinator.handleAppTermination(bundleID: bid, settings: appSettings) }
-                        }
-                    }
-
-                    let elapsed = Date().timeIntervalSince(launchDate)
-                    let breadcrumbURL = self.container.containerUrl
-                        .appendingPathComponent("Data/Library/Caches/app.makedie.PlayTools/.launching_in_progress")
-                    if elapsed < 3.0 && FileManager.default.fileExists(atPath: breadcrumbURL.path) {
-                        let msg = "\(self.name) exited abnormally within 3 seconds; " +
-                            "next launch will automatically use Safe Mode."
-                        PlayCoverDiagnostics.log(msg, isError: true)
-                        PlayCoverDiagnostics.showToast(
-                            toastType: .error,
-                            toastDetails: msg,
-                            timeRemaining: 5
-                        )
-                        let appName = self.name
-                        let bundleID = self.info.bundleIdentifier
-                        let crumbPath = breadcrumbURL.path
-                        let startupAlerts = self.dependencies?.startupAlerts
-                        Task { @MainActor in
-                            startupAlerts?.enqueue(
-                                .safeModeActivated(
-                                    appName: appName,
-                                    bundleID: bundleID,
-                                    breadcrumbPath: crumbPath
-                                )
-                            )
-                        }
-                    }
-                }
-                let targetPID = runningApp.processIdentifier
-                let stateLock = Mutex<(discordLinked: Bool, resumed: Bool)>((discordAlreadyLinked, false))
-
-                let tryLinkDiscordIfNeeded: @Sendable () -> Void = {
-                    let alreadyLinked = stateLock.withLock { $0.discordLinked }
-                    if !alreadyLinked && self.settings.settings.discordActivity.enable && self.container.doesExist() {
-                        self.loadDiscordIPC()
-                        stateLock.withLock { $0.discordLinked = true }
-                    }
-                }
-
-                if runningApp.isActive {
-                    self.disableTimeOut()
-                }
-                tryLinkDiscordIfNeeded()
-
-                let wsCenter = NSWorkspace.shared.notificationCenter
-                var activateObserver: NSObjectProtocol?
-                var deactivateObserver: NSObjectProtocol?
-                var terminateObserver: NSObjectProtocol?
-                let appSettings = self.settings
-                let settingsObserverID = appSettings.addChangeObserver {
-                    guard !runningApp.isTerminated else { return }
-                    if !self.settings.settings.disableTimeout {
-                        self.enableTimeOut()
-                    } else if runningApp.isActive {
-                        self.disableTimeOut()
-                    }
-                    if let mitmCoordinator = self.dependencies?.mitmCoordinator {
-                        let bid = self.info.bundleIdentifier
-                        let snapshot = self.settings.settings
-                        Task { await mitmCoordinator.updateLiveConfiguration(for: bid, settings: snapshot) }
-                    }
-                }
-                defer {
-                    appSettings.removeChangeObserver(settingsObserverID)
-                    if let activateObserver { wsCenter.removeObserver(activateObserver) }
-                    if let deactivateObserver { wsCenter.removeObserver(deactivateObserver) }
-                    if let terminateObserver { wsCenter.removeObserver(terminateObserver) }
-                }
-
-                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                    let completeTermination: @Sendable () -> Void = {
-                        let shouldResume = stateLock.withLock { state -> Bool in
-                            guard !state.resumed else { return false }
-                            state.resumed = true
-                            return true
-                        }
-                        if shouldResume {
-                            continuation.resume()
-                        }
-                    }
-
-                    activateObserver = wsCenter.addObserver(
-                        forName: NSWorkspace.didActivateApplicationNotification,
-                        object: nil,
-                        queue: nil
-                    ) { notification in
-                        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
-                                as? NSRunningApplication,
-                              app.processIdentifier == targetPID else {
-                            return
-                        }
-                        self.disableTimeOut()
-                        tryLinkDiscordIfNeeded()
-                    }
-
-                    deactivateObserver = wsCenter.addObserver(
-                        forName: NSWorkspace.didDeactivateApplicationNotification,
-                        object: nil,
-                        queue: nil
-                    ) { notification in
-                        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
-                                as? NSRunningApplication,
-                              app.processIdentifier == targetPID else {
-                            return
-                        }
-                        self.enableTimeOut()
-                    }
-
-                    terminateObserver = wsCenter.addObserver(
-                        forName: NSWorkspace.didTerminateApplicationNotification,
-                        object: nil,
-                        queue: nil
-                    ) { notification in
-                        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
-                                as? NSRunningApplication,
-                              app.processIdentifier == targetPID else {
-                            return
-                        }
-                        completeTermination()
-                    }
-
-                    if runningApp.isTerminated {
-                        completeTermination()
-                    }
+            if let monitor = dependencies?.runningAppsMonitor {
+                await monitor.registerHostLaunch(
+                    app: self,
+                    runningApplication: runningApp,
+                    launchDate: launchDate,
+                    launchSnapshot: launchedSettings,
+                    discordAlreadyLinked: discordAlreadyLinked
+                )
+            } else {
+                setRunningApplication(runningApp)
+                await MainActor.run {
+                    self.launchSnapshot = launchedSettings
+                    self.setRunState(.running(isActive: runningApp.isActive))
                 }
             }
         } else {
@@ -568,13 +591,13 @@ nonisolated extension PlayApp {
         }
     }
 
-    private func setRunningApplication(_ app: NSRunningApplication) {
+    func setRunningApplication(_ app: NSRunningApplication) {
         assertionLock.withLock { _ in
             runningApplication = app
         }
     }
 
-    private func clearRunningApplicationIfMatches(processIdentifier: pid_t) -> Bool {
+    func clearRunningApplicationIfMatches(processIdentifier: pid_t) -> Bool {
         assertionLock.withLock { _ in
             guard runningApplication?.processIdentifier == processIdentifier else {
                 return false
@@ -584,22 +607,90 @@ nonisolated extension PlayApp {
         }
     }
 
-    private func snapshotRunningApplication() -> NSRunningApplication? {
+    func clearRunningApplication() {
+        assertionLock.withLock { _ in
+            runningApplication = nil
+        }
+    }
+
+    func snapshotRunningApplication() -> NSRunningApplication? {
         assertionLock.withLock { _ in runningApplication }
+    }
+
+    @MainActor
+    @discardableResult
+    func activateRunningApplication() -> Bool {
+        let liveRunning: NSRunningApplication?
+        if let current = snapshotRunningApplication(), !current.isTerminated {
+            liveRunning = current
+        } else if let fallback = NSRunningApplication.runningApplications(
+            withBundleIdentifier: info.bundleIdentifier
+        ).first(where: { !$0.isTerminated }) {
+            liveRunning = fallback
+        } else {
+            liveRunning = nil
+        }
+        guard let running = liveRunning else {
+            return false
+        }
+        _ = running.activate()
+        if !ProcessInfo.isRunningUnitTests {
+            let reopenURL = running.bundleURL ?? url
+            let config = NSWorkspace.OpenConfiguration()
+            config.activates = true
+            NSWorkspace.shared.openApplication(
+                at: reopenURL,
+                configuration: config,
+                completionHandler: nil
+            )
+        }
+        return true
     }
 
     func terminate() async {
         let current = snapshotRunningApplication()
-        guard let current, !current.isTerminated else { return }
+            ?? NSRunningApplication.runningApplications(withBundleIdentifier: info.bundleIdentifier)
+                .first(where: { !$0.isTerminated })
+        guard let current, !current.isTerminated else {
+            if let monitor = dependencies?.runningAppsMonitor {
+                await monitor.notifyProcessTerminated(
+                    for: self,
+                    pid: current?.processIdentifier ?? 0
+                )
+            } else {
+                enableTimeOut()
+                await setRunState(.idle)
+            }
+            return
+        }
 
+        let targetPID = current.processIdentifier
+        await setRunState(.terminating)
         _ = current.terminate()
         let deadline = Date().addingTimeInterval(3.0)
         while !current.isTerminated && Date() < deadline {
-            try? await Task.sleep(nanoseconds: 100_000_000)
+            try? await Task.sleep(nanoseconds: 50_000_000)
         }
         if !current.isTerminated {
             _ = current.forceTerminate()
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            let forceDeadline = Date().addingTimeInterval(0.5)
+            while !current.isTerminated && Date() < forceDeadline {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+        }
+        let stillAlive = await MainActor.run {
+            RunningAppsMonitor.isProcessAlive(pid: targetPID, isTerminated: current.isTerminated)
+        }
+        if !stillAlive {
+            if let monitor = dependencies?.runningAppsMonitor {
+                await monitor.notifyProcessTerminated(for: self, pid: targetPID)
+            } else {
+                _ = clearRunningApplicationIfMatches(processIdentifier: targetPID)
+                enableTimeOut()
+                await setRunState(.idle)
+            }
+        } else {
+            await setRunState(.running(isActive: current.isActive))
         }
     }
 
@@ -635,9 +726,9 @@ nonisolated extension PlayApp {
 
     var sortName: String { name.lowercased() }
     var sortVersion: String { info.bundleVersion }
-    var sortDevice: String { settings.settings.effectiveIOSDeviceModel }
-    var sortPixelRatio: Double { settings.settings.pixelBudget.ratio }
-    var sortRunningRank: Int { isRunning ? 0 : 1 }
+    var sortDevice: String { settingsSummaryMirror.withLock { $0.device } }
+    var sortPixelRatio: Double { settingsSummaryMirror.withLock { $0.ratio } }
+    var sortRunningRank: Int { currentRunState().sortRank }
 }
 
 // MARK: - Management

@@ -99,6 +99,9 @@
 		AA72A0322F00001000623C15 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA72A0312F00001000623C15 /* AppDelegate.swift */; };
 		AA72A0382F00001000623C15 /* PlayCoverDependencies.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA72A0372F00001000623C15 /* PlayCoverDependencies.swift */; };
 		AA72A03A2F00001000623C15 /* MITMProxyCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA72A0392F00001000623C15 /* MITMProxyCoordinator.swift */; };
+		AA72A03C2F00004000623C15 /* AppLaunchFingerprintStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA72A03B2F00004000623C15 /* AppLaunchFingerprintStore.swift */; };
+		AA72A03E2F00004000623C15 /* AppLibraryIndexCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA72A03D2F00004000623C15 /* AppLibraryIndexCache.swift */; };
+		AA72A0402F00004000623C15 /* RunningAppsMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA72A03F2F00004000623C15 /* RunningAppsMonitor.swift */; };
 		AA72A0342F00001000623C15 /* ModuleExports.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA72A0332F00001000623C15 /* ModuleExports.swift */; };
 		AA72A0362F00001000623C15 /* ArchitectureAndHostTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA72A0352F00001000623C15 /* ArchitectureAndHostTests.swift */; };
 		AA5130022F00003000623C15 /* WorkspaceUISnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5130012F00003000623C15 /* WorkspaceUISnapshotTests.swift */; };
@@ -254,6 +257,9 @@
 		AA72A0312F00001000623C15 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		AA72A0372F00001000623C15 /* PlayCoverDependencies.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayCoverDependencies.swift; sourceTree = "<group>"; };
 		AA72A0392F00001000623C15 /* MITMProxyCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MITMProxyCoordinator.swift; sourceTree = "<group>"; };
+		AA72A03B2F00004000623C15 /* AppLaunchFingerprintStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLaunchFingerprintStore.swift; sourceTree = "<group>"; };
+		AA72A03D2F00004000623C15 /* AppLibraryIndexCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLibraryIndexCache.swift; sourceTree = "<group>"; };
+		AA72A03F2F00004000623C15 /* RunningAppsMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunningAppsMonitor.swift; sourceTree = "<group>"; };
 		AA72A0332F00001000623C15 /* ModuleExports.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModuleExports.swift; sourceTree = "<group>"; };
 		AA72A0352F00001000623C15 /* ArchitectureAndHostTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchitectureAndHostTests.swift; sourceTree = "<group>"; };
 		AA5130012F00003000623C15 /* WorkspaceUISnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceUISnapshotTests.swift; sourceTree = "<group>"; };
@@ -372,6 +378,8 @@
 				923421F6275F40300030CD7D /* AppContainer.swift */,
 				9286D295273A7E4200958DD3 /* AppSettings.swift */,
 				AA5110012F00003000623C15 /* AppSettingsPresets.swift */,
+				AA72A03B2F00004000623C15 /* AppLaunchFingerprintStore.swift */,
+				AA72A03D2F00004000623C15 /* AppLibraryIndexCache.swift */,
 			);
 			path = Model;
 			sourceTree = "<group>";
@@ -640,6 +648,7 @@
 				AA72A0312F00001000623C15 /* AppDelegate.swift */,
 				AA72A0372F00001000623C15 /* PlayCoverDependencies.swift */,
 				AA72A0392F00001000623C15 /* MITMProxyCoordinator.swift */,
+				AA72A03F2F00004000623C15 /* RunningAppsMonitor.swift */,
 			);
 			path = AppLifecycle;
 			sourceTree = "<group>";
@@ -886,6 +895,7 @@
 				"$(SRCROOT)/.swiftlint.yml",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/AppInfo.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/AppIntegrity.swift",
+				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/AppRunState.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/AppSettingsModels.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/AppSettingsPersistence.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/AppSettingsSchema.swift",
@@ -897,6 +907,7 @@
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/LSApplicationCategoryType.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/NetworkRuleParser.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/NetworkVM.swift",
+				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/PerformanceSignpost.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/PlayCoverDiagnostics.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/PlayCoverError.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/PlayRules.swift",
@@ -937,7 +948,10 @@
 				"$(SRCROOT)/PlayCover/AppLifecycle/AppDelegate.swift",
 				"$(SRCROOT)/PlayCover/AppLifecycle/MITMProxyCoordinator.swift",
 				"$(SRCROOT)/PlayCover/AppLifecycle/PlayCoverDependencies.swift",
+				"$(SRCROOT)/PlayCover/AppLifecycle/RunningAppsMonitor.swift",
 				"$(SRCROOT)/PlayCover/Model/AppContainer.swift",
+				"$(SRCROOT)/PlayCover/Model/AppLaunchFingerprintStore.swift",
+				"$(SRCROOT)/PlayCover/Model/AppLibraryIndexCache.swift",
 				"$(SRCROOT)/PlayCover/Model/AppSettings.swift",
 				"$(SRCROOT)/PlayCover/Model/AppSettingsPresets.swift",
 				"$(SRCROOT)/PlayCover/Model/BaseApp.swift",
@@ -1117,6 +1131,9 @@
 				AA72A0322F00001000623C15 /* AppDelegate.swift in Sources */,
 				AA72A0382F00001000623C15 /* PlayCoverDependencies.swift in Sources */,
 				AA72A03A2F00001000623C15 /* MITMProxyCoordinator.swift in Sources */,
+				AA72A03C2F00004000623C15 /* AppLaunchFingerprintStore.swift in Sources */,
+				AA72A03E2F00004000623C15 /* AppLibraryIndexCache.swift in Sources */,
+				AA72A0402F00004000623C15 /* RunningAppsMonitor.swift in Sources */,
 				AA72A0342F00001000623C15 /* ModuleExports.swift in Sources */,
 				AB6F21EB299B7FA20078ADEC /* URLHandler.swift in Sources */,
 				6ED6379D28DAAAC100B506FA /* IPASourceSettings.swift in Sources */,

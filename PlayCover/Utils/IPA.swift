@@ -14,11 +14,18 @@ nonisolated public class IPA {
         self.url = url
     }
 
-    public func allocateTempDir() throws {
+    public func allocateTempDir(appropriateFor targetURL: URL? = nil) throws {
         releaseTempDir()
+        let preferred = targetURL ?? AppsVM.appDirectory
+        let baseURL: URL
+        if FileManager.default.fileExists(atPath: preferred.path) {
+            baseURL = preferred
+        } else {
+            baseURL = FileManager.default.temporaryDirectory
+        }
         tmpDir = try FileManager.default.url(for: .itemReplacementDirectory,
                                              in: .userDomainMask,
-                                             appropriateFor: FileManager.default.temporaryDirectory,
+                                             appropriateFor: baseURL,
                                              create: true)
     }
 
@@ -34,7 +41,6 @@ nonisolated public class IPA {
 
     public func removeQuarantine(_ execUrl: URL) throws {
         _ = try? Shell.run(print: false, "/usr/bin/xattr", "-cr", execUrl.path)
-        _ = try? Shell.run(print: false, "/usr/bin/xattr", "-r", "-d", "com.apple.quarantine", execUrl.path)
     }
 
     public func unzip() throws -> BaseApp {
@@ -153,8 +159,11 @@ nonisolated public class IPA {
             return false
         }
 
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 4.0
+
         do {
-            let (data, response) = try await URLSession.shared.data(from: url)
+            let (data, response) = try await URLSession.shared.data(for: request)
             guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
                 return false
             }
@@ -174,6 +183,10 @@ nonisolated public class IPA {
         alertPresenter: AlertPresenter? = nil,
         installPreferences: InstallPreferences? = nil
     ) async -> Bool {
+        let prefs = installPreferences ?? InstallPreferences()
+        guard prefs.showAppStorePopup else {
+            return false
+        }
         let bundleID: String
         let appID: Int
         switch app {
@@ -189,9 +202,7 @@ nonisolated public class IPA {
             appID = Int(stringArray.last ?? "0") ?? 0
         }
         let supportMacOS: Bool = await Self.checkMacOSCompatibility(appID: appID)
-        let prefs = installPreferences ?? InstallPreferences()
-        let showAlert = prefs.showAppStorePopup
-        if showAlert && supportMacOS {
+        if supportMacOS {
             let presenter = alertPresenter ?? AlertPresenter()
             let response = await presenter.present(
                 PlayCoverAlertRequest(

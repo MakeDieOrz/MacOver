@@ -163,10 +163,33 @@ nonisolated class Installer {
                     backupStagingResult = .noneApplicable
                 }
 
-                for macho in machos where !export {
-                    try Macho.convertMacho(macho)
-                    if macho != app.executable {
-                        try Shell.signMacho(macho)
+                if !export && !machos.isEmpty {
+                    let mainExecCanonical = app.executable.standardizedFileURL.resolvingSymlinksInPath()
+                    let maxConcurrent = min(8, max(2, ProcessInfo.processInfo.activeProcessorCount))
+                    try await withThrowingTaskGroup(of: Void.self) { group in
+                        var nextIdx = 0
+                        while nextIdx < min(maxConcurrent, machos.count) {
+                            let macho = machos[nextIdx]
+                            nextIdx += 1
+                            group.addTask {
+                                try Macho.convertMacho(macho)
+                                if macho.standardizedFileURL.resolvingSymlinksInPath() != mainExecCanonical {
+                                    try Shell.signMacho(macho)
+                                }
+                            }
+                        }
+                        while try await group.next() != nil {
+                            if nextIdx < machos.count {
+                                let macho = machos[nextIdx]
+                                nextIdx += 1
+                                group.addTask {
+                                    try Macho.convertMacho(macho)
+                                    if macho.standardizedFileURL.resolvingSymlinksInPath() != mainExecCanonical {
+                                        try Shell.signMacho(macho)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 installVM.updateProgress(0.58)
@@ -399,6 +422,10 @@ nonisolated class Installer {
         let resolved = Mutex<[URL]>([])
 
         baseApp.url.enumerateContents { url, attributes in
+            let path = url.path
+            if path.contains("/_CodeSignature/") || path.contains("/SC_Info/") || path.contains(".lproj/") {
+                return
+            }
             guard attributes.isRegularFile == true, let fileSize = attributes.fileSize, fileSize > 4 else {
                 return
             }
@@ -407,21 +434,15 @@ nonisolated class Installer {
                 return
             }
 
-            let handle = try FileHandle(forReadingFrom: url)
+            let fd = Darwin.open(path, O_RDONLY | O_CLOEXEC)
+            guard fd >= 0 else { return }
+            defer { Darwin.close(fd) }
 
-            defer {
-                do {
-                    try handle.close()
-                } catch {
-                    print("Failed to close FileHandle for \(url.absoluteString): \(error.localizedDescription)")
-                }
-            }
+            var magic = [UInt8](repeating: 0, count: 4)
+            let bytesRead = Darwin.read(fd, &magic, 4)
+            guard bytesRead == 4 else { return }
 
-            guard let data = try handle.read(upToCount: 4) else {
-                return
-            }
-
-            switch Array(data) {
+            switch magic {
             case [202, 254, 186, 190], [190, 186, 254, 202],
                  [202, 254, 186, 191], [191, 186, 254, 202],
                  [207, 250, 237, 254], [254, 237, 250, 207]:

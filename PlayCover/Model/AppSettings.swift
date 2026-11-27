@@ -45,6 +45,7 @@ nonisolated final class AppSettings: @unchecked Sendable {
         qos: .utility
     )
     private static let metalHUDGenerations = Mutex<[String: UInt64]>([:])
+    private static let lastSyncedMetalHUD = Mutex<[String: Bool]>([:])
 
     private struct PendingMetalHUDUpdate: Sendable {
         let bundleID: String
@@ -58,6 +59,7 @@ nonisolated final class AppSettings: @unchecked Sendable {
     @ObservationIgnored private var hasPendingWrite = false
     @ObservationIgnored let debounceInterval: TimeInterval
     @ObservationIgnored private let metalHUDExecutor: @Sendable (String, Bool) throws -> Void
+    @ObservationIgnored private let usesDefaultMetalHUDExecutor: Bool
     @ObservationIgnored private var suppressPersistence = false
     @ObservationIgnored private var isResetting = false
     @ObservationIgnored private var _settings: AppSettingsData
@@ -75,14 +77,35 @@ nonisolated final class AppSettings: @unchecked Sendable {
         metalHUDGenerations.withLock { $0[bundleID] == generation }
     }
 
+    private static func isSystemMetalHUDUpToDate(bundleID: String, enabled: Bool) -> Bool {
+        if let cached = lastSyncedMetalHUD.withLock({ $0[bundleID] }) {
+            return cached == enabled
+        }
+        if let persisted = CFPreferencesCopyAppValue(
+            "MetalForceHudEnabled" as CFString,
+            bundleID as CFString
+        ) as? Bool {
+            lastSyncedMetalHUD.withLock { $0[bundleID] = persisted }
+            return persisted == enabled
+        }
+        return false
+    }
+
     private static func enqueueMetalHUDUpdate(
         _ pending: PendingMetalHUDUpdate,
+        usesDefaultExecutor: Bool,
         executor: @escaping @Sendable (String, Bool) throws -> Void
     ) {
         metalHUDQueue.async {
             guard isLatestMetalHUDGeneration(pending.generation, for: pending.bundleID) else { return }
+            if usesDefaultExecutor && isSystemMetalHUDUpToDate(bundleID: pending.bundleID, enabled: pending.enabled) {
+                return
+            }
             do {
                 try executor(pending.bundleID, pending.enabled)
+                if usesDefaultExecutor {
+                    lastSyncedMetalHUD.withLock { $0[pending.bundleID] = pending.enabled }
+                }
             } catch {
                 PlayCoverDiagnostics.reportError(error)
             }
@@ -92,7 +115,7 @@ nonisolated final class AppSettings: @unchecked Sendable {
     static func syncMetalHUD(
         bundleID: String,
         enabled: Bool,
-        executor: @escaping @Sendable (String, Bool) throws -> Void = { try Shell.setMetalHUD($0, enabled: $1) }
+        executor: (@Sendable (String, Bool) throws -> Void)? = nil
     ) async {
         guard !bundleID.isEmpty else { return }
         let generation = reserveMetalHUDGeneration(for: bundleID)
@@ -100,7 +123,13 @@ nonisolated final class AppSettings: @unchecked Sendable {
             metalHUDQueue.async {
                 defer { continuation.resume() }
                 guard isLatestMetalHUDGeneration(generation, for: bundleID) else { return }
-                try? executor(bundleID, enabled)
+                if executor == nil && isSystemMetalHUDUpToDate(bundleID: bundleID, enabled: enabled) {
+                    return
+                }
+                let runExecutor = executor ?? { try Shell.setMetalHUD($0, enabled: $1) }
+                if (try? runExecutor(bundleID, enabled)) != nil, executor == nil {
+                    lastSyncedMetalHUD.withLock { $0[bundleID] = enabled }
+                }
             }
         }
     }
@@ -166,12 +195,13 @@ nonisolated final class AppSettings: @unchecked Sendable {
         settingsUrl: URL,
         info: AppInfo,
         debounceInterval: TimeInterval = 0.5,
-        metalHUDExecutor: @escaping @Sendable (String, Bool) throws -> Void = { try Shell.setMetalHUD($0, enabled: $1) }
+        metalHUDExecutor: (@Sendable (String, Bool) throws -> Void)? = nil
     ) {
         self.info = info
         self.settingsUrl = settingsUrl
         self.debounceInterval = debounceInterval
-        self.metalHUDExecutor = metalHUDExecutor
+        self.usesDefaultMetalHUDExecutor = metalHUDExecutor == nil
+        self.metalHUDExecutor = metalHUDExecutor ?? { try Shell.setMetalHUD($0, enabled: $1) }
         var defaults = AppSettingsData()
         defaults.bundleIdentifier = info.bundleIdentifier
         defaults.notch = NSScreen.hasNotch()
@@ -228,7 +258,11 @@ nonisolated final class AppSettings: @unchecked Sendable {
         notifyChangedOnMain()
 
         if let pendingHUD {
-            Self.enqueueMetalHUDUpdate(pendingHUD, executor: metalHUDExecutor)
+            Self.enqueueMetalHUDUpdate(
+                pendingHUD,
+                usesDefaultExecutor: usesDefaultMetalHUDExecutor,
+                executor: metalHUDExecutor
+            )
         }
     }
 
@@ -306,7 +340,11 @@ nonisolated final class AppSettings: @unchecked Sendable {
         notifyChangedOnMain()
 
         if let pendingHUD {
-            Self.enqueueMetalHUDUpdate(pendingHUD, executor: metalHUDExecutor)
+            Self.enqueueMetalHUDUpdate(
+                pendingHUD,
+                usesDefaultExecutor: usesDefaultMetalHUDExecutor,
+                executor: metalHUDExecutor
+            )
         }
     }
 

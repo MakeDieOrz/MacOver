@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import SwiftUI
+import Synchronization
 
 @Observable
 nonisolated final class PlayCoverDependencies: Sendable {
@@ -27,6 +28,8 @@ nonisolated final class PlayCoverDependencies: Sendable {
     let urlHandler: URLHandler
     let appIntegrity: AppIntegrity
     let mitmCoordinator: MITMProxyCoordinator
+    let runningAppsMonitor: RunningAppsMonitor
+    @ObservationIgnored private let deferredStartupStarted = Mutex<Bool>(false)
 
     @MainActor
     init(
@@ -34,6 +37,9 @@ nonisolated final class PlayCoverDependencies: Sendable {
         loadInitialData: Bool = !ProcessInfo.isRunningUnitTests,
         configureDiagnostics: Bool = true
     ) {
+        let hostInitSpan = PerformanceSignpost.beginInterval("HostDependenciesInit")
+        defer { PerformanceSignpost.endInterval("HostDependenciesInit", hostInitSpan) }
+
         let alertPresenter = AlertPresenter()
         let startupAlerts = StartupAlertCenter()
         let toastVM = ToastVM()
@@ -61,12 +67,13 @@ nonisolated final class PlayCoverDependencies: Sendable {
         let installVM = InstallVM()
         let downloadVM = DownloadVM()
         let appsVM = AppsVM(loadOnInit: false)
-        let storeVM = StoreVM(resolveOnInit: loadInitialData)
+        let storeVM = StoreVM(resolveOnInit: false)
         let versionCheck = VersionCheck()
         let urlObservable = URLObservable()
         let urlHandler = URLHandler()
         let appIntegrity = AppIntegrity()
         let mitmCoordinator = MITMProxyCoordinator()
+        let runningAppsMonitor = RunningAppsMonitor(observeWorkspace: loadInitialData)
 
         self.alertPresenter = alertPresenter
         self.startupAlerts = startupAlerts
@@ -91,11 +98,13 @@ nonisolated final class PlayCoverDependencies: Sendable {
         self.urlHandler = urlHandler
         self.appIntegrity = appIntegrity
         self.mitmCoordinator = mitmCoordinator
+        self.runningAppsMonitor = runningAppsMonitor
 
         appsVM.dependencies = self
         versionCheck.dependencies = self
         urlHandler.dependencies = self
         cacher.appsVM = appsVM
+        runningAppsMonitor.dependencies = self
 
         if configureDiagnostics {
             let logRef = log
@@ -138,8 +147,25 @@ nonisolated final class PlayCoverDependencies: Sendable {
         }
 
         if loadInitialData {
+            appsVM.loadCachedIndexIfAvailable()
             PlayTools.installOnSystem()
-            appsVM.fetchApps()
+            appsVM.fetchAppsIfNeeded()
         }
+    }
+
+    @MainActor
+    func performDeferredStartupTasks() async {
+        let shouldRun = deferredStartupStarted.withLock { started -> Bool in
+            guard !started else { return false }
+            started = true
+            return true
+        }
+        guard shouldRun else { return }
+        await Task.yield()
+
+        storeVM.resolveSourcesIfNeeded()
+        keyCoverObservable.refreshAsync()
+        soundDeviceService.prepareSoundDevice()
+        notifyService.allowNotify()
     }
 }
