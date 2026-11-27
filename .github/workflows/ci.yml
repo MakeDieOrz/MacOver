@@ -97,11 +97,14 @@ jobs:
           PLAYCOVER_BIN="${RUNNER_TEMP}/dd-release/Build/Products/Release/MacOver.app/Contents/MacOS/MacOver"
           HELPER_BIN="${RUNNER_TEMP}/dd-release/Build/Products/Release/MacOver.app/Contents/Library/HelperTools/PlayCoverHelper"
           HELPER_PLIST="${RUNNER_TEMP}/dd-release/Build/Products/Release/MacOver.app/Contents/Library/LaunchDaemons/app.makedie.MacOver.Helper.plist"
+          AKINTERFACE_BIN="${RUNNER_TEMP}/dd-release/Build/Products/Release/MacOver.app/Contents/Frameworks/PlayTools.framework/Versions/A/PlugIns/AKInterface.bundle/Contents/MacOS/AKInterface"
           test -x "${HELPER_BIN}"
+          test -x "${AKINTERFACE_BIN}"
           plutil -lint "${HELPER_PLIST}"
           xcrun vtool -show-build "${PLAYCOVER_BIN}" | grep -q "minos 26.0"
           xcrun vtool -show-build "${HELPER_BIN}" | grep -q "minos 26.0"
           xcrun vtool -show-build "${PLAYTOOLS_BIN}" | grep -q "minos 26.0"
+          xcrun vtool -show-build "${AKINTERFACE_BIN}" | grep -q "minos 26.0"
 
           INCR_LOG=$(xcodebuild \
             -workspace PlayCover.xcworkspace \
