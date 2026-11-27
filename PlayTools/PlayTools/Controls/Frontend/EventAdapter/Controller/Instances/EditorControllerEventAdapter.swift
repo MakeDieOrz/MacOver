@@ -36,7 +36,9 @@ public class EditorControllerEventAdapter: ControllerEventAdapter {
         }
         let resolvedAlias = alias
         DispatchQueue.main.async {
-            EditorController.shared.setKey(resolvedAlias)
+            MainActor.assumeIsolated {
+                EditorController.shared.setKey(resolvedAlias)
+            }
         }
     }
 }

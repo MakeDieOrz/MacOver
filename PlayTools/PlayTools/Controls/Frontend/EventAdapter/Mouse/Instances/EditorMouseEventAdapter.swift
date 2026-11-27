@@ -29,7 +29,9 @@ public class EditorMouseEventAdapter: MouseEventAdapter {
             // asynced to return quickly. Editor contains UI operation so main queue.
             // main queue is fine. should not be slower than keyboard
             DispatchQueue.main.async(qos: .userInteractive, execute: {
-                EditorController.shared.setKey(name)
+                MainActor.assumeIsolated {
+                    EditorController.shared.setKey(name)
+                }
                 Toucher.writeLog(logMessage: "mouse button editor set")
             })
         }

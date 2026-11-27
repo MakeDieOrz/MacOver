@@ -7,6 +7,49 @@
 #import <IOKit/IOKitLib.h>
 #include <math.h>
 
+@protocol PSExternalSwizzleSelectors <NSObject>
+@optional
+- (NSString *)platform;
+- (NSString *)hwModel;
+- (NSInteger)getDeviceType;
++ (BOOL)isJailbroken;
+- (BOOL)isJailBreak;
+- (BOOL)isJailBroken;
+- (BOOL)isJailbroken;
+- (BOOL)computeIsJailbroken;
++ (BOOL)isJailBreakon;
++ (BOOL)isJailbrokenWithSkipAdvancedJailbreakValidation:(BOOL)skip;
+- (BOOL)isDeviceNonCompliant;
++ (BOOL)isDeviceJailbroken;
+- (id)is_rooted;
++ (bool)isJailbreak;
+- (bool)jailBroken;
+- (id)jailbroken;
+- (bool)jailbreakStatus;
+- (bool)isJailbrokenDetected;
+- (bool)isJailBrokenDetectedByVOS;
+- (bool)isDFPHookedDetecedByVOS;
+- (bool)isCodeInjectionDetectedByVOS;
+- (bool)isDebuggerCheckDetectedByVOS;
+- (bool)isAppSignerCheckDetectedByVOS;
+- (bool)v_checkAModified;
+- (bool)isRuntimeTamperingDetected;
+- (BOOL)rootedDeviceTestResult;
+- (BOOL)isCompliant;
+- (bool)isCydiaJailBreak;
+- (bool)isApplicationsJailBreak;
+- (bool)ischeckCydiaJailBreak;
+- (bool)isPathJailBreak;
+- (bool)boolIsjailbreak;
+- (bool)isJailBrokenDevice;
++ (bool)isJailBreak;
++ (bool)isJailBreak_file;
++ (bool)isJailBreak_cydia;
++ (bool)isJailBreak_appList;
++ (bool)isJailBreak_env;
++ (bool)isRootedOrJailbroken;
+@end
+
 @implementation PSSwizzleHooks (PlayShadowSystem)
 
 - (NSInteger) pm_hook_deviceType {

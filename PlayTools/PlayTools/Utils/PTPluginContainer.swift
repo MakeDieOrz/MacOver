@@ -122,7 +122,7 @@ public struct PTPluginManifest: Codable, Equatable {
 
 public typealias PluginManifest = PTPluginManifest
 
-public enum PTPluginLoadStatus: Equatable {
+public enum PTPluginLoadStatus: Equatable, Sendable {
     case loaded
     case blockedBySafeMode
     case skippedBundleMismatch
@@ -137,14 +137,14 @@ public struct PTPluginDescriptor: Equatable {
     public let registeredFragments: [String]
 }
 
-public struct PTPluginLoadRecord: Equatable {
+public struct PTPluginLoadRecord: Equatable, Sendable {
     public let identifier: String
     public let dylibPath: String
     public let isLegacySynthesized: Bool
     public let status: PTPluginLoadStatus
 }
 
-public final class PTPluginContainer {
+public final class PTPluginContainer: @unchecked Sendable {
     public static let shared = PTPluginContainer()
     public static let defaultUserPluginsDirectoryName = "UserPlugins"
     public static let manifestFilename = "PluginManifest.json"
@@ -388,7 +388,8 @@ public final class PTPluginContainer {
                     status: .failed(errMsg)
                 ))
                 PTDiagnosticLogger.log(
-                    "Failed to dlopen plugin \(descriptor.manifest.identifier) at \(descriptor.dylibURL.path): \(errMsg)",
+                    "Failed to dlopen plugin \(descriptor.manifest.identifier) at "
+                        + "\(descriptor.dylibURL.path): \(errMsg)",
                     bundleIdentifier: currentBundleIdentifier,
                     force: true,
                     environment: environment,

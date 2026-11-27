@@ -31,6 +31,7 @@ public class ModeAutomaton {
         return false
     }
 
+    @MainActor
     static public func onCmdK() {
         guard settings.keymapping else {
             return

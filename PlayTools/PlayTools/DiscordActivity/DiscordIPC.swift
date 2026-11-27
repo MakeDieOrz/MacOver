@@ -8,38 +8,42 @@
 import Darwin
 import Foundation
 
+struct DiscordTimestamps: Encodable {
+    var start: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case start
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(start, forKey: .start)
+    }
+}
+
+struct DiscordAssets: Encodable {
+    var largeImage: String?
+    var largeText: String?
+    var smallImage: String?
+    var smallText: String?
+
+    enum CodingKeys: String, CodingKey {
+        case largeImage = "large_image"
+        case largeText = "large_text"
+        case smallImage = "small_image"
+        case smallText = "small_text"
+    }
+}
+
+struct DiscordButton: Encodable {
+    let label: String
+    let url: String
+}
+
 struct DiscordRichPresence: Encodable {
-    struct Timestamps: Encodable {
-        var start: Int?
-
-        enum CodingKeys: String, CodingKey {
-            case start
-        }
-
-        func encode(to encoder: Encoder) throws {
-            var container = encoder.container(keyedBy: CodingKeys.self)
-            try container.encodeIfPresent(start, forKey: .start)
-        }
-    }
-
-    struct Assets: Encodable {
-        var largeImage: String?
-        var largeText: String?
-        var smallImage: String?
-        var smallText: String?
-
-        enum CodingKeys: String, CodingKey {
-            case largeImage = "large_image"
-            case largeText = "large_text"
-            case smallImage = "small_image"
-            case smallText = "small_text"
-        }
-    }
-
-    struct Button: Encodable {
-        let label: String
-        let url: String
-    }
+    typealias Timestamps = DiscordTimestamps
+    typealias Assets = DiscordAssets
+    typealias Button = DiscordButton
 
     var details: String?
     var state: String?
@@ -65,6 +69,27 @@ struct DiscordRichPresence: Encodable {
     }
 }
 
+private struct DiscordSetActivityArgs: Encodable {
+    let pid: Int32
+    let activity: DiscordRichPresence?
+
+    enum CodingKeys: String, CodingKey {
+        case pid, activity
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(pid, forKey: .pid)
+        try container.encode(activity, forKey: .activity)
+    }
+}
+
+private struct DiscordSetActivityCommand: Encodable {
+    let cmd = "SET_ACTIVITY"
+    let args: DiscordSetActivityArgs
+    let nonce: String
+}
+
 final class DiscordIPCClient {
     enum Opcode: UInt32 {
         case handshake = 0
@@ -79,30 +104,11 @@ final class DiscordIPCClient {
         let client_id: String
     }
 
-    private struct SetActivityCommand: Encodable {
-        struct Args: Encodable {
-            let pid: Int32
-            let activity: DiscordRichPresence?
-
-            enum CodingKeys: String, CodingKey {
-                case pid, activity
-            }
-
-            func encode(to encoder: Encoder) throws {
-                var container = encoder.container(keyedBy: CodingKeys.self)
-                try container.encode(pid, forKey: .pid)
-                try container.encode(activity, forKey: .activity)
-            }
-        }
-
-        let cmd = "SET_ACTIVITY"
-        let args: Args
-        let nonce: String
-    }
+    private typealias SetActivityCommand = DiscordSetActivityCommand
 
     private let appId: String
     private let socketPaths: [String]
-    private let lock = NSLock()
+    private let lock = PTUnfairLock()
     private let readQueue = DispatchQueue(label: "app.makedie.PlayTools.DiscordIPC", qos: .utility)
     private var fd: Int32 = -1
     private var readSource: DispatchSourceRead?
@@ -118,9 +124,7 @@ final class DiscordIPCClient {
 
     @discardableResult
     func connect() -> Bool {
-        lock.lock()
-        let alreadyOpen = (fd >= 0)
-        lock.unlock()
+        let alreadyOpen = lock.withLock { fd >= 0 }
         if alreadyOpen { return true }
 
         guard !appId.isEmpty else { return false }
@@ -156,10 +160,10 @@ final class DiscordIPCClient {
                 Darwin.close(connectedFD)
             }
 
-            lock.lock()
-            fd = connectedFD
-            readSource = source
-            lock.unlock()
+            lock.withLock {
+                fd = connectedFD
+                readSource = source
+            }
             source.resume()
             return true
         }
@@ -183,12 +187,13 @@ final class DiscordIPCClient {
     }
 
     func disconnect() {
-        lock.lock()
-        let activeFD = fd
-        let source = readSource
-        fd = -1
-        readSource = nil
-        lock.unlock()
+        let (activeFD, source) = lock.withLock { () -> (Int32, DispatchSourceRead?) in
+            let activeFD = fd
+            let source = readSource
+            fd = -1
+            readSource = nil
+            return (activeFD, source)
+        }
 
         if activeFD >= 0 {
             _ = Self.writeFrame(fd: activeFD, opcode: .close, payload: Data())
@@ -201,9 +206,7 @@ final class DiscordIPCClient {
     }
 
     private func sendCommand(_ command: SetActivityCommand) {
-        lock.lock()
-        let activeFD = fd
-        lock.unlock()
+        let activeFD = lock.withLock { fd }
         guard activeFD >= 0, let data = try? JSONEncoder().encode(command) else { return }
         if !Self.writeFrame(fd: activeFD, opcode: .frame, payload: data) {
             disconnect()
@@ -367,10 +370,10 @@ final class DiscordIPCClient {
     }
 }
 
-class DiscordIPC {
+final class DiscordIPC: @unchecked Sendable {
     public static let shared = DiscordIPC()
 
-    private let stateLock = NSLock()
+    private let stateLock = PTUnfairLock()
     private var rpc: DiscordIPCClient?
     private var termObserver: NSObjectProtocol?
     private static let defaultAppID = ""
@@ -400,21 +403,22 @@ class DiscordIPC {
     }
 
     private func setActiveRPC(_ ipc: DiscordIPCClient) {
-        stateLock.lock()
-        rpc = ipc
-        installTerminationObserverLocked()
-        stateLock.unlock()
+        stateLock.withLock {
+            rpc = ipc
+            installTerminationObserverLocked()
+        }
     }
 
     func shutdown() {
-        stateLock.lock()
-        let activeRPC = rpc
-        rpc = nil
-        if let observer = termObserver {
-            NotificationCenter.default.removeObserver(observer)
-            termObserver = nil
+        let activeRPC = stateLock.withLock { () -> DiscordIPCClient? in
+            let activeRPC = rpc
+            rpc = nil
+            if let observer = termObserver {
+                NotificationCenter.default.removeObserver(observer)
+                termObserver = nil
+            }
+            return activeRPC
         }
-        stateLock.unlock()
         activeRPC?.clearPresence()
         activeRPC?.disconnect()
     }

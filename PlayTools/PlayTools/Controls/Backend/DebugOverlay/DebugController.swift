@@ -7,7 +7,8 @@
 
 import Foundation
 
-class DebugController {
+@MainActor
+final class DebugController {
     static let instance = DebugController()
     private init() {
 

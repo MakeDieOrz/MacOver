@@ -10,7 +10,14 @@ import Foundation
 class DraggableButtonElement: Element {
     override func update() {
         super.update()
-        titleEdgeInsets = UIEdgeInsets(top: frame.height / 2, left: 0, bottom: 0, right: 0)
+        var updatedConfig = configuration ?? UIButton.Configuration.plain()
+        updatedConfig.contentInsets = NSDirectionalEdgeInsets(
+            top: frame.height / 2,
+            leading: 2,
+            bottom: 2,
+            trailing: 2
+        )
+        configuration = updatedConfig
         guard let child = (model as? DraggableButtonModel)?.childButton?.button else {
             return
         }

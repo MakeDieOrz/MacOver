@@ -39,6 +39,7 @@ jobs:
           command -v swiftlint >/dev/null || brew install swiftlint
           TOOL_LIB="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib"
           DYLD_FRAMEWORK_PATH="${TOOL_LIB}" swiftlint lint --strict
+          (cd PlayTools && DYLD_FRAMEWORK_PATH="${TOOL_LIB}" swiftlint lint --strict)
 
       - name: Run PlayCoverModules SwiftPM tests
         run: swift test --package-path Packages/PlayCoverModules

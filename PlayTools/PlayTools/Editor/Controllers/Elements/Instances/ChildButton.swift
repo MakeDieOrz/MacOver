@@ -7,6 +7,7 @@
 
 import Foundation
 
+@MainActor
 protocol ParentElement {
     func unfocusChildren()
     var button: Element { get }

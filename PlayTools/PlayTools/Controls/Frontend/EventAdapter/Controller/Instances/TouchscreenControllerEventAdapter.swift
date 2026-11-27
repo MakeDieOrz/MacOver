@@ -10,11 +10,12 @@ import GameController
 
 // Controller events handler when keymap is on
 
-public class TouchscreenControllerEventAdapter: ControllerEventAdapter {
+public final class TouchscreenControllerEventAdapter: ControllerEventAdapter, @unchecked Sendable {
 
     private var directionPadXValue: Float = 0,
                 directionPadYValue: Float = 0
-    static private var thumbstickCursorControl: [String: ThumbstickCursorControl] = [:]
+    private static let controlsLock = PTUnfairLock()
+    nonisolated(unsafe) static private var thumbstickCursorControl: [String: ThumbstickCursorControl] = [:]
 
     public func handleValueChanged(_ profile: GCExtendedGamepad, _ element: GCControllerElement) {
         guard let name = element.aliases.first else { return }
@@ -56,12 +57,13 @@ public class TouchscreenControllerEventAdapter: ControllerEventAdapter {
         } else if dispatchType == .DEFAULT {
             _ = ActionDispatcher.dispatch(key: name, valueX: cgDx, valueY: cgDy)
         } else {
-            let ctrl: ThumbstickCursorControl
-            if let existing = Self.thumbstickCursorControl[name] {
-                ctrl = existing
-            } else {
-                ctrl = ThumbstickCursorControl(name)
-                Self.thumbstickCursorControl[name] = ctrl
+            let ctrl = Self.controlsLock.withLock { () -> ThumbstickCursorControl in
+                if let existing = Self.thumbstickCursorControl[name] {
+                    return existing
+                }
+                let created = ThumbstickCursorControl(name)
+                Self.thumbstickCursorControl[name] = created
+                return created
             }
             ctrl.update(velocityX: cgDx * 6, velocityY: cgDy * 6)
         }
@@ -69,47 +71,34 @@ public class TouchscreenControllerEventAdapter: ControllerEventAdapter {
 
 }
 
-class ThumbstickCursorControl {
-    private static let instancesLock: UnsafeMutablePointer<os_unfair_lock_s> = {
-        let ptr = UnsafeMutablePointer<os_unfair_lock_s>.allocate(capacity: 1)
-        ptr.initialize(to: os_unfair_lock_s())
-        return ptr
-    }()
-    private static var activeInstances: [ThumbstickCursorControl] = []
+final class ThumbstickCursorControl: @unchecked Sendable {
+    private static let instancesLock = PTUnfairLock()
+    nonisolated(unsafe) private static var activeInstances: [ThumbstickCursorControl] = []
 
-    private let stateLock: UnsafeMutablePointer<os_unfair_lock_s>
+    private let stateLock = PTUnfairLock()
     private var thumbstickVelocity: CGVector = CGVector.zero
     private var thumbstickPolling: Bool = false
     private let key: String
 
     init(_ key: String) {
         self.key = key
-        self.stateLock = UnsafeMutablePointer<os_unfair_lock_s>.allocate(capacity: 1)
-        self.stateLock.initialize(to: os_unfair_lock_s())
-        os_unfair_lock_lock(Self.instancesLock)
-        Self.activeInstances.append(self)
-        os_unfair_lock_unlock(Self.instancesLock)
-    }
-
-    deinit {
-        stateLock.deinitialize(count: 1)
-        stateLock.deallocate()
+        Self.instancesLock.withLock {
+            Self.activeInstances.append(self)
+        }
     }
 
     static func invalidateAll() {
-        os_unfair_lock_lock(instancesLock)
-        let snapshot = activeInstances
-        os_unfair_lock_unlock(instancesLock)
+        let snapshot = instancesLock.withLock { activeInstances }
         for instance in snapshot {
             instance.reset()
         }
     }
 
     func reset() {
-        os_unfair_lock_lock(stateLock)
-        thumbstickVelocity = .zero
-        thumbstickPolling = false
-        os_unfair_lock_unlock(stateLock)
+        stateLock.withLock {
+            thumbstickVelocity = .zero
+            thumbstickPolling = false
+        }
     }
 
     static private func isVectorSignificant(_ vector: CGVector) -> Bool {
@@ -117,14 +106,15 @@ class ThumbstickCursorControl {
     }
 
     public func update(velocityX: CGFloat, velocityY: CGFloat) {
-        os_unfair_lock_lock(stateLock)
-        self.thumbstickVelocity.dx = velocityX
-        self.thumbstickVelocity.dy = velocityY
-        let shouldStart = !thumbstickPolling
-        if shouldStart {
-            thumbstickPolling = true
+        let shouldStart = stateLock.withLock { () -> Bool in
+            self.thumbstickVelocity.dx = velocityX
+            self.thumbstickVelocity.dy = velocityY
+            if !thumbstickPolling {
+                thumbstickPolling = true
+                return true
+            }
+            return false
         }
-        os_unfair_lock_unlock(stateLock)
 
         if shouldStart {
             PlayInput.touchQueue.async { [weak self] in
@@ -134,15 +124,14 @@ class ThumbstickCursorControl {
     }
 
     private func thumbstickPoll() {
-        os_unfair_lock_lock(stateLock)
-        let velocity = thumbstickVelocity
-        let isPolling = thumbstickPolling
-        if !isPolling || !ThumbstickCursorControl.isVectorSignificant(velocity) {
-            thumbstickPolling = false
-            os_unfair_lock_unlock(stateLock)
-            return
+        let velocity: CGVector? = stateLock.withLock {
+            if !thumbstickPolling || !ThumbstickCursorControl.isVectorSignificant(thumbstickVelocity) {
+                thumbstickPolling = false
+                return nil
+            }
+            return thumbstickVelocity
         }
-        os_unfair_lock_unlock(stateLock)
+        guard let velocity else { return }
 
         _ = ActionDispatcher.dispatch(key: key, valueX: velocity.dx, valueY: velocity.dy)
         PlayInput.touchQueue.asyncAfter(deadline: DispatchTime.now() + 0.017) { [weak self] in

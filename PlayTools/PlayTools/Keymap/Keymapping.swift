@@ -19,7 +19,7 @@ private struct CachedKeymapEntry {
     let map: KeymappingData
 }
 
-class Keymapping {
+final class Keymapping: @unchecked Sendable {
     static let shared = Keymapping()
 
     let bundleIdentifier = Bundle.main.infoDictionary?["CFBundleIdentifier"] as? String ?? ""
@@ -34,23 +34,15 @@ class Keymapping {
         }
     }
 
-    private let lock = NSLock()
+    private let lock = PTUnfairLock()
     private let baseKeymapURL: URL
     private let configURL: URL
     private var orderedKeymapURLs: [URL] = []
     private var keymapCache: [URL: CachedKeymapEntry] = [:]
 
     public var keymapConfig: KeymapConfig {
-        get {
-            lock.lock()
-            defer { lock.unlock() }
-            return readConfigLocked()
-        }
-        set {
-            lock.lock()
-            defer { lock.unlock() }
-            writeConfigLocked(newValue)
-        }
+        get { lock.withLock { readConfigLocked() } }
+        set { lock.withLock { writeConfigLocked(newValue) } }
     }
 
     private func readConfigLocked() -> KeymapConfig {
@@ -74,13 +66,13 @@ class Keymapping {
     }
 
     public var currentKeymapURL: URL {
-        lock.lock()
-        defer { lock.unlock() }
-        let order = orderedKeymapURLs.isEmpty ? readConfigLocked().keymapOrder : orderedKeymapURLs
-        guard keymapIdx >= 0 && keymapIdx < order.count else {
-            return constructKeymapPath(name: "default")
+        lock.withLock {
+            let order = orderedKeymapURLs.isEmpty ? readConfigLocked().keymapOrder : orderedKeymapURLs
+            guard keymapIdx >= 0 && keymapIdx < order.count else {
+                return constructKeymapPath(name: "default")
+            }
+            return order[keymapIdx]
         }
-        return order[keymapIdx]
     }
 
     public var currentKeymapName: String {
@@ -105,32 +97,32 @@ class Keymapping {
     }
 
     private func loadKeymapData() {
-        lock.lock()
-        defer { lock.unlock() }
-        if !FileManager.default.fileExists(atPath: baseKeymapURL.path) {
-            try? FileManager.default.createDirectory(
-                atPath: baseKeymapURL.path,
-                withIntermediateDirectories: true,
-                attributes: [:])
-        }
-
-        orderedKeymapURLs.removeAll()
-        keymapCache.removeAll()
-
-        let config = readConfigLocked()
-        for url in config.keymapOrder {
-            if !orderedKeymapURLs.contains(url) {
-                orderedKeymapURLs.append(url)
+        lock.withLock {
+            if !FileManager.default.fileExists(atPath: baseKeymapURL.path) {
+                try? FileManager.default.createDirectory(
+                    atPath: baseKeymapURL.path,
+                    withIntermediateDirectories: true,
+                    attributes: [:])
             }
-            _ = getKeymapLocked(path: url)
-        }
 
-        if let defaultKmIdx = orderedKeymapURLs.firstIndex(of: config.defaultKm) {
-            keymapIdx = defaultKmIdx
-        } else {
-            let fallback = KeymappingData(bundleIdentifier: bundleIdentifier)
-            setKeymapLocked(path: config.defaultKm, map: fallback)
-            keymapIdx = orderedKeymapURLs.firstIndex(of: config.defaultKm) ?? 0
+            orderedKeymapURLs.removeAll()
+            keymapCache.removeAll()
+
+            let config = readConfigLocked()
+            for url in config.keymapOrder {
+                if !orderedKeymapURLs.contains(url) {
+                    orderedKeymapURLs.append(url)
+                }
+                _ = getKeymapLocked(path: url)
+            }
+
+            if let defaultKmIdx = orderedKeymapURLs.firstIndex(of: config.defaultKm) {
+                keymapIdx = defaultKmIdx
+            } else {
+                let fallback = KeymappingData(bundleIdentifier: bundleIdentifier)
+                setKeymapLocked(path: config.defaultKm, map: fallback)
+                keymapIdx = orderedKeymapURLs.firstIndex(of: config.defaultKm) ?? 0
+            }
         }
     }
 
@@ -164,9 +156,7 @@ class Keymapping {
     }
 
     private func getKeymap(path: URL) -> KeymappingData {
-        lock.lock()
-        defer { lock.unlock() }
-        return getKeymapLocked(path: path)
+        lock.withLock { getKeymapLocked(path: path) }
     }
 
     private func getKeymapLocked(path: URL) -> KeymappingData {
@@ -200,9 +190,7 @@ class Keymapping {
     }
 
     private func setKeymap(path: URL, map: KeymappingData) {
-        lock.lock()
-        defer { lock.unlock() }
-        setKeymapLocked(path: path, map: map)
+        lock.withLock { setKeymapLocked(path: path, map: map) }
     }
 
     private func setKeymapLocked(path: URL, map: KeymappingData) {
@@ -221,21 +209,21 @@ class Keymapping {
     }
 
     public func nextKeymap() {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !orderedKeymapURLs.isEmpty else { return }
-        let count = orderedKeymapURLs.count
-        let currentIdx = (keymapIdx >= 0 && keymapIdx < count) ? keymapIdx : 0
-        keymapIdx = (currentIdx + 1) % count
+        lock.withLock {
+            guard !orderedKeymapURLs.isEmpty else { return }
+            let count = orderedKeymapURLs.count
+            let currentIdx = (keymapIdx >= 0 && keymapIdx < count) ? keymapIdx : 0
+            keymapIdx = (currentIdx + 1) % count
+        }
     }
 
     public func previousKeymap() {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !orderedKeymapURLs.isEmpty else { return }
-        let count = orderedKeymapURLs.count
-        let currentIdx = (keymapIdx >= 0 && keymapIdx < count) ? keymapIdx : 0
-        keymapIdx = (currentIdx - 1 + count) % count
+        lock.withLock {
+            guard !orderedKeymapURLs.isEmpty else { return }
+            let count = orderedKeymapURLs.count
+            let currentIdx = (keymapIdx >= 0 && keymapIdx < count) ? keymapIdx : 0
+            keymapIdx = (currentIdx - 1 + count) % count
+        }
     }
 
     @discardableResult

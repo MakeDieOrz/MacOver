@@ -4,30 +4,49 @@
 //
 
 import Foundation
-import ObjectiveC
 import UIKit
 
-class Toast {
+@MainActor
+private final class ToastObserverBox {
+    var token: NSObjectProtocol?
+
+    func remove(from center: NotificationCenter) {
+        if let existing = token {
+            center.removeObserver(existing)
+            token = nil
+        }
+    }
+}
+
+final class Toast {
     public static let internalNotificationCenter = NotificationCenter()
 
+    @MainActor
     private static func markInternalView(_ view: UIView) {
         PlaySettings.tagInternalView(view)
     }
     public static func showOver(msg: String) {
         if !Thread.isMainThread {
             DispatchQueue.main.async {
-                showOver(msg: msg)
+                MainActor.assumeIsolated {
+                    if let parent = screen.keyWindow ?? screen.primaryWindow {
+                        Toast.show(message: msg, parent: parent)
+                    }
+                }
             }
             return
         }
-        if let parent = screen.keyWindow ?? screen.primaryWindow {
-            Toast.show(message: msg, parent: parent)
+        MainActor.assumeIsolated {
+            if let parent = screen.keyWindow ?? screen.primaryWindow {
+                Toast.show(message: msg, parent: parent)
+            }
         }
     }
-    static var hintView: [UIView] = []
+    @MainActor static var hintView: [UIView] = []
 
     private static let gap: CGFloat = 40
 
+    @MainActor
     public static func hideHint(hint: UIView) {
         guard let id = hintView.firstIndex(of: hint) else {return}
         for index in 0..<hintView.count {
@@ -80,10 +99,20 @@ class Toast {
                                 notification: NSNotification.Name? = nil) {
         if !Thread.isMainThread {
             DispatchQueue.main.async {
-                showHint(title: title, text: text, timeout: timeout, notification: notification)
+                MainActor.assumeIsolated {
+                    showHintOnMain(title: title, text: text, timeout: timeout, notification: notification)
+                }
             }
             return
         }
+        MainActor.assumeIsolated {
+            showHintOnMain(title: title, text: text, timeout: timeout, notification: notification)
+        }
+    }
+
+    @MainActor
+    private static func showHintOnMain(title: String, text: [String] = [], timeout: Double = -3,
+                                       notification: NSNotification.Name? = nil) {
         guard let parent = screen.keyWindow ?? screen.primaryWindow else { return }
 
         // Width and height here serve as an upper limit.
@@ -114,28 +143,31 @@ class Toast {
         }
         var life = timeout
         let center = Toast.internalNotificationCenter
-        var token: NSObjectProtocol?
-        let cleanupObserver = {
-            if let existing = token {
-                center.removeObserver(existing)
-                token = nil
-            }
-        }
+        let observerBox = ToastObserverBox()
         if let note = notification {
-            token = center.addObserver(forName: note, object: nil, queue: OperationQueue.main) { [weak messageLabel] _ in
-                cleanupObserver()
-                if let label = messageLabel {
-                    hideHint(hint: label)
+            observerBox.token = center.addObserver(
+                forName: note,
+                object: nil,
+                queue: OperationQueue.main
+            ) { [weak messageLabel] _ in
+                MainActor.assumeIsolated {
+                    observerBox.remove(from: center)
+                    if let label = messageLabel {
+                        hideHint(hint: label)
+                    }
                 }
             }
         } else if life < 0 {
             life = 3
         }
         if life >= 0 {
-            DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + 0.5 + life, qos: .background) { [weak messageLabel] in
-                cleanupObserver()
-                if let label = messageLabel {
-                    hideHint(hint: label)
+            let delay: DispatchTime = .now() + 0.5 + life
+            DispatchQueue.main.asyncAfter(deadline: delay, qos: .background) { [weak messageLabel] in
+                MainActor.assumeIsolated {
+                    observerBox.remove(from: center)
+                    if let label = messageLabel {
+                        hideHint(hint: label)
+                    }
                 }
             }
         }
@@ -160,21 +192,19 @@ class Toast {
     static func syncKeymappingState() -> Float {
         cleanupLegacyUserDefaults()
         let lastUse = PlaySettings.shared.keymappingDisabledAt
-        var thisUse = lastUse
-        if lastUse < 1 {
-            thisUse = 2
-        } else {
-            thisUse = Float(Date.timeIntervalSinceReferenceDate)
-        }
-        var token2: NSObjectProtocol?
+        let thisUse: Float = lastUse < 1 ? 2 : Float(Date.timeIntervalSinceReferenceDate)
         let center = Toast.internalNotificationCenter
-        token2 = center.addObserver(forName: NSNotification.Name.playtoolsCursorWillShow,
-                                    object: nil, queue: OperationQueue.main) { _ in
-            if let t = token2 {
-                center.removeObserver(t)
-                token2 = nil
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                let observerBox = ToastObserverBox()
+                observerBox.token = center.addObserver(forName: NSNotification.Name.playtoolsCursorWillShow,
+                                                       object: nil, queue: OperationQueue.main) { _ in
+                    MainActor.assumeIsolated {
+                        observerBox.remove(from: center)
+                    }
+                    PlaySettings.shared.keymappingDisabledAt = thisUse
+                }
             }
-            PlaySettings.shared.keymappingDisabledAt = thisUse
         }
         return lastUse
     }
@@ -197,29 +227,32 @@ class Toast {
                        timeout: 10,
                        notification: NSNotification.Name.playtoolsCursorWillHide)
         let center = Toast.internalNotificationCenter
-        var token: NSObjectProtocol?
-        token = center.addObserver(forName: NSNotification.Name.playtoolsCursorWillHide,
-                                   object: nil, queue: OperationQueue.main) { _ in
-            if let t = token {
-                center.removeObserver(t)
-                token = nil
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                let observerBox = ToastObserverBox()
+                observerBox.token = center.addObserver(forName: NSNotification.Name.playtoolsCursorWillHide,
+                                                       object: nil, queue: OperationQueue.main) { _ in
+                    MainActor.assumeIsolated {
+                        observerBox.remove(from: center)
+                    }
+                    Toast.showHint(title: NSLocalizedString("hint.showCursor.title",
+                                                            tableName: "Playtools",
+                                                            value: "Cursor locked", comment: ""),
+                                   text: [NSLocalizedString("hint.showCursor.content.before",
+                                                            tableName: "Playtools",
+                                                            value: "Press", comment: ""),
+                                          " option ⌥ ",
+                                          NSLocalizedString("hint.showCursor.content.after",
+                                                            tableName: "Playtools",
+                                                            value: "to unlock cursor", comment: "")],
+                                   timeout: 10,
+                                   notification: NSNotification.Name.playtoolsCursorWillShow)
+                }
             }
-            Toast.showHint(title: NSLocalizedString("hint.showCursor.title",
-                                                    tableName: "Playtools",
-                                                    value: "Cursor locked", comment: ""),
-                           text: [NSLocalizedString("hint.showCursor.content.before",
-                                                    tableName: "Playtools",
-                                                    value: "Press", comment: ""),
-                                  " option ⌥ ",
-                                  NSLocalizedString("hint.showCursor.content.after",
-                                                    tableName: "Playtools",
-                                                    value: "to unlock cursor", comment: "")],
-                           timeout: 10,
-                           notification: NSNotification.Name.playtoolsCursorWillShow)
         }
     }
 
-    // swiftlint:disable:next function_body_length
+    @MainActor
     private static func show(message: String, parent: UIView) {
         let toastContainer = UIView(frame: CGRect())
         markInternalView(toastContainer)

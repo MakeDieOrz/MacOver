@@ -10,7 +10,7 @@ import Security
 struct PlayedAppleDBConstants {
     // https://developer.apple.com/documentation/security/keychain_services/keychain_items/item_class_keys_and_values
     // Synchronizable does not matter.
-    static let primaries = [
+    nonisolated(unsafe) static let primaries = [
         kSecClassGenericPassword: [
             kSecAttrAccessGroup,
             kSecAttrAccount,
@@ -53,7 +53,7 @@ struct PlayedAppleDBConstants {
             // kSecAttrSynchronizable
         ]
     ]
-    static let attributes = [
+    nonisolated(unsafe) static let attributes = [
         kSecClassGenericPassword: [
             kSecAttrAccessControl,
             kSecAttrAccessible,
@@ -143,7 +143,7 @@ struct PlayedAppleDBConstants {
             kSecAttrSynchronizable
         ]
     ]
-    static let values = [
+    nonisolated(unsafe) static let values = [
         kSecValueData,
         kSecValueRef,
         kSecValuePersistentRef

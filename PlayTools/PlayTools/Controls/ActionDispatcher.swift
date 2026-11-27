@@ -6,7 +6,7 @@
 //
 
 import Foundation
-import os.lock
+import Synchronization
 
 // If the same key is mapped to multiple different tasks, distinguish by priority
 public enum ActionDispatchPriority: Int {
@@ -17,11 +17,14 @@ public enum ActionDispatchPriority: Int {
 
 // This class reads keymap and thereby dispatch events
 
-public class ActionDispatcher {
+public final class ActionDispatcher: Sendable {
     static private let keymapVersion = "2.0."
-    static private let lock = NSLock()
-    static private var actions = [Action]()
-    static private var buttonHandlers: [String: [(Bool) -> Void]] = [:]
+    private struct DispatchState: Sendable {
+        var actions = [Action]()
+        var buttonHandlers: [String: [@Sendable (Bool) -> Void]] = [:]
+        var cursorHideNecessary = true
+    }
+    static private let state = Mutex<DispatchState>(DispatchState())
 
     static private let priorityCount = 3
     // You can't put more than 8 cameras or 8 joysticks in a keymap right?
@@ -32,12 +35,13 @@ public class ActionDispatcher {
     )
 
     static private func clear() {
-        lock.lock()
-        let existingActions = actions
-        actions = []
-        buttonHandlers.removeAll(keepingCapacity: true)
-        directionPadStorage.clear()
-        lock.unlock()
+        let existingActions = state.withLock { state in
+            let existing = state.actions
+            state.actions = []
+            state.buttonHandlers.removeAll(keepingCapacity: true)
+            directionPadStorage.clear()
+            return existing
+        }
 
         for action in existingActions {
             action.invalidate()
@@ -64,9 +68,7 @@ public class ActionDispatcher {
         // Meanwhile, keymap format upgrade would be rare.
         let currentMap = keymap.currentKeymap
         if !currentMap.version.hasPrefix(keymapVersion) {
-            lock.lock()
-            actions.append(contentsOf: newActions)
-            lock.unlock()
+            state.withLock { $0.actions.append(contentsOf: newActions) }
             DispatchQueue.main.asyncAfter(
                 deadline: .now() + .seconds(5)) {
                     Toast.showHint(title: "Keymap format too new",
@@ -99,9 +101,7 @@ public class ActionDispatcher {
                 newActions.append(JoystickAction(data: joystick))
             }
         }
-        lock.lock()
-        actions.append(contentsOf: newActions)
-        lock.unlock()
+        state.withLock { $0.actions.append(contentsOf: newActions) }
         // `cursorHideNecessary` is used to disable `option` toggle when there is no mouse mapping
         // but in the case this new feature disabled, `option` should always function.
         // this variable is set here to be checked for mouse mapping later.
@@ -110,43 +110,44 @@ public class ActionDispatcher {
         (getDispatchPriority(key: KeyCodeNames.mouseMove) ?? .DRAGGABLE) != .DRAGGABLE
     }
 
-    static public func register(key: String, handler: @escaping (Bool) -> Void) {
+    static public func register(key: String, handler: @escaping @Sendable (Bool) -> Void) {
         // this function is called when setting up `button` type of mapping
-        lock.lock()
-        defer { lock.unlock() }
-        if buttonHandlers[key] == nil {
-            buttonHandlers[key] = []
+        state.withLock { state in
+            if state.buttonHandlers[key] == nil {
+                state.buttonHandlers[key] = []
+            }
+            state.buttonHandlers[key]?.append(handler)
         }
-        buttonHandlers[key]?.append(handler)
     }
 
     static public func register(key: String,
-                                handler: @escaping (CGFloat, CGFloat) -> Void,
+                                handler: @escaping @Sendable (CGFloat, CGFloat) -> Void,
                                 priority: ActionDispatchPriority = .DEFAULT) {
-        lock.lock()
-        defer { lock.unlock() }
         directionPadStorage.register(key: key, handler: handler, priority: priority)
     }
 
     static public func unregister(key: String) {
         // Only draggable can be unregistered
-        lock.lock()
-        defer { lock.unlock() }
         directionPadStorage.unregisterDraggable(key: key)
     }
 
     // Frontend interfaces
 
-    static public var cursorHideNecessary = true
+    static public var cursorHideNecessary: Bool {
+        get {
+            state.withLock { $0.cursorHideNecessary }
+        }
+        set {
+            state.withLock { $0.cursorHideNecessary = newValue }
+        }
+    }
 
     /**
         Lift off (release) all actions' touch points.
         Would be called during mode switching where target mode shouldn't have any touch remain.
     */
     static public func invalidateActions() {
-        lock.lock()
-        let currentActions = actions
-        lock.unlock()
+        let currentActions = state.withLock { $0.actions }
         for action in currentActions {
             // This is just a rescue feature, in case any key stuck pressed for any reason
             // Might be called on control mode state transition
@@ -166,9 +167,7 @@ public class ActionDispatcher {
         camera control (becomes random zoom in zoom out)
     */
     static public func invalidateNonButtonActions() {
-        lock.lock()
-        let currentActions = actions
-        lock.unlock()
+        let currentActions = state.withLock { $0.actions }
         for action in currentActions
         where !(action is ButtonAction || action is JoystickAction) {
             action.invalidate()
@@ -180,9 +179,7 @@ public class ActionDispatcher {
             return priority
         }
 
-        lock.lock()
-        let hasButtonHandler = buttonHandlers[key] != nil
-        lock.unlock()
+        let hasButtonHandler = state.withLock { $0.buttonHandlers[key] != nil }
         if hasButtonHandler {
             return .DEFAULT
         }
@@ -190,9 +187,7 @@ public class ActionDispatcher {
     }
 
     static public func dispatch(key: String, pressed: Bool) -> Bool {
-        lock.lock()
-        let handlers = buttonHandlers[key]
-        lock.unlock()
+        let handlers = state.withLock { $0.buttonHandlers[key] }
         guard let handlers, !handlers.isEmpty else {
             return false
         }
@@ -236,106 +231,105 @@ public class ActionDispatcher {
     }
 }
 
-private struct DirectionPadHandler {
+private struct DirectionPadHandler: Sendable {
     static let empty = DirectionPadHandler(key: "", handle: { _, _ in })
     let key: String
-    let handle: (CGFloat, CGFloat) -> Void
+    let handle: @Sendable (CGFloat, CGFloat) -> Void
 }
 
-private final class DirectionPadStorage {
-    private let lock: UnsafeMutablePointer<os_unfair_lock>
+private final class DirectionPadStorage: Sendable {
+    private struct Storage: Sendable {
+        var handlers: [[DirectionPadHandler]]
+        var activePriorityMask: UInt8 = 0
+    }
+
     private let priorityCount: Int
-    private var handlers: [[DirectionPadHandler]]
-    private var activePriorityMask: UInt8 = 0
+    private let storage: Mutex<Storage>
 
     init(priorityCount: Int, mappingCountPerPriority: Int) {
-        self.lock = UnsafeMutablePointer<os_unfair_lock>.allocate(capacity: 1)
-        self.lock.initialize(to: os_unfair_lock())
         self.priorityCount = priorityCount
-        self.handlers = Array(
+        let initialHandlers = Array(
             repeating: Array(repeating: DirectionPadHandler.empty, count: mappingCountPerPriority),
             count: priorityCount
         )
+        self.storage = Mutex(Storage(handlers: initialHandlers))
     }
 
-    deinit {
-        lock.deinitialize(count: 1)
-        lock.deallocate()
-    }
-
-    private func refreshPriorityMaskLocked() {
+    private func refreshPriorityMaskLocked(_ state: inout Storage) {
         var mask: UInt8 = 0
-        for p in 0..<priorityCount {
-            if handlers[p].contains(where: { !$0.key.isEmpty }) {
-                mask |= UInt8(1 << p)
-            }
+        for p in 0..<priorityCount where state.handlers[p].contains(where: { !$0.key.isEmpty }) {
+            mask |= UInt8(1 << p)
         }
-        activePriorityMask = mask
+        state.activePriorityMask = mask
     }
 
     func clear() {
-        os_unfair_lock_lock(lock)
-        defer { os_unfair_lock_unlock(lock) }
-        for p in 0..<handlers.count {
-            for idx in 0..<handlers[p].count {
-                handlers[p][idx] = .empty
+        storage.withLock { state in
+            for p in 0..<state.handlers.count {
+                for idx in 0..<state.handlers[p].count {
+                    state.handlers[p][idx] = .empty
+                }
             }
+            state.activePriorityMask = 0
         }
-        activePriorityMask = 0
     }
 
-    func register(key: String, handler: @escaping (CGFloat, CGFloat) -> Void, priority: ActionDispatchPriority) {
-        os_unfair_lock_lock(lock)
-        defer { os_unfair_lock_unlock(lock) }
-        let row = priority.rawValue
-        if let existingIndex = handlers[row].firstIndex(where: { $0.key == key }) {
-            handlers[row][existingIndex] = DirectionPadHandler(key: key, handle: handler)
-        } else if let emptyIndex = handlers[row].firstIndex(where: { $0.key.isEmpty }) {
-            handlers[row][emptyIndex] = DirectionPadHandler(key: key, handle: handler)
+    func register(
+        key: String,
+        handler: @escaping @Sendable (CGFloat, CGFloat) -> Void,
+        priority: ActionDispatchPriority
+    ) {
+        storage.withLock { state in
+            let row = priority.rawValue
+            if let existingIndex = state.handlers[row].firstIndex(where: { $0.key == key }) {
+                state.handlers[row][existingIndex] = DirectionPadHandler(key: key, handle: handler)
+            } else if let emptyIndex = state.handlers[row].firstIndex(where: { $0.key.isEmpty }) {
+                state.handlers[row][emptyIndex] = DirectionPadHandler(key: key, handle: handler)
+            }
+            refreshPriorityMaskLocked(&state)
         }
-        refreshPriorityMaskLocked()
     }
 
     func unregisterDraggable(key: String) {
-        os_unfair_lock_lock(lock)
-        defer { os_unfair_lock_unlock(lock) }
-        let row = ActionDispatchPriority.DRAGGABLE.rawValue
-        if let index = handlers[row].firstIndex(where: { $0.key == key }) {
-            handlers[row][index] = .empty
-            refreshPriorityMaskLocked()
+        storage.withLock { state in
+            let row = ActionDispatchPriority.DRAGGABLE.rawValue
+            if let index = state.handlers[row].firstIndex(where: { $0.key == key }) {
+                state.handlers[row][index] = .empty
+                refreshPriorityMaskLocked(&state)
+            }
         }
     }
 
     func priority(forKey key: String) -> ActionDispatchPriority? {
-        os_unfair_lock_lock(lock)
-        defer { os_unfair_lock_unlock(lock) }
-        guard activePriorityMask != 0 else { return nil }
-        for priority in 0..<priorityCount where (activePriorityMask & UInt8(1 << priority)) != 0 {
-            if handlers[priority].contains(where: { $0.key == key }) {
-                return ActionDispatchPriority(rawValue: priority)
+        storage.withLock { state in
+            guard state.activePriorityMask != 0 else { return nil }
+            for priority in 0..<priorityCount where (state.activePriorityMask & UInt8(1 << priority)) != 0 {
+                if state.handlers[priority].contains(where: { $0.key == key }) {
+                    return ActionDispatchPriority(rawValue: priority)
+                }
             }
-        }
-        return nil
-    }
-
-    func handler(atPriority priority: ActionDispatchPriority, key: String) -> ((CGFloat, CGFloat) -> Void)? {
-        os_unfair_lock_lock(lock)
-        defer { os_unfair_lock_unlock(lock) }
-        guard (activePriorityMask & UInt8(1 << priority.rawValue)) != 0 else {
             return nil
         }
-        return handlers[priority.rawValue].first(where: { $0.key == key })?.handle
     }
 
-    func handler(forKey key: String) -> ((CGFloat, CGFloat) -> Void)? {
-        os_unfair_lock_lock(lock)
-        defer { os_unfair_lock_unlock(lock) }
-        guard activePriorityMask != 0 else { return nil }
-        for priority in 0..<priorityCount where (activePriorityMask & UInt8(1 << priority)) != 0 {
-            if let match = handlers[priority].first(where: { $0.key == key }) {
-                return match.handle
+    func handler(atPriority priority: ActionDispatchPriority, key: String) -> (@Sendable (CGFloat, CGFloat) -> Void)? {
+        storage.withLock { state in
+            guard (state.activePriorityMask & UInt8(1 << priority.rawValue)) != 0 else {
+                return nil
             }
+            return state.handlers[priority.rawValue].first(where: { $0.key == key })?.handle
         }
-        return nil
+    }
+
+    func handler(forKey key: String) -> (@Sendable (CGFloat, CGFloat) -> Void)? {
+        storage.withLock { state in
+            guard state.activePriorityMask != 0 else { return nil }
+            for priority in 0..<priorityCount where (state.activePriorityMask & UInt8(1 << priority)) != 0 {
+                if let match = state.handlers[priority].first(where: { $0.key == key }) {
+                    return match.handle
+                }
+            }
+            return nil
+        }
     }
 }

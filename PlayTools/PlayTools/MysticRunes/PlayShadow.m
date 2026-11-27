@@ -5,6 +5,13 @@
 
 #import "../Subsystems/PSInternal.h"
 
+@protocol PSPlayShadowExternalSelectors <NSObject>
+@optional
++ (void)requestTrackingAuthorizationWithCompletionHandler:(void (^)(NSInteger status))completion;
++ (NSInteger)trackingAuthorizationStatus;
+- (BOOL)isAgeRangeRequestAvailable;
+@end
+
 __attribute__((visibility("hidden"))) void ps_swizzle_instance_method(Class cls, SEL origSelector, SEL newSelector) {
     if (cls == Nil || origSelector == NULL || newSelector == NULL) {
         return;

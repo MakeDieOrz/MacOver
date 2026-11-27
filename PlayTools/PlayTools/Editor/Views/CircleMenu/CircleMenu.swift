@@ -22,8 +22,6 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-// swiftlint:disable file_length
-
 import UIKit
 
 // MARK: helpers
@@ -38,6 +36,7 @@ func customize<Type>(_ value: Type, block: (_ object: Type) -> Void) -> Type {
 /**
  *  CircleMenuDelegate
  */
+@MainActor
 internal protocol CircleMenuDelegate: AnyObject {
     func circleMenu(_ circleMenu: CircleMenu, willDisplay button: UIButton, atIndex: Int)
     func circleMenu(_ circleMenu: CircleMenu, buttonWillSelected button: UIButton, atIndex: Int)
@@ -56,7 +55,6 @@ internal extension CircleMenuDelegate {
 
 // MARK: CircleMenu
 
-// swiftlint:disable type_body_length
 /// A Button object with pop ups buttons
 internal class CircleMenu: UIButton {
 
@@ -514,8 +512,6 @@ internal class CircleMenu: UIButton {
         customSelectedIconView?.layer.add(fade, forKey: nil)
     }
 }
-
-// swiftlint:enable type_body_length
 
 // MARK: extension
 

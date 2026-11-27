@@ -4,9 +4,10 @@
 //
 
 import Foundation
-import SwiftUI
+import UIKit
 
-class EditorCircleMenu: CircleMenuDelegate {
+@MainActor
+final class EditorCircleMenu: CircleMenuDelegate {
 
     static let shared = EditorCircleMenu()
 

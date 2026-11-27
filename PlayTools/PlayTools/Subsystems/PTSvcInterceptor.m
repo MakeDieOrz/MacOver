@@ -1944,7 +1944,7 @@ static BOOL pt_svc_install_exception_handler(void) {
     }
     kr = mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND);
     if (kr != KERN_SUCCESS) {
-        mach_port_destroy(mach_task_self(), port);
+        mach_port_destruct(mach_task_self(), port, 0, 0);
         return NO;
     }
 
@@ -1956,7 +1956,7 @@ static BOOL pt_svc_install_exception_handler(void) {
     pthread_attr_destroy(&attr);
     if (prc != 0) {
         atomic_store_explicit(&s_svc_exc_port, MACH_PORT_NULL, memory_order_release);
-        mach_port_destroy(mach_task_self(), port);
+        mach_port_destruct(mach_task_self(), port, -1, 0);
         return NO;
     }
 
@@ -1998,7 +1998,7 @@ static BOOL pt_svc_install_exception_handler(void) {
     if (kr != KERN_SUCCESS) {
         pt_svc_release_send_right(pre_bp.port);
         atomic_store_explicit(&s_svc_exc_port, MACH_PORT_NULL, memory_order_release);
-        mach_port_destroy(mach_task_self(), port);
+        mach_port_destruct(mach_task_self(), port, -1, 0);
         return NO;
     }
     os_unfair_lock_lock(&s_svc_exc_snapshot_lock);

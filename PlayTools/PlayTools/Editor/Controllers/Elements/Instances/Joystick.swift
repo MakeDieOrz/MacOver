@@ -111,7 +111,7 @@ class JoystickModel: ControlModel<Joystick>, ParentElement {
         self.setJoystickMode(mode: newMode)
     }
 
-    static public func isAnalog(_ data: Joystick) -> Bool {
+    nonisolated static public func isAnalog(_ data: Joystick) -> Bool {
         // possible values are
         // ["Left Thumbstick", "Right Thumbstick", "Mouse", "Keyboard", "Dynamic"]
         // Where the former three are analog

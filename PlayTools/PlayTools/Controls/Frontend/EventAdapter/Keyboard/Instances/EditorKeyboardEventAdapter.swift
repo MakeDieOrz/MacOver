@@ -37,10 +37,18 @@ public class EditorKeyboardEventAdapter: KeyboardEventAdapter {
         if ctrlModified {
             if let name = KeyCodeNames.virtualCodes[keycode] {
                 // Setkey by name does not work with all kinds of mapping
-                EditorController.shared.setKey("⌃" + name)
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        EditorController.shared.setKey("⌃" + name)
+                    }
+                }
             }
         } else {
-            EditorController.shared.setKey(rawValue)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    EditorController.shared.setKey(rawValue)
+                }
+            }
         }
 
         return true

@@ -8,6 +8,15 @@
 
 #import "PSInternal.h"
 
+@protocol PSWebKitExternalSelectors <NSObject>
+@optional
+- (void)didReceiveResponse:(id)response;
+- (void)didReceiveData:(NSData *)data;
+- (void)didFinish;
+- (void)didFailWithError:(NSError *)error;
+- (id)urlSchemeHandlerForURLScheme:(NSString *)urlScheme;
+@end
+
 static NSString *ps_guess_mime_type_for_path(NSString *path) {
     NSString *ext = [[path pathExtension] lowercaseString];
     if (ext.length == 0) {

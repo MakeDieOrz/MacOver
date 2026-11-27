@@ -7,19 +7,24 @@
 
 import Foundation
 
-class DebugModel {
+final class DebugModel: @unchecked Sendable {
     static let instance = DebugModel()
     private init() {
         touches = []
     }
-    struct TouchPoint {
+    struct TouchPoint: Sendable {
         var point: CGPoint
         var phase: UITouch.Phase
         var description: String
     }
 
+    private let stateLock = PTUnfairLock()
     public var touches: [TouchPoint]
-    public var enabled = false
+    private var _enabled = false
+    public var enabled: Bool {
+        get { stateLock.withLock { _enabled } }
+        set { stateLock.withLock { _enabled = newValue } }
+    }
 
     public func setEnabled(_ isEnabled: Bool) {
         enabled = isEnabled

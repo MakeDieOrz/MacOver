@@ -94,6 +94,8 @@ static NW_RETURNS_RETAINED nw_endpoint_t pt_nw_endpoint_create_host(const char *
     return nw_endpoint_create_host(hostname, port);
 }
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 static SCNetworkReachabilityRef pt_SCNetworkReachabilityCreateWithName(
     CFAllocatorRef allocator,
     const char *nodename) {
@@ -105,6 +107,7 @@ static SCNetworkReachabilityRef pt_SCNetworkReachabilityCreateWithName(
     }
     return SCNetworkReachabilityCreateWithName(allocator, nodename);
 }
+#pragma clang diagnostic pop
 
 
 typedef struct {
@@ -1697,7 +1700,10 @@ PT_INTERPOSE(pt_DNSServiceGetAddrInfo, DNSServiceGetAddrInfo)
 PT_INTERPOSE(pt_CFHostCreateWithName, CFHostCreateWithName)
 PT_INTERPOSE(pt_CFStreamCreatePairWithSocketToHost, CFStreamCreatePairWithSocketToHost)
 PT_INTERPOSE(pt_nw_endpoint_create_host, nw_endpoint_create_host)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 PT_INTERPOSE(pt_SCNetworkReachabilityCreateWithName, SCNetworkReachabilityCreateWithName)
+#pragma clang diagnostic pop
 PT_INTERPOSE(pt_bind, bind)
 PT_INTERPOSE(pt_connect, connect)
 PT_INTERPOSE(pt_accept, accept)

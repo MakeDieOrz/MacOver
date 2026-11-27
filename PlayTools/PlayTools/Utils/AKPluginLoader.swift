@@ -8,7 +8,13 @@
 import Foundation
 
 class AKInterface {
-    public static var shared: Plugin?
+    private static let sharedLock = PTUnfairLock()
+    nonisolated(unsafe) private static var _shared: Plugin?
+
+    public static var shared: Plugin? {
+        get { sharedLock.withLock { _shared } }
+        set { sharedLock.withLock { _shared = newValue } }
+    }
 
     public static func initialize() {
         shared = loadPlugin()

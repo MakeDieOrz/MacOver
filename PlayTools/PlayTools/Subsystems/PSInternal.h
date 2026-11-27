@@ -105,6 +105,119 @@ characterEncodingName:(NSString *)characterEncodingName
 - (void) pm_ptkb_reloadInputViews;
 + (void) pm_wk_registerSchemeForCustomProtocol:(NSString *)scheme;
 + (void) pm_wk_unregisterSchemeForCustomProtocol:(NSString *)scheme;
+- (id) pm_wk_cfg_urlSchemeHandlerForURLScheme:(NSString *)urlScheme;
+- (void) pm_wk_cfg_setURLSchemeHandler:(id)urlSchemeHandler forURLScheme:(NSString *)urlScheme;
+- (void) pm_setProtocolClasses:(NSArray<Class> *)protocolClasses;
+- (NSArray<Class> *) pm_ps_protocolClasses;
+- (NSDictionary *) pm_ps_connectionProxyDictionary;
+- (void) pm_ps_setConnectionProxyDictionary:(NSDictionary *)proxyDict;
+- (bool) pm_return_false;
+- (bool) pm_return_true;
+- (BOOL) pm_return_yes;
+- (BOOL) pm_return_no;
+- (id) pm_return_null;
++ (void) pm_return_2_with_completion_handler:(void (^)(NSInteger))completionHandler;
++ (NSInteger) pm_return_2;
++ (bool) pm_clsm_return_false;
++ (bool) pm_clsm_return_true;
++ (BOOL) pm_clsm_return_yes;
++ (BOOL) pm_clsm_return_no;
+- (void) pm_endfield_presentViewController:(UIViewController *)viewControllerToPresent
+                                  animated:(BOOL)flag
+                                completion:(void (^)(void))completion;
++ (UIImage *) pm_ps_uiimage_systemImageNamed:(NSString *)name;
++ (UIImage *) pm_ps_uiimage_systemImageNamed:(NSString *)name withConfiguration:(UIImageConfiguration *)configuration;
++ (UIImage *) pm_ps_uiimage_systemImageNamed:(NSString *)name compatibleWithTraitCollection:(UITraitCollection *)traitCollection;
++ (UIImage *) pm_ps_uiimage_systemImageNamed:(NSString *)name
+                               variableValue:(double)value
+                           withConfiguration:(UIImageConfiguration *)configuration;
++ (UIImage *) pm_ps_uiimage_priv_systemImageNamed:(NSString *)name;
++ (UIImage *) pm_ps_uiimage_priv_systemImageNamed:(NSString *)name withConfiguration:(UIImageConfiguration *)configuration;
+- (BOOL) pm_fileExistsAtPath:(NSString *)path;
+- (BOOL) pm_fileExistsAtPath:(NSString *)path isDirectory:(BOOL *)isDirectory;
+- (BOOL) pm_isReadableFileAtPath:(NSString *)path;
+- (BOOL) pm_isWritableFileAtPath:(NSString *)path;
+- (BOOL) pm_isExecutableFileAtPath:(NSString *)path;
+- (BOOL) pm_isDeletableFileAtPath:(NSString *)path;
+- (NSDictionary<NSFileAttributeKey, id> *) pm_attributesOfItemAtPath:(NSString *)path error:(NSError **)error;
+- (NSData *) pm_contentsAtPath:(NSString *)path;
+- (NSString *) pm_destinationOfSymbolicLinkAtPath:(NSString *)path error:(NSError **)error;
+- (BOOL) pm_setResourceValue:(id)value forKey:(NSURLResourceKey)key error:(NSError **)error;
+- (BOOL) pm_setResourceValues:(NSDictionary<NSURLResourceKey, id> *)keyedValues error:(NSError **)error;
+- (NSURL *) pm_fileReferenceURL;
+- (NSArray<NSString *> *) pm_contentsOfDirectoryAtPath:(NSString *)path error:(NSError **)error;
+- (NSArray<NSString *> *) pm_subpathsOfDirectoryAtPath:(NSString *)path error:(NSError **)error;
+- (NSArray<NSString *> *) pm_subpathsAtPath:(NSString *)path;
+- (NSArray<NSURL *> *) pm_contentsOfDirectoryAtURL:(NSURL *)url
+                        includingPropertiesForKeys:(NSArray<NSURLResourceKey> *)keys
+                                           options:(NSDirectoryEnumerationOptions)mask
+                                             error:(NSError **)error;
+- (NSDictionary<NSFileAttributeKey, id> *) pm_attributesOfFileSystemForPath:(NSString *)path error:(NSError **)error;
+- (NSDirectoryEnumerator<NSString *> *) pm_enumeratorAtPath:(NSString *)path;
+- (NSDirectoryEnumerator<NSURL *> *) pm_enumeratorAtURL:(NSURL *)url
+                             includingPropertiesForKeys:(NSArray<NSURLResourceKey> *)keys
+                                                options:(NSDirectoryEnumerationOptions)mask
+                                           errorHandler:(BOOL (^)(NSURL *url, NSError *error))handler;
+- (id) pm_urlDirEnumeratorNextObject;
+- (NSArray<NSURL *> *) pm_URLsForDirectory:(NSSearchPathDirectory)directory inDomains:(NSSearchPathDomainMask)domainMask;
+- (NSURL *) pm_URLForDirectory:(NSSearchPathDirectory)directory
+                      inDomain:(NSSearchPathDomainMask)domain
+             appropriateForURL:(NSURL *)url
+                        create:(BOOL)shouldCreate
+                         error:(NSError **)error;
+- (NSURL *) pm_temporaryDirectory;
+- (BOOL) pm_changeCurrentDirectoryPath:(NSString *)path;
+- (BOOL) pm_createDirectoryAtPath:(NSString *)path
+      withIntermediateDirectories:(BOOL)createIntermediates
+                       attributes:(NSDictionary<NSFileAttributeKey, id> *)attributes
+                            error:(NSError **)error;
+- (BOOL) pm_createDirectoryAtURL:(NSURL *)url
+     withIntermediateDirectories:(BOOL)createIntermediates
+                      attributes:(NSDictionary<NSFileAttributeKey, id> *)attributes
+                           error:(NSError **)error;
+- (BOOL) pm_createFileAtPath:(NSString *)path
+                    contents:(NSData *)data
+                  attributes:(NSDictionary<NSFileAttributeKey, id> *)attr;
+- (BOOL) pm_removeItemAtPath:(NSString *)path error:(NSError **)error;
+- (BOOL) pm_removeItemAtURL:(NSURL *)URL error:(NSError **)error;
+- (BOOL) pm_copyItemAtPath:(NSString *)srcPath toPath:(NSString *)dstPath error:(NSError **)error;
+- (BOOL) pm_copyItemAtURL:(NSURL *)srcURL toURL:(NSURL *)dstURL error:(NSError **)error;
+- (BOOL) pm_moveItemAtPath:(NSString *)srcPath toPath:(NSString *)dstPath error:(NSError **)error;
+- (BOOL) pm_moveItemAtURL:(NSURL *)srcURL toURL:(NSURL *)dstURL error:(NSError **)error;
+- (BOOL) pm_linkItemAtPath:(NSString *)srcPath toPath:(NSString *)dstPath error:(NSError **)error;
+- (BOOL) pm_linkItemAtURL:(NSURL *)srcURL toURL:(NSURL *)dstURL error:(NSError **)error;
+- (BOOL) pm_createSymbolicLinkAtPath:(NSString *)path
+                 withDestinationPath:(NSString *)destPath
+                               error:(NSError **)error;
+- (BOOL) pm_createSymbolicLinkAtURL:(NSURL *)url
+                 withDestinationURL:(NSURL *)destURL
+                              error:(NSError **)error;
+- (BOOL) pm_replaceItemAtURL:(NSURL *)originalItemURL
+               withItemAtURL:(NSURL *)newItemURL
+              backupItemName:(NSString *)backupItemName
+                     options:(NSFileManagerItemReplacementOptions)options
+            resultingItemURL:(NSURL **)resultingURL
+                       error:(NSError **)error;
+- (id) pm_ps_allDescendantNextObject;
+- (BOOL) pm_setAttributes:(NSDictionary<NSFileAttributeKey, id> *)attributes
+             ofItemAtPath:(NSString *)path
+                    error:(NSError **)error;
+- (NSURL *) pm_ps_containerURLForSecurityApplicationGroupIdentifier:(NSString *)groupIdentifier;
+- (NSString *) pm_stringByExpandingTildeInPath;
+- (NSString *) pm_stringByResolvingSymlinksInPath;
+- (NSString *) pm_stringByStandardizingPath;
+- (NSString *) pm_ps2_stringByExpandingTildeInPath;
+- (NSString *) pm_ps2_stringByResolvingSymlinksInPath;
+- (NSString *) pm_ps2_stringByStandardizingPath;
++ (NSData *) pm_dataWithContentsOfFile:(NSString *)path;
++ (NSData *) pm_dataWithContentsOfFile:(NSString *)path options:(NSDataReadingOptions)readOptionsMask error:(NSError **)errorPtr;
++ (NSData *) pm_dataWithContentsOfURL:(NSURL *)url options:(NSDataReadingOptions)readOptionsMask error:(NSError **)errorPtr;
+- (BOOL) pm_data_writeToFile:(NSString *)path options:(NSDataWritingOptions)writeOptionsMask error:(NSError **)errorPtr;
+- (BOOL) pm_data_writeToURL:(NSURL *)url options:(NSDataWritingOptions)writeOptionsMask error:(NSError **)errorPtr;
++ (NSString *) pm_stringWithContentsOfFile:(NSString *)path encoding:(NSStringEncoding)enc error:(NSError **)error;
++ (NSString *) pm_stringWithContentsOfURL:(NSURL *)url encoding:(NSStringEncoding)enc error:(NSError **)error;
+- (BOOL) pm_str_writeToFile:(NSString *)path atomically:(BOOL)useAuxiliaryFile encoding:(NSStringEncoding)enc error:(NSError **)error;
+- (BOOL) pm_str_writeToURL:(NSURL *)url atomically:(BOOL)useAuxiliaryFile encoding:(NSStringEncoding)enc error:(NSError **)error;
 @end
 
 // Swizzle infrastructure (defined in PlayShadow.m)

@@ -72,7 +72,9 @@ extension UIApplication {
 
     @objc(pm_menu_toggleDebugOverlay:)
     func toggleDebugOverlay(_ sender: AnyObject) {
-        DebugController.instance.toggleDebugOverlay()
+        MainActor.assumeIsolated {
+            DebugController.instance.toggleDebugOverlay()
+        }
     }
 
     @objc(pm_menu_hideCursor:)
@@ -132,7 +134,7 @@ struct CommandsList {
     static let KeymappingToolbox = "keymapping"
 }
 // have to use a customized name, in case it conflicts with the game's localization file
-var keymapping = [
+let keymapping = [
     NSLocalizedString("menu.keymapping.toggleEditor", tableName: "Playtools",
                       value: "Open/Close Keymapping Editor", comment: ""),
     NSLocalizedString("menu.keymapping.deleteElement", tableName: "Playtools",
@@ -150,7 +152,7 @@ var keymapping = [
     NSLocalizedString("menu.keymapping.nextKeymap", tableName: "Playtools",
                       value: "Next Keymap", comment: "")
   ]
-var iconsSelctor = [
+@MainActor let iconsSelctor = [
     UIImage(systemName: "pencil"),
     UIImage(systemName: "trash.fill"),
     UIImage(systemName: "square.resize.up"),
@@ -160,7 +162,7 @@ var iconsSelctor = [
     UIImage(systemName: "arrow.down.square"),
     UIImage(systemName: "arrow.up.square")
   ]
-var keymappingSelectors = [#selector(UIApplication.switchEditorMode(_:)),
+let keymappingSelectors = [#selector(UIApplication.switchEditorMode(_:)),
                            #selector(UIApplication.removeElement(_:)),
                            #selector(UIApplication.upscaleElement(_:)),
                            #selector(UIApplication.downscaleElement(_:)),
@@ -170,16 +172,19 @@ var keymappingSelectors = [#selector(UIApplication.switchEditorMode(_:)),
                            #selector(UIApplication.nextKeymap(_:))
     ]
 
+@MainActor
 class MenuController {
     init(with builder: UIMenuBuilder) {
     #if canImport(UIKit.UIMainMenuSystem)
         // Delay to avoid error
         // Cannot set a main menu system configuration while the main menu system is building.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-            let configuration = UIMainMenuSystem.Configuration()
-            configuration.sidebarPreference = .included
-            UIMainMenuSystem.shared.setBuildConfiguration(configuration) { builder in
-                self.setupMenu(with: builder)
+            MainActor.assumeIsolated {
+                let configuration = UIMainMenuSystem.Configuration()
+                configuration.sidebarPreference = .included
+                UIMainMenuSystem.shared.setBuildConfiguration(configuration) { builder in
+                    self.setupMenu(with: builder)
+                }
             }
         }
     #else

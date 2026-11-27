@@ -17,7 +17,7 @@ public enum ControlModeLiteral: String {
 }
 // This class handles different control logic under different control mode
 
-public class ControlMode: Equatable {
+public final class ControlMode: Equatable, @unchecked Sendable {
     static public let mode = ControlMode()
 
     private var controlMode = ControlModeLiteral.off
@@ -66,9 +66,9 @@ public class ControlMode: Equatable {
         ActionDispatcher.build()
     }
 
-    private static func hasOtherActiveTextInputResponder(excluding endingObject: Any?) -> Bool {
+    @MainActor
+    private static func hasOtherActiveTextInputResponder(excludingObjectID endingID: ObjectIdentifier?) -> Bool {
         let firstResponderSelector = NSSelectorFromString("firstResponder")
-        let endingRef = endingObject as AnyObject?
         for scene in UIApplication.shared.connectedScenes {
             guard let ws = scene as? UIWindowScene else { continue }
             for win in ws.windows where !win.isHidden && win.responds(to: firstResponderSelector) {
@@ -76,7 +76,7 @@ public class ControlMode: Equatable {
                       let responder = unmanaged.takeUnretainedValue() as? UIResponder else {
                     continue
                 }
-                if responder !== endingRef, responder is UITextInput {
+                if responder is UITextInput, ObjectIdentifier(responder) != endingID {
                     return true
                 }
             }
@@ -88,7 +88,11 @@ public class ControlMode: Equatable {
         let centre = NotificationCenter.default
         let main = OperationQueue.main
         centre.addObserver(forName: UITextField.textDidEndEditingNotification, object: nil, queue: main) { note in
-            if !Self.hasOtherActiveTextInputResponder(excluding: note.object) {
+            let endingID = (note.object as AnyObject?).map(ObjectIdentifier.init)
+            let hasOther = MainActor.assumeIsolated {
+                Self.hasOtherActiveTextInputResponder(excludingObjectID: endingID)
+            }
+            if !hasOther {
                 ModeAutomaton.onUITextInputEndEdit()
             }
             Toucher.writeLog(logMessage: "uitextinput end edit")
@@ -98,7 +102,11 @@ public class ControlMode: Equatable {
             Toucher.writeLog(logMessage: "uitextinput begin edit")
         }
         centre.addObserver(forName: UITextView.textDidEndEditingNotification, object: nil, queue: main) { note in
-            if !Self.hasOtherActiveTextInputResponder(excluding: note.object) {
+            let endingID = (note.object as AnyObject?).map(ObjectIdentifier.init)
+            let hasOther = MainActor.assumeIsolated {
+                Self.hasOtherActiveTextInputResponder(excludingObjectID: endingID)
+            }
+            if !hasOther {
                 ModeAutomaton.onUITextInputEndEdit()
             }
             Toucher.writeLog(logMessage: "uitextinput end edit")
@@ -126,7 +134,11 @@ public class ControlMode: Equatable {
         if let current = GCController.current {
             configureGameController(current)
         }
-        centre.addObserver(forName: NSNotification.Name.GCControllerDidConnect, object: nil, queue: main) { [weak self] note in
+        centre.addObserver(
+            forName: NSNotification.Name.GCControllerDidConnect,
+            object: nil,
+            queue: main
+        ) { [weak self] note in
             GCController.shouldMonitorBackgroundEvents = true
             if let connected = note.object as? GCController {
                 self?.configureGameController(connected)

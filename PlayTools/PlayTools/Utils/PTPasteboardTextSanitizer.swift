@@ -6,12 +6,12 @@
 import Foundation
 
 public enum PTPasteboardTextSanitizer {
-    public enum LineEndingStyle: Equatable {
+    public enum LineEndingStyle: Equatable, Sendable {
         case lf
         case crlf
     }
 
-    public struct Options: Equatable {
+    public struct Options: Equatable, Sendable {
         public var lineEndingStyle: LineEndingStyle
         public var stripUnsafeControlCharacters: Bool
         public var allowTabs: Bool

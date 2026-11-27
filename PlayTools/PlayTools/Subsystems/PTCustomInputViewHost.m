@@ -754,7 +754,7 @@ static void pt_notify_container_did_layout(PTCustomInputHostContainerView *conta
         }
 #pragma clang diagnostic pop
         if (CGRectIsEmpty(sceneBounds) || CGRectGetWidth(sceneBounds) <= 1.0 || CGRectGetHeight(sceneBounds) <= 1.0) {
-            sceneBounds = UIScreen.mainScreen.bounds;
+            sceneBounds = targetWindow.windowScene.screen.bounds;
         }
         _overlayWindow.frame = sceneBounds;
         _overlayWindow.windowLevel = MAX(targetWindow.windowLevel + 10.0, UIWindowLevelAlert - 1.0);

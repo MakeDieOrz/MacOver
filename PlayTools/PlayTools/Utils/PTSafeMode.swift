@@ -10,7 +10,7 @@ import Foundation
 
 public enum PTDiagnosticLogger {
     private static let lock = PTUnfairLock()
-    private static let formatter: ISO8601DateFormatter = {
+    nonisolated(unsafe) private static let formatter: ISO8601DateFormatter = {
         let fmt = ISO8601DateFormatter()
         fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return fmt
@@ -85,7 +85,7 @@ public enum PTDiagnosticLogger {
     }
 }
 
-@objc public final class PTSafeMode: NSObject {
+@objc public final class PTSafeMode: NSObject, @unchecked Sendable {
     @objc public static let shared = PTSafeMode()
 
     public static let breadcrumbFilename = ".launching_in_progress"

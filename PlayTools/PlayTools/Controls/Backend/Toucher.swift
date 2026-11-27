@@ -6,14 +6,32 @@
 import Foundation
 import UIKit
 
-class Toucher {
+final class Toucher: Sendable {
+    private final class LogState: @unchecked Sendable {
+        var logEnabled = false
+        var logFilePath =
+            NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true)[0] + "/toucher.log"
+        var logCount = 0
+        var logFile: FileHandle?
+        var termObserverInstalled = false
+    }
+
+    private static let stateLock = PTUnfairLock()
+    private static let state = LogState()
+
     // For debug only
-    static var logEnabled = false
-    static var logFilePath =
-    NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true)[0] + "/toucher.log"
-    static private var logCount = 0
-    static var logFile: FileHandle?
-    private static var termObserverInstalled = false
+    static var logEnabled: Bool {
+        get { stateLock.withLock { state.logEnabled } }
+        set { stateLock.withLock { state.logEnabled = newValue } }
+    }
+    static var logFilePath: String {
+        get { stateLock.withLock { state.logFilePath } }
+        set { stateLock.withLock { state.logFilePath = newValue } }
+    }
+    static var logFile: FileHandle? {
+        get { stateLock.withLock { state.logFile } }
+        set { stateLock.withLock { state.logFile = newValue } }
+    }
 
     static func clearCachedTargets() {
         // Hit-testing now runs asynchronously inside PTFakeMetaTouch's main-runloop source.
@@ -70,23 +88,35 @@ class Toucher {
     }
 
     static func setupLogfile() {
-        if FileManager.default.createFile(atPath: logFilePath, contents: nil, attributes: nil) {
-            logFile = FileHandle(forWritingAtPath: logFilePath)
-            Toast.showOver(msg: logFilePath)
+        let path = logFilePath
+        if FileManager.default.createFile(atPath: path, contents: nil, attributes: nil) {
+            let handle = FileHandle(forWritingAtPath: path)
+            var shouldInstallObserver = false
+            stateLock.withLock {
+                state.logFile = handle
+                if !state.termObserverInstalled {
+                    state.termObserverInstalled = true
+                    shouldInstallObserver = true
+                }
+            }
+            Toast.showOver(msg: path)
+            if shouldInstallObserver {
+                NotificationCenter.default.addObserver(
+                    forName: NSNotification.Name(rawValue: "NSApplicationWillTerminateNotification"),
+                    object: nil,
+                    queue: OperationQueue.main
+                ) { _ in
+                    let closing = stateLock.withLock { () -> FileHandle? in
+                        let f = state.logFile
+                        state.logFile = nil
+                        return f
+                    }
+                    try? closing?.close()
+                }
+            }
         } else {
             Toast.showHint(title: "logFile creation failed")
             return
-        }
-        if !termObserverInstalled {
-            termObserverInstalled = true
-            NotificationCenter.default.addObserver(
-                forName: NSNotification.Name(rawValue: "NSApplicationWillTerminateNotification"),
-                object: nil,
-                queue: OperationQueue.main
-            ) { _ in
-                try? logFile?.close()
-                logFile = nil
-            }
         }
     }
 
@@ -97,20 +127,22 @@ class Toucher {
         if logFile == nil {
             setupLogfile()
         }
-        guard let file = logFile else {
-            return
-        }
         let message = "\(DispatchTime.now().rawValue) \(logMessage)\n"
         guard let data = message.data(using: .utf8) else {
             Toast.showHint(title: "log message is utf8 uncodable")
             return
         }
-        logCount += 1
-        // roll over
-        if logCount > 60000 {
-            try? file.truncate(atOffset: 0)
-            logCount = 0
+        stateLock.withLock {
+            guard let file = state.logFile else {
+                return
+            }
+            state.logCount += 1
+            // roll over
+            if state.logCount > 60000 {
+                try? file.truncate(atOffset: 0)
+                state.logCount = 0
+            }
+            file.write(data)
         }
-        file.write(data)
     }
 }

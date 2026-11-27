@@ -1848,7 +1848,7 @@ static OSStatus pt_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result)
                 return agrpStatus;
             }
         }
-        retval = [PlayKeychain copyMatching:(__bridge NSDictionary * _Nonnull)(query) result:result];
+        retval = [PlayKeychain copyMatching:(__bridge NSDictionary * _Nonnull)(query) result:(void *)result];
         if (retval == errSecItemNotFound && is_sys) {
             CFTypeRef secClass = CFDictionaryGetValue(query, kSecClass);
             if ((secClass != NULL && CFEqual(secClass, kSecClassCertificate)) ||
@@ -1902,7 +1902,7 @@ static OSStatus pt_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
                 }
             }
         }
-        retval = [PlayKeychain add:attrsDict result:result];
+        retval = [PlayKeychain add:attrsDict result:(void *)result];
     } else {
         retval = SecItemAdd(attributes, result);
     }
@@ -1989,7 +1989,8 @@ static SecKeyRef pt_SecKeyCreateRandomKey(CFDictionaryRef parameters, CFErrorRef
                 return NULL;
             }
         }
-        result = [PlayKeychain keyCreateRandomKey:(__bridge NSDictionary * _Nonnull)(parameters) error:error];
+        result = (SecKeyRef)[PlayKeychain keyCreateRandomKey:(__bridge NSDictionary * _Nonnull)(parameters)
+                                                     error:(void *)error];
     } else {
         result = SecKeyCreateRandomKey(parameters, (void *)error);
     }

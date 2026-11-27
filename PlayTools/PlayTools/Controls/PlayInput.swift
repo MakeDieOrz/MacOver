@@ -4,10 +4,10 @@ import GameController
 
 // This class is a coordinator (and module entrance), coordinating other concrete classes
 
-class PlayInput {
+final class PlayInput: Sendable {
     static let shared = PlayInput()
 
-    static var touchQueue = DispatchQueue.init(label: "com.apple.uikit.hid-dispatch",
+    static let touchQueue = DispatchQueue.init(label: "com.apple.uikit.hid-dispatch",
                                                qos: .userInteractive,
                                                autoreleaseFrequency: .workItem)
 
@@ -52,20 +52,21 @@ class PlayInput {
             guard let mouse = nofitication.object as? GCMouse else {
                 return
             }
+            nonisolated(unsafe) let unsafeMouse = mouse
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(1)) {
-                NotificationCenter.default.post(name: .GCMouseDidDisconnect, object: mouse)
-                mouse.mouseInput?.leftButton.pressedChangedHandler = nil
-                mouse.mouseInput?.leftButton.valueChangedHandler = nil
-                mouse.mouseInput?.rightButton?.pressedChangedHandler = nil
-                mouse.mouseInput?.rightButton?.valueChangedHandler = nil
-                mouse.mouseInput?.middleButton?.pressedChangedHandler = nil
-                mouse.mouseInput?.middleButton?.valueChangedHandler = nil
-                mouse.mouseInput?.auxiliaryButtons?.forEach { button in
+                NotificationCenter.default.post(name: .GCMouseDidDisconnect, object: unsafeMouse)
+                unsafeMouse.mouseInput?.leftButton.pressedChangedHandler = nil
+                unsafeMouse.mouseInput?.leftButton.valueChangedHandler = nil
+                unsafeMouse.mouseInput?.rightButton?.pressedChangedHandler = nil
+                unsafeMouse.mouseInput?.rightButton?.valueChangedHandler = nil
+                unsafeMouse.mouseInput?.middleButton?.pressedChangedHandler = nil
+                unsafeMouse.mouseInput?.middleButton?.valueChangedHandler = nil
+                unsafeMouse.mouseInput?.auxiliaryButtons?.forEach { button in
                     button.pressedChangedHandler = nil
                     button.valueChangedHandler = nil
                 }
-                mouse.mouseInput?.scroll.valueChangedHandler = nil
-                mouse.mouseInput?.mouseMovedHandler = nil
+                unsafeMouse.mouseInput?.scroll.valueChangedHandler = nil
+                unsafeMouse.mouseInput?.mouseMovedHandler = nil
             }
         }
     }

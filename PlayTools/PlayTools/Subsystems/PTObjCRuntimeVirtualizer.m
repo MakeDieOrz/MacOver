@@ -2555,6 +2555,8 @@ static uint8_t *pt_getsegmentdata(const struct mach_header_64 *mhp,
     return getsegmentdata(real_mh, segname, size);
 }
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 static char *pt_getsectdatafromheader_64(const struct mach_header_64 *mhp,
                                          const char *segname,
                                          const char *sectname,
@@ -2563,6 +2565,7 @@ static char *pt_getsectdatafromheader_64(const struct mach_header_64 *mhp,
         (const struct mach_header_64 *)pt_uncloak_shadow_mach_header((const struct mach_header *)mhp);
     return getsectdatafromheader_64(real_mh, segname, sectname, size);
 }
+#pragma clang diagnostic pop
 
 static const struct mach_header *pt_dyld_get_image_header(uint32_t image_index) {
     if (pt_is_bypass_enabled() &&
@@ -3255,5 +3258,8 @@ PT_INTERPOSE(pt_dyld_image_path_containing_address, dyld_image_path_containing_a
 PT_INTERPOSE(pt_dyld_image_header_containing_address, dyld_image_header_containing_address)
 PT_INTERPOSE(pt_getsectiondata, getsectiondata)
 PT_INTERPOSE(pt_getsegmentdata, getsegmentdata)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 PT_INTERPOSE(pt_getsectdatafromheader_64, getsectdatafromheader_64)
+#pragma clang diagnostic pop
 PT_INTERPOSE(pt_dladdr, dladdr)

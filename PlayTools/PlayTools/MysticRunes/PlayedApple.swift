@@ -12,7 +12,7 @@ import Security
 // World's Most Advanced Keychain Replacement Solution:tm:
 // This is a joke, don't take it seriously
 
-public class PlayKeychain: NSObject {
+public final class PlayKeychain: NSObject, @unchecked Sendable {
     static let shared = PlayKeychain()
     private static let playChainDB = PlayKeychainDB.shared
 
@@ -40,7 +40,7 @@ public class PlayKeychain: NSObject {
     // Store the entire dictionary as a plist
     // SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result)
     @objc static public func add(_ attributes: NSDictionary,
-                                 result: UnsafeMutablePointer<Unmanaged<CFTypeRef>?>?) -> OSStatus {
+                                 result: UnsafeMutableRawPointer?) -> OSStatus {
         let (status, insertedDict) = playChainDB.insertWithStatus(attributes)
         guard status == errSecSuccess, let keychainDict = insertedDict else {
             debugLogger("Failed to write keychain file (status: \(status))")
@@ -58,7 +58,30 @@ public class PlayKeychain: NSObject {
             return errSecSuccess
         }
 
-        return buildSingleResult(attributes, keychainDict: keychainDict, result: result)
+        var outRef: Unmanaged<CFTypeRef>?
+        let resStatus = buildSingleResult(attributes, keychainDict: keychainDict, result: &outRef)
+        if let outRef {
+            storeRetained(outRef, into: result)
+        }
+        return resStatus
+    }
+
+    private struct ResultReturnFlags {
+        let attributes: Bool
+        let data: Bool
+        let ref: Bool
+        let persistentRef: Bool
+    }
+
+    private static func storeRetained<T: AnyObject>(
+        _ unmanaged: Unmanaged<T>,
+        into rawOut: UnsafeMutableRawPointer?
+    ) {
+        if let rawOut {
+            rawOut.storeBytes(of: unmanaged.toOpaque(), as: UnsafeMutableRawPointer?.self)
+        } else {
+            _ = unmanaged.takeRetainedValue()
+        }
     }
 
     private static func makeCFError(status: OSStatus) -> Unmanaged<CFError>? {
@@ -79,29 +102,26 @@ public class PlayKeychain: NSObject {
     private static func makeResultDictionary(
         from item: NSDictionary,
         queryClassType: String,
-        wantsAttributes: Bool,
-        wantsData: Bool,
-        wantsRef: Bool,
-        wantsPersistentRef: Bool
+        flags: ResultReturnFlags
     ) -> NSMutableDictionary {
-        let dict = wantsAttributes ? NSMutableDictionary(dictionary: item) : NSMutableDictionary()
+        let dict = flags.attributes ? NSMutableDictionary(dictionary: item) : NSMutableDictionary()
         dict.removeObject(forKey: PlayKeychainDB.internalPrivateKeyColumn)
         let storedTokenID = item[PlayKeychainDB.internalTokenIDColumn] as? String
         dict.removeObject(forKey: PlayKeychainDB.internalTokenIDColumn)
-        if wantsAttributes, let storedTokenID, dict[kSecAttrTokenID as String] == nil {
+        if flags.attributes, let storedTokenID, dict[kSecAttrTokenID as String] == nil {
             dict[kSecAttrTokenID as String] = storedTokenID
         }
-        if wantsData, !isSecureEnclavePrivateKeyItem(item), let vData = item[kSecValueData] {
+        if flags.data, !isSecureEnclavePrivateKeyItem(item), let vData = item[kSecValueData] {
             dict[kSecValueData as String] = vData
         } else {
             dict.removeObject(forKey: kSecValueData)
         }
-        if wantsRef, let ref = materializeReference(for: item, queryClassType: queryClassType) {
+        if flags.ref, let ref = materializeReference(for: item, queryClassType: queryClassType) {
             dict[kSecValueRef as String] = ref
         } else {
             dict.removeObject(forKey: kSecValueRef)
         }
-        if wantsPersistentRef, let pRef = item[kSecValuePersistentRef] {
+        if flags.persistentRef, let pRef = item[kSecValuePersistentRef] {
             dict[kSecValuePersistentRef as String] = pRef
         } else {
             dict.removeObject(forKey: kSecValuePersistentRef)
@@ -133,13 +153,16 @@ public class PlayKeychain: NSObject {
             (wantsPersistentRef ? 1 : 0)
 
         if wantsAttributes || returnFlagCount > 1 {
+            let flags = ResultReturnFlags(
+                attributes: wantsAttributes,
+                data: wantsData,
+                ref: wantsRef,
+                persistentRef: wantsPersistentRef
+            )
             let dummyDict = makeResultDictionary(
                 from: keychainDict,
                 queryClassType: classType,
-                wantsAttributes: wantsAttributes,
-                wantsData: wantsData,
-                wantsRef: wantsRef,
-                wantsPersistentRef: wantsPersistentRef
+                flags: flags
             )
             if !wantsAttributes && dummyDict.count == 0 {
                 return errSecItemNotFound
@@ -194,7 +217,7 @@ public class PlayKeychain: NSObject {
         return status
     }
 
-    private static let persistedKeyAttributeKeys: [CFString] = [
+    nonisolated(unsafe) private static let persistedKeyAttributeKeys: [CFString] = [
         kSecAttrAccessGroup,
         kSecAttrApplicationLabel,
         kSecAttrApplicationTag,
@@ -224,7 +247,7 @@ public class PlayKeychain: NSObject {
         }
     }
 
-    private static let generatedKeyMetadataKeys: [CFString] = [
+    nonisolated(unsafe) private static let generatedKeyMetadataKeys: [CFString] = [
         kSecAttrKeyType,
         kSecAttrKeyClass,
         kSecAttrApplicationLabel,
@@ -304,15 +327,17 @@ public class PlayKeychain: NSObject {
     }
 
     @objc static public func keyCreateRandomKey(_ parameters: NSDictionary,
-                                                error: UnsafeMutablePointer<Unmanaged<CFError>?>?)
-    -> Unmanaged<SecKey>? {
+                                                error: UnsafeMutableRawPointer?)
+    -> UnsafeMutableRawPointer? {
         // Check if kSecAttrIsPermanent is set to 1 in kSecPrivateKeyAttrs.
         // If it is, set it to 0 before forwarding the call to SecKeyCreateRandomKey,
         // and then add the key to the keychain db with the original attributes (with kSecAttrIsPermanent set to 1)
         let rawPrivateKeyAttrs = parameters[kSecPrivateKeyAttrs as String] as? [String: Any] ?? [:]
         let isSecureEnclave = PTPlayChainSecureEnclaveRegistry.parametersRequestSecureEnclave(parameters)
         if isSecureEnclave && !isSupportedSecureEnclaveKey(parameters) {
-            error?.pointee = makeCFError(status: errSecParam)
+            if let error, let cfErr = makeCFError(status: errSecParam) {
+                storeRetained(cfErr, into: error)
+            }
             return nil
         }
         let isPermanent = flag(rawPrivateKeyAttrs as NSDictionary, kSecAttrIsPermanent) ||
@@ -334,13 +359,13 @@ public class PlayKeychain: NSObject {
         var localError: Unmanaged<CFError>?
         guard let key = SecKeyCreateRandomKey(parametersCopy as CFDictionary, &localError) else {
             if let err = localError {
-                if let errorPtr = error {
-                    errorPtr.pointee = err
+                if let error {
+                    storeRetained(err, into: error)
                 } else {
                     debugLogger("Failed to create random key: \(err.takeRetainedValue())")
                 }
-            } else if let errorPtr = error {
-                errorPtr.pointee = makeCFError(status: errSecParam)
+            } else if let error, let cfErr = makeCFError(status: errSecParam) {
+                storeRetained(cfErr, into: error)
             }
             return nil
         }
@@ -348,15 +373,15 @@ public class PlayKeychain: NSObject {
             var exportError: Unmanaged<CFError>?
             guard let extData = SecKeyCopyExternalRepresentation(key, &exportError) as? Data else {
                 if let err = exportError {
-                    if let errorPtr = error {
-                        errorPtr.pointee = err
+                    if let error {
+                        storeRetained(err, into: error)
                     } else {
                         debugLogger("Failed to export random key representation: \(err.takeRetainedValue())")
                     }
                 } else {
                     debugLogger("Failed to export random key representation")
-                    if let errorPtr = error {
-                        errorPtr.pointee = makeCFError(status: errSecBadReq)
+                    if let error, let cfErr = makeCFError(status: errSecBadReq) {
+                        storeRetained(cfErr, into: error)
                     }
                 }
                 return nil
@@ -380,8 +405,8 @@ public class PlayKeychain: NSObject {
             let (insertStatus, insertedItem) = playChainDB.insertWithStatus(keychainDict as NSDictionary)
             guard insertStatus == errSecSuccess else {
                 debugLogger("Failed to write keychain file (status: \(insertStatus))")
-                if let errorPtr = error {
-                    errorPtr.pointee = makeCFError(status: insertStatus)
+                if let error, let cfErr = makeCFError(status: insertStatus) {
+                    storeRetained(cfErr, into: error)
                 }
                 return nil
             }
@@ -402,13 +427,12 @@ public class PlayKeychain: NSObject {
         if isSecureEnclave {
             PTPlayChainSecureEnclaveRegistry.markSecureEnclaveKey(key)
         }
-        return Unmanaged.passRetained(key)
+        return Unmanaged.passRetained(key).toOpaque()
     }
 
-    // swiftlint:disable:next function_body_length
     @objc static public func keyGeneratePair(_ parameters: NSDictionary,
-                                             publicKey: UnsafeMutablePointer<Unmanaged<SecKey>?>?,
-                                             privateKey: UnsafeMutablePointer<Unmanaged<SecKey>?>?) -> OSStatus {
+                                             publicKey: UnsafeMutableRawPointer?,
+                                             privateKey: UnsafeMutableRawPointer?) -> OSStatus {
         // Same as above but we need to disable kSecAttrIsPermanent for both the public and private key.
         let isSecureEnclave = PTPlayChainSecureEnclaveRegistry.parametersRequestSecureEnclave(parameters)
         if isSecureEnclave && !isSupportedSecureEnclaveKey(parameters) {
@@ -434,11 +458,20 @@ public class PlayKeychain: NSObject {
         parametersCopy[kSecPublicKeyAttrs as String] = publicKeyAttrs
         var newPublicKey: SecKey?
         var newPrivateKey: SecKey?
-        let genStatus = SecKeyGeneratePair(parametersCopy as CFDictionary, &newPublicKey, &newPrivateKey)
-        guard genStatus == errSecSuccess else {
+        var createError: Unmanaged<CFError>?
+        guard let generatedPrivateKey = SecKeyCreateRandomKey(parametersCopy as CFDictionary, &createError) else {
+            let err = createError?.takeRetainedValue()
+            let code = err.map { OSStatus(CFErrorGetCode($0)) } ?? errSecParam
+            let genStatus = code != 0 ? code : errSecParam
             debugLogger("Failed to generate key pair (status: \(genStatus)).")
             return genStatus
         }
+        guard let generatedPublicKey = SecKeyCopyPublicKey(generatedPrivateKey) else {
+            debugLogger("Failed to extract public key for generated key pair.")
+            return errSecInternalComponent
+        }
+        newPrivateKey = generatedPrivateKey
+        newPublicKey = generatedPublicKey
         if isPermanent {
             guard let publicKeyRef = newPublicKey,
                   let privateKeyRef = newPrivateKey,
@@ -512,11 +545,11 @@ public class PlayKeychain: NSObject {
         if isSecureEnclave, let newPrivateKey {
             PTPlayChainSecureEnclaveRegistry.markSecureEnclaveKey(newPrivateKey)
         }
-        if let newPublicKey = newPublicKey {
-            publicKey?.pointee = Unmanaged.passRetained(newPublicKey)
+        if let newPublicKey, let publicKey {
+            storeRetained(Unmanaged.passRetained(newPublicKey), into: publicKey)
         }
-        if let newPrivateKey = newPrivateKey {
-            privateKey?.pointee = Unmanaged.passRetained(newPrivateKey)
+        if let newPrivateKey, let privateKey {
+            storeRetained(Unmanaged.passRetained(newPrivateKey), into: privateKey)
         }
         return errSecSuccess
     }
@@ -636,7 +669,7 @@ extension PlayKeychain {
 
     // SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result)
     @objc static public func copyMatching(_ query: NSDictionary,
-                                          result: UnsafeMutablePointer<Unmanaged<CFTypeRef>?>?) -> OSStatus {
+                                          result: UnsafeMutableRawPointer?) -> OSStatus {
         guard let keychainDicts = playChainDB.query(query),
               let keychainDict = keychainDicts.first else {
             debugLogger("Keychain item not found in db")
@@ -652,7 +685,15 @@ extension PlayKeychain {
         let wantsMultiple = (matchLimit as? String == kSecMatchLimitAll as String) ||
             ((matchLimit as? NSNumber).map { $0.intValue > 1 } ?? false)
         if wantsMultiple {
-            return copyAllMatches(keychainDicts, query: query, result: result)
+            guard let result else {
+                return copyAllMatches(keychainDicts, query: query, result: nil)
+            }
+            var outRef: Unmanaged<CFTypeRef>?
+            let status = copyAllMatches(keychainDicts, query: query, result: &outRef)
+            if let outRef {
+                storeRetained(outRef, into: result)
+            }
+            return status
         }
 
         // A query without return flags is an existence check.
@@ -664,7 +705,12 @@ extension PlayKeychain {
             return errSecSuccess
         }
 
-        return buildSingleResult(query, keychainDict: keychainDict, result: result)
+        var outRef: Unmanaged<CFTypeRef>?
+        let status = buildSingleResult(query, keychainDict: keychainDict, result: &outRef)
+        if let outRef {
+            storeRetained(outRef, into: result)
+        }
+        return status
     }
 
     private static func copyAllMatches(_ keychainDicts: [NSMutableDictionary], query: NSDictionary,
@@ -716,14 +762,17 @@ extension PlayKeychain {
             return errSecSuccess
         }
 
+        let flags = ResultReturnFlags(
+            attributes: wantsAttributes,
+            data: wantsData,
+            ref: wantsRef,
+            persistentRef: wantsPersistentRef
+        )
         let dicts: [NSMutableDictionary] = keychainDicts.map { item in
             makeResultDictionary(
                 from: item,
                 queryClassType: classType,
-                wantsAttributes: wantsAttributes,
-                wantsData: wantsData,
-                wantsRef: wantsRef,
-                wantsPersistentRef: wantsPersistentRef
+                flags: flags
             )
         }
         if !wantsAttributes && dicts.contains(where: { $0.count == 0 }) {

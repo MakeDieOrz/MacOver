@@ -108,7 +108,9 @@ class DebugContainer: UIView {
     private func startRefreshTimer() {
         guard refreshTimer == nil else { return }
         let timer = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in
-            self?.refreshTouches()
+            MainActor.assumeIsolated {
+                self?.refreshTouches()
+            }
         }
         RunLoop.main.add(timer, forMode: .common)
         refreshTimer = timer

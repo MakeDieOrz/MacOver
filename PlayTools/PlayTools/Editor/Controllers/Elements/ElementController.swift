@@ -7,6 +7,7 @@
 
 import Foundation
 
+@MainActor
 protocol ControlElement: AnyObject {
     var button: Element { get }
     func move(deltaY: CGFloat, deltaX: CGFloat)
@@ -17,6 +18,7 @@ protocol ControlElement: AnyObject {
     func remove()
 }
 
+@MainActor
 class ControlModel<ElementType: BaseElement>: ControlElement {
     var data: ElementType
     var button: Element

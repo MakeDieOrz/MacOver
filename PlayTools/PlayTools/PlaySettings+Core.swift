@@ -8,30 +8,21 @@ import Darwin
 import Foundation
 import ObjectiveC
 import Security
+import Synchronization
 
-/// Thread-safe unfair lock wrapper with deterministic cleanup on deinit.
-public final class PTUnfairLock {
-    private let lockPtr: UnsafeMutablePointer<os_unfair_lock_s>
+/// Thread-safe unfair lock wrapper backed by `Synchronization.Mutex`.
+public final class PTUnfairLock: Sendable {
+    private let mutex = Mutex<Void>(())
 
-    public init() {
-        lockPtr = UnsafeMutablePointer<os_unfair_lock_s>.allocate(capacity: 1)
-        lockPtr.initialize(to: os_unfair_lock_s())
-    }
-
-    deinit {
-        lockPtr.deinitialize(count: 1)
-        lockPtr.deallocate()
-    }
+    public init() {}
 
     @inline(__always)
     public func withLock<T>(_ body: () throws -> T) rethrows -> T {
-        os_unfair_lock_lock(lockPtr)
-        defer { os_unfair_lock_unlock(lockPtr) }
-        return try body()
+        try mutex.withLock { _ in try body() }
     }
 }
 
-@objc public final class PlaySettings: NSObject {
+@objc public final class PlaySettings: NSObject, @unchecked Sendable {
     @objc public static let shared = PlaySettings()
 
     @objc public let bundleIdentifier: String
@@ -46,7 +37,7 @@ public final class PTUnfairLock {
         set { stateLock.withLock { _settingsData = newValue } }
     }
 
-    private static let internalOverlayTagObject = NSObject()
+    nonisolated(unsafe) private static let internalOverlayTagObject = NSObject()
 
     @objc(pm_internalOverlayTagKeyAddress)
     public static var internalOverlayTagKeyAddress: UInt {
@@ -55,7 +46,7 @@ public final class PTUnfairLock {
 
     @objc public static func resolveHostUserRoot() -> String {
         let rawEnv = getenv("CFFIXED_USER_HOME") ?? getenv("HOME")
-        if let rawEnv, let envStr = String(validatingUTF8: rawEnv), envStr.hasPrefix("/") {
+        if let rawEnv, let envStr = String(validatingCString: rawEnv), envStr.hasPrefix("/") {
             var path = envStr
             if path.hasPrefix("/System/Volumes/Data/") {
                 path.removeFirst("/System/Volumes/Data".count)
@@ -84,7 +75,7 @@ public final class PTUnfairLock {
 
     static func resolveSettingsURL(bundleIdentifier: String) -> URL {
         if let overridePtr = getenv("PLAYTOOLS_SETTINGS_PLIST"),
-           let overridePath = String(validatingUTF8: overridePtr),
+           let overridePath = String(validatingCString: overridePtr),
            overridePath.hasPrefix("/") {
             return URL(fileURLWithPath: overridePath)
         }
@@ -100,7 +91,7 @@ public final class PTUnfairLock {
                 return primary
             }
             if let cfHomePtr = getenv("CFFIXED_USER_HOME"),
-               let cfHome = String(validatingUTF8: cfHomePtr),
+               let cfHome = String(validatingCString: cfHomePtr),
                let marker = cfHome.range(of: "/Library/Containers/") {
                 let tail = cfHome[marker.upperBound...]
                 let cid = tail.prefix(while: { $0 != "/" })
@@ -114,7 +105,7 @@ public final class PTUnfairLock {
             return primary
         }
         if let cfHomePtr = getenv("CFFIXED_USER_HOME"),
-           let cfHome = String(validatingUTF8: cfHomePtr),
+           let cfHome = String(validatingCString: cfHomePtr),
            let marker = cfHome.range(of: "/Library/Containers/") {
             let tail = cfHome[marker.upperBound...]
             let cid = tail.prefix(while: { $0 != "/" })
@@ -1022,8 +1013,8 @@ public enum PTStrictViewportFocusPolicy {
 }
 
 @objc public final class PTPlayChainSecureEnclaveRegistry: NSObject {
-    private static let seTagObject = NSObject()
-    private static let seAttrsTagObject = NSObject()
+    nonisolated(unsafe) private static let seTagObject = NSObject()
+    nonisolated(unsafe) private static let seAttrsTagObject = NSObject()
 
     private static var associationKey: UnsafeRawPointer {
         UnsafeRawPointer(Unmanaged.passUnretained(seTagObject).toOpaque())

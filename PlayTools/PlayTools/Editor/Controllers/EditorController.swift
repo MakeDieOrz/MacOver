@@ -1,13 +1,15 @@
 import GameController
-import SwiftUI
+import UIKit
 
+@MainActor
 let editor = EditorController.shared
 
-class EditorController {
+@MainActor
+final class EditorController {
 
     static let shared = EditorController()
 
-    let lock = NSLock()
+    let lock = PTUnfairLock()
 
     var focusedControl: ControlElement?
 
@@ -45,33 +47,44 @@ class EditorController {
     }
 
     public func switchMode() {
-        lock.lock()
-        defer { lock.unlock() }
-        if editorMode {
-            EditorCircleMenu.shared.hide()
-            saveButtons()
-            editorWindow?.isHidden = true
-            editorWindow?.windowScene = nil
-            editorWindow?.rootViewController = nil
-            // menu still holds this object until next responder hit test
-            editorWindow = nil
-            previousWindow?.makeKeyAndVisible()
-            focusedControl = nil
-            Toast.showHint(title: NSLocalizedString("hint.keymapSaved",
-                                                    tableName: "Playtools", value: "Keymap Saved", comment: ""))
-        } else {
-            previousWindow = screen.keyWindow
-            guard let win = initWindow() else { return }
-            editorWindow = win
-            win.makeKeyAndVisible()
-            showButtons()
-            Toast.showHint(title: NSLocalizedString("hint.keymappingEditor.title",
-                                                    tableName: "Playtools", value: "Keymapping Editor", comment: ""),
-                           text: [NSLocalizedString("hint.keymappingEditor.content",
-                                                    tableName: "Playtools",
-                                value: "Click a button to edit its position or key bind\n"
-                                        + "Click an empty area to open input menu", comment: "")],
-                           notification: NSNotification.Name.playtoolsCursorWillHide)
+        lock.withLock {
+            if editorMode {
+                EditorCircleMenu.shared.hide()
+                saveButtons()
+                editorWindow?.isHidden = true
+                editorWindow?.windowScene = nil
+                editorWindow?.rootViewController = nil
+                // menu still holds this object until next responder hit test
+                editorWindow = nil
+                previousWindow?.makeKeyAndVisible()
+                focusedControl = nil
+                Toast.showHint(title: NSLocalizedString("hint.keymapSaved",
+                                                        tableName: "Playtools", value: "Keymap Saved", comment: ""))
+            } else {
+                previousWindow = screen.keyWindow
+                guard let win = initWindow() else { return }
+                editorWindow = win
+                win.makeKeyAndVisible()
+                showButtons()
+                Toast.showHint(
+                    title: NSLocalizedString(
+                        "hint.keymappingEditor.title",
+                        tableName: "Playtools",
+                        value: "Keymapping Editor",
+                        comment: ""
+                    ),
+                    text: [
+                        NSLocalizedString(
+                            "hint.keymappingEditor.content",
+                            tableName: "Playtools",
+                            value: "Click a button to edit its position or key bind\n"
+                                + "Click an empty area to open input menu",
+                            comment: ""
+                        )
+                    ],
+                    notification: NSNotification.Name.playtoolsCursorWillHide
+                )
+            }
         }
     }
 

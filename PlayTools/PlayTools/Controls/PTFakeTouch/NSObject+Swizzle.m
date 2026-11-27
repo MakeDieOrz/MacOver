@@ -17,6 +17,7 @@
 #import "PTFakeMetaTouch.h"
 #import <VideoSubscriberAccount/VideoSubscriberAccount.h>
 #import <AVFoundation/AVFoundation.h>
+#import <AVFAudio/AVFAudio.h>
 #import <CoreMotion/CoreMotion.h>
 #import <GameController/GameController.h>
 
@@ -280,12 +281,40 @@ static BOOL s_screenNativeDefaultMode = NO;
 static BOOL s_screenNativeResizableOnly = NO;
 static BOOL s_screenBoundsHooked = NO;
 
+static UIScreen *pt_resolve_active_uiscreen(void) {
+    if ([NSThread isMainThread]) {
+        UIScreen *fallbackScreen = nil;
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) {
+                continue;
+            }
+            UIWindowScene *windowScene = (UIWindowScene *)scene;
+            if (windowScene.screen == nil) {
+                continue;
+            }
+            if (windowScene.activationState == UISceneActivationStateForegroundActive) {
+                return windowScene.screen;
+            }
+            if (fallbackScreen == nil) {
+                fallbackScreen = windowScene.screen;
+            }
+        }
+        if (fallbackScreen != nil) {
+            return fallbackScreen;
+        }
+    }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    return [UIScreen mainScreen];
+#pragma clang diagnostic pop
+}
+
 static double pt_get_default_height(void) {
-    return [[UIScreen mainScreen] bounds].size.height;
+    return [pt_resolve_active_uiscreen() bounds].size.height;
 }
 
 static double pt_get_default_width(void) {
-    return [[UIScreen mainScreen] bounds].size.width;
+    return [pt_resolve_active_uiscreen() bounds].size.width;
 }
 
 static CGRect pt_resolve_effective_screen_bounds(id screenOrNil) {
@@ -294,7 +323,7 @@ static CGRect pt_resolve_effective_screen_bounds(id screenOrNil) {
         targetScreen = nil;
     }
     if (targetScreen == nil && [NSThread isMainThread] && s_orig_screen_bounds != NULL) {
-        targetScreen = [UIScreen mainScreen];
+        targetScreen = pt_resolve_active_uiscreen();
     }
     if (s_orig_screen_bounds != NULL) {
         CGRect raw = (targetScreen != nil) ? s_orig_screen_bounds(targetScreen, @selector(bounds)) : CGRectZero;
@@ -823,7 +852,7 @@ static NSString *pt_hook_nsstring_regex_replace(id self, SEL _cmd, NSString *pat
 }
 
 static void pt_hook_requestRecordPermission(id self, SEL _cmd, void (^response)(BOOL)) {
-    BOOL granted = [[AVAudioSession sharedInstance] recordPermission] == AVAudioSessionRecordPermissionGranted;
+    BOOL granted = [AVAudioApplication sharedInstance].recordPermission == AVAudioApplicationRecordPermissionGranted;
     if (granted) {
         if (response != nil) {
             response(granted);

@@ -1495,7 +1495,13 @@ static int pt_scandirat(int dirfd,
         is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
     }
     BOOL app_bypass = (is_sys_caller == 0 && pt_is_bypass_enabled());
-    int count = scandirat(dirfd, dirname, namelist, app_bypass ? NULL : select_fn, app_bypass ? NULL : compar_fn);
+    int count = -1;
+    if (@available(macCatalyst 26.4, iOS 26.4, *)) {
+        count = scandirat(dirfd, dirname, namelist, app_bypass ? NULL : select_fn, app_bypass ? NULL : compar_fn);
+    } else {
+        errno = ENOSYS;
+        return -1;
+    }
     if (!app_bypass) {
         return count;
     }
@@ -1528,7 +1534,13 @@ static int pt_scandirat_b(int dirfd,
         is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
     }
     BOOL app_bypass = (is_sys_caller == 0 && pt_is_bypass_enabled());
-    int count = scandirat_b(dirfd, dirname, namelist, app_bypass ? nil : select_blk, app_bypass ? nil : compar_blk);
+    int count = -1;
+    if (@available(macCatalyst 26.4, iOS 26.4, *)) {
+        count = scandirat_b(dirfd, dirname, namelist, app_bypass ? nil : select_blk, app_bypass ? nil : compar_blk);
+    } else {
+        errno = ENOSYS;
+        return -1;
+    }
     if (!app_bypass) {
         return count;
     }
@@ -1547,7 +1559,13 @@ static int pt_fdscandir(int dirfd,
     }
     BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
     BOOL app_bypass = (!is_sys && pt_is_bypass_enabled());
-    int count = fdscandir(dirfd, namelist, app_bypass ? NULL : select_fn, app_bypass ? NULL : compar_fn);
+    int count = -1;
+    if (@available(macCatalyst 26.4, iOS 26.4, *)) {
+        count = fdscandir(dirfd, namelist, app_bypass ? NULL : select_fn, app_bypass ? NULL : compar_fn);
+    } else {
+        errno = ENOSYS;
+        return -1;
+    }
     if (!app_bypass) {
         return count;
     }
@@ -1565,7 +1583,13 @@ static int pt_fdscandir_b(int dirfd,
     }
     BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
     BOOL app_bypass = (!is_sys && pt_is_bypass_enabled());
-    int count = fdscandir_b(dirfd, namelist, app_bypass ? nil : select_blk, app_bypass ? nil : compar_blk);
+    int count = -1;
+    if (@available(macCatalyst 26.4, iOS 26.4, *)) {
+        count = fdscandir_b(dirfd, namelist, app_bypass ? nil : select_blk, app_bypass ? nil : compar_blk);
+    } else {
+        errno = ENOSYS;
+        return -1;
+    }
     if (!app_bypass) {
         return count;
     }
@@ -1672,10 +1696,13 @@ PT_INTERPOSE(pt_readdir_r, readdir_r)
 #pragma clang diagnostic pop
 PT_INTERPOSE(pt_scandir, scandir)
 PT_INTERPOSE(pt_scandir_b, scandir_b)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
 PT_INTERPOSE(pt_scandirat, scandirat)
 PT_INTERPOSE(pt_scandirat_b, scandirat_b)
 PT_INTERPOSE(pt_fdscandir, fdscandir)
 PT_INTERPOSE(pt_fdscandir_b, fdscandir_b)
+#pragma clang diagnostic pop
 PT_INTERPOSE(pt_mkdir, mkdir)
 PT_INTERPOSE(pt_mkdirat, mkdirat)
 PT_INTERPOSE(pt_mkpath_np, mkpath_np)

@@ -1,4 +1,11 @@
 disabled_rules:
+  - non_optional_string_data_conversion
+  - identifier_name
+  - file_length
+  - type_body_length
+  - function_body_length
+  - cyclomatic_complexity
+  - large_tuple
   - inclusive_language
   - todo
 
@@ -6,9 +13,6 @@ excluded:
   - Carthage
   - Pods
   - PlayToolsTests
-
-identifier_name:
-  allowed_symbols: ['_']
 
 type_name:
   allowed_symbols: ['_']

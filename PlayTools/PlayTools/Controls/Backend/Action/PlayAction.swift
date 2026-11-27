@@ -3,15 +3,14 @@
 //  PlayTools
 //
 
-// swiftlint:disable file_length
 import Foundation
 
-protocol Action {
+protocol Action: AnyObject, Sendable {
     func invalidate()
 }
 // Actions hold touch point IDs, perform fake touch
 
-class ButtonAction: Action {
+class ButtonAction: Action, @unchecked Sendable {
     func invalidate() {
         PlayInput.touchQueue.async { [weak self] in
             guard let self = self else { return }
@@ -56,7 +55,7 @@ class ButtonAction: Action {
     }
 }
 
-class DraggableButtonAction: ButtonAction {
+final class DraggableButtonAction: ButtonAction, @unchecked Sendable {
     var releasePoint: CGPoint
 
     override init(keyCode: Int, keyName: String, point: CGPoint) {
@@ -108,7 +107,7 @@ class DraggableButtonAction: ButtonAction {
     }
 }
 
-class ContinuousJoystickAction: Action {
+class ContinuousJoystickAction: Action, @unchecked Sendable {
     var key: String
     var center: CGPoint
     var position: CGPoint!
@@ -188,7 +187,7 @@ class ContinuousJoystickAction: Action {
     }
 }
 
-class JoystickAction: Action {
+class JoystickAction: Action, @unchecked Sendable {
     let keys: [Int]
     let center: CGPoint
     var touch: CGPoint
@@ -235,7 +234,7 @@ class JoystickAction: Action {
         }
     }
 
-    func getPressedHandler(index: Int) -> (Bool) -> Void {
+    func getPressedHandler(index: Int) -> @Sendable (Bool) -> Void {
         if mode == .FIXED {
             return { pressed in
                 self.updateTouch(index: index, pressed: pressed)
@@ -319,9 +318,9 @@ class JoystickAction: Action {
     }
 }
 
-class CameraAction: Action {
+final class CameraAction: Action, @unchecked Sendable {
     var swipeMove, swipeScale1, swipeScale2: SwipeAction
-    static var swipeDrag = SwipeAction(actionName: "Drag", keyName: "ScrollWheel")
+    static let swipeDrag = SwipeAction(actionName: "Drag", keyName: "ScrollWheel")
     var key: String!
     var center: CGPoint
 
@@ -374,19 +373,17 @@ class CameraAction: Action {
     }
 }
 
-class SwipeAction: Action {
+final class SwipeAction: Action, @unchecked Sendable {
     var location: CGPoint = CGPoint.zero
     private var id: Int?
     let timer = DispatchSource.makeTimerSource(flags: [], queue: PlayInput.touchQueue)
-    private let timerLock: UnsafeMutablePointer<os_unfair_lock_s>
+    private let timerLock = PTUnfairLock()
     private var isTimerSuspended = true
     private var isCancelled = false
     private let actionName: String, keyName: String
     init(actionName: String, keyName: String) {
         self.actionName = actionName
         self.keyName = keyName
-        self.timerLock = UnsafeMutablePointer<os_unfair_lock_s>.allocate(capacity: 1)
-        self.timerLock.initialize(to: os_unfair_lock_s())
         timer.schedule(deadline: DispatchTime.now() + 1, repeating: 0.1, leeway: DispatchTimeInterval.milliseconds(50))
         timer.setEventHandler(qos: .userInteractive) { [weak self] in
             self?.checkEnded()
@@ -396,39 +393,37 @@ class SwipeAction: Action {
     }
 
     deinit {
-        os_unfair_lock_lock(timerLock)
-        if !isCancelled {
-            isCancelled = true
-            if isTimerSuspended {
-                isTimerSuspended = false
-                timer.resume()
+        timerLock.withLock {
+            if !isCancelled {
+                isCancelled = true
+                if isTimerSuspended {
+                    isTimerSuspended = false
+                    timer.resume()
+                }
+                timer.cancel()
             }
-            timer.cancel()
         }
-        os_unfair_lock_unlock(timerLock)
-        timerLock.deinitialize(count: 1)
-        timerLock.deallocate()
     }
 
     private func resumeTimerIfNeeded() {
-        os_unfair_lock_lock(timerLock)
-        if !isCancelled && isTimerSuspended {
-            isTimerSuspended = false
-            timer.resume()
+        timerLock.withLock {
+            if !isCancelled && isTimerSuspended {
+                isTimerSuspended = false
+                timer.resume()
+            }
         }
-        os_unfair_lock_unlock(timerLock)
     }
 
     private func suspendTimerIfNeeded() {
-        os_unfair_lock_lock(timerLock)
-        if !isCancelled && !isTimerSuspended {
-            isTimerSuspended = true
-            timer.suspend()
+        timerLock.withLock {
+            if !isCancelled && !isTimerSuspended {
+                isTimerSuspended = true
+                timer.suspend()
+            }
         }
-        os_unfair_lock_unlock(timerLock)
     }
 
-    func delay(_ delay: Double, closure: @escaping () -> Void) {
+    func delay(_ delay: Double, closure: @escaping @Sendable () -> Void) {
         let when = DispatchTime.now() + delay
         PlayInput.touchQueue.asyncAfter(deadline: when, execute: closure)
     }
@@ -550,12 +545,12 @@ class SwipeAction: Action {
     }
 }
 
-class FakeMouseAction: Action {
+final class FakeMouseAction: Action, @unchecked Sendable {
     var id: Int?
     var pos: CGPoint = CGPoint()
-    private let onPressWillBegin: (() -> Void)?
+    private let onPressWillBegin: (@Sendable () -> Void)?
 
-    public init(onPressWillBegin: (() -> Void)? = nil) {
+    public init(onPressWillBegin: (@Sendable () -> Void)? = nil) {
         self.onPressWillBegin = onPressWillBegin
         ActionDispatcher.register(key: KeyCodeNames.fakeMouse, handler: buttonPressHandler)
         ActionDispatcher.register(key: KeyCodeNames.fakeMouse, handler: buttonLiftHandler)
@@ -607,7 +602,7 @@ class FakeMouseAction: Action {
 
 }
 
-class FakeRightLongPressAction: Action {
+final class FakeRightLongPressAction: Action, @unchecked Sendable {
     var id: Int?
     private var state = PTLongPressStateMachine()
     private var autoReleaseWorkItem: DispatchWorkItem?

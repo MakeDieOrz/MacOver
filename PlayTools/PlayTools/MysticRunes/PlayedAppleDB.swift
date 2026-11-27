@@ -10,10 +10,10 @@ import Foundation
 import Security
 import SQLite3
 
-class PlayKeychainDB: NSObject {
+final class PlayKeychainDB: NSObject, @unchecked Sendable {
     public static let shared = PlayKeychainDB()
 
-    private let dbLock: UnsafeMutablePointer<os_unfair_lock_s>
+    private let dbLock = PTUnfairLock()
     private var dbVersion: Int = 2
     private var cachedDB: OpaquePointer?
     private var cachedDBPath: String?
@@ -27,16 +27,13 @@ class PlayKeychainDB: NSObject {
 
     func setDefaultAccessGroup(_ group: String?) {
         let trimmed = group?.trimmingCharacters(in: .whitespacesAndNewlines)
-        os_unfair_lock_lock(dbLock)
-        defaultAccessGroup = (trimmed?.isEmpty == false) ? trimmed : nil
-        os_unfair_lock_unlock(dbLock)
+        dbLock.withLock {
+            defaultAccessGroup = (trimmed?.isEmpty == false) ? trimmed : nil
+        }
     }
 
     func currentDefaultAccessGroup() -> String? {
-        os_unfair_lock_lock(dbLock)
-        let group = defaultAccessGroup
-        os_unfair_lock_unlock(dbLock)
-        return group
+        dbLock.withLock { defaultAccessGroup }
     }
 
     private static let maxCachedStatements = 64
@@ -140,17 +137,13 @@ class PlayKeychainDB: NSObject {
     }()
 
     override init() {
-        dbLock = UnsafeMutablePointer<os_unfair_lock_s>.allocate(capacity: 1)
-        dbLock.initialize(to: os_unfair_lock_s())
         super.init()
     }
 
     deinit {
-        os_unfair_lock_lock(dbLock)
-        closeDatabaseLocked()
-        os_unfair_lock_unlock(dbLock)
-        dbLock.deinitialize(count: 1)
-        dbLock.deallocate()
+        dbLock.withLock {
+            closeDatabaseLocked()
+        }
     }
 
     private func closeDatabaseLocked() {
@@ -268,7 +261,7 @@ class PlayKeychainDB: NSObject {
             let cfRef = ref as CFTypeRef
             let typeID = CFGetTypeID(cfRef)
             if typeID == SecCertificateGetTypeID() {
-                let cert = unsafeBitCast(cfRef, to: SecCertificate.self)
+                let cert = unsafeDowncast(cfRef, to: SecCertificate.self)
                 if dict[kSecClass] == nil {
                     dict[kSecClass as String] = kSecClassCertificate
                 }
@@ -279,7 +272,7 @@ class PlayKeychainDB: NSObject {
                     populateCertificateMetadata(from: cert, into: dict)
                 }
             } else if typeID == SecKeyGetTypeID() {
-                let key = unsafeBitCast(cfRef, to: SecKey.self)
+                let key = unsafeDowncast(cfRef, to: SecKey.self)
                 if dict[kSecClass] == nil {
                     dict[kSecClass as String] = kSecClassKey
                 }
@@ -306,7 +299,7 @@ class PlayKeychainDB: NSObject {
                     }
                 }
             } else if typeID == SecIdentityGetTypeID() {
-                let identity = unsafeBitCast(cfRef, to: SecIdentity.self)
+                let identity = unsafeDowncast(cfRef, to: SecIdentity.self)
                 if dict[kSecClass] == nil {
                     dict[kSecClass as String] = kSecClassIdentity
                 }
@@ -461,12 +454,11 @@ class PlayKeychainDB: NSObject {
         in sqlite3DB: OpaquePointer,
         context: String
     ) -> Bool {
-        for (offset, value) in values.enumerated() {
-            if !encodeData(stmt: stmt, index: startIndex + Int32(offset), value: value) {
-                let errorMessage = String(cString: sqlite3_errmsg(sqlite3DB))
-                PlayKeychain.debugLogger("Failed to \(context) db: \(errorMessage)")
-                return false
-            }
+        for (offset, value) in values.enumerated()
+        where !encodeData(stmt: stmt, index: startIndex + Int32(offset), value: value) {
+            let errorMessage = String(cString: sqlite3_errmsg(sqlite3DB))
+            PlayKeychain.debugLogger("Failed to \(context) db: \(errorMessage)")
+            return false
         }
         return true
     }
@@ -521,7 +513,8 @@ class PlayKeychainDB: NSObject {
                 do {
                     guard let stmt = preparedStatement(for: selectQuery, in: sqlite3DB) else {
                         PlayKeychain.debugLogger("Failed query \(selectQuery)")
-                        PlayKeychain.debugLogger("Failed to query to db table: \(String(cString: sqlite3_errmsg(sqlite3DB)))")
+                        let errMsg = String(cString: sqlite3_errmsg(sqlite3DB))
+                        PlayKeychain.debugLogger("Failed to query to db table: \(errMsg)")
                         return false
                     }
                     defer { sqlite3_reset(stmt) }
@@ -532,7 +525,8 @@ class PlayKeychainDB: NSObject {
 
                     let limitIndex = Int32(whereInfo.values.count + 1)
                     guard sqlite3_bind_int64(stmt, limitIndex, remainingLimit) == SQLITE_OK else {
-                        PlayKeychain.debugLogger("Failed to bind query limit: \(String(cString: sqlite3_errmsg(sqlite3DB)))")
+                        let errMsg = String(cString: sqlite3_errmsg(sqlite3DB))
+                        PlayKeychain.debugLogger("Failed to bind query limit: \(errMsg)")
                         return false
                     }
 
@@ -635,7 +629,7 @@ class PlayKeychainDB: NSObject {
         var columnsQuery = primaryColumns.map { "\($0)" }
         columnsQuery.append(contentsOf: secondaryColumns.compactMap { col in
             guard let val = normalized[col],
-                  (val is NSNull || Self.isEncodableValue(val)) else {
+                  val is NSNull || Self.isEncodableValue(val) else {
                 return nil
             }
             return "\(col)"
@@ -644,7 +638,7 @@ class PlayKeychainDB: NSObject {
             let colStr = col as String
             guard colStr != (kSecValueRef as String),
                   let val = normalized[col],
-                  (val is NSNull || Self.isEncodableValue(val)) else {
+                  val is NSNull || Self.isEncodableValue(val) else {
                 return nil
             }
             return colStr
@@ -660,7 +654,7 @@ class PlayKeychainDB: NSObject {
 
         let insertValues: [CFTypeRef] = columnsQuery.map { col in
             guard let val = normalized[col],
-                  (val is NSNull || Self.isEncodableValue(val)) else {
+                  val is NSNull || Self.isEncodableValue(val) else {
                 return NSNull()
             }
             return val as CFTypeRef
@@ -777,7 +771,6 @@ class PlayKeychainDB: NSObject {
         return insertWithStatus(attributes).item
     }
 
-    // swiftlint:disable:next function_body_length
     func updateMatching(_ query: NSDictionary, attributesToUpdate: NSDictionary) -> OSStatus {
         let normalizedQuery = Self.normalizeAttributes(
             query,
@@ -821,14 +814,16 @@ class PlayKeychainDB: NSObject {
                 var matchedRows: [(rowID: Int64, pkValues: [CFTypeRef?])] = []
                 do {
                     guard let selectStmt = preparedStatement(for: selectRowIDsSQL, in: sqlite3DB) else {
-                        PlayKeychain.debugLogger("Failed query \(selectRowIDsSQL): \(String(cString: sqlite3_errmsg(sqlite3DB)))")
+                        let errMsg = String(cString: sqlite3_errmsg(sqlite3DB))
+                        PlayKeychain.debugLogger("Failed query \(selectRowIDsSQL): \(errMsg)")
                         sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
                         finalStatus = errSecIO
                         return false
                     }
                     defer { sqlite3_reset(selectStmt) }
 
-                    guard bindValues(whereInfo.values, to: selectStmt, in: sqlite3DB, context: "select for update") else {
+                    let selCtx = "select for update"
+                    guard bindValues(whereInfo.values, to: selectStmt, in: sqlite3DB, context: selCtx) else {
                         sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
                         finalStatus = errSecIO
                         return false
@@ -927,7 +922,8 @@ class PlayKeychainDB: NSObject {
                                 dupClauses.append("\(pkCol) IS NULL")
                             }
                         }
-                        let dupCheckSQL = "SELECT 1 FROM \(tableName) WHERE \(dupClauses.joined(separator: " AND ")) AND rowid != ? LIMIT 1"
+                        let dupFilter = dupClauses.joined(separator: " AND ")
+                        let dupCheckSQL = "SELECT 1 FROM \(tableName) WHERE \(dupFilter) AND rowid != ? LIMIT 1"
                         var hasCollision = false
                         do {
                             guard let dupStmt = preparedStatement(for: dupCheckSQL, in: sqlite3DB) else {
@@ -1040,7 +1036,8 @@ class PlayKeychainDB: NSObject {
                 let deleteQuery: String
                 if let limit = explicitDeleteLimit {
                     let remaining = limit - totalChanged
-                    deleteQuery = "DELETE FROM \(tableName) WHERE rowid IN (SELECT rowid FROM \(tableName) WHERE \(whereInfo.clause) LIMIT \(remaining))"
+                    deleteQuery = "DELETE FROM \(tableName) WHERE rowid IN "
+                        + "(SELECT rowid FROM \(tableName) WHERE \(whereInfo.clause) LIMIT \(remaining))"
                 } else {
                     deleteQuery = "DELETE FROM \(tableName) WHERE \(whereInfo.clause)"
                 }
@@ -1230,8 +1227,8 @@ class PlayKeychainDB: NSObject {
     }
 
     private func databasePathLocked() -> String {
-        let cfHome = getenv("CFFIXED_USER_HOME").flatMap { String(validatingUTF8: $0) }
-        let home = getenv("HOME").flatMap { String(validatingUTF8: $0) }
+        let cfHome = getenv("CFFIXED_USER_HOME").flatMap { String(validatingCString: $0) }
+        let home = getenv("HOME").flatMap { String(validatingCString: $0) }
         if let cached = cachedResolvedDBPath,
            cfHome == cachedEnvCFHome,
            home == cachedEnvHome {
@@ -1254,35 +1251,34 @@ class PlayKeychainDB: NSObject {
     }
 
     private func withDatabase(_ callback: (OpaquePointer) -> Bool) -> Bool {
-        os_unfair_lock_lock(dbLock)
-        defer { os_unfair_lock_unlock(dbLock) }
-
-        let dbPath = databasePathLocked()
-        if let existingDB = cachedDB {
-            var st = Darwin.stat()
-            let statOK = (stat(dbPath, &st) == 0)
-            if cachedDBPath == dbPath &&
-                statOK &&
-                st.st_nlink > 0 &&
-                st.st_dev == cachedDBDev &&
-                st.st_ino == cachedDBIno {
-                return callback(existingDB)
+        dbLock.withLock {
+            let dbPath = databasePathLocked()
+            if let existingDB = cachedDB {
+                var st = Darwin.stat()
+                let statOK = (stat(dbPath, &st) == 0)
+                if cachedDBPath == dbPath &&
+                    statOK &&
+                    st.st_nlink > 0 &&
+                    st.st_dev == cachedDBDev &&
+                    st.st_ino == cachedDBIno {
+                    return callback(existingDB)
+                }
+                closeDatabaseLocked()
             }
-            closeDatabaseLocked()
-        }
 
-        guard let sqlite3DB = openDatabase(atPath: dbPath) else { return false }
-        cachedDB = sqlite3DB
-        cachedDBPath = dbPath
-        var st = Darwin.stat()
-        if stat(dbPath, &st) == 0 {
-            cachedDBDev = st.st_dev
-            cachedDBIno = st.st_ino
-        } else {
-            cachedDBDev = 0
-            cachedDBIno = 0
+            guard let sqlite3DB = openDatabase(atPath: dbPath) else { return false }
+            cachedDB = sqlite3DB
+            cachedDBPath = dbPath
+            var st = Darwin.stat()
+            if stat(dbPath, &st) == 0 {
+                cachedDBDev = st.st_dev
+                cachedDBIno = st.st_ino
+            } else {
+                cachedDBDev = 0
+                cachedDBIno = 0
+            }
+            return callback(sqlite3DB)
         }
-        return callback(sqlite3DB)
     }
 
     private func openDatabase(atPath dbPath: String) -> OpaquePointer? {
@@ -1303,7 +1299,8 @@ class PlayKeychainDB: NSObject {
             return nil
         }
 
-        let pragmas = "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000; PRAGMA temp_store=MEMORY;"
+        let pragmas = "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; "
+            + "PRAGMA busy_timeout=5000; PRAGMA temp_store=MEMORY;"
         if sqlite3_exec(db, pragmas, nil, nil, nil) != SQLITE_OK {
             let errorMessage = String(cString: sqlite3_errmsg(db))
             PlayKeychain.debugLogger("Failed to configure SQLite pragmas: \(errorMessage)")
