@@ -3,6 +3,7 @@
 //  PlayTools
 //
 import Foundation
+import ObjectiveC.runtime
 import UIKit
 
 let screen = PlayScreen.shared
@@ -62,16 +63,16 @@ extension CGRect {
 }
 
 extension UIScreen {
-    private static var cachedAspectRatio: CGFloat?
-    private static let aspectRatioLock = PTUnfairLock()
+    nonisolated private static let aspectRatioLock = PTUnfairLock()
+    nonisolated(unsafe) private static var cachedAspectRatio: CGFloat?
 
-    static func invalidateCachedAspectRatio() {
+    nonisolated static func invalidateCachedAspectRatio() {
         aspectRatioLock.withLock {
             cachedAspectRatio = nil
         }
     }
 
-    static var aspectRatio: CGFloat {
+    nonisolated static var aspectRatio: CGFloat {
         if let cached = aspectRatioLock.withLock({ cachedAspectRatio }) {
             return cached
         }
@@ -95,30 +96,82 @@ extension UIScreen {
     }
 }
 
-public class PlayScreen: NSObject {
+public final class PlayScreen: NSObject, @unchecked Sendable {
     @objc public static let shared = PlayScreen()
 
+    private final class BoundsState: @unchecked Sendable {
+        weak var cachedWindow: UIWindow?
+        var lastKnownWindowBounds: CGRect = .zero
+        var lastMainKnownBounds: CGRect = .zero
+        var cachedMainScreenRect: CGRect = .zero
+        var lastAppliedStrictFitViewportKey: PTStrictViewportFocusKey?
+    }
+
     private static let boundsLock = PTUnfairLock()
-    private static weak var cachedWindow: UIWindow?
-    private static var lastKnownWindowBounds: CGRect = .zero
-    private static var lastMainKnownBounds: CGRect = .zero
-    private static var cachedMainScreenRect: CGRect = .zero
-    private static var lastAppliedStrictFitViewportKey: PTStrictViewportFocusKey?
+    private static let boundsState = BoundsState()
+
+    @MainActor
+    private static func resolveActiveScreenBounds(preferredWindow: UIWindow? = nil) -> CGRect {
+        if let bounds = preferredWindow?.windowScene?.screen.bounds,
+           bounds.width > 1,
+           bounds.height > 1 {
+            return bounds
+        }
+        if let bounds = PlayScreen.shared.windowScene?.screen.bounds,
+           bounds.width > 1,
+           bounds.height > 1 {
+            return bounds
+        }
+        var fallbackSceneBounds: CGRect?
+        for scene in UIApplication.shared.connectedScenes {
+            guard let windowScene = scene as? UIWindowScene else { continue }
+            let bounds = windowScene.screen.bounds
+            guard bounds.width > 1, bounds.height > 1 else { continue }
+            if windowScene.activationState == .foregroundActive {
+                return bounds
+            }
+            if fallbackSceneBounds == nil {
+                fallbackSceneBounds = bounds
+            }
+        }
+        if let fallbackSceneBounds {
+            return fallbackSceneBounds
+        }
+        if let akFrame = AKInterface.shared?.mainScreenFrame,
+           akFrame.width > 1,
+           akFrame.height > 1 {
+            return akFrame
+        }
+        let cached = boundsLock.withLock { boundsState.cachedMainScreenRect }
+        if cached.width > 1, cached.height > 1 {
+            return cached
+        }
+        return CGRect(x: 0, y: 0, width: mainScreenWidth, height: mainScreenHeight)
+    }
 
     func initialize() {
         if Thread.isMainThread {
-            Self.updateCachedScreenRect(UIScreen.main.bounds)
+            MainActor.assumeIsolated {
+                Self.updateCachedScreenRect(Self.resolveActiveScreenBounds())
+            }
         }
         AKInterface.shared?.setupWindowGeometryChanged? { _ in
             UIScreen.invalidateCachedAspectRatio()
-            Self.updateCachedScreenRect(UIScreen.main.bounds)
+            if Thread.isMainThread {
+                MainActor.assumeIsolated {
+                    Self.updateCachedScreenRect(Self.resolveActiveScreenBounds())
+                }
+            }
         }
         NotificationCenter.default.addObserver(
             forName: UIWindow.didBecomeKeyNotification,
             object: nil,
             queue: .main
         ) { [weak self] notification in
-            self?.handleWindowDidBecomeKey(notification)
+            nonisolated(unsafe) let unsafeNotification = notification
+            MainActor.assumeIsolated {
+                self?.handleWindowDidBecomeKey(unsafeNotification)
+            }
         }
         NotificationCenter.default.addObserver(
             forName: Notification.Name("NSWindowDidEndLiveResizeNotification"),
@@ -126,20 +179,26 @@ public class PlayScreen: NSObject {
             queue: .main
         ) { _ in
             UIScreen.invalidateCachedAspectRatio()
-            Self.updateCachedScreenRect(UIScreen.main.bounds)
+            MainActor.assumeIsolated {
+                Self.updateCachedScreenRect(Self.resolveActiveScreenBounds())
+            }
         }
     }
 
+    @MainActor
     private func handleWindowDidBecomeKey(_ notification: Notification) {
         UIScreen.invalidateCachedAspectRatio()
-        defer { Self.updateCachedScreenRect(UIScreen.main.bounds) }
-        guard let window = notification.object as? UIWindow,
+        let notificationWindow = notification.object as? UIWindow
+        defer { Self.updateCachedScreenRect(Self.resolveActiveScreenBounds(preferredWindow: notificationWindow)) }
+        guard let window = notificationWindow,
               !window.isHidden,
               !Self.isAuxiliaryKeyboardWindow(window),
               Self.isValidWindowBounds(window) else {
             return
         }
-        Self.cachedWindow = window
+        Self.boundsLock.withLock {
+            Self.boundsState.cachedWindow = window
+        }
         let isStrict = PlaySettings.shared.strictEmulationMode
         if self.resizable || isStrict, let windowScene = window.windowScene {
             windowScene.sizeRestrictions?.minimumSize = CGSize(width: 0, height: 0)
@@ -167,10 +226,10 @@ public class PlayScreen: NSObject {
         let shouldApplySize = Self.boundsLock.withLock {
             let decision = PTStrictViewportFocusPolicy.shouldApplyContentSizeOnFocus(
                 isStrictEmulationMode: isStrict,
-                lastAppliedFitScreenKey: Self.lastAppliedStrictFitViewportKey,
+                lastAppliedFitScreenKey: Self.boundsState.lastAppliedStrictFitViewportKey,
                 currentKey: currentKey
             )
-            Self.lastAppliedStrictFitViewportKey = decision.nextAppliedFitScreenKey
+            Self.boundsState.lastAppliedStrictFitViewportKey = decision.nextAppliedFitScreenKey
             return decision.shouldApply
         }
         if shouldApplySize {
@@ -191,7 +250,7 @@ public class PlayScreen: NSObject {
     private static func updateCachedScreenRect(_ rect: CGRect) {
         guard rect.width > 1, rect.height > 1 else { return }
         boundsLock.withLock {
-            cachedMainScreenRect = rect
+            boundsState.cachedMainScreenRect = rect
         }
     }
 
@@ -239,12 +298,12 @@ public class PlayScreen: NSObject {
             return CGRect(x: 0, y: 0, width: mainScreenWidth, height: mainScreenHeight)
         }
         if Thread.isMainThread {
-            let b = UIScreen.main.bounds
+            let b = MainActor.assumeIsolated { Self.resolveActiveScreenBounds() }
             Self.updateCachedScreenRect(b)
             return b
         }
         let (cached, fallbackWin) = Self.boundsLock.withLock {
-            (Self.cachedMainScreenRect, Self.lastKnownWindowBounds)
+            (Self.boundsState.cachedMainScreenRect, Self.boundsState.lastKnownWindowBounds)
         }
         if cached.width > 1, cached.height > 1 {
             return cached
@@ -272,6 +331,7 @@ public class PlayScreen: NSObject {
         PTCoordinateMath.screenPercent(for: screenRect.size)
     }
 
+    @MainActor
     var keyWindow: UIWindow? {
         for scene in UIApplication.shared.connectedScenes {
             guard let windowScene = scene as? UIWindowScene else { continue }
@@ -285,10 +345,12 @@ public class PlayScreen: NSObject {
         return primaryWindow
     }
 
+    @MainActor
     var windowScene: UIWindowScene? {
         window?.windowScene
     }
 
+    @MainActor
     var window: UIWindow? {
         for scene in UIApplication.shared.connectedScenes where scene.activationState == .foregroundActive {
             guard let windowScene = scene as? UIWindowScene else { continue }
@@ -302,6 +364,7 @@ public class PlayScreen: NSObject {
         return primaryWindow
     }
 
+    @MainActor
     var nsWindow: NSObject? {
         window?.nsWindow
     }
@@ -333,15 +396,18 @@ public class PlayScreen: NSObject {
             return rect.toAspectRatioDefault()
     }
 
+    @MainActor
     private static func isValidWindowBounds(_ window: UIWindow) -> Bool {
         let b = window.bounds
         return b.width > 1 && b.height > 1
     }
 
+    @MainActor
     private static func isAuxiliaryKeyboardWindow(_ window: UIWindow) -> Bool {
         PTWindowGeometryMath.isAuxiliaryUIWindow(className: NSStringFromClass(type(of: window)))
     }
 
+    @MainActor
     var primaryWindow: UIWindow? {
         var bestNormalApp: UIWindow?
         var bestKeyValidApp: UIWindow?
@@ -382,10 +448,12 @@ public class PlayScreen: NSObject {
             ?? bestVisibleValidApp ?? fallbackApp ?? bestKeyNormalOther ?? bestNormalOther ?? fallbackOther
     }
 
+    @MainActor
     @objc public func activeTouchWindow() -> UIWindow? {
         return keyWindow ?? primaryWindow
     }
 
+    @MainActor
     @objc(activeTouchWindowAtPoint:)
     public func activeTouchWindow(at point: CGPoint) -> UIWindow? {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
@@ -423,21 +491,26 @@ public class PlayScreen: NSObject {
     }
 
     public func isPointInsideActiveTextInput(_ point: CGPoint) -> Bool {
-        guard Thread.isMainThread, let win = activeTouchWindow(at: point) else {
+        guard Thread.isMainThread else {
             return false
         }
-        let localPoint = PTWindowGeometryMath.pointInWindow(
-            scenePoint: point,
-            windowOrigin: win.frame.origin
-        )
-        var current = win.hitTest(localPoint, with: nil)
-        while let view = current {
-            if view is UITextInput && view.isFirstResponder {
-                return true
+        return MainActor.assumeIsolated {
+            guard let win = activeTouchWindow(at: point) else {
+                return false
             }
-            current = view.superview
+            let localPoint = PTWindowGeometryMath.pointInWindow(
+                scenePoint: point,
+                windowOrigin: win.frame.origin
+            )
+            var current = win.hitTest(localPoint, with: nil)
+            while let view = current {
+                if view is UITextInput && view.isFirstResponder {
+                    return true
+                }
+                current = view.superview
+            }
+            return false
         }
-        return false
     }
 
     @objc public static func boundsResizable(_ rect: CGRect) -> CGRect {
@@ -445,43 +518,42 @@ public class PlayScreen: NSObject {
             return CGRect(x: 0, y: 0, width: mainScreenWidth, height: mainScreenHeight)
         }
         if Thread.isMainThread {
-            if let cw = cachedWindow,
-               !cw.isHidden,
-               cw.isKeyWindow,
-               cw.windowScene?.session.role == .windowApplication {
-                let winBounds = cw.bounds
-                if winBounds.width > 1, winBounds.height > 1 {
-                    if winBounds != lastMainKnownBounds {
-                        lastMainKnownBounds = winBounds
-                        boundsLock.withLock {
-                            lastKnownWindowBounds = winBounds
-                            cachedMainScreenRect = winBounds
-                        }
+            if let winBounds = MainActor.assumeIsolated({ () -> CGRect? in
+                let cachedWin = boundsLock.withLock { boundsState.cachedWindow }
+                if let cw = cachedWin,
+                   !cw.isHidden,
+                   cw.isKeyWindow,
+                   cw.windowScene?.session.role == .windowApplication {
+                    let b = cw.bounds
+                    if b.width > 1, b.height > 1 {
+                        return b
                     }
-                    return winBounds
                 }
+                if let resolved = PlayScreen.shared.primaryWindow {
+                    boundsLock.withLock { boundsState.cachedWindow = resolved }
+                    let b = resolved.bounds
+                    if b.width > 1, b.height > 1 {
+                        return b
+                    }
+                }
+                return nil
+            }) {
+                boundsLock.withLock {
+                    if winBounds != boundsState.lastMainKnownBounds {
+                        boundsState.lastMainKnownBounds = winBounds
+                        boundsState.lastKnownWindowBounds = winBounds
+                        boundsState.cachedMainScreenRect = winBounds
+                    }
+                }
+                return winBounds
             }
 
-            if let resolved = PlayScreen.shared.primaryWindow {
-                cachedWindow = resolved
-                let winBounds = resolved.bounds
-                if winBounds.width > 1, winBounds.height > 1 {
-                    if winBounds != lastMainKnownBounds {
-                        lastMainKnownBounds = winBounds
-                        boundsLock.withLock {
-                            lastKnownWindowBounds = winBounds
-                            cachedMainScreenRect = winBounds
-                        }
-                    }
-                    return winBounds
-                }
-            }
-
-            if lastMainKnownBounds.width > 1, lastMainKnownBounds.height > 1 {
-                return lastMainKnownBounds
+            let lastMain = boundsLock.withLock { boundsState.lastMainKnownBounds }
+            if lastMain.width > 1, lastMain.height > 1 {
+                return lastMain
             }
         } else {
-            let cached = boundsLock.withLock { lastKnownWindowBounds }
+            let cached = boundsLock.withLock { boundsState.lastKnownWindowBounds }
             if cached.width > 1, cached.height > 1 {
                 return cached
             }
@@ -523,12 +595,27 @@ extension CGFloat {
 
 extension UIWindow {
     var nsWindow: NSObject? {
-        guard let nsWindows = NSClassFromString("NSApplication")?
-            .value(forKeyPath: "sharedApplication.windows") as? [AnyObject] else { return nil }
-        for nsWindow in nsWindows {
-            let uiWindows = nsWindow.value(forKeyPath: "uiWindows") as? [UIWindow] ?? []
+        let sharedAppSel = NSSelectorFromString("sharedApplication")
+        let windowsSel = NSSelectorFromString("windows")
+        let uiWindowsSel = NSSelectorFromString("uiWindows")
+        guard let nsAppClass: AnyClass = NSClassFromString("NSApplication"),
+              let sharedMethod = class_getClassMethod(nsAppClass, sharedAppSel) else {
+            return nil
+        }
+        typealias SharedAppIMP = @convention(c) (AnyClass, Selector) -> AnyObject?
+        let sharedIMP = unsafeBitCast(method_getImplementation(sharedMethod), to: SharedAppIMP.self)
+        guard let sharedApp = sharedIMP(nsAppClass, sharedAppSel) as? NSObject,
+              sharedApp.responds(to: windowsSel),
+              let nsWindows = sharedApp.perform(windowsSel)?.takeUnretainedValue() as? [NSObject] else {
+            return nil
+        }
+        for candidate in nsWindows {
+            guard candidate.responds(to: uiWindowsSel),
+                  let uiWindows = candidate.perform(uiWindowsSel)?.takeUnretainedValue() as? [UIWindow] else {
+                continue
+            }
             if uiWindows.contains(self) {
-                return nsWindow as? NSObject
+                return candidate
             }
         }
         return nil

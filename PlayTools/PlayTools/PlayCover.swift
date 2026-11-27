@@ -3,13 +3,15 @@
 //  PlayTools
 //
 
+import Darwin
 import Foundation
 import UIKit
 
-public class PlayCover: NSObject {
+public final class PlayCover: NSObject, Sendable {
 
     static let shared = PlayCover()
-    var menuController: MenuController?
+    @MainActor var menuController: MenuController?
+    @MainActor private var isTerminatingFromWindowClose = false
 
     @objc static public func launch() {
         _ = PTSafeMode.shared.ensureEvaluatedForCurrentProcess()
@@ -57,69 +59,73 @@ public class PlayCover: NSObject {
 
     @objc static public func initMenu(menu: NSObject) {
         guard let menuBuilder = menu as? UIMenuBuilder else { return }
-        shared.menuController = MenuController(with: menuBuilder)
+        if Thread.isMainThread {
+            nonisolated(unsafe) let unsafeMenuBuilder = menuBuilder
+            MainActor.assumeIsolated {
+                shared.menuController = MenuController(with: unsafeMenuBuilder)
+            }
+        }
     }
 
     static public func quitWhenClose() {
+        NotificationCenter.default.addObserver(
+            forName: NSNotification.Name(rawValue: "NSApplicationWillTerminateNotification"),
+            object: nil,
+            queue: OperationQueue.main
+        ) { _ in
+            MainActor.assumeIsolated {
+                shared.isTerminatingFromWindowClose = true
+                PTSafeMode.shared.markGracefulTermination()
+            }
+        }
+
         NotificationCenter.default.addObserver(
             forName: NSNotification.Name(rawValue: "NSWindowWillCloseNotification"),
             object: nil,
             queue: OperationQueue.main
         ) { notif in
-            if PlayScreen.shared.nsWindow?.isEqual(notif.object) ?? false {
-                // Step 1: Resign active
-                for scene in UIApplication.shared.connectedScenes {
-                    scene.delegate?.sceneWillResignActive?(scene)
-                    NotificationCenter.default.post(name: UIScene.willDeactivateNotification,
-                                                    object: scene)
-                }
-                UIApplication.shared.delegate?.applicationWillResignActive?(UIApplication.shared)
-                NotificationCenter.default.post(name: UIApplication.willResignActiveNotification,
-                                                object: UIApplication.shared)
-
-                // Step 2: Enter background
-                for scene in UIApplication.shared.connectedScenes {
-                    scene.delegate?.sceneDidEnterBackground?(scene)
-                    NotificationCenter.default.post(name: UIScene.didEnterBackgroundNotification,
-                                                    object: scene)
-                }
-                UIApplication.shared.delegate?.applicationDidEnterBackground?(UIApplication.shared)
-                NotificationCenter.default.post(name: UIApplication.didEnterBackgroundNotification,
-                                                object: UIApplication.shared)
-
-                // Step 2.5: End UIBackgroundTask
-                // There is an expiration handler, but idk how to invoke it. Skip for now.
-
-                // Step 3: Terminate
-                for scene in UIApplication.shared.connectedScenes {
-                    scene.delegate?.sceneDidDisconnect?(scene)
-                    NotificationCenter.default.post(name: UIScene.didDisconnectNotification,
-                                                    object: scene)
-                }
-                UIApplication.shared.delegate?.applicationWillTerminate?(UIApplication.shared)
-                // Some apps will freeze or crash when click close button if we send willTerminateNotification.
-                // The developer documentation says this is a "may be called method", so it can be safely skipped.
-                // https://developer.apple.com/documentation/uikit/uiapplicationdelegate/1623111-applicationwillterminate
-                // swiftlint:disable:previous line_length
-//                NotificationCenter.default.post(name: UIApplication.willTerminateNotification,
-//                                                object: UIApplication.shared)
-                if let terminate = AKInterface.shared?.terminateApplication {
-                    PTSafeMode.shared.markGracefulTermination()
-                    DispatchQueue.main.async(execute: terminate)
+            nonisolated(unsafe) let closedObject = notif.object
+            MainActor.assumeIsolated {
+                guard !shared.isTerminatingFromWindowClose else { return }
+                let shouldQuit: Bool
+                if let closedNSObject = closedObject as? NSObject {
+                    if let decide = AKInterface.shared?.shouldTerminateOnWindowClose {
+                        shouldQuit = decide(closedNSObject)
+                    } else {
+                        shouldQuit = PlayScreen.shared.nsWindow?.isEqual(closedNSObject) ?? false
+                    }
                 } else {
-                    PTSafeMode.shared.markGracefulTermination()
+                    shouldQuit = false
                 }
+                if shouldQuit {
+                    shared.isTerminatingFromWindowClose = true
+                    PTSafeMode.shared.markGracefulTermination()
 
-                // Step 3.5: End BGTask
-                // BGTask typically runs in another process and is tricky to terminate.
-                // It may run into infinite loops, end up silently heating the device up.
-                // This actually happens for ToF. Hope future developers can solve this.
+                    // Do NOT manually post UIScene / UIApplication lifecycle notifications synchronously inside
+                    // NSWindowWillCloseNotification: AppKit fires it mid-[UIScene _invalidate], and forging
+                    // UIApplication.willResignActiveNotification hits a UINSUIKitBackgroundingController assertion
+                    // (SIGABRT). Defer to NSApplication.terminate(nil) so AppKit & UIKitMacHelper drive shutdown.
+                    if let terminate = AKInterface.shared?.terminateApplication {
+                        DispatchQueue.main.async {
+                            terminate()
+                        }
+                    } else {
+                        DispatchQueue.main.async {
+                            Darwin.exit(0)
+                        }
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                        Darwin.exit(0)
+                    }
+                }
             }
         }
     }
 
-    static func delay(_ delay: Double, closure: @escaping () -> Void) {
+    static func delay(_ delay: Double, closure: @escaping @MainActor @Sendable () -> Void) {
         let when = DispatchTime.now() + delay
-        DispatchQueue.main.asyncAfter(deadline: when, execute: closure)
+        DispatchQueue.main.asyncAfter(deadline: when) {
+            MainActor.assumeIsolated(closure)
+        }
     }
 }

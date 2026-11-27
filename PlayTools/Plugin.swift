@@ -38,4 +38,5 @@ public protocol Plugin: NSObjectProtocol {
     @objc optional func clearWindowAspectRatio()
     @objc optional func setWindowOrientation(portrait: Bool, targetSize: CGSize)
     @objc optional func setupWindowGeometryChanged(_ callback: @escaping (CGRect) -> Void)
+    @objc optional func shouldTerminateOnWindowClose(_ window: NSObject) -> Bool
 }

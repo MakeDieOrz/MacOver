@@ -310,7 +310,7 @@ public enum PTWindowGeometryMath {
         let maxW = (hasValidWidth && rawMaxW >= 1.0) ? floor(rawMaxW) : rawMaxW
         let maxH = (hasValidHeight && rawMaxH >= 1.0) ? floor(rawMaxH) : rawMaxH
 
-        var targetW = requested.width
+        let targetW = requested.width
         var targetH = requested.height
         if let ratio = aspectRatio,
            ratio.width.isFinite,
@@ -333,7 +333,7 @@ public enum PTWindowGeometryMath {
         return CGSize(width: finalW, height: finalH)
     }
 
-    public struct StrictDeviceDisplaySpec: Equatable {
+    public struct StrictDeviceDisplaySpec: Equatable, Sendable {
         public let model: String
         public let nativePixelWidth: Int
         public let nativePixelHeight: Int
@@ -562,6 +562,29 @@ public enum PTWindowGeometryMath {
             || className.contains("InputWindow")
     }
 
+    public static func isPointInTitleBar(
+        pointInWindow: CGPoint,
+        contentLayoutRect: CGRect
+    ) -> Bool {
+        guard pointInWindow.x.isFinite,
+              pointInWindow.y.isFinite,
+              contentLayoutRect.origin.x.isFinite,
+              contentLayoutRect.origin.y.isFinite,
+              contentLayoutRect.size.width.isFinite,
+              contentLayoutRect.size.height.isFinite,
+              contentLayoutRect.height > 0 else {
+            return false
+        }
+        return pointInWindow.y > contentLayoutRect.maxY
+    }
+
+    public static func shouldTerminateOnWindowClose(
+        isClosingWindowPrimary: Bool,
+        otherVisiblePrimaryWindowCount: Int
+    ) -> Bool {
+        isClosingWindowPrimary && otherVisiblePrimaryWindowCount == 0
+    }
+
     public struct TouchWindowCandidate {
         public let isHidden: Bool
         public let alpha: CGFloat
@@ -635,6 +658,7 @@ public enum PTControlModeTransitionPolicy {
         modeRawValue == "arbitraryClick" || modeRawValue == "textInput"
     }
 
+    // swiftlint:disable:next function_parameter_count
     public static func invalidation(
         from previousModeRawValue: String,
         to nextModeRawValue: String,

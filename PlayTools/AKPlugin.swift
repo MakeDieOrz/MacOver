@@ -11,8 +11,12 @@ import Darwin
 import Foundation
 import ObjectiveC
 
+private struct AKUncheckedSendableBox<Value>: @unchecked Sendable {
+    let value: Value
+}
+
 // Add a lightweight struct so we can decode only the flag we care about
-private struct AKAppSettingsData: Codable {
+private struct AKAppSettingsData: Codable, Sendable {
     var hideTitleBar: Bool?
     var floatingWindow: Bool?
     var resolution: Int?
@@ -25,10 +29,21 @@ private struct AKAppSettingsData: Codable {
     var reportedIOSVersion: String?
 }
 
-class AKPlugin: NSObject, Plugin {
+final class AKPlugin: NSObject, Plugin, @unchecked Sendable {
     private var isApplyingProgrammaticGeometry = false
+    @MainActor private var isTrackingWindowChromeClick = false
     private var geometryObservers: [NSObjectProtocol] = []
 
+    private static func onMainSync<T: Sendable>(_ body: @MainActor () -> T) -> T {
+        if Thread.isMainThread {
+            return MainActor.assumeIsolated(body)
+        }
+        return DispatchQueue.main.sync {
+            MainActor.assumeIsolated(body)
+        }
+    }
+
+    @MainActor
     private static func isPrimaryHostWindow(_ window: NSWindow) -> Bool {
         let className = NSStringFromClass(type(of: window))
         let delegateClassName = window.delegate.map { NSStringFromClass(type(of: $0)) }
@@ -42,6 +57,7 @@ class AKPlugin: NSObject, Plugin {
         )
     }
 
+    @MainActor
     private var activeWindow: NSWindow? {
         if let key = NSApplication.shared.keyWindow, Self.isPrimaryHostWindow(key) {
             return key
@@ -57,10 +73,12 @@ class AKPlugin: NSObject, Plugin {
         return NSApplication.shared.windows.first(where: { Self.isPrimaryHostWindow($0) })
     }
 
+    @MainActor
     private static func titleBarHeight(for window: NSWindow) -> CGFloat {
         max(0, window.frame.height - window.contentRect(forFrameRect: window.frame).height)
     }
 
+    @MainActor
     private func applyHideTitleBarAppearance(to window: NSWindow) {
         if !window.styleMask.contains(.fullScreen) {
             window.styleMask.insert([.fullSizeContentView])
@@ -71,6 +89,7 @@ class AKPlugin: NSObject, Plugin {
         window.title = ""
     }
 
+    @MainActor
     private func configureWindow(_ window: NSWindow) {
         if !window.styleMask.contains(.fullScreen) {
             if let plan = strictWindowPlan(for: window) {
@@ -109,9 +128,11 @@ class AKPlugin: NSObject, Plugin {
 
     required override init() {
         super.init()
-        if let window = activeWindow {
-            configureWindow(window)
-            NSWindow.allowsAutomaticWindowTabbing = true
+        Self.onMainSync {
+            if let window = self.activeWindow {
+                self.configureWindow(window)
+                NSWindow.allowsAutomaticWindowTabbing = true
+            }
         }
 
         // Apply the same appearance rules to any subsequent windows that may be created
@@ -119,35 +140,38 @@ class AKPlugin: NSObject, Plugin {
             forName: NSWindow.didBecomeKeyNotification,
             object: nil,
             queue: .main) { [weak self] notif in
-                guard let self,
-                      let win = notif.object as? NSWindow,
-                      Self.isPrimaryHostWindow(win) else { return }
-                self.configureWindow(win)
+                guard let self else { return }
+                let winBox = AKUncheckedSendableBox(value: notif.object as? NSWindow)
+                MainActor.assumeIsolated {
+                    guard let win = winBox.value,
+                          Self.isPrimaryHostWindow(win) else { return }
+                    self.configureWindow(win)
+                }
         }
     }
 
     var screenCount: Int {
-        NSScreen.screens.count
+        Self.onMainSync { NSScreen.screens.count }
     }
 
     var mousePoint: CGPoint {
-        activeWindow?.mouseLocationOutsideOfEventStream ?? CGPoint()
+        Self.onMainSync { activeWindow?.mouseLocationOutsideOfEventStream ?? CGPoint() }
     }
 
     var windowFrame: CGRect {
-        activeWindow?.frame ?? CGRect()
+        Self.onMainSync { activeWindow?.frame ?? CGRect() }
     }
 
     var isMainScreenEqualToFirst: Bool {
-        return NSScreen.main == NSScreen.screens.first
+        Self.onMainSync { NSScreen.main == NSScreen.screens.first }
     }
 
     var mainScreenFrame: CGRect {
-        return (NSScreen.main ?? NSScreen.screens.first)?.frame ?? CGRect()
+        Self.onMainSync { (NSScreen.main ?? NSScreen.screens.first)?.frame ?? CGRect() }
     }
 
     var isFullscreen: Bool {
-        activeWindow?.styleMask.contains(.fullScreen) ?? false
+        Self.onMainSync { activeWindow?.styleMask.contains(.fullScreen) ?? false }
     }
 
     var isSequoiaOrNewer: Bool {
@@ -155,7 +179,7 @@ class AKPlugin: NSObject, Plugin {
     }
 
     func setWindowContentSize(_ size: CGSize) {
-        let apply = { [weak self] in
+        let apply = { @MainActor [weak self] in
             guard let self, let window = self.activeWindow else { return }
             guard !window.styleMask.contains(.fullScreen) else { return }
             if self.hideTitleBarSetting && !window.styleMask.contains(.fullSizeContentView) {
@@ -198,14 +222,16 @@ class AKPlugin: NSObject, Plugin {
             window.setFrame(nextFrame, display: true, animate: false)
         }
         if Thread.isMainThread {
-            apply()
+            MainActor.assumeIsolated(apply)
         } else {
-            DispatchQueue.main.async(execute: apply)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated(apply)
+            }
         }
     }
 
     func setWindowAspectRatio(_ ratio: CGSize) {
-        let apply = { [weak self] in
+        let apply = { @MainActor [weak self] in
             guard let self,
                   let window = self.activeWindow,
                   !window.styleMask.contains(.fullScreen) else { return }
@@ -217,26 +243,30 @@ class AKPlugin: NSObject, Plugin {
             window.contentAspectRatio = NSSize(width: effectiveRatio.width, height: effectiveRatio.height)
         }
         if Thread.isMainThread {
-            apply()
+            MainActor.assumeIsolated(apply)
         } else {
-            DispatchQueue.main.async(execute: apply)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated(apply)
+            }
         }
     }
 
     func clearWindowAspectRatio() {
-        let apply = { [weak self] in
+        let apply = { @MainActor [weak self] in
             guard let self, !self.isStrictEmulationActive, let window = self.activeWindow else { return }
             window.resizeIncrements = NSSize(width: 1, height: 1)
         }
         if Thread.isMainThread {
-            apply()
+            MainActor.assumeIsolated(apply)
         } else {
-            DispatchQueue.main.async(execute: apply)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated(apply)
+            }
         }
     }
 
     func setWindowOrientation(portrait: Bool, targetSize: CGSize) {
-        let apply = { [weak self] in
+        let apply = { @MainActor [weak self] in
             guard let self else { return }
             if let strictSize = self.strictDeviceLogicalSize {
                 self.setWindowAspectRatio(strictSize)
@@ -253,14 +283,17 @@ class AKPlugin: NSObject, Plugin {
             self.setWindowContentSize(oriented)
         }
         if Thread.isMainThread {
-            apply()
+            MainActor.assumeIsolated(apply)
         } else {
-            DispatchQueue.main.async(execute: apply)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated(apply)
+            }
         }
     }
 
     func setupWindowGeometryChanged(_ callback: @escaping (CGRect) -> Void) {
-        let register = { [weak self] in
+        let callbackBox = AKUncheckedSendableBox(value: callback)
+        let register = { @MainActor [weak self] in
             guard let self else { return }
             for obs in self.geometryObservers {
                 NotificationCenter.default.removeObserver(obs)
@@ -279,22 +312,28 @@ class AKPlugin: NSObject, Plugin {
                     object: nil,
                     queue: .main
                 ) { [weak self] notification in
-                    guard let self, !self.isApplyingProgrammaticGeometry else { return }
-                    if let notifiedWin = notification.object as? NSWindow,
-                       !Self.isPrimaryHostWindow(notifiedWin) {
-                        return
+                    guard let self else { return }
+                    let notifBox = AKUncheckedSendableBox(value: notification.object as? NSWindow)
+                    MainActor.assumeIsolated {
+                        guard !self.isApplyingProgrammaticGeometry else { return }
+                        if let notifiedWin = notifBox.value,
+                           !Self.isPrimaryHostWindow(notifiedWin) {
+                            return
+                        }
+                        guard let win = notifBox.value ?? self.activeWindow,
+                              Self.isPrimaryHostWindow(win) else { return }
+                        callbackBox.value(win.frame)
                     }
-                    guard let win = (notification.object as? NSWindow) ?? self.activeWindow,
-                          Self.isPrimaryHostWindow(win) else { return }
-                    callback(win.frame)
                 }
                 self.geometryObservers.append(observer)
             }
         }
         if Thread.isMainThread {
-            register()
+            MainActor.assumeIsolated(register)
         } else {
-            DispatchQueue.main.async(execute: register)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated(register)
+            }
         }
     }
 
@@ -312,10 +351,12 @@ class AKPlugin: NSObject, Plugin {
     }
 
     func warpCursor() {
-        guard let firstScreen = NSScreen.screens.first else {return}
-        let frame = windowFrame
-        // Convert from NS coordinates to CG coordinates
-        CGWarpMouseCursorPosition(CGPoint(x: frame.midX, y: firstScreen.frame.height - frame.midY))
+        Self.onMainSync {
+            guard let firstScreen = NSScreen.screens.first else { return }
+            let frame = windowFrame
+            // Convert from NS coordinates to CG coordinates
+            CGWarpMouseCursorPosition(CGPoint(x: frame.midX, y: firstScreen.frame.height - frame.midY))
+        }
     }
 
     func unhideCursor() {
@@ -332,12 +373,35 @@ class AKPlugin: NSObject, Plugin {
     }
 
     func terminateApplication() {
-        NSApplication.shared.terminate(self)
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                NSApplication.shared.terminate(nil)
+            }
+        }
+    }
+
+    func shouldTerminateOnWindowClose(_ window: NSObject) -> Bool {
+        guard let closingWindow = window as? NSWindow else { return false }
+        let windowBox = AKUncheckedSendableBox(value: closingWindow)
+        return Self.onMainSync {
+            let targetWindow = windowBox.value
+            let isPrimary = Self.isPrimaryHostWindow(targetWindow)
+            let otherVisiblePrimaryCount = NSApplication.shared.windows.reduce(into: 0) { count, candidate in
+                if candidate !== targetWindow
+                    && candidate.isVisible
+                    && Self.isPrimaryHostWindow(candidate) {
+                    count += 1
+                }
+            }
+            return PTWindowGeometryMath.shouldTerminateOnWindowClose(
+                isClosingWindowPrimary: isPrimary,
+                otherVisiblePrimaryWindowCount: otherVisiblePrimaryCount
+            )
+        }
     }
 
     private var modifierFlag: UInt = 0
 
-    // swiftlint:disable:next function_body_length
     func setupKeyboard(keyboard: @escaping (UInt16, Bool, Bool, Bool) -> Bool,
                        swapMode: @escaping () -> Bool) {
         func checkCmd(modifier: NSEvent.ModifierFlags) -> Bool {
@@ -397,6 +461,19 @@ class AKPlugin: NSObject, Plugin {
     func setupMouseMoved(_ mouseMoved: @escaping (CGFloat, CGFloat) -> Bool) {
         let mask: NSEvent.EventTypeMask = [.leftMouseDragged, .otherMouseDragged, .rightMouseDragged]
         NSEvent.addLocalMonitorForEvents(matching: mask, handler: { event in
+            if event.type == .leftMouseDragged {
+                let eventBox = AKUncheckedSendableBox(value: event)
+                let bypass = MainActor.assumeIsolated {
+                    let ev = eventBox.value
+                    if let eventWin = ev.window, !Self.isPrimaryHostWindow(eventWin) {
+                        return true
+                    }
+                    return self.isTrackingWindowChromeClick || self.isInWindowChromeOrTrafficLights(ev)
+                }
+                if bypass {
+                    return event
+                }
+            }
             let consumed = mouseMoved(event.deltaX, event.deltaY)
             if consumed {
                 return nil
@@ -410,71 +487,84 @@ class AKPlugin: NSObject, Plugin {
         })
     }
 
+    @MainActor
+    private func isInWindowChromeOrTrafficLights(_ event: NSEvent) -> Bool {
+        guard let win = event.window else { return false }
+        let pointInWindow = event.locationInWindow
+        let buttonTypes: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
+        for type in buttonTypes {
+            if let button = win.standardWindowButton(type) {
+                let localPoint = button.convert(pointInWindow, from: nil)
+                if button.bounds.contains(localPoint) {
+                    return true
+                }
+            }
+        }
+        if !self.hideTitleBarSetting && !win.styleMask.contains(.fullScreen) {
+            return PTWindowGeometryMath.isPointInTitleBar(
+                pointInWindow: pointInWindow,
+                contentLayoutRect: win.contentLayoutRect
+            )
+        }
+        return false
+    }
+
     func setupMouseButton(left: Bool, right: Bool, _ consumed: @escaping (Int, Bool) -> Bool) {
         let downType: NSEvent.EventTypeMask = left ? .leftMouseDown : right ? .rightMouseDown : .otherMouseDown
         let upType: NSEvent.EventTypeMask = left ? .leftMouseUp : right ? .rightMouseUp : .otherMouseUp
+        let consumedBox = AKUncheckedSendableBox(value: consumed)
 
-        // Helper to detect whether the event is inside any of the window "traffic-light" buttons
-        func isInTrafficLightArea(_ event: NSEvent) -> Bool {
-            if self.hideTitleBarSetting == false {
-                return false
-            }
-            guard let win = event.window else { return false }
-            let pointInWindow = event.locationInWindow
-            let buttonTypes: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton, .fullScreenButton]
-            for type in buttonTypes {
-                if let button = win.standardWindowButton(type) {
-                    let localPoint = button.convert(pointInWindow, from: nil) // convert from window coords
-                    if button.bounds.contains(localPoint) {
+        NSEvent.addLocalMonitorForEvents(matching: downType, handler: { event in
+            let eventBox = AKUncheckedSendableBox(value: event)
+            let dropEvent = MainActor.assumeIsolated {
+                let event = eventBox.value
+                // Always allow clicks on the window traffic-light buttons or native title bar to pass through
+                if self.isInWindowChromeOrTrafficLights(event) {
+                    if left {
+                        self.isTrackingWindowChromeClick = true
+                    }
+                    return false
+                }
+
+                // Detect double-clicks on the title-bar area (respecting system preference)
+                if left && event.clickCount == 2, self.hideTitleBarSetting, let win = event.window {
+                    let contentRect = win.contentLayoutRect
+                    // Title-bar area is the region above contentLayoutRect
+                    if event.locationInWindow.y > contentRect.maxY {
+                        win.performZoom(nil)
                         return true
                     }
                 }
-            }
-            return false
-        }
 
-        NSEvent.addLocalMonitorForEvents(matching: downType, handler: { event in
-            // Always allow clicks on the window traffic-light buttons to pass through
-            if isInTrafficLightArea(event) {
-                return event
-            }
-
-            // Detect double-clicks on the title-bar area (respecting system preference)
-
-            if left && event.clickCount == 2, self.hideTitleBarSetting, let win = event.window {
-                let contentRect = win.contentLayoutRect
-                // Title-bar area is the region above contentLayoutRect
-                if event.locationInWindow.y > contentRect.maxY {
-                    win.performZoom(nil)
-                    return nil
+                // Bypass auxiliary panels / IME windows and mismatched host windows
+                if let eventWin = event.window, !Self.isPrimaryHostWindow(eventWin) {
+                    return false
                 }
+                if let targetWin = self.activeWindow, let eventWin = event.window, eventWin != targetWin {
+                    return false
+                }
+                return consumedBox.value(event.buttonNumber, true)
             }
-
-            // Bypass auxiliary panels / IME windows and mismatched host windows
-            if let eventWin = event.window, !Self.isPrimaryHostWindow(eventWin) {
-                return event
-            }
-            if let targetWin = self.activeWindow, let eventWin = event.window, eventWin != targetWin {
-                return event
-            }
-            if consumed(event.buttonNumber, true) {
-                return nil
-            }
-            return event
+            return dropEvent ? nil : event
         })
         NSEvent.addLocalMonitorForEvents(matching: upType, handler: { event in
-            if let eventWin = event.window, !Self.isPrimaryHostWindow(eventWin) {
-                return event
+            let eventBox = AKUncheckedSendableBox(value: event)
+            let dropEvent = MainActor.assumeIsolated {
+                let event = eventBox.value
+                if let eventWin = event.window, !Self.isPrimaryHostWindow(eventWin) {
+                    return false
+                }
+                // Always allow releases on the traffic-light buttons or title bar to pass through
+                if (left && self.isTrackingWindowChromeClick) || self.isInWindowChromeOrTrafficLights(event) {
+                    if left {
+                        self.isTrackingWindowChromeClick = false
+                    }
+                    _ = consumedBox.value(event.buttonNumber, false)
+                    return false
+                }
+                return consumedBox.value(event.buttonNumber, false)
             }
-            // Always allow releases on the traffic-light buttons to pass through
-            if isInTrafficLightArea(event) {
-                _ = consumed(event.buttonNumber, false)
-                return event
-            }
-            if consumed(event.buttonNumber, false) {
-                return nil
-            }
-            return event
+            return dropEvent ? nil : event
         })
     }
 
@@ -560,6 +650,7 @@ class AKPlugin: NSObject, Plugin {
         return spec.logicalSize(orientation: orientation)
     }
 
+    @MainActor
     private func strictWindowPlan(
         for window: NSWindow,
         visibleFrame: CGRect? = nil,
@@ -600,7 +691,7 @@ class AKPlugin: NSObject, Plugin {
 
     private static func resolveHostUserRoot() -> String {
         let rawEnv = getenv("CFFIXED_USER_HOME") ?? getenv("HOME")
-        if let rawEnv, let envStr = String(validatingUTF8: rawEnv), envStr.hasPrefix("/") {
+        if let rawEnv, let envStr = String(validatingCString: rawEnv), envStr.hasPrefix("/") {
             var path = envStr
             if path.hasPrefix("/System/Volumes/Data/") {
                 path.removeFirst("/System/Volumes/Data".count)
@@ -629,7 +720,7 @@ class AKPlugin: NSObject, Plugin {
 
     private static func resolveSettingsURL(bundleIdentifier: String) -> URL {
         if let overridePtr = getenv("PLAYTOOLS_SETTINGS_PLIST"),
-           let overridePath = String(validatingUTF8: overridePtr),
+           let overridePath = String(validatingCString: overridePtr),
            overridePath.hasPrefix("/") {
             return URL(fileURLWithPath: overridePath)
         }
@@ -642,7 +733,7 @@ class AKPlugin: NSObject, Plugin {
                 return primary
             }
             if let cfHomePtr = getenv("CFFIXED_USER_HOME"),
-               let cfHome = String(validatingUTF8: cfHomePtr),
+               let cfHome = String(validatingCString: cfHomePtr),
                let marker = cfHome.range(of: "/Library/Containers/") {
                 let tail = cfHome[marker.upperBound...]
                 let cid = tail.prefix(while: { $0 != "/" })
@@ -656,7 +747,7 @@ class AKPlugin: NSObject, Plugin {
             return primary
         }
         if let cfHomePtr = getenv("CFFIXED_USER_HOME"),
-           let cfHome = String(validatingUTF8: cfHomePtr),
+           let cfHome = String(validatingCString: cfHomePtr),
            let marker = cfHome.range(of: "/Library/Containers/") {
             let tail = cfHome[marker.upperBound...]
             let cid = tail.prefix(while: { $0 != "/" })
@@ -667,7 +758,7 @@ class AKPlugin: NSObject, Plugin {
         return settingsDir.appendingPathComponent("\(bundleIdentifier).plist")
     }
 
-    fileprivate static var akAppSettingsData: AKAppSettingsData? = {
+    fileprivate static let akAppSettingsData: AKAppSettingsData? = {
         let bundleIdentifier = Bundle.main.bundleIdentifier ?? ""
         let settingsURL = resolveSettingsURL(bundleIdentifier: bundleIdentifier)
         guard let data = try? Data(contentsOf: settingsURL),
