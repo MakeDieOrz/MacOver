@@ -105,12 +105,26 @@ public enum InlineSyscallPatcher {
         return try revertPatches(appBundleURL: appBundleURL, manifestURL: manifestURL)
     }
 
+    private static let maxManifestBytes = 4 * 1024 * 1024
+    private static let maxManifestFiles = 1024
+    private static let maxManifestSites = 262_144
+
     private static func applyPatches(
         appBundleURL: URL,
         bundleIdentifier: String,
         manifestURL: URL
     ) throws -> ReconcileResult {
-        let existingManifest = try loadValidManifestIfPresent(at: manifestURL)
+        let existingManifest: SVCPatchManifest?
+        do {
+            existingManifest = try loadValidManifestIfPresent(at: manifestURL)
+        } catch is DecodingError {
+            PlayCoverDiagnostics.log(
+                "Corrupt SVC patch manifest at \(manifestURL.path); regenerating during enable.",
+                isError: true
+            )
+            try? removeManifestIfExists(at: manifestURL)
+            existingManifest = nil
+        }
         let candidateFiles = try collectCandidateMachOFiles(in: appBundleURL)
         var existingByPath: [String: SVCPatchedFile] = [:]
         if let existingManifest, existingManifest.bundleIdentifier == bundleIdentifier {
@@ -134,10 +148,11 @@ public enum InlineSyscallPatcher {
         }
 
         var nextEntries: [SVCPatchedFile] = []
-        var modifiedURLs: [URL] = []
+        var stagedWrites: [(url: URL, original: Data, patched: Data)] = []
 
         for candidate in candidateFiles {
-            var data = try Data(contentsOf: candidate.url)
+            let originalFileData = try Data(contentsOf: candidate.url)
+            var data = originalFileData
             let existingEntry = existingByPath[candidate.relativePath]
             let newSites = try scanInstructionSites(in: data, matching: svcInstruction)
 
@@ -157,8 +172,7 @@ public enum InlineSyscallPatcher {
                 let origSHA = sha256Hex(data)
                 try writeWord(brkInstruction, to: &data, sites: combinedSites)
                 let patchedSHA = sha256Hex(data)
-                try writeAtomicPreservingPermissions(data, to: candidate.url)
-                modifiedURLs.append(candidate.url)
+                stagedWrites.append((candidate.url, originalFileData, data))
                 nextEntries.append(SVCPatchedFile(
                     relativePath: candidate.relativePath,
                     originalSHA256: origSHA,
@@ -175,8 +189,7 @@ public enum InlineSyscallPatcher {
             let originalSHA = sha256Hex(data)
             try writeWord(brkInstruction, to: &data, sites: newSites)
             let patchedSHA = sha256Hex(data)
-            try writeAtomicPreservingPermissions(data, to: candidate.url)
-            modifiedURLs.append(candidate.url)
+            stagedWrites.append((candidate.url, originalFileData, data))
             nextEntries.append(SVCPatchedFile(
                 relativePath: candidate.relativePath,
                 originalSHA256: originalSHA,
@@ -188,8 +201,8 @@ public enum InlineSyscallPatcher {
         if nextEntries.isEmpty {
             try removeManifestIfExists(at: manifestURL)
             return ReconcileResult(
-                modified: !modifiedURLs.isEmpty,
-                modifiedBinaryURLs: modifiedURLs,
+                modified: false,
+                modifiedBinaryURLs: [],
                 patchedSiteCount: 0
             )
         }
@@ -198,13 +211,35 @@ public enum InlineSyscallPatcher {
             bundleIdentifier: bundleIdentifier,
             files: nextEntries.sorted { $0.relativePath < $1.relativePath }
         )
+        let encodedManifest = try encodeValidatedManifest(updatedManifest)
+
+        let previousManifestData = try? Data(contentsOf: manifestURL)
         if existingManifest != updatedManifest {
-            try writeManifest(updatedManifest, to: manifestURL)
+            try writeManifestData(encodedManifest, to: manifestURL)
         }
+
+        var committedURLs: [URL] = []
+        do {
+            for item in stagedWrites {
+                try writeAtomicPreservingPermissions(item.patched, to: item.url)
+                committedURLs.append(item.url)
+            }
+        } catch {
+            for (idx, committedURL) in committedURLs.enumerated() {
+                try? writeAtomicPreservingPermissions(stagedWrites[idx].original, to: committedURL)
+            }
+            if let previousManifestData {
+                try? writeManifestData(previousManifestData, to: manifestURL)
+            } else {
+                try? removeManifestIfExists(at: manifestURL)
+            }
+            throw error
+        }
+
         let totalSites = updatedManifest.files.reduce(0) { $0 + $1.sites.count }
         return ReconcileResult(
-            modified: !modifiedURLs.isEmpty,
-            modifiedBinaryURLs: modifiedURLs,
+            modified: !committedURLs.isEmpty,
+            modifiedBinaryURLs: committedURLs,
             patchedSiteCount: totalSites
         )
     }
@@ -590,6 +625,7 @@ public enum InlineSyscallPatcher {
         }
 
         var textSegmentVMAddr: UInt64?
+        var textSegmentVMSize: UInt64?
         var sections: [InstructionSection] = []
         var rawDataInCodeRanges: [Range<UInt64>] = []
 
@@ -608,38 +644,39 @@ public enum InlineSyscallPatcher {
                 let segName = extractSegmentName(seg.segname)
                 if segName == "__TEXT" {
                     textSegmentVMAddr = seg.vmaddr
-                }
+                    textSegmentVMSize = seg.vmsize
 
-                let sectHeaderSize = UInt64(MemoryLayout<section_64>.size)
-                var sectOffset = cmdOffset + UInt64(MemoryLayout<segment_command_64>.size)
-                let segCmdEnd = cmdOffset + UInt64(lc.cmdsize)
-                for _ in 0..<seg.nsects {
-                    guard sectOffset + sectHeaderSize <= segCmdEnd,
-                          let sec = loadStruct(section_64.self, from: data, at: Int(sectOffset)) else {
-                        break
-                    }
-                    sectOffset += sectHeaderSize
+                    let sectHeaderSize = UInt64(MemoryLayout<section_64>.size)
+                    var sectOffset = cmdOffset + UInt64(MemoryLayout<segment_command_64>.size)
+                    let segCmdEnd = cmdOffset + UInt64(lc.cmdsize)
+                    for _ in 0..<seg.nsects {
+                        guard sectOffset + sectHeaderSize <= segCmdEnd,
+                              let sec = loadStruct(section_64.self, from: data, at: Int(sectOffset)) else {
+                            break
+                        }
+                        sectOffset += sectHeaderSize
 
-                    let sectionType = sec.flags & UInt32(SECTION_TYPE)
-                    let isZerofill = (sectionType == UInt32(S_ZEROFILL) || sectionType == UInt32(S_GB_ZEROFILL))
-                    let instrMask = UInt32(S_ATTR_PURE_INSTRUCTIONS) | UInt32(S_ATTR_SOME_INSTRUCTIONS)
-                    guard !isZerofill,
-                          (sec.flags & instrMask) != 0,
-                          sec.offset > 0,
-                          sec.size >= 4 else {
-                        continue
-                    }
+                        let sectionType = sec.flags & UInt32(SECTION_TYPE)
+                        let isZerofill = (sectionType == UInt32(S_ZEROFILL) || sectionType == UInt32(S_GB_ZEROFILL))
+                        let instrMask = UInt32(S_ATTR_PURE_INSTRUCTIONS) | UInt32(S_ATTR_SOME_INSTRUCTIONS)
+                        guard !isZerofill,
+                              (sec.flags & instrMask) != 0,
+                              sec.offset > 0,
+                              sec.size >= 4 else {
+                            continue
+                        }
 
-                    let fileStart = sliceOffset + UInt64(sec.offset)
-                    guard fileStart <= sliceEnd,
-                          sec.size <= sliceEnd - fileStart else {
-                        continue
+                        let fileStart = sliceOffset + UInt64(sec.offset)
+                        guard fileStart <= sliceEnd,
+                              sec.size <= sliceEnd - fileStart else {
+                            continue
+                        }
+                        sections.append(InstructionSection(
+                            fileStart: fileStart,
+                            fileEnd: fileStart + sec.size,
+                            vmAddress: sec.addr
+                        ))
                     }
-                    sections.append(InstructionSection(
-                        fileStart: fileStart,
-                        fileEnd: fileStart + sec.size,
-                        vmAddress: sec.addr
-                    ))
                 }
             } else if lc.cmd == UInt32(LC_DATA_IN_CODE),
                       lc.cmdsize >= UInt32(MemoryLayout<linkedit_data_command>.size),
@@ -669,7 +706,11 @@ public enum InlineSyscallPatcher {
             cmdOffset += UInt64(lc.cmdsize)
         }
 
-        let baseTextVMAddr = textSegmentVMAddr ?? 0
+        guard let baseTextVMAddr = textSegmentVMAddr,
+              let baseTextVMSize = textSegmentVMSize,
+              baseTextVMSize >= 4 else {
+            return
+        }
         let mergedDIC = mergeSortedRanges(rawDataInCodeRanges)
         let sortedSections = sections.sorted { $0.fileStart < $1.fileStart }
 
@@ -699,13 +740,17 @@ public enum InlineSyscallPatcher {
                     if word == targetWord {
                         let deltaInSection = cursor - section.fileStart
                         let vmAddr = section.vmAddress + deltaInSection
-                        let vmOffset = vmAddr >= baseTextVMAddr ? (vmAddr - baseTextVMAddr) : 0
-                        sites.append(SVCPatchSite(
-                            sliceOffset: sliceOffset,
-                            fileOffset: cursor,
-                            vmAddress: vmAddr,
-                            vmOffset: vmOffset
-                        ))
+                        if vmAddr >= baseTextVMAddr {
+                            let vmOffset = vmAddr - baseTextVMAddr
+                            if vmOffset <= baseTextVMSize - 4 {
+                                sites.append(SVCPatchSite(
+                                    sliceOffset: sliceOffset,
+                                    fileOffset: cursor,
+                                    vmAddress: vmAddr,
+                                    vmOffset: vmOffset
+                                ))
+                            }
+                        }
                     }
                     cursor += 4
                 }
@@ -813,13 +858,38 @@ public enum InlineSyscallPatcher {
         return manifest
     }
 
-    private static func writeManifest(_ manifest: SVCPatchManifest, to manifestURL: URL) throws {
+    private static func encodeValidatedManifest(_ manifest: SVCPatchManifest) throws -> Data {
+        guard manifest.files.count <= maxManifestFiles else {
+            throw PlayCoverError.playToolsError(
+                "SVC patch file count \(manifest.files.count) exceeds runtime limit \(maxManifestFiles)"
+            )
+        }
+        let totalSites = manifest.files.reduce(0) { $0 + $1.sites.count }
+        guard totalSites <= maxManifestSites else {
+            throw PlayCoverError.playToolsError(
+                "SVC patch site count \(totalSites) exceeds runtime limit \(maxManifestSites)"
+            )
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(manifest)
+        guard data.count <= maxManifestBytes else {
+            throw PlayCoverError.playToolsError(
+                "SVC patch manifest size \(data.count) bytes exceeds runtime limit \(maxManifestBytes)"
+            )
+        }
+        return data
+    }
+
+    private static func writeManifestData(_ data: Data, to manifestURL: URL) throws {
         let dir = manifestURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let data = try encoder.encode(manifest)
         try data.write(to: manifestURL, options: .atomic)
+    }
+
+    private static func writeManifest(_ manifest: SVCPatchManifest, to manifestURL: URL) throws {
+        let data = try encodeValidatedManifest(manifest)
+        try writeManifestData(data, to: manifestURL)
     }
 
     private static func removeManifestIfExists(at manifestURL: URL) throws {

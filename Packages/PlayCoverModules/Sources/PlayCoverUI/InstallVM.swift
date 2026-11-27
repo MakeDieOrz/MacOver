@@ -17,7 +17,8 @@ public enum InstallStepsNative: String, Sendable {
          failed = "playapp.progress.failed"
 }
 
-public class InstallVM: ProgressVM<InstallStepsNative>, @unchecked Sendable {
+@MainActor
+public class InstallVM: ProgressVM<InstallStepsNative> {
 
     public init() {
         super.init(start: .begin, ends: [.finish, .failed])

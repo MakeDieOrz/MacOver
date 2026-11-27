@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import PlayCoverCore
+import Synchronization
 
 public enum KeyCoverStatus: String, Codable, Hashable, Sendable {
     case disabled
@@ -15,35 +16,68 @@ public final class KeyCoverPreferences: @unchecked Sendable {
         static let promptAtLaunch = "promptForKeyCoverPasswordAtLaunch"
     }
 
+    private struct State: Sendable {
+        var keyCoverEnabled: KeyCoverStatus
+        var promptForKeyCoverPasswordAtLaunch: Bool
+    }
+
     @ObservationIgnored private let userDefaults: UserDefaults
+    @ObservationIgnored private let stateLock: Mutex<State>
 
     public var keyCoverEnabled: KeyCoverStatus {
-        didSet {
-            guard oldValue != keyCoverEnabled else { return }
-            userDefaults.set(keyCoverEnabled.rawValue, forKey: Keys.keyCoverEnabled)
+        get {
+            access(keyPath: \.keyCoverEnabled)
+            return stateLock.withLock { $0.keyCoverEnabled }
+        }
+        set {
+            withMutation(keyPath: \.keyCoverEnabled) {
+                let changed = stateLock.withLock { state -> Bool in
+                    guard state.keyCoverEnabled != newValue else { return false }
+                    state.keyCoverEnabled = newValue
+                    return true
+                }
+                if changed {
+                    userDefaults.set(newValue.rawValue, forKey: Keys.keyCoverEnabled)
+                }
+            }
         }
     }
 
     public var promptForKeyCoverPasswordAtLaunch: Bool {
-        didSet {
-            guard oldValue != promptForKeyCoverPasswordAtLaunch else { return }
-            userDefaults.set(promptForKeyCoverPasswordAtLaunch, forKey: Keys.promptAtLaunch)
+        get {
+            access(keyPath: \.promptForKeyCoverPasswordAtLaunch)
+            return stateLock.withLock { $0.promptForKeyCoverPasswordAtLaunch }
+        }
+        set {
+            withMutation(keyPath: \.promptForKeyCoverPasswordAtLaunch) {
+                let changed = stateLock.withLock { state -> Bool in
+                    guard state.promptForKeyCoverPasswordAtLaunch != newValue else { return false }
+                    state.promptForKeyCoverPasswordAtLaunch = newValue
+                    return true
+                }
+                if changed {
+                    userDefaults.set(newValue, forKey: Keys.promptAtLaunch)
+                }
+            }
         }
     }
 
     public init(userDefaults: UserDefaults = .standard) {
         self.userDefaults = userDefaults
+        let initialStatus: KeyCoverStatus
         if let raw = userDefaults.string(forKey: Keys.keyCoverEnabled),
            let status = KeyCoverStatus(rawValue: raw) {
-            self.keyCoverEnabled = status
+            initialStatus = status
         } else {
-            self.keyCoverEnabled = .disabled
+            initialStatus = .disabled
         }
-        if userDefaults.object(forKey: Keys.promptAtLaunch) != nil {
-            self.promptForKeyCoverPasswordAtLaunch = userDefaults.bool(forKey: Keys.promptAtLaunch)
-        } else {
-            self.promptForKeyCoverPasswordAtLaunch = true
-        }
+        let initialPrompt = userDefaults.object(forKey: Keys.promptAtLaunch) != nil
+            ? userDefaults.bool(forKey: Keys.promptAtLaunch)
+            : true
+        self.stateLock = Mutex(State(
+            keyCoverEnabled: initialStatus,
+            promptForKeyCoverPasswordAtLaunch: initialPrompt
+        ))
     }
 }
 
@@ -106,8 +140,9 @@ public final class InstallPreferences: @unchecked Sendable {
     }
 }
 
+@MainActor
 @Observable
-public final class UninstallPreferences: @unchecked Sendable {
+public final class UninstallPreferences {
     private enum Keys {
         static let clearAppData = "ClearAppDataUninstall"
         static let removeAppKeymap = "RemoveAppKeymapUninstall"

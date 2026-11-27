@@ -6,7 +6,7 @@
 import Foundation
 import PlayCoverCore
 
-enum PlayAppSettingsPreset: String, CaseIterable, Identifiable {
+nonisolated enum PlayAppSettingsPreset: String, CaseIterable, Identifiable {
     case balanced
     case crisp
     case eco
@@ -77,7 +77,7 @@ enum PlayAppSettingsPreset: String, CaseIterable, Identifiable {
     }
 }
 
-struct DeviceProfileOption: Identifiable, Hashable {
+nonisolated struct DeviceProfileOption: Identifiable, Hashable {
     let model: String
     let label: String
     let isIPhone: Bool
@@ -144,7 +144,7 @@ struct DeviceProfileOption: Identifiable, Hashable {
     }
 }
 
-extension AppSettingsData {
+nonisolated extension AppSettingsData {
     static func computedDimensions(
         resolution: Int,
         aspectRatio: Int,

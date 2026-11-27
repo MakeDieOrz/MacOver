@@ -9,7 +9,7 @@ import Foundation
 import Observation
 import PlayCoverUI
 
-enum DownloadStepsNative: String, Sendable {
+nonisolated enum DownloadStepsNative: String, Sendable {
     case downloading = "playapp.download.downloading",
          integrity = "playapp.download.integrityCheck",
          finish = "playapp.progress.finished",
@@ -18,7 +18,7 @@ enum DownloadStepsNative: String, Sendable {
 }
 
 @Observable
-final class DownloadVM: @unchecked Sendable {
+final class DownloadVM {
     @ObservationIgnored private let tracker = ProgressVM<DownloadStepsNative>(
         start: .downloading,
         ends: [.finish, .failed, .canceled]
@@ -41,11 +41,11 @@ final class DownloadVM: @unchecked Sendable {
         set { tracker.status = newValue }
     }
 
-    func next(_ step: DownloadStepsNative, _ startProgress: Double, _ stopProgress: Double) {
+    nonisolated func next(_ step: DownloadStepsNative, _ startProgress: Double, _ stopProgress: Double) {
         tracker.next(step, startProgress, stopProgress)
     }
 
-    func updateProgress(_ value: Double) {
+    nonisolated func updateProgress(_ value: Double) {
         tracker.updateProgress(value)
     }
 }

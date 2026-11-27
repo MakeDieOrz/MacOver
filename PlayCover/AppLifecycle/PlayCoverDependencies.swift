@@ -3,7 +3,7 @@ import Observation
 import SwiftUI
 
 @Observable
-final class PlayCoverDependencies: Sendable {
+nonisolated final class PlayCoverDependencies: Sendable {
     let alertPresenter: AlertPresenter
     let startupAlerts: StartupAlertCenter
     let toastVM: ToastVM

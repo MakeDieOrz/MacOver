@@ -17,6 +17,7 @@ let package = Package(
         .library(name: "PlayCoverKeymapping", targets: ["PlayCoverKeymapping"]),
         .library(name: "PlayCoverNetwork", targets: ["PlayCoverNetwork"]),
         .library(name: "PlayCoverSandbox", targets: ["PlayCoverSandbox"]),
+        .library(name: "PlayCoverInstaller", targets: ["PlayCoverInstaller"]),
         .library(name: "PlayCoverUI", targets: ["PlayCoverUI"])
     ],
     targets: [
@@ -46,6 +47,11 @@ let package = Package(
             swiftSettings: approachableConcurrencySettings
         ),
         .target(
+            name: "PlayCoverInstaller",
+            dependencies: ["PlayCoverCore", "PlayCoverMachO"],
+            swiftSettings: approachableConcurrencySettings
+        ),
+        .target(
             name: "PlayCoverUI",
             dependencies: ["PlayCoverCore"],
             swiftSettings: approachableConcurrencySettings
@@ -68,6 +74,11 @@ let package = Package(
         .testTarget(
             name: "PlayCoverSandboxSPMTests",
             dependencies: ["PlayCoverSandbox", "PlayCoverCore"],
+            swiftSettings: approachableConcurrencySettings
+        ),
+        .testTarget(
+            name: "PlayCoverInstallerSPMTests",
+            dependencies: ["PlayCoverInstaller", "PlayCoverMachO", "PlayCoverCore"],
             swiftSettings: approachableConcurrencySettings
         ),
         .testTarget(

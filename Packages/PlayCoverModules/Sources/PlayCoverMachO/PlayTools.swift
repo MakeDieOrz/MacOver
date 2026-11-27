@@ -226,6 +226,7 @@ public class PlayTools {
         installState.withLock { $0.lastInstallError }
     }
 
+    @concurrent
     public static func installInIPA(_ exec: URL, appInfo: AppInfo? = nil, signBundle: Bool = true) async throws {
         await waitForSystemInstall()
         _ = try Macho.removeLoadCommand(
@@ -261,36 +262,9 @@ public class PlayTools {
 
     @discardableResult
     public static func installPluginInIPA(_ payload: URL) throws -> Bool {
-        var modified = false
-        let allFiles = try FileManager.default.contentsOfDirectory(
-            at: bundledPlayToolsFramework, includingPropertiesForKeys: [])
-        for localizationDirectory in allFiles where localizationDirectory.pathExtension == "lproj" {
-            let (_, changed) = try copyAssetIfChanged(target: payload,
-                                                      directoryName: localizationDirectory.lastPathComponent,
-                                                      component: "Playtools", pathExtension: "strings")
-            if changed { modified = true }
-        }
-
-        let bundledPlayToolsResources = bundledPlayToolsFramework
-            .appendingPathComponent("Versions")
-            .appendingPathComponent("A")
-            .appendingPathComponent("Resources")
-        if FileManager.default.fileExists(atPath: bundledPlayToolsResources.path) {
-            let allFiles = try FileManager.default.contentsOfDirectory(
-                at: bundledPlayToolsResources, includingPropertiesForKeys: [])
-            for localizationDirectory in allFiles where localizationDirectory.pathExtension == "lproj" {
-                let (_, changed) = try copyAssetIfChanged(source: bundledPlayToolsResources,
-                                                          target: payload,
-                                                          directoryName: localizationDirectory.lastPathComponent,
-                                                          component: "Playtools", pathExtension: "strings")
-                if changed { modified = true }
-            }
-        }
-
-        if try installComponentBundles(into: payload) {
-            modified = true
-        }
-        return modified
+        // Playtools localization strings live inside PlayTools.framework Resources and are resolved
+        // via Bundle(for: PlayCover.self), so we must not inject .lproj directories into the guest app bundle.
+        try installComponentBundles(into: payload)
     }
 
     @discardableResult
@@ -438,13 +412,14 @@ public class PlayTools {
         return (resolvedBundleURL, "")
     }
 
+    @concurrent
     public static func removeFromApp(
         _ exec: URL,
         appBundleURL: URL? = nil,
         bundleIdentifier: String? = nil,
         svcManifestURL: URL? = nil,
-        signMacho: (URL) throws -> Void = { try Shell.signMacho($0) },
-        signApp: (URL) throws -> Void = { try Shell.signApp($0) }
+        signMacho: @Sendable (URL) throws -> Void = { try Shell.signMacho($0) },
+        signApp: @Sendable (URL) throws -> Void = { try Shell.signApp($0) }
     ) async {
         do {
             let resolved = resolveAppBundleAndInfo(

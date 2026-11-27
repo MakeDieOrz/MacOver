@@ -1,0 +1,5 @@
+#include "App.xcconfig"
+
+// Swift 6.2 SE-0466: macOS SwiftUI/AppKit host application target defaults to MainActor isolation.
+// Background/model/installer types opt out explicitly with `nonisolated`.
+SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor

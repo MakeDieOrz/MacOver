@@ -8,7 +8,7 @@
 import Darwin
 import Foundation
 
-extension PlayApp {
+nonisolated extension PlayApp {
     private static func isUnixSocketAcceptingConnections(at path: String) -> Bool {
         var st = stat()
         guard lstat(path, &st) == 0, (st.st_mode & S_IFMT) == S_IFSOCK else {

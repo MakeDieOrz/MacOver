@@ -8,7 +8,7 @@
 import Foundation
 import UniformTypeIdentifiers
 
-final class Keymapping: @unchecked Sendable {
+nonisolated final class Keymapping: @unchecked Sendable {
     static var keymappingDir: URL {
         let keymappingFolder = PlayTools.playCoverContainer.appendingPathComponent("Keymapping")
         if !FileManager.default.fileExists(atPath: keymappingFolder.path) {

@@ -8,7 +8,7 @@
 import Darwin
 import Foundation
 
-struct AppContainer {
+nonisolated struct AppContainer {
 
     static let containersURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library")

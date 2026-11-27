@@ -7,9 +7,9 @@ import Foundation
 import Observation
 
 @Observable
-class AppsVM: @unchecked Sendable {
+class AppsVM {
 
-    public static let appDirectory = PlayTools.playCoverContainer.appendingPathComponent("Applications")
+    nonisolated public static let appDirectory = PlayTools.playCoverContainer.appendingPathComponent("Applications")
 
     weak var dependencies: PlayCoverDependencies?
 
@@ -22,7 +22,7 @@ class AppsVM: @unchecked Sendable {
         }
     }
 
-    static func ensureBaseDirectoriesExist() throws {
+    nonisolated static func ensureBaseDirectoriesExist() throws {
         try FileManager.default.createDirectory(
             at: appDirectory,
             withIntermediateDirectories: true
@@ -45,7 +45,7 @@ class AppsVM: @unchecked Sendable {
         filteredApps = nextFiltered.sorted { $0.name.lowercased() < $1.name.lowercased() }
     }
 
-    static func shouldReuseExistingApp(_ existing: PlayApp, at appURL: URL) -> Bool {
+    nonisolated static func shouldReuseExistingApp(_ existing: PlayApp, at appURL: URL) -> Bool {
         let plistURL = appURL.appendingPathComponent("Info").appendingPathExtension("plist")
         let freshInfo = AppInfo(contentsOf: plistURL)
         let existingInfo = existing.info

@@ -126,6 +126,36 @@ final class MITMProxyCoordinator {
         }
     }
 
+    func stopAllServers(apps: [PlayApp]) async {
+        let bundleIDs = Set(Array(servers.keys) + apps.map(\.info.bundleIdentifier))
+        for bundleID in bundleIDs where !bundleID.isEmpty {
+            await stopServer(for: bundleID)
+        }
+        for app in apps where app.settings.settings.mitmRuntimePort != 0 {
+            app.settings.update { $0.mitmRuntimePort = 0 }
+            _ = app.settings.flush()
+        }
+    }
+
+    func prepareForHostTermination(apps: [PlayApp]) {
+        for app in apps where app.settings.settings.mitmRuntimePort != 0 {
+            app.settings.update { $0.mitmRuntimePort = 0 }
+            _ = app.settings.flush()
+        }
+        let runningServers = Array(servers.values)
+        for task in observerTasks.values {
+            task.cancel()
+        }
+        observerTasks.removeAll()
+        servers.removeAll()
+        activePorts.removeAll()
+        for server in runningServers {
+            Task.detached(priority: .userInitiated) {
+                await server.stop()
+            }
+        }
+    }
+
     func updateLiveConfiguration(for bundleID: String, settings: AppSettingsData) async {
         let shouldInject = settings.enableCustomCertificates || settings.networkProxyMode == "builtInMITM"
         try? certificateStore.syncRuntimeCertificates(for: bundleID, enabled: shouldInject)

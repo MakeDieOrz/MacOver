@@ -95,6 +95,7 @@
 		AA72A0242F00001000623C15 /* PlayCoverSandbox in Frameworks */ = {isa = PBXBuildFile; productRef = AA72A0142F00001000623C15 /* PlayCoverSandbox */; };
 		AA72A0252F00001000623C15 /* PlayCoverUI in Frameworks */ = {isa = PBXBuildFile; productRef = AA72A0152F00001000623C15 /* PlayCoverUI */; };
 		AA72A0262F00001000623C15 /* PlayCoverNetwork in Frameworks */ = {isa = PBXBuildFile; productRef = AA72A0162F00001000623C15 /* PlayCoverNetwork */; };
+		AA72A0272F00001000623C15 /* PlayCoverInstaller in Frameworks */ = {isa = PBXBuildFile; productRef = AA72A0172F00001000623C15 /* PlayCoverInstaller */; };
 		AA72A0322F00001000623C15 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA72A0312F00001000623C15 /* AppDelegate.swift */; };
 		AA72A0382F00001000623C15 /* PlayCoverDependencies.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA72A0372F00001000623C15 /* PlayCoverDependencies.swift */; };
 		AA72A03A2F00001000623C15 /* MITMProxyCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA72A0392F00001000623C15 /* MITMProxyCoordinator.swift */; };
@@ -193,6 +194,7 @@
 		AA71A0202F00000200623C15 /* PlayTools.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; name = PlayTools.xcodeproj; path = PlayTools/PlayTools.xcodeproj; sourceTree = "<group>"; };
 		AA71A0412F00000400623C15 /* Base.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Base.xcconfig; sourceTree = "<group>"; };
 		AA71A0422F00000400623C15 /* App.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = App.xcconfig; sourceTree = "<group>"; };
+		AA71A0462F00000400623C15 /* HostApp.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = HostApp.xcconfig; sourceTree = "<group>"; };
 		AA71A0522F00000500623C15 /* PlayCoverMachOTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PlayCoverMachOTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA71A0532F00000500623C15 /* PlayCoverCoreTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PlayCoverCoreTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA71A0542F00000500623C15 /* MachoTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MachoTests.swift; sourceTree = "<group>"; };
@@ -276,6 +278,7 @@
 				AA72A0242F00001000623C15 /* PlayCoverSandbox in Frameworks */,
 				AA72A0252F00001000623C15 /* PlayCoverUI in Frameworks */,
 				AA72A0262F00001000623C15 /* PlayCoverNetwork in Frameworks */,
+				AA72A0272F00001000623C15 /* PlayCoverInstaller in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -574,6 +577,7 @@
 			children = (
 				AA71A0412F00000400623C15 /* Base.xcconfig */,
 				AA71A0422F00000400623C15 /* App.xcconfig */,
+				AA71A0462F00000400623C15 /* HostApp.xcconfig */,
 			);
 			path = Config;
 			sourceTree = "<group>";
@@ -682,6 +686,7 @@
 				AA72A0142F00001000623C15 /* PlayCoverSandbox */,
 				AA72A0152F00001000623C15 /* PlayCoverUI */,
 				AA72A0162F00001000623C15 /* PlayCoverNetwork */,
+				AA72A0172F00001000623C15 /* PlayCoverInstaller */,
 			);
 			productName = PlayCover;
 			productReference = 8783CFF726B8C52D00171041 /* MacOver.app */;
@@ -881,10 +886,14 @@
 				"$(SRCROOT)/.swiftlint.yml",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/AppInfo.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/AppIntegrity.swift",
+				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/AppSettingsModels.swift",
+				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/AppSettingsPersistence.swift",
+				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/AppSettingsSchema.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/DataExtensions.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/DiscordActivity.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/FileExtensions.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/ITunesResponse.swift",
+				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/KeyCoverVault.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/LSApplicationCategoryType.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/NetworkRuleParser.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/NetworkVM.swift",
@@ -894,18 +903,22 @@
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/ProcessInfo+Testing.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/Shell.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverCore/URLExtensions.swift",
+				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverInstaller/BackupTransactionStore.swift",
+				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverInstaller/LaunchEnvironmentPatcher.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverKeymapping/KeyCodeNames.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverKeymapping/KeymapData.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverMachO/InlineSyscallPatcher.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverMachO/MachOByteSwap.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverMachO/Macho.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverMachO/PlayTools.swift",
+				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverNetwork/HTTPBodyDecoder.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverNetwork/LocalMITMProxyServer.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverNetwork/NetworkMITMModels.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverNetwork/PerAppCertificateStore.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverNetwork/TrafficCaptureStore.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverNetwork/X509CertificateTools.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverSandbox/DualTrackPrivilegeEscalator.swift",
+				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverSandbox/EntitlementsComposer.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverSandbox/HelperSecurityValidator.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverSandbox/PlayCoverHelperProtocol.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverSandbox/SystemConfig.swift",
@@ -1219,7 +1232,7 @@
 		};
 		8783D00926B8C52E00171041 /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = AA71A0422F00000400623C15 /* App.xcconfig */;
+			baseConfigurationReference = AA71A0462F00000400623C15 /* HostApp.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = "AppIcon${BUNDLE_ID_SUFFIX}";
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -1252,7 +1265,7 @@
 		};
 		9BFBDA6828C95BA500252EB7 /* Nightly */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = AA71A0422F00000400623C15 /* App.xcconfig */;
+			baseConfigurationReference = AA71A0462F00000400623C15 /* HostApp.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = "AppIcon${BUNDLE_ID_SUFFIX}";
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -1285,7 +1298,7 @@
 		};
 		AA71A0442F00000400623C15 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = AA71A0422F00000400623C15 /* App.xcconfig */;
+			baseConfigurationReference = AA71A0462F00000400623C15 /* HostApp.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = "AppIcon${BUNDLE_ID_SUFFIX}";
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -1565,6 +1578,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = AA72A0012F00001000623C15 /* XCLocalSwiftPackageReference "Packages/PlayCoverModules" */;
 			productName = PlayCoverNetwork;
+		};
+		AA72A0172F00001000623C15 /* PlayCoverInstaller */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA72A0012F00001000623C15 /* XCLocalSwiftPackageReference "Packages/PlayCoverModules" */;
+			productName = PlayCoverInstaller;
 		};
 		AA72B0212F00002000623C15 /* PlayCoverCore */ = {
 			isa = XCSwiftPackageProductDependency;

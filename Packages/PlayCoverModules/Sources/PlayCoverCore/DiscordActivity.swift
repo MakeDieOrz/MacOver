@@ -18,10 +18,10 @@ public struct DiscordActivity: Codable, Equatable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        enable = try container.decodeIfPresent(Bool.self, forKey: .enable) ?? false
-        applicationID = try container.decodeIfPresent(String.self, forKey: .applicationID) ?? ""
-        details = try container.decodeIfPresent(String.self, forKey: .details) ?? ""
-        state = try container.decodeIfPresent(String.self, forKey: .state) ?? ""
-        image = try container.decodeIfPresent(String.self, forKey: .image) ?? ""
+        enable = (try? container.decodeIfPresent(Bool.self, forKey: .enable)) ?? false
+        applicationID = (try? container.decodeIfPresent(String.self, forKey: .applicationID)) ?? ""
+        details = (try? container.decodeIfPresent(String.self, forKey: .details)) ?? ""
+        state = (try? container.decodeIfPresent(String.self, forKey: .state)) ?? ""
+        image = (try? container.decodeIfPresent(String.self, forKey: .image)) ?? ""
     }
 }

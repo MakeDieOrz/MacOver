@@ -7,7 +7,7 @@ import Foundation
 import SwiftUI
 import Synchronization
 
-final class Log: Sendable {
+nonisolated final class Log: Sendable {
 
     private let alertPresenter: AlertPresenter?
 

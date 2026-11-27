@@ -10,7 +10,7 @@ import CryptoKit
 import Foundation
 import Synchronization
 
-final class LocalDataCache: Sendable {
+nonisolated final class LocalDataCache: Sendable {
     static let shared = LocalDataCache(name: "PlayCoverCache")
 
     private let cacheDirectory: URL?
@@ -106,7 +106,7 @@ final class LocalDataCache: Sendable {
     }
 }
 
-final class Cacher: @unchecked Sendable {
+nonisolated final class Cacher: @unchecked Sendable {
     weak var appsVM: AppsVM?
     let cache = LocalDataCache.shared
     private let remoteImageMemoryCache: NSCache<NSString, NSImage> = {
@@ -120,7 +120,7 @@ final class Cacher: @unchecked Sendable {
         c.countLimit = 256
         return c
     }()
-    private lazy var imageURLSession: URLSession = {
+    private let imageURLSession: URLSession = {
         let config = URLSessionConfiguration.default
         config.urlCache = URLCache.iconCache
         config.requestCachePolicy = .returnCacheDataElseLoad
@@ -133,6 +133,7 @@ final class Cacher: @unchecked Sendable {
         URLCache.iconCache.removeAllCachedResponses()
     }
 
+    @concurrent
     func loadRemoteImage(from urlString: String) async -> NSImage? {
         let cacheKey = urlString as NSString
         if let memoryImage = remoteImageMemoryCache.object(forKey: cacheKey) {
@@ -155,6 +156,7 @@ final class Cacher: @unchecked Sendable {
         }
     }
 
+    @concurrent
     func resolveITunesData(_ link: String) async {
         if let refreshedITunesData = await getITunesData(link) {
             try? cache.write(codable: refreshedITunesData, forKey: link)
@@ -244,6 +246,7 @@ final class Cacher: @unchecked Sendable {
         )?.tiffRepresentation
     }
 
+    @MainActor
     func getLocalIcon(bundleId: String) -> NSImage? {
         if let app = appsVM?.apps.first(where: { $0.info.bundleIdentifier == bundleId }) {
             let key = (app.info.bundleIdentifier + app.info.bundleVersion) as NSString
@@ -258,6 +261,6 @@ final class Cacher: @unchecked Sendable {
 
 }
 
-extension URLCache {
+nonisolated extension URLCache {
     static let iconCache = URLCache(memoryCapacity: 4*1024*1024, diskCapacity: 20*1024*1024) // 4MB and 20MB
 }

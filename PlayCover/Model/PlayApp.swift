@@ -12,7 +12,7 @@ import PlayCoverCore
 import Synchronization
 
 @Observable
-class PlayApp: BaseApp, Identifiable, Hashable, @unchecked Sendable {
+nonisolated class PlayApp: BaseApp, Identifiable, Hashable, @unchecked Sendable {
     var id: URL { url }
 
     static func == (lhs: PlayApp, rhs: PlayApp) -> Bool {
@@ -126,13 +126,36 @@ class PlayApp: BaseApp, Identifiable, Hashable, @unchecked Sendable {
             .appendingEscapedPathComponent(name)
             .appendingPathExtension("app")
     }
-    @ObservationIgnored lazy var playChainURL = KeyCover.playChainPath.appendingPathComponent(info.bundleIdentifier)
+    var playChainURL: URL {
+        KeyCover.playChainPath.appendingPathComponent(info.bundleIdentifier)
+    }
 
-    @ObservationIgnored lazy var settings = AppSettings(info)
-    @ObservationIgnored lazy var keymapping = Keymapping(info, alertPresenter: dependencies?.alertPresenter)
-    @ObservationIgnored lazy var container = AppContainer(bundleId: info.bundleIdentifier)
+    @ObservationIgnored private let settingsLock = Mutex<AppSettings?>(nil)
+    var settings: AppSettings {
+        settingsLock.withLock { cached in
+            if let cached { return cached }
+            let created = AppSettings(info)
+            cached = created
+            return created
+        }
+    }
+
+    @ObservationIgnored private let keymappingLock = Mutex<Keymapping?>(nil)
+    var keymapping: Keymapping {
+        keymappingLock.withLock { cached in
+            if let cached { return cached }
+            let created = Keymapping(info, alertPresenter: dependencies?.alertPresenter)
+            cached = created
+            return created
+        }
+    }
+
+    var container: AppContainer {
+        AppContainer(bundleId: info.bundleIdentifier)
+    }
 
     // MARK: - Launch
+    @concurrent
     func launch(safeModeOneShot: Bool = false) async {
         isStarting = true
         defer { isStarting = false }
@@ -307,9 +330,9 @@ class PlayApp: BaseApp, Identifiable, Hashable, @unchecked Sendable {
 }
 
 // MARK: - Environment Management
-extension PlayApp {
-    static let introspection: String = "/usr/lib/system/introspection"
-    static let iosFrameworks: String = "/System/iOSSupport/System/Library/Frameworks"
+nonisolated extension PlayApp {
+    static let introspection: String = LaunchEnvironmentPatcher.introspectionLibraryPath
+    static let iosFrameworks: String = LaunchEnvironmentPatcher.iosFrameworksLibraryPath
 
     /// Common Metal and capture related environment keys used in multiple places
     private static let metalEnvKeys: [String] = [
@@ -353,19 +376,30 @@ extension PlayApp {
 
         let targetURL = url
         let targetPath = targetURL.path
-        let runningApp: NSRunningApplication? = try await withCheckedThrowingContinuation { continuation in
-            NSWorkspace.shared.openApplication(
-                at: targetURL,
-                configuration: config,
-                completionHandler: { app, error in
-                    if let error {
-                        PlayCoverDiagnostics.log("LaunchServices failed to open \(targetPath): \(error)", isError: true)
-                        continuation.resume(throwing: error)
-                    } else {
-                        continuation.resume(returning: app)
+        let runningApp: NSRunningApplication?
+        do {
+            runningApp = try await withCheckedThrowingContinuation { continuation in
+                NSWorkspace.shared.openApplication(
+                    at: targetURL,
+                    configuration: config,
+                    completionHandler: { app, error in
+                        if let error {
+                            PlayCoverDiagnostics.log(
+                                "LaunchServices failed to open \(targetPath): \(error)",
+                                isError: true
+                            )
+                            continuation.resume(throwing: error)
+                        } else {
+                            continuation.resume(returning: app)
+                        }
                     }
-                }
-            )
+                )
+            }
+        } catch {
+            if let mitmCoordinator = dependencies?.mitmCoordinator {
+                await mitmCoordinator.handleAppTermination(bundleID: info.bundleIdentifier, settings: settings)
+            }
+            throw error
         }
 
         if let runningApp {
@@ -387,15 +421,14 @@ extension PlayApp {
                                 self.launchSnapshot = nil
                             }
                         }
-                    }
-
-                    self.enableTimeOut()
-                    self.releaseDiscordIPC()
-                    self.lockKeyCover()
-                    if let mitmCoordinator = self.dependencies?.mitmCoordinator {
-                        let bid = self.info.bundleIdentifier
-                        let appSettings = self.settings
-                        Task { await mitmCoordinator.handleAppTermination(bundleID: bid, settings: appSettings) }
+                        self.enableTimeOut()
+                        self.releaseDiscordIPC()
+                        self.lockKeyCover()
+                        if let mitmCoordinator = self.dependencies?.mitmCoordinator {
+                            let bid = self.info.bundleIdentifier
+                            let appSettings = self.settings
+                            Task { await mitmCoordinator.handleAppTermination(bundleID: bid, settings: appSettings) }
+                        }
                     }
 
                     let elapsed = Date().timeIntervalSince(launchDate)
@@ -570,6 +603,7 @@ extension PlayApp {
         }
     }
 
+    @concurrent
     func restart(safeModeOneShot: Bool = false) async {
         await terminate()
         await launch(safeModeOneShot: safeModeOneShot)
@@ -607,7 +641,7 @@ extension PlayApp {
 }
 
 // MARK: - Management
-extension PlayApp {
+nonisolated extension PlayApp {
     func disableTimeOut() {
         guard settings.settings.disableTimeout else {
             enableTimeOut()
@@ -642,7 +676,7 @@ extension PlayApp {
 }
 
 // MARK: - KeyCover
-extension PlayApp {
+nonisolated extension PlayApp {
     func unlockKeyCover() async {
         guard let keyCover = dependencies?.keyCover, keyCover.isKeyCoverEnabled() else { return }
         let keychain = keyCover.listKeychains()
@@ -688,7 +722,7 @@ extension PlayApp {
 }
 
 // MARK: - Tools
-extension PlayApp {
+nonisolated extension PlayApp {
     func hasPlayTools() -> Bool {
         do {
             return try PlayTools.installedInExec(atURL: url.appendingEscapedPathComponent(info.executableName))
@@ -698,37 +732,8 @@ extension PlayApp {
         }
     }
 
-    private static func updatedLSEnvironment(
-        _ env: [String: String],
-        including entry: String,
-        enabled: Bool
-    ) -> (env: [String: String], changed: Bool) {
-        var nextEnv = env
-        var entries = (nextEnv["DYLD_LIBRARY_PATH"] ?? "")
-            .split(separator: ":")
-            .map(String.init)
-            .filter { !$0.isEmpty }
-        let contains = entries.contains(entry)
-        if enabled {
-            guard !contains else { return (env, false) }
-            entries.append(entry)
-        } else {
-            guard contains else { return (env, false) }
-            entries.removeAll { $0 == entry }
-        }
-        if entries.isEmpty {
-            nextEnv.removeValue(forKey: "DYLD_LIBRARY_PATH")
-        } else {
-            nextEnv["DYLD_LIBRARY_PATH"] = entries.joined(separator: ":")
-        }
-        return (nextEnv, true)
-    }
-
     private func syncInMemoryLSEnvironment(_ env: [String: String]) {
-        var filtered = env
-        if let dyldPath = filtered["DYLD_LIBRARY_PATH"], dyldPath.isEmpty {
-            filtered.removeValue(forKey: "DYLD_LIBRARY_PATH")
-        }
+        let filtered = LaunchEnvironmentPatcher.sanitizedLSEnvironment(env)
         if filtered.isEmpty {
             info[dictionary: "LSEnvironment"] = nil
         } else {
@@ -737,83 +742,40 @@ extension PlayApp {
     }
 
     func stripIntrospectionForStrictLaunch(launchInfo: AppInfo) -> Bool {
-        var env = launchInfo.lsEnvironment
-        var changed = false
-
-        let introResult = Self.updatedLSEnvironment(
-            env,
-            including: Self.introspection,
-            enabled: false
-        )
-        if introResult.changed {
-            if !settings.settings.storedHasIntrospection {
-                settings.update { $0.storedHasIntrospection = true }
-                _ = settings.flush()
-            }
-            env = introResult.env
-            changed = true
+        let result = LaunchEnvironmentPatcher.stripForStrictLaunch(env: launchInfo.lsEnvironment)
+        if result.discoveredIntrospection, !settings.settings.storedHasIntrospection {
+            settings.update { $0.storedHasIntrospection = true }
+            _ = settings.flush()
         }
-
-        let iosFwResult = Self.updatedLSEnvironment(
-            env,
-            including: Self.iosFrameworks,
-            enabled: false
-        )
-        if iosFwResult.changed {
-            if !settings.settings.storedHasIosFrameworks {
-                settings.update { $0.storedHasIosFrameworks = true }
-                _ = settings.flush()
-            }
-            env = iosFwResult.env
-            changed = true
+        if result.discoveredIosFrameworks, !settings.settings.storedHasIosFrameworks {
+            settings.update { $0.storedHasIosFrameworks = true }
+            _ = settings.flush()
         }
-
-        guard changed else {
+        guard result.changed else {
             return false
         }
-        launchInfo.lsEnvironment = env
-        syncInMemoryLSEnvironment(env)
+        launchInfo.lsEnvironment = result.env
+        syncInMemoryLSEnvironment(result.env)
         Self.invalidateVerifiedBundleStamp(for: url)
         return true
     }
 
     func restoreIntrospectionForNonStrictLaunch(launchInfo: AppInfo) -> Bool {
-        var env = launchInfo.lsEnvironment
-        var changed = false
-
-        if settings.settings.storedHasIntrospection {
-            let introResult = Self.updatedLSEnvironment(
-                env,
-                including: Self.introspection,
-                enabled: true
-            )
-            if introResult.changed {
-                env = introResult.env
-                changed = true
-            }
-        }
-
-        if settings.settings.storedHasIosFrameworks {
-            let iosFwResult = Self.updatedLSEnvironment(
-                env,
-                including: Self.iosFrameworks,
-                enabled: true
-            )
-            if iosFwResult.changed {
-                env = iosFwResult.env
-                changed = true
-            }
-        }
-
-        guard changed else {
+        let result = LaunchEnvironmentPatcher.restoreForNonStrictLaunch(
+            env: launchInfo.lsEnvironment,
+            storedHasIntrospection: settings.settings.storedHasIntrospection,
+            storedHasIosFrameworks: settings.settings.storedHasIosFrameworks
+        )
+        guard result.changed else {
             return false
         }
-        launchInfo.lsEnvironment = env
-        syncInMemoryLSEnvironment(env)
+        launchInfo.lsEnvironment = result.env
+        syncInMemoryLSEnvironment(result.env)
         Self.invalidateVerifiedBundleStamp(for: url)
         return true
     }
 
+    @concurrent
     func changeDyldLibraryPath(set: Bool? = nil, path: String) async -> Bool {
         if let set {
             if path == Self.introspection {
@@ -821,7 +783,11 @@ extension PlayApp {
             } else if path == Self.iosFrameworks {
                 settings.update { $0.storedHasIosFrameworks = set }
             }
-            let result = Self.updatedLSEnvironment(info.lsEnvironment, including: path, enabled: set)
+            let result = LaunchEnvironmentPatcher.updatedLSEnvironment(
+                info.lsEnvironment,
+                including: path,
+                enabled: set
+            )
             if result.changed {
                 info.lsEnvironment = result.env
                 Self.invalidateVerifiedBundleStamp(for: url)
@@ -835,16 +801,12 @@ extension PlayApp {
             return set
         }
 
-        let entries = (info.lsEnvironment["DYLD_LIBRARY_PATH"] ?? "")
-            .split(separator: ":")
-            .map(String.init)
-            .filter { !$0.isEmpty }
-        return entries.contains(path)
+        return LaunchEnvironmentPatcher.containsLibraryPath(path, in: info.lsEnvironment)
     }
 }
 
 // MARK: - FS / Codesign
-extension PlayApp {
+nonisolated extension PlayApp {
     func hasAlias() -> Bool {
         FileManager.default.fileExists(atPath: aliasURL.path)
     }
@@ -887,12 +849,13 @@ extension PlayApp {
         } else {
             PlayCoverDiagnostics.showToast(
                 toastType: .notice,
-                toastDetails: "应用尚未生成数据目录，请先启动一次应用"
+                toastDetails: NSLocalizedString("app.dataDirMissing", comment: "")
             )
         }
     }
 
     @discardableResult
+    @concurrent
     func clearAllCache() async -> Error? {
         let bundleId = self.info.bundleIdentifier
         let bundleURL = self.url
@@ -925,7 +888,11 @@ extension PlayApp {
     func deleteApp() {
         Self.invalidateVerifiedBundleStamp(for: url)
         FileManager.default.delete(at: URL(fileURLWithPath: url.path))
-        dependencies?.appsVM.fetchApps()
+        if let appsVM = dependencies?.appsVM {
+            Task { @MainActor in
+                appsVM.fetchApps()
+            }
+        }
     }
 
     func signThrowing(targetBundleURL: URL? = nil) throws {
@@ -958,7 +925,7 @@ extension PlayApp {
 }
 
 // MARK: - Policies
-extension PlayApp {
+nonisolated extension PlayApp {
     var prohibitedToPlay: Bool {
         PlayApp.PROHIBITED_APPS.contains(info.bundleIdentifier)
     }

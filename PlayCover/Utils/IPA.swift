@@ -6,7 +6,7 @@
 import AppKit
 import Foundation
 
-public class IPA {
+nonisolated public class IPA {
     public let url: URL
     public private(set) var tmpDir: URL?
 

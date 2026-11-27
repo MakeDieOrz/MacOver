@@ -328,7 +328,7 @@ public enum HARExporter {
         let receive: Double
     }
 
-    public static func export(entries: [MITMCaptureEntry], appVersion: String = "1.0.7") throws -> Data {
+    public static func export(entries: [MITMCaptureEntry], appVersion: String = "1.0.8") throws -> Data {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 

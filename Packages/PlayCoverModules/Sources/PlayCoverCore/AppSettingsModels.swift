@@ -215,6 +215,37 @@ public struct StrictDeviceDisplaySpec: Equatable, Sendable {
             isIPad: true
         )
     }
+
+    public static func oemID(for iosDeviceModel: String) -> String {
+        switch iosDeviceModel.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "iPad6,7":
+            return "J98aAP"
+        case "iPad8,6":
+            return "J320xAP"
+        case "iPad13,8":
+            return "J522AP"
+        case "iPad14,5":
+            return "J620AP"
+        case "iPad16,6":
+            return "J720AP"
+        case "iPad17,3":
+            return "J820AP"
+        case "iPhone12,5":
+            return "D431AP"
+        case "iPhone14,3":
+            return "D64AP"
+        case "iPhone15,3":
+            return "D74AP"
+        case "iPhone16,2":
+            return "D84AP"
+        case "iPhone17,2":
+            return "D94AP"
+        case "iPhone18,2":
+            return "D94xAP"
+        default:
+            return "J522AP"
+        }
+    }
 }
 
 public struct PixelBudget: Equatable, Sendable {
@@ -304,14 +335,22 @@ public struct PixelBudget: Equatable, Sendable {
         return Double(width) * Double(height) * scaler * scaler
     }
 
+    private static func clampedPixelDimension(_ dimension: Int, scaler: Double) -> Int {
+        guard dimension > 0, scaler.isFinite, scaler > 0 else { return 0 }
+        let scaled = (Double(dimension) * scaler).rounded()
+        guard scaled.isFinite, scaled >= 0 else { return Int.max }
+        if scaled >= Double(Int.max) {
+            return Int.max
+        }
+        return Int(scaled)
+    }
+
     public var renderedWidth: Int {
-        guard width > 0, scaler.isFinite, scaler > 0 else { return 0 }
-        return Int((Double(width) * scaler).rounded())
+        Self.clampedPixelDimension(width, scaler: scaler)
     }
 
     public var renderedHeight: Int {
-        guard height > 0, scaler.isFinite, scaler > 0 else { return 0 }
-        return Int((Double(height) * scaler).rounded())
+        Self.clampedPixelDimension(height, scaler: scaler)
     }
 
     public var renderedDimensions: (width: Int, height: Int) {
@@ -505,6 +544,7 @@ public enum PlayCoverRestartField: String, CaseIterable, Equatable, Hashable, Se
     /// Legacy field retained for enum/Codable compatibility; introspection injection uses
     /// `Info.plist` `LSEnvironment` (`PlayApp.introspection`) rather than `AppSettingsData`.
     case injectIntrospection
+    case injectIosFrameworks
     case rootWorkDir
     case hideTitleBar
     case floatingWindow

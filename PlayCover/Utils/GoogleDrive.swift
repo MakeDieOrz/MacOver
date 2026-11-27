@@ -8,7 +8,7 @@
 import Foundation
 import Synchronization
 
-final class RedirectHandler: NSObject, URLSessionTaskDelegate {
+nonisolated final class RedirectHandler: NSObject, URLSessionTaskDelegate {
     private let redirectedGoogleDriveURL = Mutex<URL?>(nil)
 
     static func resolveDirectDownloadURL(

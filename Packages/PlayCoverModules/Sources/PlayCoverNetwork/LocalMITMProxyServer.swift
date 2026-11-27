@@ -138,8 +138,8 @@ public struct NetworkRuleEvaluator: Sendable {
     }
 }
 
-private final class BufferedConnection: @unchecked Sendable {
-    let connection: NWConnection
+private actor BufferedConnection {
+    nonisolated let connection: NWConnection
     private var buffer = Data()
 
     init(connection: NWConnection) {
@@ -302,8 +302,10 @@ public actor LocalMITMProxyServer {
     private let queue = DispatchQueue(label: "app.makedie.MacOver.MITMProxy", qos: .userInitiated)
     private var listener: NWListener?
     private var boundListenPort: UInt16 = 0
+    private var isStopped = false
     private var activeConnections: [UUID: NWConnection] = [:]
     private var terminators: [String: (port: UInt16, listener: NWListener)] = [:]
+    private var pendingTerminators: [String: Task<UInt16, Error>] = [:]
     private var terminatorOrder: [String] = []
     private let maxTerminators = 256
 
@@ -332,6 +334,7 @@ public actor LocalMITMProxyServer {
         if let existing = listener, let port = existing.port?.rawValue {
             return port
         }
+        isStopped = false
 
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
@@ -383,15 +386,24 @@ public actor LocalMITMProxyServer {
             newListener.start(queue: self.queue)
         }
 
+        if isStopped {
+            newListener.cancel()
+            throw MITMProxyError.failedToStartListener("Server stopped during startup")
+        }
         self.listener = newListener
         self.boundListenPort = boundPort
         return boundPort
     }
 
     public func stop() {
+        isStopped = true
         listener?.cancel()
         listener = nil
         boundListenPort = 0
+        for pending in pendingTerminators.values {
+            pending.cancel()
+        }
+        pendingTerminators.removeAll()
         for conn in activeConnections.values {
             conn.cancel()
         }
@@ -551,7 +563,7 @@ public actor LocalMITMProxyServer {
             disposition: .tunnel
         ))
 
-        let initialClientData = clientStream.drainRemainder()
+        let initialClientData = await clientStream.drainRemainder()
         await Self.pumpBidirectional(
             client: clientStream.connection,
             upstream: upstream,
@@ -573,7 +585,7 @@ public actor LocalMITMProxyServer {
         defer { bridgeConn.cancel() }
 
         try await clientStream.writeAll(Data("HTTP/1.1 200 Connection Established\r\n\r\n".utf8))
-        let initialClientData = clientStream.drainRemainder()
+        let initialClientData = await clientStream.drainRemainder()
         await Self.pumpBidirectional(
             client: clientStream.connection,
             upstream: bridgeConn,
@@ -583,63 +595,102 @@ public actor LocalMITMProxyServer {
 
     private func getOrCreateTerminator(host: String, upstreamPort: Int) async throws -> UInt16 {
         let cacheKey = "\(host.lowercased()):\(upstreamPort)"
+        if isStopped {
+            throw MITMProxyError.failedToStartListener("Server stopped")
+        }
         if let existing = terminators[cacheKey] {
             return existing.port
         }
-
-        let nwIdentity = try leafIssuer.makeSecIdentity(for: host)
-        let tlsOptions = NWProtocolTLS.Options()
-        sec_protocol_options_set_local_identity(tlsOptions.securityProtocolOptions, nwIdentity)
-        sec_protocol_options_add_tls_application_protocol(tlsOptions.securityProtocolOptions, "http/1.1")
-
-        let params = NWParameters(tls: tlsOptions, tcp: .init())
-        params.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: .any)
-
-        let termListener = try NWListener(using: params)
-        termListener.newConnectionHandler = { [weak self] tlsConn in
-            guard let self else {
-                tlsConn.cancel()
-                return
-            }
-            Task {
-                await self.handleDecryptedHTTPSConnection(tlsConn, targetHost: host, targetPort: upstreamPort)
-            }
+        if let pendingTask = pendingTerminators[cacheKey] {
+            return try await pendingTask.value
         }
 
-        let boundPort: UInt16 = try await withCheckedThrowingContinuation { continuation in
-            let settled = Mutex(false)
-            termListener.stateUpdateHandler = { state in
-                let shouldSettle = settled.withLock { done -> Bool in
-                    guard !done else { return false }
-                    switch state {
-                    case .ready, .failed, .cancelled:
-                        done = true
-                        return true
-                    default:
-                        return false
-                    }
+        let task = Task<UInt16, Error> {
+            let nwIdentity = try leafIssuer.makeSecIdentity(for: host)
+            let tlsOptions = NWProtocolTLS.Options()
+            sec_protocol_options_set_local_identity(tlsOptions.securityProtocolOptions, nwIdentity)
+            sec_protocol_options_add_tls_application_protocol(tlsOptions.securityProtocolOptions, "http/1.1")
+
+            let params = NWParameters(tls: tlsOptions, tcp: .init())
+            params.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: .any)
+
+            let termListener = try NWListener(using: params)
+            termListener.newConnectionHandler = { [weak server = self] tlsConn in
+                guard let server else {
+                    tlsConn.cancel()
+                    return
                 }
-                guard shouldSettle else { return }
-                switch state {
-                case .ready:
-                    if let port = termListener.port?.rawValue {
-                        continuation.resume(returning: port)
-                    } else {
-                        let err = MITMProxyError.failedToStartListener("Missing TLS terminator port")
-                        continuation.resume(throwing: err)
-                    }
-                case let .failed(error):
-                    continuation.resume(throwing: MITMProxyError.failedToStartListener(error.localizedDescription))
-                case .cancelled:
-                    continuation.resume(throwing: MITMProxyError.failedToStartListener("Terminator cancelled"))
-                default:
-                    break
+                Task {
+                    await server.handleDecryptedHTTPSConnection(tlsConn, targetHost: host, targetPort: upstreamPort)
                 }
             }
-            termListener.start(queue: self.queue)
-        }
 
-        terminators[cacheKey] = (boundPort, termListener)
+            let boundPort: UInt16
+            do {
+                boundPort = try await withTaskCancellationHandler {
+                    try await withCheckedThrowingContinuation { continuation in
+                        let settled = Mutex(false)
+                        termListener.stateUpdateHandler = { state in
+                            let shouldSettle = settled.withLock { done -> Bool in
+                                guard !done else { return false }
+                                switch state {
+                                case .ready, .failed, .cancelled:
+                                    done = true
+                                    return true
+                                default:
+                                    return false
+                                }
+                            }
+                            guard shouldSettle else { return }
+                            switch state {
+                            case .ready:
+                                if let port = termListener.port?.rawValue {
+                                    continuation.resume(returning: port)
+                                } else {
+                                    let err = MITMProxyError.failedToStartListener("Missing TLS terminator port")
+                                    continuation.resume(throwing: err)
+                                }
+                            case let .failed(error):
+                                let err = MITMProxyError.failedToStartListener(error.localizedDescription)
+                                continuation.resume(throwing: err)
+                            case .cancelled:
+                                let err = MITMProxyError.failedToStartListener("Terminator cancelled")
+                                continuation.resume(throwing: err)
+                            default:
+                                break
+                            }
+                        }
+                        termListener.start(queue: self.queue)
+                    }
+                } onCancel: {
+                    termListener.cancel()
+                }
+            } catch {
+                termListener.cancel()
+                throw error
+            }
+
+            return registerTerminator(termListener, port: boundPort, cacheKey: cacheKey)
+        }
+        pendingTerminators[cacheKey] = task
+        defer { pendingTerminators.removeValue(forKey: cacheKey) }
+        let port = try await task.value
+        if isStopped {
+            throw MITMProxyError.failedToStartListener("Server stopped")
+        }
+        return port
+    }
+
+    private func registerTerminator(_ termListener: NWListener, port: UInt16, cacheKey: String) -> UInt16 {
+        if isStopped || Task.isCancelled {
+            termListener.cancel()
+            return port
+        }
+        if let existing = terminators[cacheKey] {
+            termListener.cancel()
+            return existing.port
+        }
+        terminators[cacheKey] = (port, termListener)
         terminatorOrder.append(cacheKey)
         while terminatorOrder.count > maxTerminators {
             let evicted = terminatorOrder.removeFirst()
@@ -647,7 +698,7 @@ public actor LocalMITMProxyServer {
                 entry.listener.cancel()
             }
         }
-        return boundPort
+        return port
     }
 
     private func handleDecryptedHTTPSConnection(
@@ -888,7 +939,7 @@ public actor LocalMITMProxyServer {
 
             if respHead.statusCode == 101 {
                 var upgradeWire = Self.serializeResponseForClient(respHead, method: req.method, body: Data())
-                let upstreamExtra = upstreamStream.drainRemainder()
+                let upstreamExtra = await upstreamStream.drainRemainder()
                 if !upstreamExtra.isEmpty {
                     upgradeWire.append(upstreamExtra)
                 }
@@ -912,7 +963,7 @@ public actor LocalMITMProxyServer {
                 await Self.pumpBidirectional(
                     client: clientStream.connection,
                     upstream: upstreamConn,
-                    initialUpstreamBytes: clientStream.drainRemainder()
+                    initialUpstreamBytes: await clientStream.drainRemainder()
                 )
                 return false
             }
@@ -1093,33 +1144,66 @@ public actor LocalMITMProxyServer {
         params.setPrivacyContext(privacyCtx)
     }
 
-    private func waitForReady(_ connection: NWConnection) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let settled = Mutex(false)
-            connection.stateUpdateHandler = { state in
-                let shouldSettle = settled.withLock { done -> Bool in
-                    guard !done else { return false }
-                    switch state {
-                    case .ready, .failed, .cancelled:
-                        done = true
-                        return true
-                    default:
-                        return false
+    private func waitForReady(_ connection: NWConnection, timeoutSeconds: Double = 15.0) async throws {
+        if isStopped {
+            connection.cancel()
+            throw MITMProxyError.upstreamConnectionFailed("Server stopped")
+        }
+        let token = UUID()
+        activeConnections[token] = connection
+        defer { activeConnections.removeValue(forKey: token) }
+
+        let timeoutTask = Task { [weak connection] in
+            try await Task.sleep(for: .seconds(timeoutSeconds))
+            connection?.cancel()
+        }
+        defer { timeoutTask.cancel() }
+
+        do {
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    let settled = Mutex(false)
+                    connection.stateUpdateHandler = { state in
+                        let shouldSettle = settled.withLock { done -> Bool in
+                            guard !done else { return false }
+                            switch state {
+                            case .ready, .failed, .cancelled, .waiting:
+                                done = true
+                                return true
+                            default:
+                                return false
+                            }
+                        }
+                        guard shouldSettle else { return }
+                        switch state {
+                        case .ready:
+                            continuation.resume()
+                        case let .waiting(error):
+                            connection.cancel()
+                            continuation.resume(
+                                throwing: MITMProxyError.upstreamConnectionFailed(error.localizedDescription)
+                            )
+                        case let .failed(error):
+                            connection.cancel()
+                            continuation.resume(
+                                throwing: MITMProxyError.upstreamConnectionFailed(error.localizedDescription)
+                            )
+                        case .cancelled:
+                            continuation.resume(
+                                throwing: MITMProxyError.upstreamConnectionFailed("Connection cancelled")
+                            )
+                        default:
+                            break
+                        }
                     }
+                    connection.start(queue: self.queue)
                 }
-                guard shouldSettle else { return }
-                switch state {
-                case .ready:
-                    continuation.resume()
-                case let .failed(error):
-                    continuation.resume(throwing: MITMProxyError.upstreamConnectionFailed(error.localizedDescription))
-                case .cancelled:
-                    continuation.resume(throwing: MITMProxyError.upstreamConnectionFailed("Connection cancelled"))
-                default:
-                    break
-                }
+            } onCancel: {
+                connection.cancel()
             }
-            connection.start(queue: self.queue)
+        } catch {
+            connection.cancel()
+            throw error
         }
     }
 
@@ -1257,6 +1341,13 @@ public actor LocalMITMProxyServer {
     ) -> Data {
         var headerLines = ["\(req.method) \(path) HTTP/1.1"]
         var hasHost = false
+        var isWebSocketUpgrade = false
+        let hasUpgradeHeader = req.headers.contains { $0.name.lowercased() == "upgrade" }
+        if hasUpgradeHeader,
+           let connHeader = req.headers.first(where: { $0.name.lowercased() == "connection" })?.value.lowercased(),
+           connHeader.contains("upgrade") {
+            isWebSocketUpgrade = true
+        }
         for (name, value) in req.headers {
             let lower = name.lowercased()
             if lower == "proxy-connection" || lower == "proxy-authorization" ||
@@ -1272,7 +1363,7 @@ public actor LocalMITMProxyServer {
         if !hasHost {
             headerLines.append("Host: \(host)\(portSuffix)")
         }
-        headerLines.append("Connection: close")
+        headerLines.append(isWebSocketUpgrade ? "Connection: Upgrade" : "Connection: close")
         let hadExplicitLength = req.headerMap.contains { entry in
             let lower = entry.key.lowercased()
             return lower == "content-length" || lower == "transfer-encoding"

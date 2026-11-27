@@ -7,18 +7,18 @@
 
 import Foundation
 
-struct AssetImage: CustomStringConvertible {
+nonisolated struct AssetImage: CustomStringConvertible {
     let name: String
     let namedImages: [CUINamedImage]
     var description: String { name }
 }
 
-enum AssetError: Error {
+nonisolated enum AssetError: Error {
     case fileDoesNotExist
     case catalogInitFail
 }
 
-struct AssetsExtractor {
+nonisolated struct AssetsExtractor {
     let catalog: CUICatalog
 
     var imagesList: [AssetImage] {
@@ -65,7 +65,7 @@ struct AssetsExtractor {
 
 }
 
-extension CUINamedImage {
+nonisolated extension CUINamedImage {
     func asNSImage() -> NSImage? {
         guard let cgImage = self._rendition().unslicedImage()?.takeUnretainedValue() else {
             return nil

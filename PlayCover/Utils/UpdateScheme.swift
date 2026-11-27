@@ -5,7 +5,7 @@
 //  Created by TheMoonThatRises on 7/6/24.
 //
 
-class UpdateScheme {
+nonisolated class UpdateScheme {
     public static let versionsFile = PlayTools.playCoverContainer.appendingPathComponent("VERSION")
     public static var currentVersion: String {
         (try? String(contentsOf: UpdateScheme.versionsFile, encoding: .utf8)) ?? "3.1"

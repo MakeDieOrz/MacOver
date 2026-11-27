@@ -96,7 +96,7 @@ public final class TrafficCaptureStore: Sendable {
         }
     }
 
-    public func exportHAR(appVersion: String = "1.0.7") throws -> Data {
+    public func exportHAR(appVersion: String = "1.0.8") throws -> Data {
         try HARExporter.export(entries: entries(), appVersion: appVersion)
     }
 

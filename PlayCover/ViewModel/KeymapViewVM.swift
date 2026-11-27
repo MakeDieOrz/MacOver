@@ -24,6 +24,7 @@ final class KeymapViewVM {
     var showCreateKeymap = false
 
     var appIcon: NSImage?
+    private var hasLoadedCache = false
 
     var keymapURLS: [URL] = [] {
         didSet {
@@ -31,17 +32,23 @@ final class KeymapViewVM {
         }
     }
 
-    init(app: PlayApp) {
+    init(app: PlayApp, loadCacheImmediately: Bool = true) {
         self.app = app
-
         self.defaultKm = app.keymapping.keymapConfig.defaultKm
 
-        self.reloadKeymapCache()
+        if loadCacheImmediately {
+            self.reloadKeymapCache()
+        }
+    }
+
+    func ensureLoaded() {
+        guard !hasLoadedCache else { return }
+        reloadKeymapCache()
     }
 
     func reloadKeymapCache() {
+        hasLoadedCache = true
         app.keymapping.reloadKeymapCache()
-
         keymapURLS = app.keymapping.keymapConfig.keymapOrder
     }
 

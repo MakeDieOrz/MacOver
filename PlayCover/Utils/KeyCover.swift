@@ -5,14 +5,16 @@
 //  Created by Venti on 31/01/2023.
 //
 
-import CommonCrypto
 import Foundation
 import Observation
 import Security
-import SwiftUI
 import Synchronization
 
-final class KeyCover: @unchecked Sendable {
+nonisolated final class KeyCover: Sendable {
+    private struct WeakObservableBox: Sendable {
+        weak var value: KeyCoverObservable?
+    }
+
     static var playChainPath: URL {
         let playChainDir = PlayTools.playCoverContainer.appendingPathComponent("PlayChain")
 
@@ -31,7 +33,11 @@ final class KeyCover: @unchecked Sendable {
     private let preferences: KeyCoverPreferences
     private let passwordStore: KeyCoverPassword
     private let playChainDirectory: URL
-    private weak var observable: KeyCoverObservable?
+    private let observableBox: Mutex<WeakObservableBox>
+
+    private var observable: KeyCoverObservable? {
+        observableBox.withLock { $0.value }
+    }
 
     // This is only exposed at runtime
     var keyCoverPlainTextKey: String? {
@@ -47,7 +53,7 @@ final class KeyCover: @unchecked Sendable {
     ) {
         self.preferences = preferences
         self.passwordStore = passwordStore
-        self.observable = observable
+        self.observableBox = Mutex(WeakObservableBox(value: observable))
         self.playChainDirectory = playChainDirectory
 
         let initialKey: String?
@@ -79,32 +85,11 @@ final class KeyCover: @unchecked Sendable {
     }
 
     static func listKeychains(in directory: URL = KeyCover.playChainPath) -> [KeyCoverKey] {
-        let keychains = try? FileManager.default
-            .contentsOfDirectory(at: directory,
-                                 includingPropertiesForKeys: nil,
-                                 options: .skipsHiddenFiles)
-        var seenBundleIDs = Set<String>()
-        var keychainList: [KeyCoverKey] = []
-        for file in keychains ?? [] {
-            let ext = file.pathExtension
-            guard ext == "db" || ext == KeyCoverKey.encryptedKeyExtension else {
-                continue
-            }
-            let keychainName = file.deletingPathExtension().lastPathComponent
-            guard !keychainName.isEmpty, seenBundleIDs.insert(keychainName).inserted else {
-                continue
-            }
-            keychainList.append(KeyCoverKey(appBundleID: keychainName, playChainDirectory: directory))
-        }
-        return keychainList.sorted { $0.appBundleID < $1.appBundleID }
+        KeyCoverVaultStore.listKeychains(in: directory)
     }
 
     static func unlockedCount(in keychains: [KeyCoverKey]? = nil) -> Int {
-        var count = 0
-        for keychain in (keychains ?? listKeychains()) where !keychain.chainEncryptionStatus {
-            count += 1
-        }
-        return count
+        KeyCoverVaultStore.unlockedCount(in: keychains ?? listKeychains())
     }
 
     func listKeychains() -> [KeyCoverKey] {
@@ -116,6 +101,7 @@ final class KeyCover: @unchecked Sendable {
     }
 
     func unlockChain(_ keychain: KeyCoverKey) async throws {
+        let obs = observable
         if keyCoverPlainTextKey == nil {
             switch preferences.keyCoverEnabled {
             case .selfGeneratedPassword:
@@ -123,28 +109,32 @@ final class KeyCover: @unchecked Sendable {
                     keyCoverPlainTextKey = resolved
                 }
             case .userProvidedPassword:
-                try await observable?.requestUnlockPromptAndWait()
+                try await obs?.requestUnlockPromptAndWait()
             case .disabled:
                 break
             }
         }
         if keychain.chainEncryptionStatus, let key = keyCoverPlainTextKey {
-            try keychain.decryptKeyDB(plainTextKey: key) { [weak observable] in
+            try keychain.decryptKeyDB(plainTextKey: key) { [weak obs] in
                 Task { @MainActor in
-                    observable?.update()
+                    obs?.update()
                 }
             }
         }
     }
 
     func lockChain(_ keychain: KeyCoverKey) throws {
+        if keyCoverPlainTextKey == nil && preferences.keyCoverEnabled == .selfGeneratedPassword {
+            _ = passwordStore.resolveSelfGeneratedPassword(allowLegacyKeychainMigration: true)
+        }
         guard let key = keyCoverPlainTextKey else {
             return
         }
+        let obs = observable
         if !keychain.chainEncryptionStatus {
-            try keychain.encryptKeyDB(plainTextKey: key) { [weak observable] in
+            try keychain.encryptKeyDB(plainTextKey: key) { [weak obs] in
                 Task { @MainActor in
-                    observable?.update()
+                    obs?.update()
                 }
             }
         }
@@ -162,8 +152,9 @@ final class KeyCover: @unchecked Sendable {
     }
 }
 
+@MainActor
 @Observable
-final class KeyCoverObservable: @unchecked Sendable {
+final class KeyCoverObservable {
     var keyCoverEnabled: Bool
     var unlockedCount: Int
     var keychains: [KeyCoverKey]
@@ -259,206 +250,36 @@ final class KeyCoverObservable: @unchecked Sendable {
     }
 }
 
-struct KeyCoverKey {
-    static let encryptedKeyExtension = "keyCover"
-
-    var appBundleID: String
-    var playChainDirectory: URL = KeyCover.playChainPath
-
-    var decryptedKeyDB: URL {
-        playChainDirectory
-            .appendingPathComponent(appBundleID)
-            .appendingPathExtension("db")
-    }
-    var encryptedKeyDB: URL {
-        playChainDirectory
-            .appendingPathComponent(appBundleID)
-            .appendingPathExtension(KeyCoverKey.encryptedKeyExtension)
+nonisolated final class KeyCoverPassword: Sendable {
+    private struct WeakKeyCoverBox: Sendable {
+        weak var value: KeyCover?
     }
 
-    var chainEncryptionStatus: Bool {
-        return FileManager.default.fileExists(atPath: encryptedKeyDB.path)
+    private struct WeakObservableBox: Sendable {
+        weak var value: KeyCoverObservable?
     }
 
-    func encryptKeyDB(plainTextKey: String, onUpdate: (() -> Void)? = nil) throws {
-        try runOpenSSL(sourceURL: decryptedKeyDB,
-                       destURL: encryptedKeyDB,
-                       decrypt: false,
-                       plainTextKey: plainTextKey)
-
-        try deleteKeyDB()
-        onUpdate?()
-    }
-
-    func decryptKeyDB(plainTextKey: String, onUpdate: (() -> Void)? = nil) throws {
-        try runOpenSSL(sourceURL: encryptedKeyDB,
-                       destURL: decryptedKeyDB,
-                       decrypt: true,
-                       plainTextKey: plainTextKey)
-
-        try deleteEncryptedKeyDB()
-        onUpdate?()
-    }
-
-    /// Probes whether `plainTextKey` decrypts `encryptedKeyDB` without altering `.db` or `.keyCover`.
-    func canDecrypt(plainTextKey: String) -> Bool {
-        guard chainEncryptionStatus else { return false }
-        let probeURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("keycover-probe-\(UUID().uuidString).db")
-        defer {
-            try? FileManager.default.removeItem(at: probeURL)
-        }
-        do {
-            try runOpenSSL(sourceURL: encryptedKeyDB,
-                           destURL: probeURL,
-                           decrypt: true,
-                           plainTextKey: plainTextKey)
-            return true
-        } catch {
-            return false
-        }
-    }
-
-    private func runOpenSSL(sourceURL: URL,
-                            destURL: URL,
-                            decrypt: Bool,
-                            plainTextKey: String) throws {
-        let fm = FileManager.default
-        let tmpURL = destURL.appendingPathExtension("tmp-\(UUID().uuidString)")
-
-        if fm.fileExists(atPath: tmpURL.path) {
-            try fm.removeItem(at: tmpURL)
-        }
-
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/openssl")
-        var arguments = ["enc", "-aes-256-cbc", "-A"]
-        if decrypt {
-            arguments.append("-d")
-        }
-        arguments.append(contentsOf: [
-            "-in", sourceURL.path,
-            "-out", tmpURL.path,
-            "-pass", "stdin"
-        ])
-        task.arguments = arguments
-
-        let stdinPipe = Pipe()
-        let stderrPipe = Pipe()
-        task.standardInput = stdinPipe
-        task.standardError = stderrPipe
-
-        defer {
-            try? stdinPipe.fileHandleForReading.close()
-            try? stdinPipe.fileHandleForWriting.close()
-            try? stderrPipe.fileHandleForReading.close()
-            try? stderrPipe.fileHandleForWriting.close()
-        }
-
-        do {
-            try task.run()
-        } catch {
-            try? fm.removeItem(at: tmpURL)
-            throw error
-        }
-
-        try? stdinPipe.fileHandleForReading.close()
-        try? stderrPipe.fileHandleForWriting.close()
-
-        if let keyData = (plainTextKey + "\n").data(using: .utf8) {
-            try? stdinPipe.fileHandleForWriting.write(contentsOf: keyData)
-        }
-        try? stdinPipe.fileHandleForWriting.close()
-
-        let stderrData = (try? stderrPipe.fileHandleForReading.readToEnd()) ?? Data()
-        task.waitUntilExit()
-
-        let stderrOutput = String(data: stderrData, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let stderrSuffix = stderrOutput.isEmpty ? "" : ": \(stderrOutput)"
-        let operation = decrypt ? "decrypt" : "encrypt"
-
-        let exitCode = task.terminationStatus
-        let tmpExists = fm.fileExists(atPath: tmpURL.path)
-        let outputSize = (try? fm.attributesOfItem(atPath: tmpURL.path)[.size] as? NSNumber)?.uint64Value ?? 0
-
-        guard exitCode == 0, tmpExists, outputSize > 0 else {
-            try? fm.removeItem(at: tmpURL)
-            let reason: String
-            if exitCode != 0 {
-                reason = "OpenSSL \(operation) failed with exit code \(exitCode)\(stderrSuffix)"
-            } else if !tmpExists {
-                reason = "OpenSSL \(operation) produced no output file (exit code \(exitCode))\(stderrSuffix)"
-            } else {
-                reason = "OpenSSL \(operation) produced an empty output file (exit code \(exitCode))\(stderrSuffix)"
-            }
-            throw NSError(
-                domain: "app.makedie.KeyCover",
-                code: Int(exitCode != 0 ? exitCode : -1),
-                userInfo: [NSLocalizedDescriptionKey: reason]
-            )
-        }
-
-        do {
-            if fm.fileExists(atPath: destURL.path) {
-                _ = try fm.replaceItemAt(destURL, withItemAt: tmpURL)
-            } else {
-                try fm.moveItem(at: tmpURL, to: destURL)
-            }
-        } catch {
-            try? fm.removeItem(at: tmpURL)
-            throw error
-        }
-    }
-
-    func deleteKeyDB() throws {
-        let fm = FileManager.default
-        try fm.removeItem(at: decryptedKeyDB)
-        for suffix in ["-wal", "-shm", "-journal"] {
-            let sidecarURL = URL(fileURLWithPath: decryptedKeyDB.path + suffix)
-            if fm.fileExists(atPath: sidecarURL.path) {
-                try fm.removeItem(at: sidecarURL)
-            }
-        }
-    }
-
-    func deleteEncryptedKeyDB() throws {
-        try FileManager.default.removeItem(at: encryptedKeyDB)
-    }
-}
-
-final class KeyCoverPassword: @unchecked Sendable {
     static let tag = "app.makedie.masterkey"
-    private static let storeFileName = "keycover.json"
-    private static let pbkdf2Iterations = 100_000
-    private static let saltByteCount = 16
-    private static let verifierByteCount = 32
 
     static var defaultStoreDirectory: URL {
         PlayTools.playCoverContainer.appendingPathComponent("KeyCover", isDirectory: true)
     }
 
-    private enum StoredKind: String, Codable, Sendable {
-        case selfGeneratedKey
-        case passwordVerifier
-    }
-
-    private struct StoredRecord: Codable, Sendable {
-        var version: Int = 1
-        var kind: StoredKind
-        var managedKey: String?
-        var saltBase64: String?
-        var verifierBase64: String?
-        var iterations: Int?
-    }
-
     private let preferences: KeyCoverPreferences
-    private let storeDirectory: URL
+    private let vaultStore: KeyCoverVaultStore
     private let playChainDirectory: URL
     private let legacyKeychainReader: @Sendable () -> String?
     private let legacyKeychainDeleter: @Sendable () -> Void
-    private weak var keyCover: KeyCover?
-    private weak var observable: KeyCoverObservable?
+    private let keyCoverBox: Mutex<WeakKeyCoverBox>
+    private let observableBox: Mutex<WeakObservableBox>
+
+    private var keyCover: KeyCover? {
+        keyCoverBox.withLock { $0.value }
+    }
+
+    private var observable: KeyCoverObservable? {
+        observableBox.withLock { $0.value }
+    }
 
     init(
         preferences: KeyCoverPreferences = KeyCoverPreferences(),
@@ -470,16 +291,16 @@ final class KeyCoverPassword: @unchecked Sendable {
         legacyKeychainDeleter: (@Sendable () -> Void)? = nil
     ) {
         self.preferences = preferences
-        self.keyCover = keyCover
-        self.observable = observable
-        self.storeDirectory = storeDirectory
+        self.keyCoverBox = Mutex(WeakKeyCoverBox(value: keyCover))
+        self.observableBox = Mutex(WeakObservableBox(value: observable))
+        self.vaultStore = KeyCoverVaultStore(storeDirectory: storeDirectory)
         self.playChainDirectory = playChainDirectory
         self.legacyKeychainReader = legacyKeychainReader ?? Self.defaultLegacyKeychainReader
         self.legacyKeychainDeleter = legacyKeychainDeleter ?? Self.defaultLegacyKeychainDeleter
     }
 
     func attachKeyCover(_ keyCover: KeyCover) {
-        self.keyCover = keyCover
+        keyCoverBox.withLock { $0.value = keyCover }
     }
 
     func loadLocalManagedPassword() -> String? {
@@ -512,9 +333,9 @@ final class KeyCoverPassword: @unchecked Sendable {
         guard allowLegacyKeychainMigration, let legacyKey = legacyKeychainReader() else {
             return nil
         }
-        let record = StoredRecord(kind: .selfGeneratedKey, managedKey: legacyKey)
+        let record = vaultStore.makeSelfGeneratedRecord(key: legacyKey)
         do {
-            try writeRecord(record)
+            try vaultStore.writeRecord(record)
             legacyKeychainDeleter()
         } catch {
             print("Error persisting migrated KeyCover configuration: \(error)")
@@ -568,7 +389,7 @@ final class KeyCoverPassword: @unchecked Sendable {
         }
 
         do {
-            try writeRecord(newRecord)
+            try vaultStore.writeRecord(newRecord)
         } catch {
             print("Error storing KeyCover configuration: \(error)")
             if let oldKey = resolvedOldKey {
@@ -589,8 +410,9 @@ final class KeyCoverPassword: @unchecked Sendable {
             try? keychain.encryptKeyDB(plainTextKey: key)
         }
 
-        Task { @MainActor [weak observable] in
-            observable?.update()
+        let obs = observable
+        Task { @MainActor [weak obs] in
+            obs?.update()
         }
         return true
     }
@@ -624,14 +446,15 @@ final class KeyCoverPassword: @unchecked Sendable {
             }
         }
 
-        removeRecordFile()
+        vaultStore.removeRecord()
         legacyKeychainDeleter()
 
         preferences.keyCoverEnabled = .disabled
         keyCover?.keyCoverPlainTextKey = nil
 
-        Task { @MainActor [weak observable] in
-            observable?.update()
+        let obs = observable
+        Task { @MainActor [weak obs] in
+            obs?.update()
         }
         return true
     }
@@ -640,7 +463,7 @@ final class KeyCoverPassword: @unchecked Sendable {
         if keyCover?.keyCoverPlainTextKey != nil {
             return
         }
-        removeRecordFile()
+        vaultStore.removeRecord()
         legacyKeychainDeleter()
 
         preferences.keyCoverEnabled = .disabled
@@ -650,8 +473,9 @@ final class KeyCoverPassword: @unchecked Sendable {
             try? chain.deleteEncryptedKeyDB()
         }
 
-        Task { @MainActor [weak observable] in
-            observable?.update()
+        let obs = observable
+        Task { @MainActor [weak obs] in
+            obs?.update()
         }
     }
 
@@ -659,28 +483,7 @@ final class KeyCoverPassword: @unchecked Sendable {
         guard !key.isEmpty else { return false }
 
         if let record = readRecord() {
-            switch record.kind {
-            case .selfGeneratedKey:
-                guard let stored = record.managedKey else { return false }
-                return Self.constantTimeEqual(Data(stored.utf8), Data(key.utf8))
-            case .passwordVerifier:
-                guard let saltBase64 = record.saltBase64,
-                      let verifierBase64 = record.verifierBase64,
-                      let salt = Data(base64Encoded: saltBase64),
-                      let expected = Data(base64Encoded: verifierBase64) else {
-                    return false
-                }
-                let iterations = record.iterations ?? Self.pbkdf2Iterations
-                guard let derived = Self.derivePBKDF2(
-                    password: key,
-                    salt: salt,
-                    iterations: iterations,
-                    byteCount: expected.count
-                ) else {
-                    return false
-                }
-                return Self.constantTimeEqual(derived, expected)
-            }
+            return vaultStore.verify(password: key, against: record)
         }
 
         // Lazy migration when no local keycover.json exists yet.
@@ -690,149 +493,45 @@ final class KeyCoverPassword: @unchecked Sendable {
                 return false
             }
             if let verifierRecord = makeRecord(for: key, mode: .userProvidedPassword) {
-                try? writeRecord(verifierRecord)
+                try? vaultStore.writeRecord(verifierRecord)
             }
             legacyKeychainDeleter()
             return true
         }
 
         guard let legacyKey = legacyKeychainReader(),
-              Self.constantTimeEqual(Data(legacyKey.utf8), Data(key.utf8)) else {
+              KeyCoverVaultStore.constantTimeEqual(Data(legacyKey.utf8), Data(key.utf8)) else {
             return false
         }
         let targetMode: KeyCoverStatus = preferences.keyCoverEnabled == .selfGeneratedPassword
             ? .selfGeneratedPassword
             : .userProvidedPassword
         if let migratedRecord = makeRecord(for: key, mode: targetMode) {
-            try? writeRecord(migratedRecord)
+            try? vaultStore.writeRecord(migratedRecord)
         }
         legacyKeychainDeleter()
         return true
     }
 
     func generateVerySecurePassword() -> String {
-        let length = 32
-        let letters = Array("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()_+")
-        var randomBytes = [UInt8](repeating: 0, count: length)
-        if SecRandomCopyBytes(kSecRandomDefault, length, &randomBytes) == errSecSuccess {
-            return String(randomBytes.map { letters[Int($0) % letters.count] })
-        }
-        return String((0..<length).map { _ in letters.randomElement() ?? "." })
+        KeyCoverVaultStore.generateSecurePassword()
     }
 
-    // MARK: - Private Storage & Crypto Helpers
+    // MARK: - Private Storage Delegation
 
-    private var recordURL: URL {
-        storeDirectory.appendingPathComponent(Self.storeFileName)
-    }
-
-    private func makeRecord(for key: String, mode: KeyCoverStatus) -> StoredRecord? {
+    private func makeRecord(for key: String, mode: KeyCoverStatus) -> KeyCoverVaultRecord? {
         switch mode {
         case .selfGeneratedPassword:
-            return StoredRecord(kind: .selfGeneratedKey, managedKey: key)
+            return vaultStore.makeSelfGeneratedRecord(key: key)
         case .userProvidedPassword:
-            var salt = Data(count: Self.saltByteCount)
-            let randomStatus = salt.withUnsafeMutableBytes { buf -> OSStatus in
-                guard let base = buf.baseAddress else { return errSecAllocate }
-                return SecRandomCopyBytes(kSecRandomDefault, Self.saltByteCount, base)
-            }
-            guard randomStatus == errSecSuccess,
-                  let verifier = Self.derivePBKDF2(
-                    password: key,
-                    salt: salt,
-                    iterations: Self.pbkdf2Iterations,
-                    byteCount: Self.verifierByteCount
-                  ) else {
-                return nil
-            }
-            return StoredRecord(
-                kind: .passwordVerifier,
-                saltBase64: salt.base64EncodedString(),
-                verifierBase64: verifier.base64EncodedString(),
-                iterations: Self.pbkdf2Iterations
-            )
+            return vaultStore.makePasswordVerifierRecord(password: key)
         case .disabled:
             return nil
         }
     }
 
-    private func readRecord() -> StoredRecord? {
-        guard let data = try? Data(contentsOf: recordURL) else { return nil }
-        return try? JSONDecoder().decode(StoredRecord.self, from: data)
-    }
-
-    private func writeRecord(_ record: StoredRecord) throws {
-        let fm = FileManager.default
-        if !fm.fileExists(atPath: storeDirectory.path) {
-            try fm.createDirectory(
-                at: storeDirectory,
-                withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
-        }
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        let data = try encoder.encode(record)
-
-        let tmpURL = storeDirectory.appendingPathComponent(".\(Self.storeFileName).tmp-\(UUID().uuidString)")
-        do {
-            try data.write(to: tmpURL, options: [.atomic])
-            if chmod(tmpURL.path, 0o600) != 0 {
-                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EACCES)
-            }
-            if fm.fileExists(atPath: recordURL.path) {
-                _ = try fm.replaceItemAt(recordURL, withItemAt: tmpURL)
-            } else {
-                try fm.moveItem(at: tmpURL, to: recordURL)
-            }
-            _ = chmod(recordURL.path, 0o600)
-        } catch {
-            try? fm.removeItem(at: tmpURL)
-            throw error
-        }
-    }
-
-    private func removeRecordFile() {
-        try? FileManager.default.removeItem(at: recordURL)
-    }
-
-    private static func derivePBKDF2(
-        password: String,
-        salt: Data,
-        iterations: Int,
-        byteCount: Int
-    ) -> Data? {
-        var derived = Data(count: byteCount)
-        let passwordLength = password.utf8.count
-        let status: Int32 = password.withCString { passwordPtr in
-            salt.withUnsafeBytes { saltBytes in
-                let saltPtr = saltBytes.bindMemory(to: UInt8.self).baseAddress
-                return derived.withUnsafeMutableBytes { derivedBytes in
-                    let derivedPtr = derivedBytes.bindMemory(to: UInt8.self).baseAddress
-                    return CCKeyDerivationPBKDF(
-                        CCPBKDFAlgorithm(kCCPBKDF2),
-                        passwordPtr,
-                        passwordLength,
-                        saltPtr,
-                        salt.count,
-                        CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA256),
-                        UInt32(iterations),
-                        derivedPtr,
-                        byteCount
-                    )
-                }
-            }
-        }
-        return status == kCCSuccess ? derived : nil
-    }
-
-    private static func constantTimeEqual(_ lhs: Data, _ rhs: Data) -> Bool {
-        guard lhs.count == rhs.count else { return false }
-        var diff: UInt8 = 0
-        for (a, b) in zip(lhs, rhs) {
-            diff |= a ^ b
-        }
-        return diff == 0
+    private func readRecord() -> KeyCoverVaultRecord? {
+        vaultStore.readRecord()
     }
 
     private static let defaultLegacyKeychainReader: @Sendable () -> String? = {
