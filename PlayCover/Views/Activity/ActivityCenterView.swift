@@ -21,13 +21,21 @@ struct ActivityCenterView: View {
 
     private var activeStageIndex: Int {
         switch installVM.status {
-        case .begin, .unzip, .wrapper: return 0
-        case .playtools: return 1
+        case .begin, .unzip: return 0
+        case .wrapper, .playtools: return 1
         case .sign: return 2
         case .library: return 3
         case .finish: return 4
         case .failed: return -1
         }
+    }
+
+    private func clampedProgress(_ value: Double) -> Double {
+        min(max(value, 0), 1)
+    }
+
+    private func percentageText(for value: Double) -> String {
+        "\(Int((clampedProgress(value) * 100).rounded()))%"
     }
 
     var body: some View {
@@ -63,11 +71,14 @@ struct ActivityCenterView: View {
 
     private var downloadCard: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
+            HStack(spacing: 8) {
                 Text(downloadVM.storeAppData?.name ?? NSLocalizedString("sidebar.ipaLibrary", comment: ""))
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
                 Spacer()
+                Text(percentageText(for: downloadVM.progress))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
                 if downloadVM.status == .downloading {
                     Button {
                         DownloadApp(url: nil, app: nil, warning: nil, dependencies: dependencies).cancel()
@@ -76,12 +87,13 @@ struct ActivityCenterView: View {
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel(Text("button.Cancel"))
                 }
             }
             Text(NSLocalizedString(downloadVM.status.rawValue, comment: ""))
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            ProgressView(value: downloadVM.progress)
+            ProgressView(value: clampedProgress(downloadVM.progress))
         }
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(.fill.quaternary))
@@ -89,9 +101,16 @@ struct ActivityCenterView: View {
 
     private var installCard: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(NSLocalizedString(installVM.status.rawValue, comment: ""))
-                .font(.subheadline.weight(.semibold))
-            ProgressView(value: installVM.progress)
+            HStack(spacing: 8) {
+                Text(NSLocalizedString(installVM.status.rawValue, comment: ""))
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                Spacer()
+                Text(percentageText(for: installVM.progress))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            ProgressView(value: clampedProgress(installVM.progress))
                 .tint(installVM.status == .failed ? .red : .accentColor)
 
             HStack(spacing: 6) {

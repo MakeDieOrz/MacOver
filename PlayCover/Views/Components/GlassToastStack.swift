@@ -32,6 +32,7 @@ struct GlassToastStack: View {
                     }
                 }
             }
+            .frame(maxWidth: 460)
             .padding(.horizontal, 24)
             .padding(.bottom, 16)
             .animation(.snappy, value: visibleToasts)
@@ -60,20 +61,38 @@ private struct GlassToastCapsule: View {
     }
 
     var body: some View {
-        Button(action: onDismiss) {
-            HStack(spacing: 8) {
-                Image(systemName: iconName)
-                    .foregroundStyle(tintColor)
-                Text(toast.toastDetails)
-                    .font(.callout)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
+        HStack(spacing: 10) {
+            Image(systemName: iconName)
+                .foregroundStyle(tintColor)
+                .accessibilityHidden(true)
+
+            Text(toast.toastDetails)
+                .font(.callout)
+                .lineLimit(3)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 20, height: 20)
+                    .contentShape(Circle())
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 9)
+            .buttonStyle(.plain)
+            .help("button.Dismiss")
+            .accessibilityLabel(Text("button.Dismiss"))
         }
-        .buttonStyle(.plain)
+        .padding(.leading, 14)
+        .padding(.trailing, 10)
+        .padding(.vertical, 9)
+        .frame(maxWidth: 460)
+        .contentShape(Capsule())
+        .onTapGesture(perform: onDismiss)
         .glassEffect(.regular.interactive(), in: .capsule)
         .shadow(color: .black.opacity(0.14), radius: 8, y: 3)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text(toast.toastDetails))
+        .accessibilityAction(named: Text("button.Dismiss"), onDismiss)
     }
 }

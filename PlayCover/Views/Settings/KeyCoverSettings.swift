@@ -11,74 +11,79 @@ struct KeyCoverSettings: View {
     @State private var keyCoverInitialSetupShown = false
     @State private var keyCoverUpdatePasswordShown = false
     @State private var keyCoverRemovalViewShown = false
+    @State private var showForceResetAlert = false
 
     @Environment(PlayCoverDependencies.self) var dependencies
     @Environment(KeyCoverPreferences.self) var keyCoverPreferences
     @Environment(KeyCoverObservable.self) var keyCoverObserved
-    @Environment(ModifierKeyObserver.self) var modifierKeyObserver
+
+    private var statusTextKey: LocalizedStringKey {
+        guard keyCoverObserved.keyCoverEnabled else { return "state.disabled" }
+        return keyCoverPreferences.keyCoverEnabled == .selfGeneratedPassword
+            ? "keycover.status.managedPassword"
+            : "keycover.status.userPassword"
+    }
 
     var body: some View {
         @Bindable var keyCoverPreferences = keyCoverPreferences
-        VStack {
-            HStack {
-                HStack {
-                    Text("keycover.status.title")
-                    Text(keyCoverObserved.keyCoverEnabled ?
-                             keyCoverPreferences.keyCoverEnabled == .selfGeneratedPassword ?
-                             "keycover.status.managedPassword" : "keycover.status.userPassword"
-                         : "state.disabled")
-                        .foregroundColor(keyCoverObserved.keyCoverEnabled ? .green : .none)
-                    Spacer()
-                }
-                Spacer()
-                Button(keyCoverObserved.keyCoverEnabled ? "button.Reset" : "button.Enable") {
-                    if keyCoverObserved.keyCoverEnabled {
-                        if modifierKeyObserver.isOptionKeyPressed {
-                            dependencies.keyCoverPassword.forceResetKeyCoverPassword()
+        Form {
+            Section {
+                LabeledContent("keycover.status.title") {
+                    HStack(spacing: 10) {
+                        Text(statusTextKey)
+                            .fontWeight(.medium)
+                            .foregroundStyle(keyCoverObserved.keyCoverEnabled ? .green : .secondary)
+
+                        if keyCoverObserved.keyCoverEnabled {
+                            Button("button.Reset") {
+                                keyCoverRemovalViewShown = true
+                            }
                         } else {
-                            keyCoverRemovalViewShown = true
+                            Button("button.Enable") {
+                                keyCoverInitialSetupShown = true
+                            }
+                            .buttonStyle(.borderedProminent)
                         }
-                    } else {
-                        keyCoverInitialSetupShown = true
                     }
                 }
-                .foregroundColor((keyCoverObserved.keyCoverEnabled
-                                 && modifierKeyObserver.isOptionKeyPressed)
-                                    ? .red : .none)
-            }
-            .padding()
-            Spacer()
-            HStack {
-                VStack(alignment: .leading) {
-                    Text("keycover.status.chainCount")
-                    Text(String(format: NSLocalizedString("keycover.status.unlockedCount %@ %@", comment: ""),
-                                "\(keyCoverObserved.unlockedCount)",
-                                "\(keyCoverObserved.keychains.count)"))
+
+                LabeledContent("keycover.status.chainCount") {
+                    HStack(spacing: 10) {
+                        Text(String(
+                            format: NSLocalizedString("keycover.status.unlockedCount %@ %@", comment: ""),
+                            "\(keyCoverObserved.unlockedCount)",
+                            "\(keyCoverObserved.keychains.count)"
+                        ))
+                        .font(.callout.monospacedDigit())
+                        .foregroundStyle(.secondary)
+
+                        Button("keycover.button.lockAll") {
+                            dependencies.keyCover.lockAllChainsAsync()
+                        }
+                        .disabled(!keyCoverObserved.keyCoverEnabled)
+                    }
                 }
-                Spacer()
-                Button("keycover.button.lockAll") {
-                    dependencies.keyCover.lockAllChainsAsync()
-                }
-                .disabled(!keyCoverObserved.keyCoverEnabled)
             }
-            .padding()
-            HStack {
-                Spacer()
+
+            Section {
+                Toggle("keycover.toggle.startupPrompt", isOn: $keyCoverPreferences.promptForKeyCoverPasswordAtLaunch)
+                    .help("keycover.toggle.startupPrompt.help")
+
                 Button("keycover.button.changePassword") {
                     keyCoverUpdatePasswordShown = true
                 }
                 .disabled(!keyCoverObserved.keyCoverEnabled)
-                Spacer()
             }
-            .padding()
-            VStack(alignment: .leading) {
-                Toggle("keycover.toggle.startupPrompt", isOn: $keyCoverPreferences.promptForKeyCoverPasswordAtLaunch)
-                    .help("keycover.toggle.startupPrompt.help")
-                Spacer()
+
+            if keyCoverObserved.keyCoverEnabled {
+                Section {
+                    Button("keycover.forceReset.confirm", role: .destructive) {
+                        showForceResetAlert = true
+                    }
+                }
             }
-            .padding()
         }
-        .frame(width: 600, height: 300)
+        .formStyle(.grouped)
         .sheet(isPresented: $keyCoverInitialSetupShown) {
             KeyCoverInitialSetupView(isPresented: $keyCoverInitialSetupShown)
                 .environment(dependencies)
@@ -90,6 +95,14 @@ struct KeyCoverSettings: View {
         .sheet(isPresented: $keyCoverRemovalViewShown) {
             KeyCoverRemovalView(isPresented: $keyCoverRemovalViewShown)
                 .environment(dependencies)
+        }
+        .alert("keycover.forceReset.title", isPresented: $showForceResetAlert) {
+            Button("keycover.forceReset.confirm", role: .destructive) {
+                dependencies.keyCoverPassword.forceResetKeyCoverPassword()
+            }
+            Button("button.Cancel", role: .cancel) {}
+        } message: {
+            Text("keycover.forceReset.message")
         }
     }
 }

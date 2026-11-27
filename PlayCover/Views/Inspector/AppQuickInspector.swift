@@ -6,7 +6,45 @@
 import PlayCoverCore
 import SwiftUI
 
+private struct InspectorSwitchToggleStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            configuration.label
+                .font(.callout)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+            Toggle("", isOn: configuration.$isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+/// Solid tinted capsule for the inspector's primary Launch/Quit CTA, at an exact height so it
+/// lines up with the adjacent `…` menu capsule.
+private struct InspectorProminentCapsuleStyle: ButtonStyle {
+    let tint: Color
+    let height: CGFloat
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.body.weight(.semibold))
+            .foregroundStyle(.white)
+            .frame(height: height)
+            .background(Capsule().fill(tint.gradient))
+            .overlay(Capsule().strokeBorder(.white.opacity(0.18), lineWidth: 0.5))
+            .contentShape(Capsule())
+            .opacity(isEnabled ? (configuration.isPressed ? 0.82 : 1) : 0.6)
+            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+            .animation(.snappy(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
 struct AppQuickInspector: View {
+    @Environment(PlayCoverDependencies.self) var dependencies
     @Environment(AppNavigationState.self) var navState
 
     var app: PlayApp
@@ -100,7 +138,7 @@ struct AppQuickInspector: View {
                     .lineLimit(2)
                 HStack(spacing: 6) {
                     Text(app.info.bundleVersion)
-                        .font(.caption)
+                        .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                     if app.isRunning {
                         AppStatusPill(kind: .running, compact: true)
@@ -114,61 +152,121 @@ struct AppQuickInspector: View {
         }
     }
 
+    /// The CTA, `…` menu and Configure button all draw an exact `actionRowHeight` capsule.
+    /// (macOS `Menu` ignores glass button styles and control sizes, so system bezels drift.)
+    private let actionRowHeight: CGFloat = 34
+
     private var actionButtonsSection: some View {
         VStack(spacing: 8) {
-            HStack(spacing: 8) {
-                if app.isRunning {
-                    Button {
-                        Task { await app.terminate() }
-                    } label: {
-                        Label("action.quit", systemImage: "stop.fill")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.red)
-                } else {
-                    Button {
-                        Task(priority: .userInitiated) {
-                            if !app.isStarting {
-                                await app.launch()
-                            }
-                        }
-                    } label: {
-                        Label("action.launch", systemImage: "play.fill")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(app.isStarting)
+            GlassEffectContainer(spacing: 8) {
+                HStack(spacing: 8) {
+                    primaryActionButton
+                    moreActionsMenu
                 }
-
-                Menu {
-                    Button("action.launchSafeMode", systemImage: "shield.lefthalf.filled") {
-                        Task {
-                            if app.isRunning {
-                                await app.restart(safeModeOneShot: true)
-                            } else if !app.isStarting {
-                                await app.launch(safeModeOneShot: true)
-                            }
-                        }
-                    }
-                } label: {
-                    Image(systemName: "ellipsis")
-                }
-                .buttonStyle(.bordered)
-                .menuIndicator(.hidden)
-                .help("action.moreActions")
-                .accessibilityLabel(Text("action.moreActions"))
             }
 
             Button {
                 navState.openConfiguration(for: app, pane: .overview)
             } label: {
                 Label("action.configure", systemImage: "slider.horizontal.3")
+                    .font(.body.weight(.medium))
                     .frame(maxWidth: .infinity)
+                    .frame(height: actionRowHeight)
+                    .contentShape(Capsule())
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.plain)
+            .glassEffect(.regular.interactive(), in: .capsule)
         }
-        .controlSize(.large)
+    }
+
+    private var primaryActionButton: some View {
+        Button {
+            if app.isRunning {
+                Task { await app.terminate() }
+            } else {
+                Task(priority: .userInitiated) {
+                    if !app.isStarting {
+                        await app.launch()
+                    }
+                }
+            }
+        } label: {
+            Group {
+                if !app.isRunning && app.isStarting {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(.white)
+                        Text("action.launch")
+                    }
+                } else if app.isRunning {
+                    Label("action.quit", systemImage: "stop.fill")
+                } else {
+                    Label("action.launch", systemImage: "play.fill")
+                }
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(InspectorProminentCapsuleStyle(
+            tint: app.isRunning ? .red : .accentColor,
+            height: actionRowHeight
+        ))
+        .disabled(!app.isRunning && app.isStarting)
+    }
+
+    private var moreActionsMenu: some View {
+        Menu {
+            Button(
+                app.isRunning ? "action.restartSafeMode" : "action.launchSafeMode",
+                systemImage: "shield.lefthalf.filled"
+            ) {
+                Task {
+                    if app.isRunning {
+                        await app.restart(safeModeOneShot: true)
+                    } else if !app.isStarting {
+                        await app.launch(safeModeOneShot: true)
+                    }
+                }
+            }
+
+            Divider()
+
+            Button("action.configure", systemImage: "slider.horizontal.3") {
+                navState.openConfiguration(for: app, pane: .overview)
+            }
+            Button("action.manageKeymaps", systemImage: "keyboard") {
+                navState.openConfiguration(for: app, pane: .input)
+            }
+
+            Divider()
+
+            Button("playapp.openCache", systemImage: "folder") {
+                app.openAppCache()
+            }
+            Button("menubar.log.copy", systemImage: "doc.on.doc") {
+                dependencies.log.logdata.copyToClipBoard()
+                dependencies.toastVM.showToast(
+                    toastType: .notice,
+                    toastDetails: NSLocalizedString("toast.logsCopied", comment: "")
+                )
+            }
+            Button("playapp.showInFinder", systemImage: "finder") {
+                app.showInFinder()
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.body.weight(.semibold))
+                .foregroundStyle(.primary)
+                .frame(width: 40, height: actionRowHeight)
+                .contentShape(Capsule())
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .glassEffect(.regular.interactive(), in: .capsule)
+        .frame(width: 40, height: actionRowHeight)
+        .help("action.moreActions")
+        .accessibilityLabel(Text("action.moreActions"))
     }
 
     private var restartCallout: some View {
@@ -204,6 +302,7 @@ struct AppQuickInspector: View {
                     } label: {
                         Label(LocalizedStringKey(preset.titleKey), systemImage: preset.systemImage)
                             .font(.caption.weight(.medium))
+                            .lineLimit(1)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 6)
@@ -217,16 +316,21 @@ struct AppQuickInspector: View {
                             )
                     }
                     .buttonStyle(.plain)
+                    .help(LocalizedStringKey(preset.subtitleKey))
+                    .accessibilityLabel(Text(LocalizedStringKey(preset.titleKey)))
+                    .accessibilityHint(Text(LocalizedStringKey(preset.subtitleKey)))
+                    .accessibilityAddTraits(active ? .isSelected : [])
                 }
             }
         }
     }
 
     private var quickTogglesSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             Text("inspector.quickControls")
                 .font(.subheadline.weight(.medium))
             Toggle("settings.toggle.km", isOn: $settings.settings.keymapping)
+                .help("settings.toggle.km.help")
             Toggle("settings.playChain.enable", isOn: $settings.settings.playChain)
             Toggle(
                 "settings.toggle.jbBypass",
@@ -238,22 +342,32 @@ struct AppQuickInspector: View {
                     }
                 )
             )
+            .help("settings.toggle.jbBypass.help")
             .disabled(!hasPlayTools || settings.settings.strictEmulationMode)
             Toggle("settings.network.enable", isOn: $settings.settings.enableNetworkRules)
             Toggle("settings.toggle.disableDisplaySleep", isOn: $settings.settings.disableTimeout)
+                .help("settings.toggle.disableDisplaySleep.help")
             if settings.settings.strictEmulationMode {
                 StrictLockedNote(textKey: "strict.lockedByMode.bypasses")
             }
         }
-        .toggleStyle(.switch)
-        .controlSize(.small)
+        .toggleStyle(InspectorSwitchToggleStyle())
         .disabled(!hasPlayTools)
     }
 
     private var defaultKeymapSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("inspector.defaultKeymap")
-                .font(.subheadline.weight(.medium))
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("inspector.defaultKeymap")
+                    .font(.subheadline.weight(.medium))
+                Spacer(minLength: 4)
+                Button("action.manageKeymaps") {
+                    navState.openConfiguration(for: app, pane: .input)
+                }
+                .buttonStyle(.link)
+                .font(.caption)
+                .disabled(!hasPlayTools)
+            }
             if keymapURLs.isEmpty {
                 Text("inspector.none")
                     .font(.caption)

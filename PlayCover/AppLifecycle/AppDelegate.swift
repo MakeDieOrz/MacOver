@@ -9,6 +9,7 @@ import Foundation
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let showLowPowerModeAlertKey = "ShowLowPowerModeAlert"
+    private static let showMenuBarExtraKey = "showMenuBarExtra"
 
     let dependencies: PlayCoverDependencies
 
@@ -36,10 +37,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private var isMenuBarExtraEnabled: Bool {
+        UserDefaults.standard.object(forKey: Self.showMenuBarExtraKey) as? Bool ?? true
+    }
+
     func application(_ application: NSApplication, open urls: [URL]) {
         guard !ProcessInfo.isRunningUnitTests else { return }
         if let url = urls.first {
             dependencies.urlHandler.processURL(url: url)
+            bringMainWindowToFront(in: application)
         }
     }
 
@@ -69,13 +75,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        guard !ProcessInfo.isRunningUnitTests else { return false }
+        if !flag, bringMainWindowToFront(in: sender) {
+            return false
+        }
         return true
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        !isMenuBarExtraEnabled
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         guard !ProcessInfo.isRunningUnitTests else { return }
-        for app in dependencies.appsVM.apps {
+        let apps = dependencies.appsVM.apps
+        dependencies.mitmCoordinator.prepareForHostTermination(apps: apps)
+        for app in apps {
             app.settings.flush()
         }
     }
@@ -97,5 +113,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 startupAlerts.enqueue(.lowPowerMode)
             }
         }
+    }
+
+    @discardableResult
+    private func bringMainWindowToFront(in application: NSApplication) -> Bool {
+        guard let mainWindow = application.windows.first(where: { window in
+            window.canBecomeMain && !(window is NSPanel)
+        }) else {
+            return false
+        }
+        if mainWindow.isMiniaturized {
+            mainWindow.deminiaturize(nil)
+        }
+        mainWindow.makeKeyAndOrderFront(nil)
+        application.activate()
+        return true
     }
 }

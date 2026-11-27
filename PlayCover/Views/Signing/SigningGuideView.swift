@@ -38,6 +38,9 @@ struct SigningGuideView: View {
         .padding(20)
         .frame(width: 600)
         .presentationSizing(.form)
+        .onExitCommand {
+            isSigningSetupShown = false
+        }
         .task {
             await refreshStatus()
         }
@@ -85,18 +88,21 @@ struct SigningGuideView: View {
                 isActive: !sipEnabled && amfiDisabledInRunningOS
             )
         }
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     private var statusSummarySection: some View {
         Group {
             if isLoadingStatus {
-                HStack {
+                HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
-                    Text("preferences.popover.checking")
+                    Text("signing.status.checking")
                         .font(.callout)
                         .foregroundStyle(.secondary)
+                    Spacer()
                 }
-                .padding(.vertical, 6)
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(.fill.quaternary))
             } else {
                 VStack(spacing: 8) {
                     HStack {
@@ -130,10 +136,17 @@ struct SigningGuideView: View {
     }
 
     private var wizardContent: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("signing.wizard.step1").font(.caption)
-            Text("signing.wizard.step2").font(.caption)
-            Text("signing.wizard.step3").font(.caption).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 6) {
+            Text("signing.wizard.step1")
+                .font(.caption)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("signing.wizard.step2")
+                .font(.caption)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("signing.wizard.step3")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             HStack(spacing: 10) {
                 Button("configSigning.action.configureAutomatic") {
@@ -163,7 +176,7 @@ struct SigningGuideView: View {
                     ProgressView().controlSize(.small)
                 }
             }
-            .padding(.top, 4)
+            .padding(.top, 6)
         }
     }
 
@@ -175,7 +188,7 @@ struct SigningGuideView: View {
                 }
             }
             Spacer()
-            Button("button.Dismiss", role: .cancel) {
+            Button("button.Done") {
                 isSigningSetupShown = false
             }
             .buttonStyle(.borderedProminent)
@@ -224,7 +237,7 @@ private struct SigningModeCard: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(isActive ? tint.opacity(0.08) : Color.secondary.opacity(0.06))

@@ -30,6 +30,23 @@
         }
       }
     },
+    "action.copy" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Copy"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "复制"
+          }
+        }
+      }
+    },
     "action.launch" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -84,6 +101,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "安全模式單次啟動"
+          }
+        }
+      }
+    },
+    "action.manageKeymaps" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Manage Keymaps…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "管理键位映射…"
           }
         }
       }
@@ -2238,6 +2272,12 @@
             "value" : "Tastenbelegung importiert!"
           }
         },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Keymap imported"
+          }
+        },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
@@ -4184,6 +4224,23 @@
         }
       }
     },
+    "app.dataDirMissing" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "App data directory has not been created yet. Launch the app once first."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "应用尚未生成数据目录，请先启动一次应用。"
+          }
+        }
+      }
+    },
     "budget.caution" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -4965,6 +5022,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "關閉"
+          }
+        }
+      }
+    },
+    "button.Done" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Done"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "完成"
           }
         }
       }
@@ -6410,6 +6484,57 @@
         }
       }
     },
+    "config.advanced.lldbSessionOnly" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Applies to the next launch session only and resets automatically after launch."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仅对下一次启动会话生效，启动后将自动关闭。"
+          }
+        }
+      }
+    },
+    "config.network.invalidRule" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Invalid rule format. Enter a valid host, URL pattern, or AdGuard-style rule."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "规则格式无效，请输入有效的域名、URL 模式或 AdGuard 风格规则。"
+          }
+        }
+      }
+    },
+    "config.network.mitmHostsEmpty" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No MITM host patterns added yet. Add a domain pattern to inspect HTTPS traffic."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "尚未添加 MITM 域名规则，请添加需要抓包分析的域名模式。"
+          }
+        }
+      }
+    },
     "config.overview.summary" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -6671,6 +6796,23 @@
         }
       }
     },
+    "config.playtools.busyBanner" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Updating PlayTools… Please wait before launching or editing plugins."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在更新 PlayTools… 请等待操作完成后再启动或修改插件。"
+          }
+        }
+      }
+    },
     "config.resetMessage" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -6725,6 +6867,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "確認恢復預設設定？"
+          }
+        }
+      }
+    },
+    "configSigning.action.configureAutomatic" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Configure Automatically"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "自动配置"
           }
         }
       }
@@ -8690,6 +8849,91 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "應用程式包簽名幫助修復需要依靠正確 團隊 ID\n來處理身分驗證等操作的應用程序。\n這個功能有可能會帶來風險。\n\n因此，我們建議在不必要的情況下禁用它"
+          }
+        }
+      }
+    },
+    "confirm.clearCaptures.title" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Clear Captured Traffic?"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "清除已捕获的流量记录？"
+          }
+        }
+      }
+    },
+    "confirm.clearNetworkRules.title" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Clear All Network Rules?"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "清除所有网络规则？"
+          }
+        }
+      }
+    },
+    "confirm.deleteKeymap.title" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Delete Selected Keymap?"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "删除所选键位映射？"
+          }
+        }
+      }
+    },
+    "confirm.removePlayTools.title" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Remove PlayTools from App?"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "从此应用移除 PlayTools？"
+          }
+        }
+      }
+    },
+    "confirm.resetKeymap.title" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reset Keymap to Default?"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "将键位映射重置为默认？"
           }
         }
       }
@@ -14497,6 +14741,57 @@
         }
       }
     },
+    "keycover.forceReset.confirm" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Force Reset KeyCover"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "强制重置 KeyCover"
+          }
+        }
+      }
+    },
+    "keycover.forceReset.message" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This removes the stored KeyCover master password immediately without decrypting existing PlayChain databases. Any encrypted PlayChain credentials that cannot be unlocked will be lost."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此操作将立即清除已保存的 KeyCover 主密码，且不会解密现有的 PlayChain 数据库。无法解锁的已加密 PlayChain 凭据将会丢失。"
+          }
+        }
+      }
+    },
+    "keycover.forceReset.title" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Force Reset KeyCover?"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "强制重置 KeyCover？"
+          }
+        }
+      }
+    },
     "keycover.masterPassword" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -15927,7 +16222,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%@ 总共解锁了 %@ 条链"
+            "value" : "已解锁 %@ 条链（共 %@ 条）"
           }
         },
         "zh-Hant" : {
@@ -16690,6 +16985,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "拖放 IPA 檔案以安裝"
+          }
+        }
+      }
+    },
+    "library.empty.dropHint" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Drag and drop an .ipa file anywhere in this window to install."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "将 .ipa 文件拖放到窗口任意位置即可开始安装。"
           }
         }
       }
@@ -19190,6 +19502,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "馬上來看一看吧!"
+          }
+        }
+      }
+    },
+    "pixelBudget.suggestedScaler" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Suggested:"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "建议倍率："
           }
         }
       }
@@ -24641,13 +24970,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "复制链接"
+            "value" : "重复链接"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "複製連結"
+            "value" : "重複連結"
           }
         }
       }
@@ -27818,6 +28147,35 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "內省函式庫"
+          }
+        }
+      }
+    },
+    "restart.field.injectIosFrameworks" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS Frameworks"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS フレームワーク"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS 框架注入"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS 框架注入"
           }
         }
       }
@@ -34518,6 +34876,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Tastenbelegung wurde zurückgesetzt!"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Keymaps reset"
           }
         },
         "es" : {
@@ -41527,6 +41891,23 @@
         }
       }
     },
+    "signing.status.checking" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Checking signing status…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在检测签名状态…"
+          }
+        }
+      }
+    },
     "signing.wizard.step1" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -43368,6 +43749,91 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "嚴格模擬模式"
+          }
+        }
+      }
+    },
+    "toast.cacheCleared" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "App cache cleared"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "应用缓存已清除"
+          }
+        }
+      }
+    },
+    "toast.logsCopied" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Diagnostic logs copied to clipboard"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "诊断日志已复制到剪贴板"
+          }
+        }
+      }
+    },
+    "uninstaller.fda.message" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "macOS prevented MacOver from accessing this app's sandbox container (%@).\n\nThis usually happens when macOS privacy permissions are invalidated after MacOver is re-signed. Enable (or toggle off and back on) MacOver in System Settings → Privacy & Security → Full Disk Access, or run in Terminal:\ntccutil reset All app.makedie.MacOver"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "macOS 阻止了 MacOver 访问该应用的沙盒容器目录（%@）。\n\n这通常是因为 MacOver 重新编译签名后，macOS 原有的隐私授权记录失效。请在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」中勾选（或先关闭再重新开启）MacOver，或在终端执行以下命令重置授权后重试：\ntccutil reset All app.makedie.MacOver"
+          }
+        }
+      }
+    },
+    "uninstaller.fda.openSettings" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Open System Settings"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "打开系统设置"
+          }
+        }
+      }
+    },
+    "uninstaller.fda.title" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Unable to Clear App Data (Permission Restricted)"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法清除应用数据（系统权限受限）"
           }
         }
       }

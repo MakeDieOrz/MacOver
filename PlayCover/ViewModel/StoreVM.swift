@@ -9,7 +9,7 @@ import Foundation
 import Observation
 
 @Observable
-class StoreVM: @unchecked Sendable {
+class StoreVM {
     private let plistSource: URL
 
     private var isDecoding = false
@@ -66,6 +66,7 @@ class StoreVM: @unchecked Sendable {
 
     //
     func addSource(_ source: SourceData) {
+        guard !sourcesList.contains(where: { $0.source == source.source }) else { return }
         sourcesList.append(source)
         resolveSources()
     }
@@ -75,6 +76,7 @@ class StoreVM: @unchecked Sendable {
         sourcesList.removeAll {
             selectedSource.contains($0.id)
         }
+        selectedSource.removeAll()
         resolveSources()
     }
 
@@ -123,8 +125,15 @@ class StoreVM: @unchecked Sendable {
     func resolveSources() {
         resolveTask?.cancel()
         resolveTask = Task { @MainActor in
+            guard !sourcesList.isEmpty else {
+                sourcesData.removeAll()
+                return
+            }
 
-            guard NetworkVM.isConnectedToNetwork() && !sourcesList.isEmpty else { return }
+            let isConnected = await Task.detached(priority: .utility) {
+                NetworkVM.isConnectedToNetwork()
+            }.value
+            if Task.isCancelled { return }
 
             let sourcesCount = sourcesList.count
             sourcesData.removeAll()
@@ -132,8 +141,11 @@ class StoreVM: @unchecked Sendable {
             for index in sourcesList.indices {
                 if Task.isCancelled { return }
                 sourcesList[index].status = .checking
-                let (sourceJson, sourceState) = await getSourceData(sourceLink: sourcesList[index].source,
-                                                                    sourceId: sourcesList[index].id)
+                let (sourceJson, sourceState) = await getSourceData(
+                    sourceLink: sourcesList[index].source,
+                    sourceId: sourcesList[index].id,
+                    isConnected: isConnected
+                )
                 if Task.isCancelled { return }
                 guard sourcesCount == sourcesList.count else { return }
                 sourcesList[index].status = sourceState
@@ -141,7 +153,6 @@ class StoreVM: @unchecked Sendable {
                     sourcesData.append(sourceJson)
                 }
             }
-
         }
     }
 
@@ -182,40 +193,100 @@ class StoreVM: @unchecked Sendable {
         }
     }
 
-    //
-    private func getSourceData(sourceLink: String, sourceId: UUID) async -> (SourceJSON?, SourceValidation) {
-        guard let url = URL(string: sourceLink) else { return (nil, .badurl) }
-        var dataToDecode: Data?
-        do {
-            let (data, response) = try await URLSession.shared.data(
-                for: URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData)
-            )
-            if !url.isFileURL {
-                guard (response as? HTTPURLResponse)?.statusCode == 200 else { return (nil, .badurl) }
-            }
-            dataToDecode = data
-        } catch {
-            debugPrint("Error decoding data from URL: \(url): \(error)")
-            return (nil, .badjson)
+    static func normalizeSourceURL(_ rawSource: String) -> URL? {
+        let trimmed = rawSource.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        if trimmed.hasPrefix("/") {
+            return URL(fileURLWithPath: trimmed)
         }
-        guard let unwrappedData = dataToDecode else { return (nil, .badurl) }
-        var decodedData: SourceJSON?
+
+        guard var url = URL(string: trimmed) else { return nil }
+        if url.scheme == nil {
+            guard let httpsURL = URL(string: "https://" + trimmed) else { return nil }
+            url = httpsURL
+        }
+
+        if url.isFileURL {
+            return url.path.isEmpty ? nil : url
+        }
+
+        guard let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = url.host, !host.isEmpty else {
+            return nil
+        }
+
+        return url
+    }
+
+    static func fetchAndValidateSource(
+        url: URL,
+        sourceId: UUID = UUID(),
+        isConnected: Bool? = nil
+    ) async -> (SourceJSON?, SourceValidation) {
+        let dataToDecode: Data
+        if url.isFileURL {
+            do {
+                dataToDecode = try await Task.detached(priority: .userInitiated) {
+                    try Data(contentsOf: url)
+                }.value
+            } catch {
+                debugPrint("Error reading local source URL: \(url): \(error)")
+                return (nil, .badurl)
+            }
+        } else {
+            let networkAvailable: Bool
+            if let isConnected {
+                networkAvailable = isConnected
+            } else {
+                networkAvailable = await Task.detached(priority: .utility) {
+                    NetworkVM.isConnectedToNetwork()
+                }.value
+            }
+            guard networkAvailable else {
+                return (nil, .badurl)
+            }
+
+            do {
+                let request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData)
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                    return (nil, .badurl)
+                }
+                dataToDecode = data
+            } catch {
+                debugPrint("Error fetching data from URL: \(url): \(error)")
+                return (nil, .badurl)
+            }
+        }
+
         do {
-            decodedData = try JSONDecoder().decode(SourceJSON.self, from: unwrappedData)
+            let decodedData = try JSONDecoder().decode(SourceJSON.self, from: dataToDecode)
             return (decodedData, .valid)
         } catch {
             do {
                 let sourceName = url.isFileURL
-                ? (url.absoluteString as NSString).lastPathComponent.replacingOccurrences(of: ".json", with: "")
-                : url.host ?? url.absoluteString
-                let oldTypeJson: [SourceAppsData] = try JSONDecoder().decode([SourceAppsData].self, from: unwrappedData)
-                decodedData = SourceJSON(name: sourceName, data: oldTypeJson, id: sourceId)
+                    ? url.deletingPathExtension().lastPathComponent
+                    : (url.host ?? url.absoluteString)
+                let oldTypeJson = try JSONDecoder().decode([SourceAppsData].self, from: dataToDecode)
+                let decodedData = SourceJSON(name: sourceName, data: oldTypeJson, id: sourceId)
                 return (decodedData, .valid)
             } catch {
-                debugPrint("Error decoding data from URL: \(url): \(error)")
+                debugPrint("Error decoding JSON from URL: \(url): \(error)")
                 return (nil, .badjson)
             }
         }
+    }
+
+    //
+    private func getSourceData(
+        sourceLink: String,
+        sourceId: UUID,
+        isConnected: Bool
+    ) async -> (SourceJSON?, SourceValidation) {
+        guard let url = Self.normalizeSourceURL(sourceLink) else { return (nil, .badurl) }
+        return await Self.fetchAndValidateSource(url: url, sourceId: sourceId, isConnected: isConnected)
     }
 
     //
@@ -228,13 +299,13 @@ class StoreVM: @unchecked Sendable {
 }
 
 // Source Data Structure
-struct SourceJSON: Codable, Equatable, Hashable {
+nonisolated struct SourceJSON: Codable, Equatable, Hashable {
     let name: String
     let data: [SourceAppsData]
     let id: UUID
 }
 
-struct SourceAppsData: Codable, Equatable, Hashable {
+nonisolated struct SourceAppsData: Codable, Equatable, Hashable {
     let bundleID: String
     let name: String
     let version: String

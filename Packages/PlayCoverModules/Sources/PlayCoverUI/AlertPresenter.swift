@@ -33,7 +33,7 @@ public struct PlayCoverAlertResponse: Equatable, Sendable {
     }
 }
 
-public struct PlayCoverAlertRequest: Identifiable {
+public struct PlayCoverAlertRequest: Identifiable, Sendable {
     public let id = UUID()
     public let title: String
     public let message: String
@@ -238,32 +238,49 @@ public struct PlayCoverAlertSheet: View {
                     .toggleStyle(.checkbox)
             }
 
-            HStack {
+            HStack(spacing: 8) {
                 Spacer()
                 ForEach(request.buttons.reversed()) { button in
-                    if button.id == 0 {
-                        alertButton(button)
-                            .keyboardShortcut(.defaultAction)
-                    } else {
-                        alertButton(button)
-                    }
+                    alertButton(button)
                 }
             }
         }
         .padding(20)
         .frame(minWidth: 380, maxWidth: 480)
+        .onExitCommand {
+            onResolve(PlayCoverAlertResponse(
+                buttonIndex: request.defaultCancelIndex,
+                suppressionChecked: suppressionChecked
+            ))
+        }
+    }
+
+    private func isDefaultButton(_ button: PlayCoverAlertButton) -> Bool {
+        button.id == 0
     }
 
     @ViewBuilder
     private func alertButton(_ button: PlayCoverAlertButton) -> some View {
-        Button(
-            button.title,
-            role: button.isDestructive ? .destructive : (button.isCancel ? .cancel : nil)
-        ) {
+        let isDefault = isDefaultButton(button)
+        let role: ButtonRole? = button.isDestructive ? .destructive : (button.isCancel ? .cancel : nil)
+        let baseButton = Button(button.title, role: role) {
             onResolve(PlayCoverAlertResponse(
                 buttonIndex: button.id,
                 suppressionChecked: suppressionChecked
             ))
+        }
+
+        if isDefault {
+            baseButton
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+        } else if button.isCancel {
+            baseButton
+                .buttonStyle(.bordered)
+                .keyboardShortcut(.cancelAction)
+        } else {
+            baseButton
+                .buttonStyle(.bordered)
         }
     }
 }

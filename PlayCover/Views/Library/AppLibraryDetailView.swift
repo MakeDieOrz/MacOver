@@ -28,14 +28,21 @@ struct AppLibraryDetailView: View {
     var body: some View {
         @Bindable var navState = navState
         Group {
-            if !appsVM.apps.isEmpty || appsVM.updatingApps {
-                if navState.libraryLayout == .table {
-                    AppTableView(
-                        apps: appsVM.filteredApps,
-                        onClearPreferences: { clearPrefsApp = $0 },
-                        onClearPlayChain: { clearPlayChainApp = $0 }
-                    )
-                } else {
+            if appsVM.updatingApps && appsVM.apps.isEmpty {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if appsVM.apps.isEmpty {
+                emptyLibraryView
+            } else if appsVM.filteredApps.isEmpty {
+                ContentUnavailableView.search(text: navState.searchText)
+            } else if navState.libraryLayout == .table {
+                AppTableView(
+                    apps: appsVM.filteredApps,
+                    onClearPreferences: { clearPrefsApp = $0 },
+                    onClearPlayChain: { clearPlayChainApp = $0 }
+                )
+            } else {
+                ScrollViewReader { proxy in
                     ScrollView {
                         LazyVGrid(columns: gridColumns, spacing: 14) {
                             ForEach(appsVM.filteredApps) { app in
@@ -46,6 +53,7 @@ struct AppLibraryDetailView: View {
                                     onClearPreferences: { clearPrefsApp = $0 },
                                     onClearPlayChain: { clearPlayChainApp = $0 }
                                 )
+                                .id(app.id)
                             }
                         }
                         .padding(18)
@@ -55,9 +63,13 @@ struct AppLibraryDetailView: View {
                     .onTapGesture {
                         navState.selectedAppID = nil
                     }
+                    .onChange(of: navState.selectedAppID) { _, newID in
+                        guard let newID else { return }
+                        withAnimation(.snappy(duration: 0.2)) {
+                            proxy.scrollTo(newID, anchor: .center)
+                        }
+                    }
                 }
-            } else {
-                emptyLibraryView
             }
         }
         .navigationTitle("sidebar.appLibrary")
@@ -94,10 +106,15 @@ struct AppLibraryDetailView: View {
 
             ToolbarItemGroup(placement: .primaryAction) {
                 Picker("sidebar.layoutPicker", selection: $navState.libraryLayout) {
-                    Image(systemName: "square.grid.2x2").tag(LibraryLayoutMode.grid)
-                    Image(systemName: "tablecells").tag(LibraryLayoutMode.table)
+                    Image(systemName: "square.grid.2x2")
+                        .accessibilityLabel(Text("sidebar.layoutPicker"))
+                        .tag(LibraryLayoutMode.grid)
+                    Image(systemName: "tablecells")
+                        .accessibilityLabel(Text("library.table.app"))
+                        .tag(LibraryLayoutMode.table)
                 }
                 .pickerStyle(.segmented)
+                .accessibilityLabel(Text("sidebar.layoutPicker"))
             }
 
             ToolbarSpacer(.fixed, placement: .primaryAction)
@@ -151,7 +168,12 @@ struct AppLibraryDetailView: View {
         ContentUnavailableView {
             Label("playapp.noSources.title", systemImage: "square.grid.2x2")
         } description: {
-            Text("playapp.noSources.subtitle")
+            VStack(spacing: 6) {
+                Text("playapp.noSources.subtitle")
+                Text("library.empty.dropHint")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
         } actions: {
             Button("playapp.importIPA") {
                 navState.pendingImportIPATrigger = UUID()

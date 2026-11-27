@@ -8,6 +8,8 @@ import PlayCoverCore
 import SwiftUI
 
 struct ConfigAdvancedPane: View {
+    @Environment(\.locale) private var locale
+
     var app: PlayApp
     @Bindable var settings: AppSettings
     let hasPlayTools: Bool
@@ -33,8 +35,9 @@ struct ConfigAdvancedPane: View {
         self._blockingTask = blockingTask
         let lsEnv = app.info.lsEnvironment["DYLD_LIBRARY_PATH"] ?? ""
         let plistHasIntrospection = lsEnv.contains(PlayApp.introspection)
+        let plistHasIosFrameworks = lsEnv.contains(PlayApp.iosFrameworks)
         _hasIntrospection = State(initialValue: plistHasIntrospection || settings.settings.storedHasIntrospection)
-        _hasIosFrameworks = State(initialValue: lsEnv.contains(PlayApp.iosFrameworks))
+        _hasIosFrameworks = State(initialValue: plistHasIosFrameworks || settings.settings.storedHasIosFrameworks)
     }
 
     private var troubleshootingCount: Int {
@@ -64,22 +67,22 @@ struct ConfigAdvancedPane: View {
                     .help("settings.toggle.jbBypass.help")
                     .disabled(!hasPlayTools || isStrictMode)
 
-                rowWithRestartBadge {
-                    Toggle(
-                        "settings.toggle.interceptInlineSyscalls",
-                        isOn: effectiveLockedBinding(
-                            effective: settings.settings.effectiveInterceptInlineSyscalls,
-                            stored: $settings.settings.interceptInlineSyscalls
-                        )
+                Toggle(
+                    isOn: effectiveLockedBinding(
+                        effective: settings.settings.effectiveInterceptInlineSyscalls,
+                        stored: $settings.settings.interceptInlineSyscalls
                     )
-                        .help("settings.toggle.interceptInlineSyscalls.help")
-                        .disabled(!hasPlayTools || isStrictMode)
+                ) {
+                    restartLabel("settings.toggle.interceptInlineSyscalls")
                 }
+                .help("settings.toggle.interceptInlineSyscalls.help")
+                .disabled(!hasPlayTools || isStrictMode)
 
                 if settings.settings.effectiveInterceptInlineSyscalls {
                     Text("settings.toggle.interceptInlineSyscalls.warning")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 if isStrictMode {
@@ -87,17 +90,21 @@ struct ConfigAdvancedPane: View {
                 }
             }
 
-            Section("settings.toggle.discord") {
+            Section("settings.button.discord") {
                 Toggle("settings.toggle.discord", isOn: $settings.settings.discordActivity.enable)
                     .disabled(!hasPlayTools)
 
                 if settings.settings.discordActivity.enable {
                     TextField("settings.text.applicationID", text: $settings.settings.discordActivity.applicationID)
+                        .textFieldStyle(.roundedBorder)
                     TextField("settings.text.details", text: $settings.settings.discordActivity.details)
+                        .textFieldStyle(.roundedBorder)
                         .help("settings.text.details.help")
                     TextField("settings.text.state", text: $settings.settings.discordActivity.state)
+                        .textFieldStyle(.roundedBorder)
                         .help("settings.text.state.help")
                     TextField("settings.text.image", text: $settings.settings.discordActivity.image)
+                        .textFieldStyle(.roundedBorder)
                         .help("settings.text.image.help")
                     Button("settings.button.clearActivity") {
                         settings.update { $0.discordActivity = DiscordActivity() }
@@ -110,9 +117,11 @@ struct ConfigAdvancedPane: View {
                     troubleshootingRows
                 } label: {
                     let title = troubleshootingCount > 0
-                        ? String(format: NSLocalizedString("advanced.troubleshooting", comment: ""),
-                                 troubleshootingCount)
-                        : NSLocalizedString("advanced.troubleshootingZero", comment: "")
+                        ? String(
+                            format: ConfigLabelFormatter.localized("advanced.troubleshooting", locale: locale),
+                            troubleshootingCount
+                        )
+                        : ConfigLabelFormatter.localized("advanced.troubleshootingZero", locale: locale)
                     Text(title)
                         .font(.headline)
                 }
@@ -134,66 +143,42 @@ struct ConfigAdvancedPane: View {
     private func syncDyldStates() {
         let lsEnv = app.info.lsEnvironment["DYLD_LIBRARY_PATH"] ?? ""
         let plistHasIntrospection = lsEnv.contains(PlayApp.introspection)
+        let plistHasIosFrameworks = lsEnv.contains(PlayApp.iosFrameworks)
         hasIntrospection = plistHasIntrospection || settings.settings.storedHasIntrospection
-        hasIosFrameworks = lsEnv.contains(PlayApp.iosFrameworks)
-    }
-
-    private func dyldBinding(
-        for path: String,
-        role: ConfigBlockingTask,
-        value: Binding<Bool>
-    ) -> Binding<Bool> {
-        Binding(
-            get: { value.wrappedValue },
-            set: { enabled in
-                let currentInPlist = (app.info.lsEnvironment["DYLD_LIBRARY_PATH"] ?? "").contains(path)
-                guard blockingTask == .none, enabled != currentInPlist else {
-                    syncDyldStates()
-                    return
-                }
-                value.wrappedValue = enabled
-                blockingTask = role
-                Task {
-                    _ = await app.changeDyldLibraryPath(set: enabled, path: path)
-                    await MainActor.run {
-                        syncDyldStates()
-                        blockingTask = .none
-                    }
-                }
-            }
-        )
+        hasIosFrameworks = plistHasIosFrameworks || settings.settings.storedHasIosFrameworks
     }
 
     @ViewBuilder
     private var strictEmulationSection: some View {
         let data = settings.settings
         Section("strict.section.title") {
-            rowWithRestartBadge {
-                Toggle("strict.mode.toggle", isOn: $settings.settings.strictEmulationMode)
-                    .disabled(!hasPlayTools)
+            Toggle(isOn: $settings.settings.strictEmulationMode) {
+                restartLabel("strict.mode.toggle")
             }
+            .disabled(!hasPlayTools && !isStrictMode)
 
             Text("strict.mode.desc")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             if isStrictMode {
-                rowWithRestartBadge {
-                    Picker("strict.orientation.title", selection: $settings.settings.strictViewportOrientation) {
-                        Text("strict.orientation.landscape").tag(StrictViewportOrientation.landscape)
-                        Text("strict.orientation.portrait").tag(StrictViewportOrientation.portrait)
-                    }
-                    .pickerStyle(.segmented)
-                    .disabled(!hasPlayTools)
+                Picker(selection: $settings.settings.strictViewportOrientation) {
+                    Text("strict.orientation.landscape").tag(StrictViewportOrientation.landscape)
+                    Text("strict.orientation.portrait").tag(StrictViewportOrientation.portrait)
+                } label: {
+                    restartLabel("strict.orientation.title")
                 }
+                .pickerStyle(.segmented)
+                .disabled(!hasPlayTools)
 
-                rowWithRestartBadge {
-                    Picker("strict.scaleMode.title", selection: $settings.settings.strictViewportScaleMode) {
-                        Text("strict.scaleMode.fitScreen").tag(StrictViewportScaleMode.fitScreen)
-                        Text("strict.scaleMode.native1x").tag(StrictViewportScaleMode.native1x)
-                    }
-                    .disabled(!hasPlayTools)
+                Picker(selection: $settings.settings.strictViewportScaleMode) {
+                    Text("strict.scaleMode.fitScreen").tag(StrictViewportScaleMode.fitScreen)
+                    Text("strict.scaleMode.native1x").tag(StrictViewportScaleMode.native1x)
+                } label: {
+                    restartLabel("strict.scaleMode.title")
                 }
+                .disabled(!hasPlayTools)
 
                 strictViewportDiagnostics(for: data)
             }
@@ -212,7 +197,7 @@ struct ConfigAdvancedPane: View {
         let usableHeight = max(1, Int((visibleSize.height - titleBarReserve).rounded(.down)))
         let fitsAt1x = logical.width <= usableWidth && logical.height <= usableHeight
 
-        LabeledContent("strict.display.targetHardware") {
+        LabeledContent(ConfigLabelFormatter.clean("strict.display.targetHardware", locale: locale)) {
             Text(
                 "\(spec.model) · \(logical.width)×\(logical.height) pt @ "
                 + "\(Int(spec.nativeScale))× (\(pixels.width)×\(pixels.height) px · \(spec.maxFrameRateHz) Hz)"
@@ -224,7 +209,7 @@ struct ConfigAdvancedPane: View {
         if fitsAt1x {
             Label(
                 String(
-                    format: NSLocalizedString("strict.fitStatus.fitsNative", comment: ""),
+                    format: ConfigLabelFormatter.localized("strict.fitStatus.fitsNative", locale: locale),
                     logical.width, logical.height, usableWidth, usableHeight
                 ),
                 systemImage: "checkmark.circle.fill"
@@ -241,7 +226,7 @@ struct ConfigAdvancedPane: View {
             let pct = max(1, Int((ratio * 100.0).rounded()))
             Label(
                 String(
-                    format: NSLocalizedString("strict.fitStatus.fitScreenActive", comment: ""),
+                    format: ConfigLabelFormatter.localized("strict.fitStatus.fitScreenActive", locale: locale),
                     logical.width, logical.height, fittedW, fittedH, pct, usableWidth, usableHeight
                 ),
                 systemImage: "arrow.up.left.and.arrow.down.right.circle.fill"
@@ -251,7 +236,7 @@ struct ConfigAdvancedPane: View {
         } else {
             Label(
                 String(
-                    format: NSLocalizedString("strict.fitStatus.nativeExceeds", comment: ""),
+                    format: ConfigLabelFormatter.localized("strict.fitStatus.nativeExceeds", locale: locale),
                     logical.width, logical.height, usableWidth, usableHeight
                 ),
                 systemImage: "exclamationmark.triangle.fill"
@@ -280,113 +265,128 @@ struct ConfigAdvancedPane: View {
             StrictLockedNote(textKey: "strict.lockedByMode.troubleshooting")
         }
 
-        rowWithRestartBadge {
-            Toggle(
-                "settings.playChain.debugging",
-                isOn: effectiveLockedBinding(
-                    effective: settings.settings.effectivePlayChainDebugging,
-                    stored: $settings.settings.playChainDebugging
-                )
+        Toggle(
+            isOn: effectiveLockedBinding(
+                effective: settings.settings.effectivePlayChainDebugging,
+                stored: $settings.settings.playChainDebugging
             )
-                .disabled(!settings.settings.playChain || !hasPlayTools || isStrictMode)
+        ) {
+            restartLabel("settings.playChain.debugging")
         }
+        .disabled(!settings.settings.playChain || !hasPlayTools || isStrictMode)
 
-        rowWithRestartBadge {
-            Toggle(
-                "settings.toggle.introspection",
-                isOn: Binding(
-                    get: {
-                        settings.settings.effectiveHasIntrospection(hasIntrospection)
-                    },
-                    set: { enabled in
-                        guard !isStrictMode, blockingTask == .none else {
+        Toggle(
+            isOn: Binding(
+                get: {
+                    settings.settings.effectiveHasIntrospection(hasIntrospection)
+                },
+                set: { enabled in
+                    guard !isStrictMode, blockingTask == .none else {
+                        syncDyldStates()
+                        return
+                    }
+                    settings.update { $0.storedHasIntrospection = enabled }
+                    let currentInPlist = (app.info.lsEnvironment["DYLD_LIBRARY_PATH"] ?? "")
+                        .contains(PlayApp.introspection)
+                    guard enabled != currentInPlist else {
+                        syncDyldStates()
+                        return
+                    }
+                    hasIntrospection = enabled
+                    blockingTask = .introspection
+                    Task {
+                        _ = await app.changeDyldLibraryPath(set: enabled, path: PlayApp.introspection)
+                        await MainActor.run {
                             syncDyldStates()
-                            return
-                        }
-                        settings.update { $0.storedHasIntrospection = enabled }
-                        let currentInPlist = (app.info.lsEnvironment["DYLD_LIBRARY_PATH"] ?? "")
-                            .contains(PlayApp.introspection)
-                        guard enabled != currentInPlist else {
-                            syncDyldStates()
-                            return
-                        }
-                        hasIntrospection = enabled
-                        blockingTask = .introspection
-                        Task {
-                            _ = await app.changeDyldLibraryPath(set: enabled, path: PlayApp.introspection)
-                            await MainActor.run {
-                                syncDyldStates()
-                                blockingTask = .none
-                            }
+                            blockingTask = .none
                         }
                     }
-                )
+                }
             )
-            .help("settings.toggle.introspection.help")
-            .toggleStyle(ConfigAsyncToggleStyle(activeTask: $blockingTask, role: .introspection))
-            .disabled(!hasPlayTools || isStrictMode)
+        ) {
+            restartLabel("settings.toggle.introspection")
         }
+        .help("settings.toggle.introspection.help")
+        .toggleStyle(ConfigAsyncToggleStyle(activeTask: $blockingTask, role: .introspection))
+        .disabled(!hasPlayTools || isStrictMode)
 
-        rowWithRestartBadge {
-            Toggle(
-                "settings.toggle.iosFrameworks",
-                isOn: dyldBinding(
-                    for: PlayApp.iosFrameworks,
-                    role: .iosFrameworks,
-                    value: $hasIosFrameworks
-                )
+        Toggle(
+            isOn: Binding(
+                get: {
+                    settings.settings.effectiveHasIosFrameworks(hasIosFrameworks)
+                },
+                set: { enabled in
+                    guard !isStrictMode, blockingTask == .none else {
+                        syncDyldStates()
+                        return
+                    }
+                    settings.update { $0.storedHasIosFrameworks = enabled }
+                    let currentInPlist = (app.info.lsEnvironment["DYLD_LIBRARY_PATH"] ?? "")
+                        .contains(PlayApp.iosFrameworks)
+                    guard enabled != currentInPlist else {
+                        syncDyldStates()
+                        return
+                    }
+                    hasIosFrameworks = enabled
+                    blockingTask = .iosFrameworks
+                    Task {
+                        _ = await app.changeDyldLibraryPath(set: enabled, path: PlayApp.iosFrameworks)
+                        await MainActor.run {
+                            syncDyldStates()
+                            blockingTask = .none
+                        }
+                    }
+                }
             )
-            .help("settings.toggle.iosFrameworks.help")
-            .toggleStyle(ConfigAsyncToggleStyle(activeTask: $blockingTask, role: .iosFrameworks))
-            .disabled(!hasPlayTools)
+        ) {
+            restartLabel("settings.toggle.iosFrameworks")
         }
+        .help("settings.toggle.iosFrameworks.help")
+        .toggleStyle(ConfigAsyncToggleStyle(activeTask: $blockingTask, role: .iosFrameworks))
+        .disabled(!hasPlayTools || isStrictMode)
 
         Toggle("settings.toggle.checkMicPermissionSync", isOn: $settings.settings.checkMicPermissionSync)
             .help("settings.toggle.checkMicPermissionSync.help")
             .disabled(!hasPlayTools)
 
-        rowWithRestartBadge {
-            Toggle("settings.toggle.blockSleepSpamming", isOn: $settings.settings.blockSleepSpamming)
-                .help("settings.toggle.blockSleepSpamming.help")
-                .disabled(!hasPlayTools)
+        Toggle(isOn: $settings.settings.blockSleepSpamming) {
+            restartLabel("settings.toggle.blockSleepSpamming")
         }
+        .help("settings.toggle.blockSleepSpamming.help")
+        .disabled(!hasPlayTools)
 
-        rowWithRestartBadge {
-            Toggle(
-                "settings.toggle.rootWorkDir",
-                isOn: effectiveLockedBinding(
-                    effective: settings.settings.effectiveRootWorkDir,
-                    stored: $settings.settings.rootWorkDir
-                )
+        Toggle(
+            isOn: effectiveLockedBinding(
+                effective: settings.settings.effectiveRootWorkDir,
+                stored: $settings.settings.rootWorkDir
             )
-                .help("settings.toggle.rootWorkDir.help")
-                .disabled(!hasPlayTools || isStrictMode)
+        ) {
+            restartLabel("settings.toggle.rootWorkDir")
         }
+        .help("settings.toggle.rootWorkDir.help")
+        .disabled(!hasPlayTools || isStrictMode)
 
         Toggle("settings.toggle.limitMotionUpdateFrequency", isOn: $settings.settings.limitMotionUpdateFrequency)
             .help("settings.toggle.limitMotionUpdateFrequency.help")
             .disabled(!hasPlayTools)
 
-        rowWithRestartBadge {
-            Toggle("settings.toggle.ignoreUnityKeyboardInitializationError",
-                   isOn: $settings.settings.ignoreUnityKeyboardInitializationError)
-                .help("settings.toggle.ignoreUnityKeyboardInitializationError.help")
-                .disabled(!hasPlayTools)
+        Toggle(isOn: $settings.settings.ignoreUnityKeyboardInitializationError) {
+            restartLabel("settings.toggle.ignoreUnityKeyboardInitializationError")
         }
-
-        rowWithRestartBadge {
-            Toggle(
-                "settings.toggle.hud",
-                isOn: effectiveLockedBinding(
-                    effective: settings.settings.effectiveMetalHUD,
-                    stored: $settings.settings.metalHUD
-                )
-            )
-            .disabled(isStrictMode)
-        }
+        .help("settings.toggle.ignoreUnityKeyboardInitializationError.help")
+        .disabled(!hasPlayTools)
 
         Toggle(
-            "settings.toggle.lldb",
+            isOn: effectiveLockedBinding(
+                effective: settings.settings.effectiveMetalHUD,
+                stored: $settings.settings.metalHUD
+            )
+        ) {
+            restartLabel("settings.toggle.hud")
+        }
+        .disabled(isStrictMode)
+
+        Toggle(
             isOn: Binding(
                 get: { settings.effectiveOpenWithLLDB },
                 set: { newValue in
@@ -394,17 +394,24 @@ struct ConfigAdvancedPane: View {
                     settings.openWithLLDB = newValue
                 }
             )
-        )
+        ) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("settings.toggle.lldb")
+                Text("config.advanced.lldbSessionOnly")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
         .disabled(isStrictMode)
 
         Toggle("settings.toggle.lldbWithTerminal", isOn: $settings.openLLDBWithTerminal)
             .disabled(!settings.effectiveOpenWithLLDB || isStrictMode)
     }
 
-    private func rowWithRestartBadge<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        HStack {
-            content()
-            Spacer(minLength: 8)
+    private func restartLabel(_ titleKey: LocalizedStringKey) -> some View {
+        HStack(spacing: 6) {
+            Text(titleKey)
             RestartFieldBadge()
         }
     }

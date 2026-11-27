@@ -15,7 +15,7 @@ struct PlayCoverApp: App {
     private var deps: PlayCoverDependencies { appDelegate.dependencies }
 
     var body: some Scene {
-        WindowGroup(id: "main") {
+        Window("MacOver", id: "main") {
             if ProcessInfo.isRunningUnitTests {
                 EmptyView()
             } else {
@@ -44,8 +44,8 @@ struct PlayCoverApp: App {
                     }
             }
         }
+        .defaultSize(width: 1280, height: 800)
         .windowToolbarStyle(.unified)
-        .handlesExternalEvents(matching: ["{same path of URL?}"])
         .commands {
             if !ProcessInfo.isRunningUnitTests {
                 SidebarCommands()

@@ -6,12 +6,14 @@ import UniformTypeIdentifiers
 struct MITMTrafficMonitorView: View {
     let bundleID: String
     @Environment(MITMProxyCoordinator.self) var mitmCoordinator
+    @Environment(\.locale) private var locale
 
     @State private var searchText = ""
     @State private var dispositionFilter: DispositionFilter = .all
     @State private var selectedEntryID: UUID?
     @State private var inspectorTab: InspectorTab = .request
     @State private var showRawHex = false
+    @State private var showClearConfirm = false
 
     enum DispositionFilter: String, CaseIterable, Identifiable {
         case all
@@ -79,13 +81,13 @@ struct MITMTrafficMonitorView: View {
     }
 
     private var selectedEntry: MITMCaptureEntry? {
-        guard let selectedEntryID else { return filteredEntries.last }
+        guard let selectedEntryID else { return nil }
         return filteredEntries.first { $0.id == selectedEntryID }
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            toolbarHeader
+            filterBar
             Divider()
             HSplitView {
                 trafficListPane
@@ -95,62 +97,135 @@ struct MITMTrafficMonitorView: View {
             }
         }
         .frame(minWidth: 780, minHeight: 500)
-        .navigationTitle(Text("\(bundleID) — \(NSLocalizedString("mitm.monitor.title", comment: ""))"))
-    }
-
-    private var toolbarHeader: some View {
-        HStack(spacing: 10) {
-            if let activePort = mitmCoordinator.activePorts[bundleID] {
-                Label("127.0.0.1:\(activePort)", systemImage: "dot.radiowaves.left.and.right")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.green)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Capsule().fill(Color.green.opacity(0.14)))
-            } else {
-                Label("mitm.monitor.inactive", systemImage: "pause.circle")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Capsule().fill(Color.secondary.opacity(0.12)))
+        .navigationTitle(
+            "\(bundleID) — \(ConfigLabelFormatter.localized("mitm.monitor.title", locale: locale))"
+        )
+        .toolbar {
+            ToolbarItem(placement: .status) {
+                statusPill
             }
 
-            TextField("", text: $searchText, prompt: Text("mitm.monitor.search"))
-                .textFieldStyle(.roundedBorder)
-                .frame(maxWidth: 260)
-
-            Picker("", selection: $dispositionFilter) {
-                ForEach(DispositionFilter.allCases) { item in
-                    Text(item.titleKey).tag(item)
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    exportHAR()
+                } label: {
+                    Label("mitm.monitor.exportHAR", systemImage: "square.and.arrow.up")
                 }
+                .disabled(entries.isEmpty)
+                .help("mitm.monitor.exportHAR")
+
+                Button(role: .destructive) {
+                    showClearConfirm = true
+                } label: {
+                    Label("mitm.monitor.clear", systemImage: "trash")
+                }
+                .disabled(entries.isEmpty)
+                .help("mitm.monitor.clear")
             }
-            .labelsHidden()
-            .pickerStyle(.segmented)
-            .frame(maxWidth: 360)
-
-            Text("\(filteredEntries.count)")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 2)
-                .background(Capsule().fill(Color.secondary.opacity(0.12)))
-
-            Spacer()
-
-            Button("mitm.monitor.exportHAR") {
-                exportHAR()
-            }
-            .disabled(entries.isEmpty)
-
+        }
+        .alert("confirm.clearCaptures.title", isPresented: $showClearConfirm) {
+            Button("button.Cancel", role: .cancel) {}
             Button("mitm.monitor.clear", role: .destructive) {
                 selectedEntryID = nil
                 mitmCoordinator.clearCaptures(for: bundleID)
             }
-            .disabled(entries.isEmpty)
+        }
+    }
+
+    @ViewBuilder
+    private var statusPill: some View {
+        if let activePort = mitmCoordinator.activePorts[bundleID] {
+            Label("127.0.0.1:\(activePort)", systemImage: "dot.radiowaves.left.and.right")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.green)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Capsule().fill(Color.green.opacity(0.14)))
+        } else {
+            Label("mitm.monitor.inactive", systemImage: "pause.circle")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Capsule().fill(Color.secondary.opacity(0.12)))
+        }
+    }
+
+    private var filterBar: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                searchField
+                    .frame(minWidth: 200, maxWidth: 280)
+                dispositionPicker
+                    .fixedSize()
+                Spacer(minLength: 8)
+                entryCountBadge
+            }
+
+            VStack(spacing: 8) {
+                HStack(spacing: 10) {
+                    searchField
+                    entryCountBadge
+                }
+                HStack {
+                    dispositionPicker
+                    Spacer(minLength: 0)
+                }
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            TextField("", text: $searchText, prompt: Text("mitm.monitor.search"))
+                .labelsHidden()
+                .textFieldStyle(.plain)
+            if !searchText.isEmpty {
+                Button {
+                    searchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("mitm.monitor.clear")
+                .accessibilityLabel("mitm.monitor.clear")
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color(nsColor: .textBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .strokeBorder(Color.secondary.opacity(0.25), lineWidth: 1)
+        )
+    }
+
+    private var dispositionPicker: some View {
+        Picker("", selection: $dispositionFilter) {
+            ForEach(DispositionFilter.allCases) { item in
+                Text(item.titleKey).tag(item)
+            }
+        }
+        .labelsHidden()
+        .pickerStyle(.segmented)
+    }
+
+    private var entryCountBadge: some View {
+        Text("\(filteredEntries.count)")
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(Color.secondary.opacity(0.12)))
     }
 
     private var trafficListPane: some View {
@@ -161,6 +236,7 @@ struct MITMTrafficMonitorView: View {
                     systemImage: "network",
                     description: Text("mitm.monitor.emptySubtitle")
                 )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List(filteredEntries, selection: $selectedEntryID) { entry in
                     TrafficEntryRow(entry: entry)
@@ -239,6 +315,7 @@ struct MITMTrafficMonitorView: View {
                     "mitm.monitor.selectTitle",
                     systemImage: "doc.text.magnifyingglass"
                 )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
     }
@@ -254,15 +331,19 @@ struct MITMTrafficMonitorView: View {
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             } else {
-                ForEach(headers.keys.sorted(), id: \.self) { key in
-                    HStack(alignment: .top, spacing: 8) {
-                        Text(key + ":")
-                            .font(.system(.caption, design: .monospaced).weight(.semibold))
-                            .foregroundStyle(.secondary)
-                            .frame(minWidth: 120, alignment: .trailing)
-                        Text(headers[key] ?? "")
-                            .font(.system(.caption, design: .monospaced))
-                            .textSelection(.enabled)
+                Grid(alignment: .topLeading, horizontalSpacing: 10, verticalSpacing: 4) {
+                    ForEach(headers.keys.sorted(), id: \.self) { key in
+                        GridRow {
+                            Text(key)
+                                .font(.system(.caption, design: .monospaced).weight(.semibold))
+                                .foregroundStyle(.secondary)
+                                .gridColumnAlignment(.trailing)
+                            Text(headers[key] ?? "")
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .gridColumnAlignment(.leading)
+                        }
                     }
                 }
             }
@@ -383,6 +464,7 @@ private struct TrafficEntryRow: View {
                 .frame(width: 56, alignment: .leading)
 
             statusBadge
+                .frame(minWidth: 52, alignment: .center)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(entry.host + (entry.port == 443 || entry.port == 80 ? "" : ":\(entry.port)"))

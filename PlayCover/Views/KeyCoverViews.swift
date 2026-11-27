@@ -15,37 +15,46 @@ struct KeyCoverUnlockingPrompt: View {
     @State private var passwordError = false
 
     var body: some View {
-        VStack(alignment: .leading) {
-            HStack {
-                Image(systemName: "lock")
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 20, height: 20)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Image(systemName: "lock.fill")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
                 Text("keycover.unlockPrompt.title")
-                    .padding()
+                    .font(.headline)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .padding()
-                SecureField("keycover.masterPassword", text: $password)
-                    .padding()
-                if passwordError {
-                    Text("keycover.error.incorrectPassword")
-                        .foregroundColor(.red)
-                        .padding()
+
+            SecureField("keycover.masterPassword", text: $password)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit {
+                    unlock()
+                }
+
+            if passwordError {
+                Text("keycover.error.incorrectPassword")
+                    .font(.callout)
+                    .foregroundStyle(.red)
             }
+
             Divider()
-            HStack {
+
+            HStack(spacing: 10) {
                 Spacer()
                 Button("button.Cancel") {
                     keyCoverObserved.isKeyCoverUnlockingPromptShown = false
                 }
                 .keyboardShortcut(.cancelAction)
+
                 Button("button.Unlock") {
                     unlock()
                 }
+                .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
             }
-            .padding()
         }
+        .padding(20)
+        .frame(width: 440)
     }
 
     func unlock() {

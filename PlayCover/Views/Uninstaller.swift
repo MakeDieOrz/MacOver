@@ -9,12 +9,11 @@ import Synchronization
 import SwiftUI
 
 struct CheckBoxHelper {
-    var view: NSView
     var button: NSButton
     var preferenceKeyPath: ReferenceWritableKeyPath<UninstallPreferences, Bool>
 }
 
-class Uninstaller {
+nonisolated class Uninstaller {
     private static let libraryUrl = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library")
     private static let pruneURLs: [URL] = [
         PlayTools.playCoverContainer.appendingPathComponent("App Settings"),
@@ -34,58 +33,64 @@ class Uninstaller {
     ]
 
     @MainActor
-    private static func createButtonView(
-        _ yaxis: CGFloat,
+    private static func createCheckBox(
         _ text: String,
         _ keyPath: ReferenceWritableKeyPath<UninstallPreferences, Bool>,
         preferences: UninstallPreferences
     ) -> CheckBoxHelper {
-        let button = NSButton(checkboxWithTitle: text, target: self, action: nil)
-
-        if preferences[keyPath: keyPath] {
-            button.animator().setNextState()
-        }
-
-        let view = NSView(frame: NSRect(x: 0, y: yaxis,
-                                        width: button.fittingSize.width,
-                                        height: button.fittingSize.height))
-
-        view.addSubview(button)
-
-        return CheckBoxHelper(view: view, button: button, preferenceKeyPath: keyPath)
+        let button = NSButton(checkboxWithTitle: text, target: nil, action: nil)
+        button.state = preferences[keyPath: keyPath] ? .on : .off
+        return CheckBoxHelper(button: button, preferenceKeyPath: keyPath)
     }
 
     @MainActor
-    static func uninstallPopup(_ app: PlayApp, dependencies: PlayCoverDependencies? = nil) async {
+    private static func presentModalAlert(_ alert: NSAlert) async -> NSApplication.ModalResponse {
+        if ProcessInfo.isRunningUnitTests {
+            return .alertSecondButtonReturn
+        }
+        let anchorWindow = NSApp.keyWindow
+            ?? NSApp.mainWindow
+            ?? NSApp.windows.first(where: { $0.isVisible && $0.canBecomeKey && !$0.isSheet })
+        if let window = anchorWindow {
+            return await alert.beginSheetModal(for: window)
+        }
+        return alert.runModal()
+    }
+
+    @MainActor
+    @discardableResult
+    static func uninstallPopup(_ app: PlayApp, dependencies: PlayCoverDependencies? = nil) async -> Bool {
         let prefs = dependencies?.uninstallPreferences
             ?? app.dependencies?.uninstallPreferences
             ?? UninstallPreferences()
         if prefs.showUninstallPopup {
             let boxmakers: [(ReferenceWritableKeyPath<UninstallPreferences, Bool>, String)] = [
-                (\.removePlayChain, NSLocalizedString("preferences.toggle.removePlayChain", comment: "")),
-                (\.removeAppEntitlements, NSLocalizedString("preferences.toggle.removeEntitlements", comment: "")),
-                (\.removeAppNetworkRules, NSLocalizedString("preferences.toggle.removeNetworkRules", comment: "")),
-                (\.removeAppSettings, NSLocalizedString("preferences.toggle.removeSetting", comment: "")),
+                (\.clearAppData, NSLocalizedString("preferences.toggle.clearAppData", comment: "")),
                 (\.removeAppKeymap, NSLocalizedString("preferences.toggle.removeKeymap", comment: "")),
-                (\.clearAppData, NSLocalizedString("preferences.toggle.clearAppData", comment: ""))
+                (\.removeAppSettings, NSLocalizedString("preferences.toggle.removeSetting", comment: "")),
+                (\.removeAppNetworkRules, NSLocalizedString("preferences.toggle.removeNetworkRules", comment: "")),
+                (\.removeAppEntitlements, NSLocalizedString("preferences.toggle.removeEntitlements", comment: "")),
+                (\.removePlayChain, NSLocalizedString("preferences.toggle.removePlayChain", comment: ""))
             ]
 
-            var checkboxes: [CheckBoxHelper] = []
-
-            var viewY = 0.0
-
-            for (keyPath, buttontitle) in boxmakers {
-                checkboxes.append(createButtonView(viewY, buttontitle, keyPath, preferences: prefs))
-                viewY += checkboxes[checkboxes.count - 1].view.frame.height
+            let checkboxes = boxmakers.map { keyPath, title in
+                createCheckBox(title, keyPath, preferences: prefs)
             }
 
-            let viewWidth = checkboxes.max(by: { $0.view.frame.width < $1.view.frame.width })?.view.frame.width
-
-            let settingsView = NSStackView(frame: NSRect(x: 0, y: 0, width: viewWidth ?? 0, height: viewY))
+            let settingsView = NSStackView()
+            settingsView.orientation = .vertical
+            settingsView.alignment = .leading
+            settingsView.spacing = 6
 
             for checkboxhelper in checkboxes {
-                settingsView.addSubview(checkboxhelper.view)
+                settingsView.addArrangedSubview(checkboxhelper.button)
             }
+            settingsView.layoutSubtreeIfNeeded()
+            let fittingSize = settingsView.fittingSize
+            settingsView.frame = NSRect(
+                origin: .zero,
+                size: NSSize(width: max(fittingSize.width, 260), height: fittingSize.height)
+            )
 
             let alert = NSAlert()
             alert.messageText = NSLocalizedString("playapp.delete", comment: "")
@@ -105,8 +110,9 @@ class Uninstaller {
             delete.hasDestructiveAction = true
 
             NSApplication.shared.requestUserAttention(.criticalRequest)
-            guard let window = NSApplication.shared.windows.first,
-                  await alert.beginSheetModal(for: window) == .alertFirstButtonReturn else { return }
+            guard await presentModalAlert(alert) == .alertFirstButtonReturn else {
+                return false
+            }
             for checkboxhelper in checkboxes {
                 prefs[keyPath: checkboxhelper.preferenceKeyPath] =
                     (checkboxhelper.button.state == .on)
@@ -118,40 +124,67 @@ class Uninstaller {
 
             let alertPresenter = dependencies?.alertPresenter ?? app.dependencies?.alertPresenter
             await uninstall(app, preferences: prefs, alertPresenter: alertPresenter)
+            return true
         } else {
             let alertPresenter = dependencies?.alertPresenter ?? app.dependencies?.alertPresenter
             await uninstall(app, preferences: prefs, alertPresenter: alertPresenter)
+            return true
         }
     }
 
+    @concurrent
     static func uninstall(
         _ app: PlayApp,
         preferences: UninstallPreferences? = nil,
         alertPresenter: AlertPresenter? = nil
     ) async {
-        let prefs = preferences ?? app.dependencies?.uninstallPreferences ?? UninstallPreferences()
+        let (
+            clearAppData,
+            removeAppKeymap,
+            removeSettings,
+            removeNetRules,
+            removeAppEntitlements,
+            removePlayChain
+        ) = await MainActor.run {
+            let prefs = preferences ?? app.dependencies?.uninstallPreferences ?? UninstallPreferences()
+            return (
+                prefs.clearAppData,
+                prefs.removeAppKeymap,
+                prefs.removeAppSettings,
+                prefs.removeAppNetworkRules,
+                prefs.removeAppEntitlements,
+                prefs.removePlayChain
+            )
+        }
         var uninstallNum = 0
         var clearError: Error?
 
-        if prefs.clearAppData {
+        if clearAppData {
             clearError = await app.clearAllCache()
             uninstallNum += 1
         }
 
-        if prefs.removeAppKeymap {
+        if removeAppKeymap {
             FileManager.default.delete(at: app.keymapping.baseKeymapURL)
             uninstallNum += 1
         }
 
-        let removeSettings = prefs.removeAppSettings
-        let removeNetRules = prefs.removeAppNetworkRules
         let savedEnableNet = app.settings.settings.enableNetworkRules
         let savedMock200 = app.settings.settings.networkBlockMock200
         let savedPatterns = app.settings.settings.blockedURLPatterns
         let savedProxyMode = app.settings.settings.networkProxyMode
+        let savedExtProto = app.settings.settings.externalProxyProtocol
+        let savedExtHost = app.settings.settings.externalProxyHost
+        let savedExtPort = app.settings.settings.externalProxyPort
+        let savedMitmPort = app.settings.settings.mitmPort
         let savedCustomCerts = app.settings.settings.enableCustomCertificates
+        let savedMitmAllHosts = app.settings.settings.mitmAllHosts
+        let savedMitmHostPatterns = app.settings.settings.mitmHostPatterns
+        let savedMitmPinningBypass = app.settings.settings.mitmAllowPinningBypass
+        let savedHideProxy = app.settings.settings.hideProxyFromApp
+        let savedMitmCaptureBodies = app.settings.settings.mitmCaptureBodies
         let hasConfiguredNetRules = savedEnableNet || !savedPatterns.isEmpty ||
-            savedProxyMode != "direct" || savedCustomCerts
+            savedProxyMode != "direct" || savedCustomCerts || !savedMitmHostPatterns.isEmpty
 
         if removeNetRules {
             let certsStore = PerAppCertificateStore(
@@ -173,8 +206,18 @@ class Uninstaller {
                     $0.networkBlockMock200 = savedMock200
                     $0.blockedURLPatterns = savedPatterns
                     $0.networkProxyMode = savedProxyMode
+                    $0.externalProxyProtocol = savedExtProto
+                    $0.externalProxyHost = savedExtHost
+                    $0.externalProxyPort = savedExtPort
+                    $0.mitmPort = savedMitmPort
                     $0.enableCustomCertificates = savedCustomCerts
+                    $0.mitmAllHosts = savedMitmAllHosts
+                    $0.mitmHostPatterns = savedMitmHostPatterns
+                    $0.mitmAllowPinningBypass = savedMitmPinningBypass
+                    $0.hideProxyFromApp = savedHideProxy
+                    $0.mitmCaptureBodies = savedMitmCaptureBodies
                 }
+                _ = app.settings.flush()
             }
             uninstallNum += 1
         } else if !removeSettings && removeNetRules {
@@ -183,26 +226,42 @@ class Uninstaller {
                 $0.networkBlockMock200 = true
                 $0.blockedURLPatterns = []
                 $0.networkProxyMode = "direct"
-                $0.enableCustomCertificates = false
+                $0.externalProxyProtocol = "http"
+                $0.externalProxyHost = "127.0.0.1"
+                $0.externalProxyPort = 8888
+                $0.mitmPort = 0
                 $0.mitmRuntimePort = 0
+                $0.enableCustomCertificates = false
+                $0.mitmAllHosts = true
                 $0.mitmHostPatterns = []
+                $0.mitmAllowPinningBypass = false
+                $0.hideProxyFromApp = true
+                $0.mitmCaptureBodies = true
             }
+            _ = app.settings.flush()
             uninstallNum += 1
         }
 
-        if prefs.removeAppEntitlements {
+        if removeAppEntitlements {
             FileManager.default.delete(at: app.entitlements)
             uninstallNum += 1
         }
 
-        if prefs.removePlayChain {
+        if removePlayChain {
             app.clearPlayChain()
             uninstallNum += 1
         }
 
         app.removeAlias()
-        FileManager.default.delete(at: app.appBackupsDir)
-        FileManager.default.delete(at: app.svcPatchManifestURL)
+        if !app.info.bundleIdentifier.isEmpty {
+            FileManager.default.delete(at: app.appBackupsDir)
+            Installer.cleanupInvalidatedAppBackups(
+                primary: nil,
+                in: BaseApp.appBackupsRoot,
+                bundleIdentifier: app.info.bundleIdentifier
+            )
+            FileManager.default.delete(at: app.svcPatchManifestURL)
+        }
         app.deleteApp()
 
         if uninstallNum >= 5 || FileManager.default.fileExists(atPath: PlayApp.bundleIDCacheURL.path) {
@@ -226,22 +285,18 @@ class Uninstaller {
 
     @MainActor
     private static func presentPermissionAlert(_ err: Error, alertPresenter: AlertPresenter? = nil) async {
-        let message = """
-        macOS 阻止了 MacOver 访问该应用的沙盒容器目录（\(err.localizedDescription)）。
-
-        这通常是因为 MacOver 重新编译签名后，macOS 原有的隐私授权记录失效。
-        请在「系统设置 -> 隐私与安全性 -> 完全磁盘访问权限」中勾选（或先关闭再重新开启）MacOver，\
-        或在终端执行以下命令重置授权后重试：
-        tccutil reset All app.makedie.MacOver
-        """
+        let message = String(
+            format: NSLocalizedString("uninstaller.fda.message", comment: ""),
+            err.localizedDescription
+        )
         let presenter = alertPresenter ?? AlertPresenter()
         let response = await presenter.present(
             PlayCoverAlertRequest(
-                title: "无法清除应用数据（系统权限受限）",
+                title: NSLocalizedString("uninstaller.fda.title", comment: ""),
                 message: message,
                 style: .warning,
                 buttons: [
-                    PlayCoverAlertButton(title: "打开系统设置"),
+                    PlayCoverAlertButton(title: NSLocalizedString("uninstaller.fda.openSettings", comment: "")),
                     PlayCoverAlertButton(title: NSLocalizedString("button.Cancel", comment: ""), isCancel: true)
                 ],
                 defaultCancelIndex: 1
@@ -266,8 +321,7 @@ class Uninstaller {
         alert.addButton(withTitle: NSLocalizedString("button.Cancel", comment: ""))
 
         NSApplication.shared.requestUserAttention(.criticalRequest)
-        guard let window = NSApplication.shared.windows.first,
-              await alert.beginSheetModal(for: window) == .alertFirstButtonReturn else { return }
+        guard await presentModalAlert(alert) == .alertFirstButtonReturn else { return }
 
         let bundleId = app.info.bundleIdentifier
         let bundleURL = app.url
@@ -522,6 +576,13 @@ class Uninstaller {
             return file.pathExtension == "json"
                 ? file.deletingPathExtension().lastPathComponent
                 : file.lastPathComponent
+        case "AppBackups":
+            let name = file.lastPathComponent
+            if name.hasPrefix("."), let range = name.range(of: ".invalidated-", options: .backwards) {
+                let start = name.index(after: name.startIndex)
+                return String(name[start..<range.lowerBound])
+            }
+            return name
         case "PlayChain":
             var name = file.lastPathComponent
             for suffix in ["-wal", "-shm", "-journal"] where name.hasSuffix(suffix) {

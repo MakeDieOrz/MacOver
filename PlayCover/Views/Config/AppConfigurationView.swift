@@ -14,27 +14,64 @@ enum ConfigBlockingTask: Equatable {
     case applicationCategoryType
 }
 
+enum ConfigLabelFormatter {
+    /// Resolves `key` in the `.lproj` matching the SwiftUI `\.locale` environment.
+    /// `String(localized:bundle:locale:)` only applies `locale` to format arguments,
+    /// so it would silently fall back to the process language instead.
+    static func localized(_ key: String, locale: Locale) -> String {
+        localizationBundle(for: locale).localizedString(forKey: key, value: nil, table: nil)
+    }
+
+    private static func localizationBundle(for locale: Locale) -> Bundle {
+        let main = Bundle.main
+        guard let language = Bundle.preferredLocalizations(
+            from: main.localizations,
+            forPreferences: [locale.identifier]
+        ).first,
+            language != main.preferredLocalizations.first,
+            let path = main.path(forResource: language, ofType: "lproj"),
+            let bundle = Bundle(path: path) else {
+            return main
+        }
+        return bundle
+    }
+
+    /// Trims legacy trailing ASCII/fullwidth colons so grouped Form and Inspector labels
+    /// stay visually uniform across English and Simplified Chinese.
+    static func clean(_ key: String, locale: Locale) -> String {
+        var text = localized(key, locale: locale)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        while text.hasSuffix(":") || text.hasSuffix("：") {
+            text.removeLast()
+            text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return text
+    }
+}
+
 struct ConfigAsyncToggleStyle: ToggleStyle {
     @Binding var activeTask: ConfigBlockingTask
     let role: ConfigBlockingTask
 
     func makeBody(configuration: Configuration) -> some View {
-        if activeTask == role {
-            HStack(spacing: 6) {
+        LabeledContent {
+            if activeTask == role {
                 ProgressView()
                     .controlSize(.small)
-                configuration.label
+            } else {
+                Toggle("", isOn: configuration.$isOn)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
             }
-        } else {
-            Toggle(isOn: configuration.$isOn) {
-                configuration.label
-            }
+        } label: {
+            configuration.label
         }
     }
 }
 
 struct AppConfigurationView: View {
     @Environment(AppNavigationState.self) var navState
+    @Environment(\.locale) private var locale
 
     var app: PlayApp
     var settings: AppSettings
@@ -49,6 +86,10 @@ struct AppConfigurationView: View {
                 restartBanner
             }
 
+            if blockingTask == .playTools {
+                playToolsBusyBanner
+            }
+
             if !hasPlayTools {
                 noPlayToolsBanner
             }
@@ -60,7 +101,8 @@ struct AppConfigurationView: View {
                         app: app,
                         settings: settings,
                         hasPlayTools: hasPlayTools,
-                        onOpenStrictMode: { navState.activeConfigPane = .advanced }
+                        onOpenStrictMode: { navState.activeConfigPane = .advanced },
+                        onRequestReset: { showResetConfirm = true }
                     )
                 case .display:
                     ConfigDisplayPane(
@@ -103,9 +145,11 @@ struct AppConfigurationView: View {
             }
             .disabled(blockingTask != .none)
         }
-        .navigationTitle("\(app.name) — \(NSLocalizedString(navState.activeConfigPane.titleKey, comment: ""))")
+        .navigationTitle(
+            "\(app.name) — \(ConfigLabelFormatter.localized(navState.activeConfigPane.titleKey, locale: locale))"
+        )
         .toolbar {
-            ToolbarItemGroup(placement: .navigation) {
+            ToolbarItem(placement: .navigation) {
                 Button {
                     app.settings.flush()
                     navState.closeConfiguration()
@@ -115,26 +159,24 @@ struct AppConfigurationView: View {
             }
 
             ToolbarItemGroup(placement: .primaryAction) {
-                if app.isRunning {
-                    Button {
+                Button {
+                    if app.isRunning {
                         Task { await app.terminate() }
-                    } label: {
-                        Label("action.quit", systemImage: "stop.fill")
-                    }
-                    .tint(.red)
-                } else {
-                    Button {
+                    } else {
                         Task(priority: .userInitiated) {
                             if !app.isStarting {
                                 await app.launch()
                             }
                         }
-                    } label: {
-                        Label("action.launch", systemImage: "play.fill")
                     }
-                    .tint(.accentColor)
-                    .disabled(app.isStarting)
+                } label: {
+                    Label(
+                        app.isRunning ? "action.quit" : "action.launch",
+                        systemImage: app.isRunning ? "stop.fill" : "play.fill"
+                    )
                 }
+                .tint(app.isRunning ? .red : .accentColor)
+                .disabled(!app.isRunning && app.isStarting)
 
                 Menu {
                     Button("action.launchSafeMode", systemImage: "shield.lefthalf.filled") {
@@ -146,19 +188,22 @@ struct AppConfigurationView: View {
                             }
                         }
                     }
+                    .disabled(!app.isRunning && app.isStarting)
                     Divider()
                     Button("settings.resetSettings", systemImage: "arrow.counterclockwise", role: .destructive) {
                         showResetConfirm = true
                     }
                 } label: {
-                    Label("action.moreActions", systemImage: "ellipsis.circle")
+                    Label("action.moreActions", systemImage: "ellipsis")
                 }
+                .menuIndicator(.hidden)
                 .help("action.moreActions")
+                .accessibilityLabel("action.moreActions")
             }
 
             ToolbarSpacer(.fixed, placement: .primaryAction)
 
-            ToolbarItemGroup(placement: .primaryAction) {
+            ToolbarItem(placement: .primaryAction) {
                 Button {
                     navState.showInspector.toggle()
                 } label: {
@@ -183,48 +228,96 @@ struct AppConfigurationView: View {
                 app.settings.reset()
                 PlayCoverDiagnostics.showToast(
                     toastType: .notice,
-                    toastDetails: NSLocalizedString("settings.resetSettingsCompleted", comment: "")
+                    toastDetails: ConfigLabelFormatter.localized("settings.resetSettingsCompleted", locale: locale)
                 )
             }
         } message: {
-            Text(String(format: NSLocalizedString("config.resetMessage", comment: ""), app.name))
+            Text(String(format: ConfigLabelFormatter.localized("config.resetMessage", locale: locale), app.name))
         }
     }
 
     private var restartBanner: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "arrow.clockwise.circle.fill")
-                .foregroundStyle(.orange)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(String(
-                    format: NSLocalizedString("restart.bannerTitle", comment: ""),
-                    app.restartRequiredChanges.count
-                ))
-                .font(.callout.weight(.semibold))
-                let fieldTitles = app.restartRequiredChanges
-                    .prefix(4)
-                    .map { NSLocalizedString($0.localizedKey, comment: "") }
-                    .joined(separator: " · ")
-                Text(fieldTitles)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                restartBannerIcon
+                restartBannerTexts
+                    .fixedSize(horizontal: true, vertical: false)
+                Spacer(minLength: 8)
+                restartBannerActions
             }
-            Spacer()
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .top, spacing: 10) {
+                    restartBannerIcon
+                    restartBannerTexts
+                }
+                HStack(spacing: 8) {
+                    restartBannerActions
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Color.orange.opacity(0.12))
+    }
+
+    private var restartBannerIcon: some View {
+        Image(systemName: "arrow.clockwise.circle.fill")
+            .foregroundStyle(.orange)
+            .accessibilityHidden(true)
+    }
+
+    private var restartBannerTexts: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(String(
+                format: ConfigLabelFormatter.localized("restart.bannerTitle", locale: locale),
+                app.restartRequiredChanges.count
+            ))
+            .font(.callout.weight(.semibold))
+            .fixedSize(horizontal: false, vertical: true)
+
+            let fieldTitles = app.restartRequiredChanges
+                .prefix(4)
+                .map { ConfigLabelFormatter.localized($0.localizedKey, locale: locale) }
+                .joined(separator: " · ")
+            Text(fieldTitles)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+    }
+
+    private var restartBannerActions: some View {
+        HStack(spacing: 8) {
             Button("action.restartSafeMode") {
                 Task { await app.restart(safeModeOneShot: true) }
             }
             .buttonStyle(.bordered)
+            .controlSize(.small)
+            .fixedSize()
 
             Button("action.restart") {
                 Task { await app.restart() }
             }
             .buttonStyle(.borderedProminent)
+            .controlSize(.small)
             .tint(.orange)
+            .fixedSize()
+        }
+    }
+
+    private var playToolsBusyBanner: some View {
+        HStack(spacing: 10) {
+            ProgressView()
+                .controlSize(.small)
+            Text("config.playtools.busyBanner")
+                .font(.callout.weight(.medium))
+            Spacer(minLength: 0)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(Color.orange.opacity(0.12))
+        .padding(.vertical, 8)
+        .background(Color.accentColor.opacity(0.10))
     }
 
     private var noPlayToolsBanner: some View {

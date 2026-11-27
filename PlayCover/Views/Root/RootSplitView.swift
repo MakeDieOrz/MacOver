@@ -110,7 +110,7 @@ struct RootSplitView: View {
         .alert(item: $startupAlerts.activeAlert) { alertItem in
             startupAlert(for: alertItem)
         }
-        .frame(minWidth: 920, minHeight: 560)
+        .frame(minWidth: 1024, minHeight: 600)
     }
 
     @ViewBuilder

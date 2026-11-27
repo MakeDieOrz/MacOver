@@ -58,16 +58,24 @@ private struct SidebarRunningAppRow: View {
     @Environment(AppNavigationState.self) var navState
     var app: PlayApp
 
+    private var isSelectedInLibrary: Bool {
+        navState.configTargetID == nil
+            && (navState.sidebarDestination ?? .library) == .library
+            && navState.selectedAppID == app.id
+    }
+
     var body: some View {
         HStack(spacing: 8) {
             AppIconView(app: app, size: 20, cornerRadius: 5)
             Text(app.name)
+                .fontWeight(isSelectedInLibrary ? .semibold : .regular)
                 .lineLimit(1)
             Spacer(minLength: 4)
-            Circle()
-                .fill(.green)
-                .frame(width: 7, height: 7)
+            Image(systemName: "circle.fill")
+                .font(.system(size: 7))
+                .foregroundStyle(.green)
                 .symbolEffect(.pulse, value: app.isRunning)
+                .accessibilityHidden(true)
             Button {
                 Task { await app.terminate() }
             } label: {
@@ -76,10 +84,29 @@ private struct SidebarRunningAppRow: View {
             }
             .buttonStyle(.plain)
             .help("sidebar.quit")
+            .accessibilityLabel(Text("sidebar.quit"))
         }
+        .padding(.vertical, 2)
+        .padding(.horizontal, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(isSelectedInLibrary ? Color.accentColor.opacity(0.14) : Color.clear)
+        )
         .contentShape(Rectangle())
         .onTapGesture {
-            navState.openConfiguration(for: app, pane: .overview)
+            navState.closeConfiguration()
+            navState.sidebarDestination = .library
+            navState.selectedAppID = app.id
         }
+        .contextMenu {
+            Button("action.configure", systemImage: "slider.horizontal.3") {
+                navState.openConfiguration(for: app, pane: .overview)
+            }
+            Button("action.quit", systemImage: "stop.fill", role: .destructive) {
+                Task { await app.terminate() }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(Text(app.name))
     }
 }

@@ -42,7 +42,7 @@ struct PlayCoverSettingsView: View {
                 UninstallSettings()
             }
         }
-        .frame(minWidth: 580, minHeight: 340)
+        .frame(minWidth: 620, minHeight: 400)
     }
 }
 
@@ -72,6 +72,7 @@ private struct SigningSettingsTab: View {
                 LabeledContent("configSigning.info.SIPHeader") {
                     if let status {
                         Text(status.sipDisabled ? "state.disabled" : "state.enabled")
+                            .fontWeight(.medium)
                             .foregroundStyle(status.sipDisabled ? .orange : .green)
                     } else {
                         ProgressView().controlSize(.small)
@@ -82,7 +83,12 @@ private struct SigningSettingsTab: View {
                         Text(status.amfiDisabledInRunningOS
                              ? "state.disabled"
                              : (status.amfiDisabledInNVRAM ? "state.pendingReboot" : "state.enabled"))
-                            .foregroundStyle(status.amfiDisabledInRunningOS ? .blue : .secondary)
+                            .fontWeight(.medium)
+                            .foregroundStyle(
+                                status.amfiDisabledInRunningOS
+                                    ? .blue
+                                    : (status.amfiDisabledInNVRAM ? .orange : .secondary)
+                            )
                     } else {
                         ProgressView().controlSize(.small)
                     }

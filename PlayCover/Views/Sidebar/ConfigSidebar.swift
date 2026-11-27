@@ -11,11 +11,13 @@ struct ConfigSidebar: View {
     var app: PlayApp
     var settings: AppSettings
 
+    @State private var isBackHovered = false
+
     private var troubleshootingCount: Int {
         let lsEnv = app.info.lsEnvironment["DYLD_LIBRARY_PATH"] ?? ""
         return settings.settings.activeTroubleshootingCount(
-            hasIntrospection: lsEnv.contains(PlayApp.introspection),
-            hasIosFrameworks: lsEnv.contains(PlayApp.iosFrameworks),
+            hasIntrospection: lsEnv.contains(PlayApp.introspection) || settings.settings.storedHasIntrospection,
+            hasIosFrameworks: lsEnv.contains(PlayApp.iosFrameworks) || settings.settings.storedHasIosFrameworks,
             openWithLLDB: settings.openWithLLDB
         )
     }
@@ -29,10 +31,22 @@ struct ConfigSidebar: View {
             } label: {
                 Label("sidebar.backToLibrary", systemImage: "chevron.left")
                     .font(.callout.weight(.medium))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(isBackHovered ? Color.secondary.opacity(0.14) : Color.clear)
+                    )
+                    .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
             }
             .buttonStyle(.plain)
-            .keyboardShortcut("[", modifiers: .command)
-            .padding(.horizontal, 14)
+            .onHover { hovering in
+                withAnimation(.snappy(duration: 0.14)) {
+                    isBackHovered = hovering
+                }
+            }
+            .help("sidebar.backToLibrary")
+            .padding(.horizontal, 10)
             .padding(.top, 8)
 
             HStack(spacing: 10) {
@@ -42,7 +56,7 @@ struct ConfigSidebar: View {
                         .font(.headline)
                         .lineLimit(1)
                     Text(app.info.bundleVersion)
-                        .font(.caption)
+                        .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 4)
@@ -54,11 +68,11 @@ struct ConfigSidebar: View {
                         .accessibilityLabel(Text("strict.banner.title"))
                 }
                 if app.isRunning {
-                    Circle()
-                        .fill(.green)
-                        .frame(width: 8, height: 8)
+                    Image(systemName: "circle.fill")
+                        .font(.system(size: 8))
+                        .foregroundStyle(.green)
+                        .symbolEffect(.pulse, value: app.isRunning)
                         .help("sidebar.runningBadge")
-                        .accessibilityElement()
                         .accessibilityLabel(Text("sidebar.runningBadge"))
                 }
             }

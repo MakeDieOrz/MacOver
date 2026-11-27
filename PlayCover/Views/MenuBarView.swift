@@ -14,6 +14,10 @@ struct PlayCoverMenuView: Commands {
         CommandGroup(after: .systemServices) {
             Button("menubar.log.copy", systemImage: "document.on.document.fill") {
                 dependencies.log.logdata.copyToClipBoard()
+                dependencies.toastVM.showToast(
+                    toastType: .notice,
+                    toastDetails: NSLocalizedString("toast.logsCopied", comment: "")
+                )
             }
             .keyboardShortcut("L", modifiers: [.command, .option])
 
@@ -88,6 +92,10 @@ struct PlayCoverViewMenuView: Commands {
 
             if navState.configTargetID != nil {
                 Button("sidebar.backToLibrary", systemImage: "chevron.left") {
+                    if let targetID = navState.configTargetID,
+                       let app = dependencies.appsVM.apps.first(where: { $0.id == targetID }) {
+                        app.settings.flush()
+                    }
                     navState.closeConfiguration()
                 }
                 .keyboardShortcut("[", modifiers: .command)
@@ -103,6 +111,10 @@ struct PlayCoverViewMenuView: Commands {
                     FileManager.default.delete(at: cacheDir.appendingPathComponent(bundleID)
                         .appendingPathComponent("Image Cache"))
                 }
+                dependencies.toastVM.showToast(
+                    toastType: .notice,
+                    toastDetails: NSLocalizedString("toast.cacheCleared", comment: "")
+                )
             }
             .keyboardShortcut("R", modifiers: [.command, .shift])
             Divider()
@@ -170,7 +182,7 @@ struct PlayCoverMenuBarExtraContent: View {
 
     var body: some View {
         Button("menubar.openWindow") {
-            NSApp.activate(ignoringOtherApps: true)
+            NSApp.activate()
             openWindow(id: "main")
         }
 

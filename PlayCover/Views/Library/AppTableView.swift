@@ -3,6 +3,7 @@
 //  PlayCover
 //
 
+import AppKit
 import PlayCoverCore
 import SwiftUI
 
@@ -29,29 +30,29 @@ struct AppTableView: View {
             TableColumn("library.table.app", value: \.sortName) { app in
                 TableAppNameCell(app: app)
             }
-            .width(min: 180, ideal: 240)
+            .width(min: 150, ideal: 180, max: 240)
 
             TableColumn("library.table.version", value: \.sortVersion) { app in
                 Text(app.info.bundleVersion)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
-            .width(min: 70, ideal: 95)
+            .width(min: 60, ideal: 72, max: 90)
 
             TableColumn("library.table.device", value: \.sortDevice) { app in
                 TableAppDeviceCell(settings: app.settings)
             }
-            .width(min: 140, ideal: 190)
+            .width(min: 205, ideal: 250)
 
             TableColumn("library.table.pixelLoad", value: \.sortPixelRatio) { app in
                 TableAppLoadCell(settings: app.settings)
             }
-            .width(min: 110, ideal: 140)
+            .width(min: 96, ideal: 112, max: 130)
 
             TableColumn("library.table.status", value: \.sortRunningRank) { app in
                 TableAppStatusCell(app: app)
             }
-            .width(min: 90, ideal: 110)
+            .width(min: 76, ideal: 90, max: 120)
         }
         .contextMenu(forSelectionType: PlayApp.ID.self) { selectedIDs in
             if let firstID = selectedIDs.first,
@@ -64,8 +65,15 @@ struct AppTableView: View {
             }
         } primaryAction: { selectedIDs in
             guard let firstID = selectedIDs.first,
-                  let target = apps.first(where: { $0.id == firstID }),
-                  !target.isStarting else { return }
+                  let target = apps.first(where: { $0.id == firstID }) else { return }
+            if target.isRunning,
+               let running = NSRunningApplication.runningApplications(
+                   withBundleIdentifier: target.info.bundleIdentifier
+               ).first(where: { !$0.isTerminated }) {
+                _ = running.activate()
+                return
+            }
+            guard !target.isStarting else { return }
             Task(priority: .userInitiated) {
                 await target.launch()
             }
@@ -94,6 +102,7 @@ private struct TableAppDeviceCell: View {
     var settings: AppSettings
 
     var body: some View {
+        let deviceName = DeviceProfileOption.displayName(for: settings.settings.effectiveIOSDeviceModel)
         HStack(spacing: 4) {
             if settings.settings.strictEmulationMode {
                 Image(systemName: "lock.shield.fill")
@@ -102,11 +111,12 @@ private struct TableAppDeviceCell: View {
                     .help("strict.banner.title")
                     .accessibilityLabel(Text("strict.banner.title"))
             }
-            Text(DeviceProfileOption.displayName(for: settings.settings.effectiveIOSDeviceModel))
+            Text(deviceName)
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
+        .help(deviceName)
     }
 }
 

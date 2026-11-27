@@ -8,6 +8,7 @@ import SwiftUI
 
 struct PixelBudgetMeter: View {
     let budget: PixelBudget
+    var titleKey: LocalizedStringKey = "budget.title"
     var compact: Bool = false
     var onFitToBudget: ((Double) -> Void)?
 
@@ -19,7 +20,7 @@ struct PixelBudgetMeter: View {
         }
     }
 
-    private var levelTitleKey: String {
+    private var levelTitleKey: LocalizedStringKey {
         switch budget.level {
         case .ok: return "budget.healthy"
         case .caution: return "budget.caution"
@@ -39,67 +40,143 @@ struct PixelBudgetMeter: View {
         budget.adaptiveLimit / 1_000_000.0
     }
 
+    private var readoutText: String {
+        String(
+            format: NSLocalizedString("budget.readout", comment: ""),
+            weightedMegapixels,
+            limitMegapixels
+        )
+    }
+
+    private var renderedDetailsText: String {
+        String(
+            format: NSLocalizedString("budget.renderedDetails", comment: ""),
+            budget.renderedWidth,
+            budget.renderedHeight,
+            budget.memoryTier.label
+        )
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: compact ? 4 : 6) {
-            HStack(spacing: 6) {
-                if !compact {
-                    Text("budget.title")
-                        .font(.subheadline.weight(.medium))
-                }
-                Text(LocalizedStringKey(levelTitleKey))
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(tintColor)
-                Spacer()
-                Text(String(
-                    format: NSLocalizedString("budget.readout", comment: ""),
-                    weightedMegapixels,
-                    limitMegapixels
-                ))
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-            }
+        VStack(alignment: .leading, spacing: compact ? 5 : 6) {
+            headerRow
 
             ProgressView(value: normalizedProgress)
                 .tint(tintColor)
 
-            HStack(spacing: 6) {
-                Text(String(
-                    format: NSLocalizedString("budget.renderedDetails", comment: ""),
-                    budget.renderedWidth,
-                    budget.renderedHeight,
-                    budget.memoryTier.label
-                ))
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-
-                Spacer(minLength: 4)
-
-                if budget.exceedsMaxTextureEdge {
-                    Label("budget.textureEdgeWarning", systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.orange)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(Color.orange.opacity(0.16)))
-                        .help("budget.textureEdgeWarning.help")
-                }
-            }
+            detailsRow
 
             if budget.level == .over, let onFitToBudget {
-                HStack {
-                    Text(String(format: "%.1f×", budget.fittedScaler))
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("budget.fit") {
-                        onFitToBudget(budget.fittedScaler)
-                    }
-                    .controlSize(.small)
-                    .buttonStyle(.borderedProminent)
-                    .tint(.accentColor)
-                }
+                suggestedFitRow(onFitToBudget: onFitToBudget)
             }
         }
+    }
+
+    private var headerRow: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 6) {
+                headerLeadingLabels
+                Spacer(minLength: 6)
+                readoutLabel
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                headerLeadingLabels
+                readoutLabel
+            }
+        }
+    }
+
+    private var headerLeadingLabels: some View {
+        HStack(spacing: 6) {
+            if !compact {
+                Text(titleKey)
+                    .font(.subheadline.weight(.medium))
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+            Text(levelTitleKey)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(tintColor)
+                .fixedSize(horizontal: true, vertical: false)
+        }
+    }
+
+    private var readoutLabel: some View {
+        Text(readoutText)
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private var detailsRow: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 6) {
+                renderedDetailsLabel
+                    .fixedSize(horizontal: true, vertical: false)
+                Spacer(minLength: 4)
+                textureEdgeBadge
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                renderedDetailsLabel
+                    .fixedSize(horizontal: false, vertical: true)
+                textureEdgeBadge
+            }
+        }
+    }
+
+    private var renderedDetailsLabel: some View {
+        Text(renderedDetailsText)
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.secondary)
+            .lineLimit(2)
+    }
+
+    @ViewBuilder
+    private var textureEdgeBadge: some View {
+        if budget.exceedsMaxTextureEdge {
+            Label("budget.textureEdgeWarning", systemImage: "exclamationmark.triangle.fill")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.orange)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(Color.orange.opacity(0.16)))
+                .fixedSize()
+                .help("budget.textureEdgeWarning.help")
+        }
+    }
+
+    private func suggestedFitRow(onFitToBudget: @escaping (Double) -> Void) -> some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) {
+                suggestedScalerLabel
+                Spacer(minLength: 6)
+                fitButton(onFitToBudget: onFitToBudget)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                suggestedScalerLabel
+                fitButton(onFitToBudget: onFitToBudget)
+            }
+        }
+    }
+
+    private var suggestedScalerLabel: some View {
+        HStack(spacing: 3) {
+            Text("pixelBudget.suggestedScaler")
+            Text(String(format: "%.1f×", budget.fittedScaler))
+                .monospacedDigit()
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private func fitButton(onFitToBudget: @escaping (Double) -> Void) -> some View {
+        Button("budget.fit") {
+            onFitToBudget(budget.fittedScaler)
+        }
+        .controlSize(.small)
+        .buttonStyle(.borderedProminent)
+        .tint(.accentColor)
+        .fixedSize()
     }
 }

@@ -36,68 +36,76 @@ extension SourceData: Codable {
 
 struct IPASourceSettings: View {
     @State var selected = Set<UUID>()
-    @State var selectedNotEmpty = false
     @State var addSourceSheet = false
-    @State var triggerUpdate = false
     @Environment(StoreVM.self) var storeVM
     @Environment(URLObservable.self) var urlObservable
 
+    private var hasSelection: Bool {
+        !selected.isEmpty
+    }
+
     var body: some View {
         Form {
-            HStack {
-                List(storeVM.sourcesList, id: \.id, selection: $selected) { source in
-                    SourceView(source: source,
-                               isEnabled: source.isEnabled)
+            Section {
+                HStack(alignment: .top, spacing: 12) {
+                    List(storeVM.sourcesList, id: \.id, selection: $selected) { source in
+                        SourceView(source: source, isEnabled: source.isEnabled)
+                    }
+                    .listStyle(.bordered(alternatesRowBackgrounds: true))
+                    .frame(minHeight: 240)
+
+                    VStack(spacing: 8) {
+                        Button {
+                            addSourceSheet = true
+                        } label: {
+                            Text("preferences.button.addSource")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Button(role: .destructive) {
+                            storeVM.deleteSource(&selected)
+                        } label: {
+                            Text("preferences.button.deleteSource")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .disabled(!hasSelection)
+
+                        Divider()
+                            .padding(.vertical, 4)
+
+                        Button {
+                            storeVM.moveSourceUp(&selected)
+                        } label: {
+                            Text("preferences.button.moveSourceUp")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .disabled(!hasSelection)
+
+                        Button {
+                            storeVM.moveSourceDown(&selected)
+                        } label: {
+                            Text("preferences.button.moveSourceDown")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .disabled(!hasSelection)
+
+                        Divider()
+                            .padding(.vertical, 4)
+
+                        Button {
+                            storeVM.resolveSources()
+                        } label: {
+                            Text("playapp.refreshSources")
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
+                    .frame(width: 148)
                 }
-                .listStyle(.bordered(alternatesRowBackgrounds: true))
-                Spacer()
-                    .frame(width: 20)
-                VStack {
-                    Button {
-                        addSourceSheet.toggle()
-                    } label: {
-                        Text("preferences.button.addSource")
-                            .frame(width: 130)
-                    }
-                    Button {
-                        storeVM.deleteSource(&selected)
-                    } label: {
-                        Text("preferences.button.deleteSource")
-                            .frame(width: 130)
-                    }
-                    .disabled(!selectedNotEmpty)
-                    Spacer()
-                        .frame(height: 20)
-                    Button {
-                        storeVM.moveSourceUp(&selected)
-                    } label: {
-                        Text("preferences.button.moveSourceUp")
-                            .frame(width: 130)
-                    }
-                    .disabled(!selectedNotEmpty)
-                    Button {
-                        storeVM.moveSourceDown(&selected)
-                    } label: {
-                        Text("preferences.button.moveSourceDown")
-                            .frame(width: 130)
-                    }
-                    .disabled(!selectedNotEmpty)
-                    Spacer()
-                        .frame(height: 20)
-                    Button {
-                        storeVM.resolveSources()
-                    } label: {
-                        Text("playapp.refreshSources")
-                            .frame(width: 130)
-                    }
-                }
+                .padding(.vertical, 4)
             }
         }
-        .onChange(of: selected) { _, data in
-            selectedNotEmpty = data.count > 0
-        }
-        .padding(20)
-        .frame(width: 600, height: 300, alignment: .center)
+        .formStyle(.grouped)
         .sheet(isPresented: $addSourceSheet) {
             AddSourceView(addSourceSheet: $addSourceSheet)
                 .environment(storeVM)
@@ -113,11 +121,16 @@ struct SourceView: View {
     @Environment(StoreVM.self) var storeVM
 
     var body: some View {
-        HStack {
-            Toggle(source.source, isOn: $isEnabled)
+        HStack(spacing: 8) {
+            Toggle(isOn: $isEnabled) {
+                Text(source.source)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .toggleStyle(.checkbox)
             .foregroundStyle(isEnabled ? .primary : .secondary)
             .help("state.enabled")
-            Spacer()
+            Spacer(minLength: 8)
             switch source.status {
             case .badjson:
                 StatusBadgeView(imageName: "xmark.circle.fill",
@@ -130,13 +143,12 @@ struct SourceView: View {
                                 popoverText: "preferences.popover.badurl",
                                 showingPopover: $showingPopover)
             case .checking:
-                StatusBadgeView(imageName: "exclamationmark.circle.fill",
-                                imageColor: .yellow,
-                                popoverText: "preferences.popover.checking",
-                                showingPopover: $showingPopover)
+                ProgressView()
+                    .controlSize(.small)
+                    .help("preferences.popover.checking")
             case .duplicate:
-                StatusBadgeView(imageName: "exclamationmark.circle.fill",
-                                imageColor: .yellow,
+                StatusBadgeView(imageName: "exclamationmark.triangle.fill",
+                                imageColor: .orange,
                                 popoverText: "preferences.popover.duplicate",
                                 showingPopover: $showingPopover)
             case .empty:
@@ -153,6 +165,11 @@ struct SourceView: View {
                                     popoverText: "state.disabled",
                                     showingPopover: $showingPopover)
                 }
+            }
+        }
+        .onChange(of: source.isEnabled) { _, newValue in
+            if isEnabled != newValue {
+                isEnabled = newValue
             }
         }
         .onChange(of: isEnabled) { _, value in
@@ -173,9 +190,10 @@ struct StatusBadgeView: View {
             showingPopover.toggle()
         } label: {
             Image(systemName: imageName)
-                .foregroundColor(imageColor)
+                .foregroundStyle(imageColor)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(Text(LocalizedStringKey(popoverText)))
         .popover(isPresented: $showingPopover) {
             Text(NSLocalizedString(popoverText, comment: ""))
                 .padding(10)
@@ -195,73 +213,39 @@ struct AddSourceView: View {
     @Environment(StoreVM.self) var storeVM
     @Environment(URLObservable.self) var urlObservable
 
-    @State var checkTask: Task<Void, Error>?
-    @State var urlSessionTask: URLSessionTask?
+    @State var checkTask: Task<Void, Never>?
 
     var body: some View {
-        VStack {
-            TextField(text: $newSource, label: {Text("preferences.textfield.url")})
-            Spacer()
-                .frame(height: 20)
-            HStack {
-                switch sourceValidationState {
-                case .badjson:
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundColor(.red)
-                    Text("preferences.popover.badjson")
-                        .font(.system(.subheadline))
-                case .badurl:
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundColor(.red)
-                    Text("preferences.popover.badurl")
-                        .font(.system(.subheadline))
-                case .checking:
-                    Image(systemName: "exclamationmark.circle.fill")
-                        .foregroundColor(.yellow)
-                    Text("preferences.popover.checking")
-                        .font(.system(.subheadline))
-                case .duplicate:
-                    Image(systemName: "exclamationmark.circle.fill")
-                        .foregroundColor(.yellow)
-                    Text("preferences.popover.duplicate")
-                        .font(.system(.subheadline))
-                case .empty:
-                    EmptyView()
-                case .valid:
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundColor(.green)
-                    Text("preferences.popover.valid")
-                        .font(.system(.subheadline))
+        VStack(alignment: .leading, spacing: 14) {
+            Text("preferences.button.addSource")
+                .font(.headline)
+
+            TextField("preferences.textfield.url", text: $newSource)
+                .textFieldStyle(.roundedBorder)
+
+            HStack(spacing: 8) {
+                validationStatusView
+                Spacer(minLength: 12)
+                Button("button.Cancel") {
+                    addSourceSheet = false
                 }
-                Spacer()
-                Button {
-                    addSourceSheet.toggle()
-                } label: {
-                    Text("button.Cancel")
-                }
-                Button {
-                    if let sourceURL = newSourceURL?.absoluteString {
+                .keyboardShortcut(.cancelAction)
+
+                Button("button.OK") {
+                    if sourceValidationState == .valid, let sourceURL = newSourceURL?.absoluteString {
                         storeVM.addSource(SourceData(source: sourceURL, isEnabled: true))
-                        addSourceSheet.toggle()
+                        addSourceSheet = false
                     }
-                } label: {
-                    Text("button.OK")
                 }
-                .tint(.accentColor)
+                .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
-                .disabled(![.valid, .duplicate].contains(sourceValidationState))
+                .disabled(sourceValidationState != .valid)
             }
         }
-        .padding()
-        .frame(width: 600, height: 100)
+        .padding(20)
+        .frame(width: 480)
         .onChange(of: newSource) { _, source in
-            if let task = checkTask, !task.isCancelled {
-                if let session = urlSessionTask {
-                    session.cancel()
-                }
-
-                task.cancel()
-            }
+            checkTask?.cancel()
             validateSource(source)
         }
         .onAppear {
@@ -270,65 +254,90 @@ struct AddSourceView: View {
             }
         }
         .onDisappear {
+            checkTask?.cancel()
             urlObservable.url = nil
             urlObservable.type = nil
             urlObservable.action = nil
         }
     }
 
-    func validateSource(_ source: String) {
-        guard NetworkVM.isConnectedToNetwork() else { return }
+    @ViewBuilder
+    private var validationStatusView: some View {
+        switch sourceValidationState {
+        case .badjson:
+            Label("preferences.popover.badjson", systemImage: "xmark.circle.fill")
+                .font(.subheadline)
+                .foregroundStyle(.red)
+        case .badurl:
+            Label("preferences.popover.badurl", systemImage: "xmark.circle.fill")
+                .font(.subheadline)
+                .foregroundStyle(.red)
+        case .checking:
+            HStack(spacing: 6) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("preferences.popover.checking")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        case .duplicate:
+            Label("preferences.popover.duplicate", systemImage: "exclamationmark.triangle.fill")
+                .font(.subheadline)
+                .foregroundStyle(.orange)
+        case .empty:
+            EmptyView()
+        case .valid:
+            Label("preferences.popover.valid", systemImage: "checkmark.circle.fill")
+                .font(.subheadline)
+                .foregroundStyle(.green)
+        }
+    }
 
-        sourceValidationState = .empty
+    func validateSource(_ source: String) {
+        let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            newSourceURL = nil
+            sourceValidationState = .empty
+            return
+        }
+
+        guard let url = StoreVM.normalizeSourceURL(trimmed) else {
+            newSourceURL = nil
+            sourceValidationState = .badurl
+            return
+        }
+
+        newSourceURL = url
+
+        let normalized = url.absoluteString
+        let isAlreadyAdded = storeVM.sourcesList.contains { existing in
+            existing.source == normalized || StoreVM.normalizeSourceURL(existing.source)?.absoluteString == normalized
+        }
+        if isAlreadyAdded {
+            sourceValidationState = .duplicate
+            return
+        }
+
+        sourceValidationState = .checking
+        let existingSources = storeVM.sourcesList.map(\.source)
 
         checkTask = Task {
-            if var url = URL(string: source) {
-                if url.scheme == nil {
-                    url = URL(string: "https://" + url.absoluteString) ?? url
-                }
+            try? await Task.sleep(for: .milliseconds(200))
+            guard !Task.isCancelled else { return }
 
-                newSourceURL = url
-                urlSessionTask = URLSession.shared.dataTask(with: URLRequest(url: url)) { jsonData, response, error in
-                    guard error == nil,
-                          ((response as? HTTPURLResponse)?.statusCode ?? 200) == 200,
-                          let jsonData = jsonData else {
-                        Task { @MainActor in
-                            self.sourceValidationState = .badurl
-                        }
-                        return
+            let (_, validation) = await StoreVM.fetchAndValidateSource(url: url)
+            guard !Task.isCancelled else { return }
+
+            await MainActor.run {
+                if validation == .valid {
+                    let duplicate = existingSources.contains { existing in
+                        existing == normalized
+                            || StoreVM.normalizeSourceURL(existing)?.absoluteString == normalized
                     }
-
-                    do {
-                        let _: SourceJSON = try JSONDecoder().decode(SourceJSON.self, from: jsonData)
-                        Task { @MainActor in
-                            sourceValidationState = storeVM.sourcesList.filter {
-                                $0.source == source
-                            }.isEmpty ? .valid : .duplicate
-                        }
-                    } catch {
-                        do {
-                            let data: [SourceAppsData] = try JSONDecoder().decode([SourceAppsData].self, from: jsonData)
-                            if data.count > 0 {
-                                Task { @MainActor in
-                                    sourceValidationState = storeVM.sourcesList.filter {
-                                        $0.source == source
-                                    }.isEmpty ? .valid : .duplicate
-                                }
-                            }
-                        } catch {
-                            Task { @MainActor in
-                                self.sourceValidationState = .badjson
-                            }
-                        }
-                    }
+                    sourceValidationState = duplicate ? .duplicate : .valid
+                } else {
+                    sourceValidationState = validation
                 }
-
-                urlSessionTask?.resume()
-                sourceValidationState = .checking
-                return
-            }
-            Task { @MainActor in
-                self.sourceValidationState = .badurl
             }
         }
     }

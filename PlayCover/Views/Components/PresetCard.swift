@@ -11,43 +11,78 @@ struct PresetCard: View {
     let isActive: Bool
     let action: () -> Void
 
+    @State private var isHovered = false
+
     var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 6) {
-                HStack {
+                HStack(spacing: 6) {
                     Image(systemName: preset.systemImage)
                         .font(.title3)
                         .foregroundStyle(isActive ? Color.accentColor : Color.secondary)
-                    Spacer()
+                    Spacer(minLength: 4)
                     if isActive {
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundStyle(Color.accentColor)
                     }
                 }
-                Text(LocalizedStringKey(preset.titleKey))
-                    .font(.headline)
-                    .foregroundStyle(.primary)
-                Text(LocalizedStringKey(preset.subtitleKey))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
+
+                ViewThatFits(in: .horizontal) {
+                    Text(LocalizedStringKey(preset.titleKey))
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    Text(LocalizedStringKey(preset.titleKey))
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                ViewThatFits(in: .vertical) {
+                    Text(LocalizedStringKey(preset.subtitleKey))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(LocalizedStringKey(preset.subtitleKey))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 0)
             }
             .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(isActive ? Color.accentColor.opacity(0.14) : Color.secondary.opacity(0.08))
+                    .fill(
+                        isActive
+                            ? Color.accentColor.opacity(0.14)
+                            : Color.secondary.opacity(isHovered ? 0.12 : 0.08)
+                    )
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .strokeBorder(
-                        isActive ? Color.accentColor.opacity(0.55) : Color.secondary.opacity(0.18),
+                        isActive
+                            ? Color.accentColor.opacity(0.55)
+                            : Color.secondary.opacity(isHovered ? 0.30 : 0.18),
                         lineWidth: 1
                     )
             )
         }
         .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.snappy(duration: 0.15)) {
+                isHovered = hovering
+            }
+        }
+        .help(LocalizedStringKey(preset.subtitleKey))
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(isActive ? [.isButton, .isSelected] : .isButton)
     }
 }
 

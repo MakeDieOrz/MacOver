@@ -7,6 +7,7 @@ import SwiftUI
 
 struct ConfigPluginsPane: View {
     @Environment(AppsVM.self) var appsVM
+    @Environment(\.locale) private var locale
 
     var app: PlayApp
     @Binding var hasPlayTools: Bool
@@ -15,13 +16,36 @@ struct ConfigPluginsPane: View {
     @AppStorage("settings.customPluginsWarningShown") private var hasShownCustomPluginWarning = false
     @State private var userDylibs: [URL] = []
     @State private var showCustomPluginWarning = false
+    @State private var showRemovePlayToolsConfirm = false
 
     var body: some View {
         Form {
-            Section("settings.customPlugins.title") {
+            Section {
+                if userDylibs.isEmpty {
+                    Text("settings.customPlugins.empty")
+                        .foregroundStyle(.secondary)
+                        .font(.callout)
+                } else {
+                    ForEach(userDylibs, id: \.self) { dylib in
+                        HStack {
+                            Image(systemName: "puzzlepiece.extension")
+                                .foregroundStyle(.secondary)
+                                .accessibilityHidden(true)
+                            Text(dylib.lastPathComponent)
+                            Spacer()
+                            Button(role: .destructive) {
+                                removeDylib(dylib)
+                            } label: {
+                                Image(systemName: "minus.circle")
+                            }
+                            .buttonStyle(.borderless)
+                            .accessibilityLabel(dylib.lastPathComponent)
+                        }
+                    }
+                }
+            } header: {
                 HStack {
                     Text("settings.customPlugins.title")
-                        .font(.headline)
                     Spacer()
                     Button {
                         if hasShownCustomPluginWarning {
@@ -32,28 +56,8 @@ struct ConfigPluginsPane: View {
                     } label: {
                         Label("settings.customPlugins.add", systemImage: "plus")
                     }
+                    .controlSize(.small)
                     .disabled(!hasPlayTools)
-                }
-
-                if userDylibs.isEmpty {
-                    Text("settings.customPlugins.empty")
-                        .foregroundStyle(.secondary)
-                        .font(.callout)
-                } else {
-                    ForEach(userDylibs, id: \.self) { dylib in
-                        HStack {
-                            Image(systemName: "puzzlepiece.extension")
-                                .foregroundStyle(.secondary)
-                            Text(dylib.lastPathComponent)
-                            Spacer()
-                            Button(role: .destructive) {
-                                removeDylib(dylib)
-                            } label: {
-                                Image(systemName: "minus.circle")
-                            }
-                            .buttonStyle(.borderless)
-                        }
-                    }
                 }
             }
 
@@ -61,6 +65,7 @@ struct ConfigPluginsPane: View {
                 Text("plugins.safeModeDesc")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 Button {
                     Task {
@@ -73,26 +78,36 @@ struct ConfigPluginsPane: View {
                 } label: {
                     Label("action.launchSafeMode", systemImage: "shield.lefthalf.filled")
                 }
+                .disabled(!app.isRunning && app.isStarting)
             }
 
             Section("PlayTools") {
-                HStack {
-                    LabeledContent("settings.info.playTools") {
+                let isBusy = blockingTask == .playTools
+                LabeledContent(ConfigLabelFormatter.clean("settings.info.playTools", locale: locale)) {
+                    HStack(spacing: 12) {
                         Text(hasPlayTools ? "button.Yes" : "button.No")
                             .foregroundStyle(hasPlayTools ? .green : .orange)
-                    }
-                    Spacer()
-                    Button(role: hasPlayTools ? .destructive : nil) {
-                        togglePlayTools()
-                    } label: {
-                        if blockingTask == .playTools {
-                            ProgressView().controlSize(.small)
-                        } else {
-                            Text(hasPlayTools ? "settings.removePlayTools" : "alert.install.injectPlayTools")
+
+                        Button(role: hasPlayTools ? .destructive : nil) {
+                            if hasPlayTools {
+                                showRemovePlayToolsConfirm = true
+                            } else {
+                                togglePlayTools()
+                            }
+                        } label: {
+                            ZStack {
+                                Text(hasPlayTools ? "settings.removePlayTools" : "alert.install.injectPlayTools")
+                                    .opacity(isBusy ? 0 : 1)
+                                if isBusy {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                }
+                            }
                         }
+                        .buttonStyle(.borderedProminent)
+                        .tint(hasPlayTools ? .red : .accentColor)
+                        .disabled(isBusy)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(hasPlayTools ? .red : .accentColor)
                 }
             }
         }
@@ -110,6 +125,12 @@ struct ConfigPluginsPane: View {
         } message: {
             Text("settings.customPlugins.warningMessage")
         }
+        .alert("confirm.removePlayTools.title", isPresented: $showRemovePlayToolsConfirm) {
+            Button("button.Cancel", role: .cancel) {}
+            Button("settings.removePlayTools", role: .destructive) {
+                togglePlayTools()
+            }
+        }
     }
 
     private func reloadUserDylibs() {
@@ -121,7 +142,7 @@ struct ConfigPluginsPane: View {
             guard case .success(let url) = result else { return }
             let bundleID = app.info.bundleIdentifier
             let executable = app.executable
-            Task(priority: .userInitiated) {
+            Task.detached(priority: .userInitiated) {
                 do {
                     try PlayTools.addUserDylib(at: url, bundleIdentifier: bundleID, appExecutable: executable)
                 } catch {
@@ -138,7 +159,7 @@ struct ConfigPluginsPane: View {
         let name = url.lastPathComponent
         let bundleID = app.info.bundleIdentifier
         let executable = app.executable
-        Task(priority: .userInitiated) {
+        Task.detached(priority: .userInitiated) {
             do {
                 try PlayTools.removeUserDylib(
                     named: name,
@@ -161,7 +182,7 @@ struct ConfigPluginsPane: View {
         let bundleID = app.info.bundleIdentifier
         let svcManifestURL = bundleID.isEmpty ? nil : app.svcPatchManifestURL
         let currentlyInstalled = hasPlayTools
-        Task(priority: .userInitiated) {
+        Task.detached(priority: .userInitiated) {
             defer {
                 Task { @MainActor in
                     blockingTask = .none

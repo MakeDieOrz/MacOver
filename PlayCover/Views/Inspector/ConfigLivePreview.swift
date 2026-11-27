@@ -7,6 +7,9 @@ import PlayCoverCore
 import SwiftUI
 
 struct ConfigLivePreview: View {
+    @Environment(AppNavigationState.self) var navState
+    @Environment(\.locale) private var locale
+
     var app: PlayApp
     var settings: AppSettings
 
@@ -37,12 +40,16 @@ struct ConfigLivePreview: View {
         }
     }
 
+    private var isTopRestartBannerVisible: Bool {
+        navState.configTargetID == app.id
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 6) {
                     Text("inspector.previewTitle")
-                        .font(.subheadline.weight(.medium))
+                        .font(.subheadline.weight(.semibold))
                     Spacer(minLength: 4)
                     if settings.settings.strictEmulationMode {
                         AppStatusPill(kind: .strict, compact: true)
@@ -51,57 +58,19 @@ struct ConfigLivePreview: View {
 
                 windowSchematic
 
-                VStack(alignment: .leading, spacing: 6) {
-                    let data = settings.settings
-                    if data.strictEmulationMode {
-                        LabeledContent("strict.section.title") {
-                            let orientKey = data.strictViewportOrientation == .portrait
-                                ? "strict.orientation.portrait"
-                                : "strict.orientation.landscape"
-                            let scaleKey = data.strictViewportScaleMode == .native1x
-                                ? "strict.scaleMode.native1xShort"
-                                : "strict.scaleMode.fitScreenShort"
-                            Text("\(NSLocalizedString(orientKey, comment: "")) · "
-                                 + "\(NSLocalizedString(scaleKey, comment: ""))")
-                                .font(.caption)
-                                .foregroundStyle(Color.accentColor)
+                metadataList
+
+                if navState.activeConfigPane != .display {
+                    Divider()
+
+                    PixelBudgetMeter(
+                        budget: settings.settings.pixelBudget,
+                        compact: true,
+                        onFitToBudget: settings.settings.strictEmulationMode ? nil : { fitted in
+                            settings.update { $0.customScaler = fitted }
                         }
-                    }
-                    LabeledContent("settings.picker.iosDevice") {
-                        Text(DeviceProfileOption.displayName(for: data.effectiveIOSDeviceModel))
-                            .font(.caption)
-                            .lineLimit(1)
-                    }
-                    LabeledContent("settings.picker.adaptiveRes") {
-                        let scalerText = String(format: "%.1f×", data.effectiveCustomScaler)
-                        Text("\(data.effectiveWindowWidth)×\(data.effectiveWindowHeight) @ \(scalerText)")
-                            .font(.caption.monospacedDigit())
-                    }
-                    LabeledContent("display.frameRate.title") {
-                        Text(LocalizedStringKey(frameRateLabelKey))
-                            .font(.caption)
-                    }
-                    LabeledContent("device.layoutTitle") {
-                        let isPhone = DeviceProfileOption.isIPhone(data.effectiveIOSDeviceModel)
-                        Label(
-                            LocalizedStringKey(isPhone ? "device.layout.compact" : "device.layout.regular"),
-                            systemImage: isPhone ? "iphone" : "ipad.landscape"
-                        )
-                        .font(.caption)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.trailing)
-                    }
+                    )
                 }
-
-                Divider()
-
-                PixelBudgetMeter(
-                    budget: settings.settings.pixelBudget,
-                    compact: true,
-                    onFitToBudget: settings.settings.strictEmulationMode ? nil : { fitted in
-                        settings.update { $0.customScaler = fitted }
-                    }
-                )
 
                 if app.isRunning && !app.restartRequiredChanges.isEmpty {
                     Divider()
@@ -110,6 +79,67 @@ struct ConfigLivePreview: View {
             }
             .padding(16)
         }
+    }
+
+    private var metadataList: some View {
+        let data = settings.settings
+        let scalerText = String(format: "%.1f×", data.effectiveCustomScaler)
+        let isPhone = DeviceProfileOption.isIPhone(data.effectiveIOSDeviceModel)
+
+        return VStack(alignment: .leading, spacing: 10) {
+            if data.strictEmulationMode {
+                let orientKey = data.strictViewportOrientation == .portrait
+                    ? "strict.orientation.portrait"
+                    : "strict.orientation.landscape"
+                let scaleKey = data.strictViewportScaleMode == .native1x
+                    ? "strict.scaleMode.native1xShort"
+                    : "strict.scaleMode.fitScreenShort"
+                let orientText = ConfigLabelFormatter.localized(orientKey, locale: locale)
+                let scaleText = ConfigLabelFormatter.localized(scaleKey, locale: locale)
+                previewRow("strict.section.title") {
+                    Text("\(orientText) · \(scaleText)")
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+
+            previewRow("settings.picker.iosDevice") {
+                Text(DeviceProfileOption.displayName(for: data.effectiveIOSDeviceModel))
+            }
+
+            previewRow("settings.picker.adaptiveRes") {
+                Text("\(data.effectiveWindowWidth)×\(data.effectiveWindowHeight) @ \(scalerText)")
+                    .monospacedDigit()
+            }
+
+            previewRow("display.frameRate.title") {
+                Text(LocalizedStringKey(frameRateLabelKey))
+            }
+
+            previewRow("device.layoutTitle") {
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    Image(systemName: isPhone ? "iphone" : "ipad.landscape")
+                        .foregroundStyle(Color.accentColor)
+                        .accessibilityHidden(true)
+                    Text(LocalizedStringKey(isPhone ? "device.layout.compact" : "device.layout.regular"))
+                }
+            }
+        }
+    }
+
+    private func previewRow<Value: View>(
+        _ titleKey: String,
+        @ViewBuilder value: () -> Value
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(ConfigLabelFormatter.clean(titleKey, locale: locale))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            value()
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var windowSchematic: some View {
@@ -150,23 +180,26 @@ struct ConfigLivePreview: View {
                 .foregroundStyle(.orange)
 
             ForEach(app.restartRequiredChanges, id: \.self) { field in
-                HStack {
+                HStack(spacing: 6) {
                     Image(systemName: "circle.fill")
                         .font(.system(size: 5))
                         .foregroundStyle(.orange)
+                        .accessibilityHidden(true)
                     Text(LocalizedStringKey(field.localizedKey))
                         .font(.caption)
                 }
             }
 
-            Button {
-                Task { await app.restart() }
-            } label: {
-                Label("action.restart", systemImage: "arrow.clockwise")
-                    .frame(maxWidth: .infinity)
+            if !isTopRestartBannerVisible {
+                Button {
+                    Task { await app.restart() }
+                } label: {
+                    Label("action.restart", systemImage: "arrow.clockwise")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.orange)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.orange)
         }
     }
 }

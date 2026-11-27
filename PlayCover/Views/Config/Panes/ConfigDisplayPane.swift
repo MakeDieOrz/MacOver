@@ -7,11 +7,15 @@ import PlayCoverCore
 import SwiftUI
 
 struct ConfigDisplayPane: View {
+    @Environment(\.locale) private var locale
+
     @Bindable var settings: AppSettings
     var onOpenStrictMode: (() -> Void)?
 
     @State private var customWidth = 1920
     @State private var customHeight = 1080
+    @State private var customAspectWidth = 16
+    @State private var customAspectHeight = 9
 
     private var isStrictMode: Bool {
         settings.settings.strictEmulationMode
@@ -20,14 +24,18 @@ struct ConfigDisplayPane: View {
     private static let integerFormatter: NumberFormatter = {
         let formatter = NumberFormatter()
         formatter.numberStyle = .none
+        formatter.minimum = 1
+        formatter.maximum = 16_384
         return formatter
     }()
 
     private static let scalerFormatter: NumberFormatter = {
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal
-        formatter.maximumFractionDigits = 1
+        formatter.maximumFractionDigits = 2
         formatter.minimumFractionDigits = 1
+        formatter.minimum = 0.25
+        formatter.maximum = 8.0
         formatter.decimalSeparator = "."
         return formatter
     }()
@@ -45,16 +53,22 @@ struct ConfigDisplayPane: View {
         .formStyle(.grouped)
         .scrollEdgeEffectStyle(.soft, for: .top)
         .onAppear {
-            customWidth = settings.settings.windowWidth
-            customHeight = settings.settings.windowHeight
+            customWidth = max(1, settings.settings.windowWidth)
+            customHeight = max(1, settings.settings.windowHeight)
+            if settings.settings.resizableAspectRatioType == 1,
+               settings.settings.resizableAspectRatioWidth > 0,
+               settings.settings.resizableAspectRatioHeight > 0 {
+                customAspectWidth = settings.settings.resizableAspectRatioWidth
+                customAspectHeight = settings.settings.resizableAspectRatioHeight
+            }
         }
         .onChange(of: settings.settings.windowWidth) { _, newWidth in
-            if customWidth != newWidth {
+            if settings.settings.resolution == 5, customWidth != newWidth, newWidth > 0 {
                 customWidth = newWidth
             }
         }
         .onChange(of: settings.settings.windowHeight) { _, newHeight in
-            if customHeight != newHeight {
+            if settings.settings.resolution == 5, customHeight != newHeight, newHeight > 0 {
                 customHeight = newHeight
             }
         }
@@ -65,17 +79,35 @@ struct ConfigDisplayPane: View {
             applyComputedDimensions()
         }
         .onChange(of: customWidth) { _, newWidth in
-            if !isStrictMode, settings.settings.resolution == 5, settings.settings.windowWidth != newWidth {
+            let clamped = max(1, newWidth)
+            if !isStrictMode, settings.settings.resolution == 5, settings.settings.windowWidth != clamped {
                 applyComputedDimensions()
             }
         }
         .onChange(of: customHeight) { _, newHeight in
-            if !isStrictMode, settings.settings.resolution == 5, settings.settings.windowHeight != newHeight {
+            let clamped = max(1, newHeight)
+            if !isStrictMode, settings.settings.resolution == 5, settings.settings.windowHeight != clamped {
                 applyComputedDimensions()
             }
         }
         .onChange(of: settings.settings.resizableAspectRatioType) {
             syncResizableRatioPresets()
+        }
+        .onChange(of: customAspectWidth) { _, newValue in
+            let clamped = max(1, newValue)
+            if !isStrictMode,
+               settings.settings.resizableAspectRatioType == 1,
+               settings.settings.resizableAspectRatioWidth != clamped {
+                settings.update { $0.resizableAspectRatioWidth = clamped }
+            }
+        }
+        .onChange(of: customAspectHeight) { _, newValue in
+            let clamped = max(1, newValue)
+            if !isStrictMode,
+               settings.settings.resizableAspectRatioType == 1,
+               settings.settings.resizableAspectRatioHeight != clamped {
+                settings.update { $0.resizableAspectRatioHeight = clamped }
+            }
         }
     }
 
@@ -94,7 +126,7 @@ struct ConfigDisplayPane: View {
     private var resolutionSection: some View {
         Section {
             Picker(
-                "settings.picker.adaptiveRes",
+                ConfigLabelFormatter.clean("settings.picker.adaptiveRes", locale: locale),
                 selection: Binding(
                     get: { settings.settings.effectiveResolution },
                     set: { newValue in
@@ -118,17 +150,17 @@ struct ConfigDisplayPane: View {
                 let data = settings.settings
                 let spec = data.strictDeviceDisplaySpec
                 let px = spec.pixelSize(orientation: data.strictViewportOrientation)
-                LabeledContent("strict.display.logicalPoints") {
+                LabeledContent(ConfigLabelFormatter.clean("strict.display.logicalPoints", locale: locale)) {
                     Text("\(data.effectiveWindowWidth) × \(data.effectiveWindowHeight) pt")
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
-                LabeledContent("strict.display.nativePixels") {
+                LabeledContent(ConfigLabelFormatter.clean("strict.display.nativePixels", locale: locale)) {
                     Text("\(px.width) × \(px.height) px · \(spec.maxFrameRateHz) Hz")
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
-                LabeledContent("strict.scaleMode.title") {
+                LabeledContent(ConfigLabelFormatter.clean("strict.scaleMode.title", locale: locale)) {
                     let key = data.strictViewportScaleMode == .native1x
                         ? "strict.scaleMode.native1x"
                         : "strict.scaleMode.fitScreen"
@@ -137,63 +169,76 @@ struct ConfigDisplayPane: View {
                 }
             } else if settings.settings.resolution == 1 {
                 let autoRes = AppSettings.autoResolution()
-                LabeledContent("settings.text.detectedResolution") {
+                LabeledContent(ConfigLabelFormatter.clean("settings.text.detectedResolution", locale: locale)) {
                     Text("\(autoRes.width) × \(autoRes.height)")
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
             } else if settings.settings.resolution >= 2 && settings.settings.resolution <= 4 {
-                Picker("settings.picker.aspectRatio", selection: $settings.settings.aspectRatio) {
+                Picker(
+                    ConfigLabelFormatter.clean("settings.picker.aspectRatio", locale: locale),
+                    selection: $settings.settings.aspectRatio
+                ) {
                     Text("4:3").tag(0)
                     Text("16:9").tag(1)
                     Text("16:10").tag(2)
                 }
                 .pickerStyle(.segmented)
             } else if settings.settings.resolution == 5 {
-                LabeledContent("settings.text.customWidth") {
+                LabeledContent(ConfigLabelFormatter.clean("settings.text.customWidth", locale: locale)) {
                     HStack(spacing: 6) {
                         TextField("", value: $customWidth, formatter: Self.integerFormatter)
                             .labelsHidden()
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 72)
                             .multilineTextAlignment(.trailing)
+                            .monospacedDigit()
                         Stepper("", value: $customWidth, in: 320...7680, step: 16)
                             .labelsHidden()
                     }
                 }
-                LabeledContent("settings.text.customHeight") {
+                LabeledContent(ConfigLabelFormatter.clean("settings.text.customHeight", locale: locale)) {
                     HStack(spacing: 6) {
                         TextField("", value: $customHeight, formatter: Self.integerFormatter)
                             .labelsHidden()
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 72)
                             .multilineTextAlignment(.trailing)
+                            .monospacedDigit()
                         Stepper("", value: $customHeight, in: 240...4320, step: 16)
                             .labelsHidden()
                     }
                 }
             } else if settings.settings.resolution == 6 {
-                Picker("settings.picker.aspectRatio", selection: $settings.settings.resizableAspectRatioType) {
+                Picker(
+                    ConfigLabelFormatter.clean("settings.picker.aspectRatio", locale: locale),
+                    selection: $settings.settings.resizableAspectRatioType
+                ) {
                     Text("settings.picker.aspectRatio.free").tag(0)
                     Text("settings.picker.aspectRatio.custom").tag(1)
                     Text("4:3").tag(2)
                     Text("16:9").tag(3)
                     Text("16:10").tag(4)
                 }
-                .pickerStyle(.segmented)
+                .pickerStyle(.menu)
 
                 if settings.settings.resizableAspectRatioType == 1 {
-                    LabeledContent("settings.picker.aspectRatio.custom") {
+                    LabeledContent(ConfigLabelFormatter.clean("settings.picker.aspectRatio.custom", locale: locale)) {
                         HStack(spacing: 6) {
-                            TextField("", value: $settings.settings.resizableAspectRatioWidth,
-                                      formatter: Self.integerFormatter)
+                            TextField("", value: $customAspectWidth, formatter: Self.integerFormatter)
+                                .labelsHidden()
+                                .textFieldStyle(.roundedBorder)
                                 .frame(width: 72)
                                 .multilineTextAlignment(.trailing)
+                                .monospacedDigit()
                             Text(":")
-                            TextField("", value: $settings.settings.resizableAspectRatioHeight,
-                                      formatter: Self.integerFormatter)
+                                .foregroundStyle(.secondary)
+                            TextField("", value: $customAspectHeight, formatter: Self.integerFormatter)
+                                .labelsHidden()
+                                .textFieldStyle(.roundedBorder)
                                 .frame(width: 72)
                                 .multilineTextAlignment(.trailing)
+                                .monospacedDigit()
                         }
                     }
                 }
@@ -205,20 +250,22 @@ struct ConfigDisplayPane: View {
         let scalerBinding = Binding<Double>(
             get: { settings.settings.effectiveCustomScaler },
             set: { newValue in
-                guard !isStrictMode else { return }
-                settings.settings.customScaler = newValue
+                guard !isStrictMode, newValue.isFinite else { return }
+                let clamped = min(8.0, max(0.25, newValue))
+                settings.settings.customScaler = (clamped * 100.0).rounded() / 100.0
             }
         )
         let budget = settings.settings.pixelBudget
         return Section {
-            LabeledContent("settings.picker.scaler") {
+            LabeledContent(ConfigLabelFormatter.clean("settings.picker.scaler", locale: locale)) {
                 HStack(spacing: 6) {
                     TextField("", value: scalerBinding, formatter: Self.scalerFormatter)
                         .labelsHidden()
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 72)
                         .multilineTextAlignment(.trailing)
-                    Stepper("", value: scalerBinding, in: 0.5...3.0, step: 0.1)
+                        .monospacedDigit()
+                    Stepper("", value: scalerBinding, in: 0.25...8.0, step: 0.1)
                         .labelsHidden()
                 }
             }
@@ -241,7 +288,10 @@ struct ConfigDisplayPane: View {
 
     private var frameRateAndCompatSection: some View {
         Section {
-            Picker("display.frameRate.title", selection: $settings.settings.frameRateTargetMode) {
+            Picker(
+                ConfigLabelFormatter.clean("display.frameRate.title", locale: locale),
+                selection: $settings.settings.frameRateTargetMode
+            ) {
                 Text("display.frameRate.adaptive").tag(FrameRateTarget.adaptive)
                 Text("display.frameRate.fixed120").tag(FrameRateTarget.fixed120)
                 Text("display.frameRate.fixed60").tag(FrameRateTarget.fixed60)
@@ -250,7 +300,7 @@ struct ConfigDisplayPane: View {
             .help("display.frameRate.help")
 
             Picker(
-                "display.windowCompat.title",
+                ConfigLabelFormatter.clean("display.windowCompat.title", locale: locale),
                 selection: Binding(
                     get: { settings.settings.effectiveWindowCompatibility },
                     set: { newValue in
@@ -268,7 +318,7 @@ struct ConfigDisplayPane: View {
             .disabled(isStrictMode)
 
             Picker(
-                "settings.settings.displayRotation",
+                ConfigLabelFormatter.clean("settings.settings.displayRotation", locale: locale),
                 selection: Binding(
                     get: { settings.settings.effectiveDisplayRotation },
                     set: { newValue in
@@ -315,9 +365,7 @@ struct ConfigDisplayPane: View {
         let pair: (width: Int, height: Int)
         switch settings.settings.resizableAspectRatioType {
         case 0: pair = (0, 0)
-        case 1:
-            pair = (settings.settings.resizableAspectRatioWidth,
-                    settings.settings.resizableAspectRatioHeight)
+        case 1: pair = (max(1, customAspectWidth), max(1, customAspectHeight))
         case 2: pair = (4, 3)
         case 3: pair = (16, 9)
         case 4: pair = (16, 10)

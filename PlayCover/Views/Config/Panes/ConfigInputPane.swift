@@ -10,6 +10,8 @@ enum KeymapNameValidation {
 }
 
 struct ConfigInputPane: View {
+    @Environment(\.locale) private var locale
+
     var app: PlayApp
     @Bindable var settings: AppSettings
 
@@ -18,11 +20,13 @@ struct ConfigInputPane: View {
     @State private var newKeymapName = ""
     @State private var renamingURL: URL?
     @State private var renameText = ""
+    @State private var keymapPendingReset: String?
+    @State private var keymapPendingDelete: String?
 
     init(app: PlayApp, settings: AppSettings) {
         self.app = app
         self.settings = settings
-        _keymapVM = State(initialValue: KeymapViewVM(app: app))
+        _keymapVM = State(initialValue: KeymapViewVM(app: app, loadCacheImmediately: false))
     }
 
     private func validateKeymapName(_ candidate: String) -> KeymapNameValidation {
@@ -59,15 +63,17 @@ struct ConfigInputPane: View {
                         .disabled(!settings.settings.keymapping)
                 } label: {
                     Text(String(
-                        format: NSLocalizedString("settings.slider.mouseSensitivity", comment: ""),
+                        format: ConfigLabelFormatter.localized("settings.slider.mouseSensitivity", locale: locale),
                         settings.settings.sensitivity
                     ))
+                    .monospacedDigit()
                 }
             }
 
             Section("playapp.keymap") {
                 HStack(spacing: 8) {
-                    TextField("input.newKeymapPlaceholder", text: $newKeymapName)
+                    TextField("", text: $newKeymapName, prompt: Text("input.newKeymapPlaceholder"))
+                        .labelsHidden()
                         .textFieldStyle(.roundedBorder)
                         .onSubmit {
                             if newValidation == .valid {
@@ -98,10 +104,57 @@ struct ConfigInputPane: View {
         }
         .formStyle(.grouped)
         .scrollEdgeEffectStyle(.soft, for: .top)
+        .onAppear {
+            keymapVM.ensureLoaded()
+        }
         .onChange(of: app.url) {
             keymapVM.reloadKeymapCache()
             renamingURL = nil
             renameText = ""
+            keymapPendingReset = nil
+            keymapPendingDelete = nil
+        }
+        .alert(
+            "confirm.resetKeymap.title",
+            isPresented: Binding(
+                get: { keymapPendingReset != nil },
+                set: { if !$0 { keymapPendingReset = nil } }
+            )
+        ) {
+            Button("button.Cancel", role: .cancel) {
+                keymapPendingReset = nil
+            }
+            Button("button.Reset", role: .destructive) {
+                if let name = keymapPendingReset {
+                    app.keymapping.reset(name: name)
+                }
+                keymapPendingReset = nil
+            }
+        } message: {
+            if let name = keymapPendingReset {
+                Text(name)
+            }
+        }
+        .alert(
+            "confirm.deleteKeymap.title",
+            isPresented: Binding(
+                get: { keymapPendingDelete != nil },
+                set: { if !$0 { keymapPendingDelete = nil } }
+            )
+        ) {
+            Button("button.Cancel", role: .cancel) {
+                keymapPendingDelete = nil
+            }
+            Button("settings.deleteKm", role: .destructive) {
+                if let name = keymapPendingDelete {
+                    deleteKeymap(name: name)
+                }
+                keymapPendingDelete = nil
+            }
+        } message: {
+            if let name = keymapPendingDelete {
+                Text(name)
+            }
         }
     }
 
@@ -118,7 +171,8 @@ struct ConfigInputPane: View {
     private func renameKeymapRow(prevName: String) -> some View {
         let renameValidation = validateKeymapName(renameText)
         return HStack(spacing: 8) {
-            TextField("keymap.sheet.name", text: $renameText)
+            TextField("", text: $renameText, prompt: Text("keymap.sheet.name"))
+                .labelsHidden()
                 .textFieldStyle(.roundedBorder)
                 .onSubmit {
                     if renameValidation == .valid {
@@ -134,6 +188,7 @@ struct ConfigInputPane: View {
             }
             .buttonStyle(.borderless)
             .disabled(renameValidation != .valid)
+            .accessibilityLabel("button.OK")
 
             Button {
                 renamingURL = nil
@@ -143,6 +198,7 @@ struct ConfigInputPane: View {
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.borderless)
+            .accessibilityLabel("button.Cancel")
         }
     }
 
@@ -178,25 +234,33 @@ struct ConfigInputPane: View {
             }
             .buttonStyle(.borderless)
             .help("settings.renameKm")
+            .accessibilityLabel("settings.renameKm")
 
             Button { app.keymapping.exportKeymap(name: name) } label: {
                 Image(systemName: "square.and.arrow.up")
             }
             .buttonStyle(.borderless)
             .help("playapp.exportKm")
+            .accessibilityLabel("playapp.exportKm")
 
-            Button { app.keymapping.reset(name: name) } label: {
+            Button {
+                keymapPendingReset = name
+            } label: {
                 Image(systemName: "arrow.counterclockwise")
             }
             .buttonStyle(.borderless)
             .help("settings.resetKm")
+            .accessibilityLabel("settings.resetKm")
 
             if !isDefault {
-                Button(role: .destructive) { deleteKeymap(name: name) } label: {
+                Button(role: .destructive) {
+                    keymapPendingDelete = name
+                } label: {
                     Image(systemName: "trash")
                 }
                 .buttonStyle(.borderless)
                 .help("settings.deleteKm")
+                .accessibilityLabel("settings.deleteKm")
             }
         }
     }
@@ -205,7 +269,7 @@ struct ConfigInputPane: View {
         if !app.keymapping.deleteKeymap(name: name) {
             PlayCoverDiagnostics.reportError(
                 String(
-                    format: NSLocalizedString("settings.deleteKmFailed", comment: ""),
+                    format: ConfigLabelFormatter.localized("settings.deleteKmFailed", locale: locale),
                     arguments: [name]
                 )
             )
@@ -222,14 +286,17 @@ struct ConfigInputPane: View {
             Image(systemName: "checkmark.circle.fill")
                 .foregroundStyle(.green)
                 .help("preferences.popover.valid.keymap")
+                .accessibilityLabel("preferences.popover.valid.keymap")
         case .duplicate:
             Image(systemName: "exclamationmark.circle.fill")
                 .foregroundStyle(.orange)
                 .help("preferences.popover.duplicate.keymap")
+                .accessibilityLabel("preferences.popover.duplicate.keymap")
         case .malformed:
             Image(systemName: "xmark.circle.fill")
                 .foregroundStyle(.red)
                 .help("preferences.popover.malformed.keymap")
+                .accessibilityLabel("preferences.popover.malformed.keymap")
         }
     }
 
@@ -238,7 +305,7 @@ struct ConfigInputPane: View {
             newKeymapName = ""
             keymapVM.reloadKeymapCache()
         } else {
-            PlayCoverDiagnostics.reportError(NSLocalizedString("alert.errorKmCreated", comment: ""))
+            PlayCoverDiagnostics.reportError(ConfigLabelFormatter.localized("alert.errorKmCreated", locale: locale))
         }
     }
 
@@ -249,7 +316,7 @@ struct ConfigInputPane: View {
             if success {
                 newKeymapName = ""
             } else {
-                PlayCoverDiagnostics.reportError(NSLocalizedString("alert.errorImportKm", comment: ""))
+                PlayCoverDiagnostics.reportError(ConfigLabelFormatter.localized("alert.errorImportKm", locale: locale))
             }
         }
     }
@@ -261,7 +328,7 @@ struct ConfigInputPane: View {
         if app.keymapping.renameKeymap(prevName: prevName, newName: nextName) {
             keymapVM.reloadKeymapCache()
         } else {
-            PlayCoverDiagnostics.reportError(NSLocalizedString("alert.errorRenameKm", comment: ""))
+            PlayCoverDiagnostics.reportError(ConfigLabelFormatter.localized("alert.errorRenameKm", locale: locale))
         }
     }
 }

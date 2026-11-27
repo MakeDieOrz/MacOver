@@ -8,10 +8,10 @@
 import Foundation
 import Synchronization
 
-final class NativeDownloadManager: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+nonisolated final class NativeDownloadManager: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     static let shared = NativeDownloadManager()
 
-    private struct ActiveDownload: @unchecked Sendable {
+    private struct ActiveDownload: Sendable {
         let task: URLSessionDownloadTask
         let destinationDirectory: URL
         let onProgress: @Sendable (CGFloat) -> Void
@@ -19,10 +19,16 @@ final class NativeDownloadManager: NSObject, URLSessionDownloadDelegate, @unchec
     }
 
     private let activeDownloads = Mutex<[Int: ActiveDownload]>([:])
-    private lazy var session: URLSession = {
-        let configuration = URLSessionConfiguration.default
-        return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
-    }()
+    private let sessionLock = Mutex<URLSession?>(nil)
+    private var session: URLSession {
+        sessionLock.withLock { cached in
+            if let cached { return cached }
+            let configuration = URLSessionConfiguration.default
+            let created = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+            cached = created
+            return created
+        }
+    }
 
     private override init() {
         super.init()
@@ -121,14 +127,23 @@ final class NativeDownloadManager: NSObject, URLSessionDownloadDelegate, @unchec
     }
 }
 
-final class DownloadApp: @unchecked Sendable {
+nonisolated final class DownloadApp: Sendable {
+    private struct WeakDependenciesBox: Sendable {
+        weak var value: PlayCoverDependencies?
+    }
+
     let url: URL?
     let app: SourceAppsData?
     let warning: String?
-    private weak var dependencies: PlayCoverDependencies?
+    private let dependenciesBox: Mutex<WeakDependenciesBox>
+
+    private var dependencies: PlayCoverDependencies? {
+        dependenciesBox.withLock { $0.value }
+    }
 
     private let activeDownloadDirLock = Mutex<URL?>(nil)
 
+    @MainActor
     init(
         url: URL?,
         app: SourceAppsData?,
@@ -138,7 +153,7 @@ final class DownloadApp: @unchecked Sendable {
         self.url = url
         self.app = app
         self.warning = warning
-        self.dependencies = dependencies
+        self.dependenciesBox = Mutex(WeakDependenciesBox(value: dependencies))
         self.downloadVM = dependencies?.downloadVM ?? DownloadVM()
         self.installVM = dependencies?.installVM ?? InstallVM()
     }
@@ -186,7 +201,7 @@ final class DownloadApp: @unchecked Sendable {
                         ),
                         style: .warning,
                         buttons: [
-                            PlayCoverAlertButton(title: NSLocalizedString("Ok", comment: ""), isCancel: true),
+                            PlayCoverAlertButton(title: NSLocalizedString("button.OK", comment: ""), isCancel: true),
                             PlayCoverAlertButton(title: NSLocalizedString("alert.download.downloadAnyway", comment: ""))
                         ],
                         defaultCancelIndex: 0
@@ -252,7 +267,7 @@ final class DownloadApp: @unchecked Sendable {
     private func proceedDownload(_ finalURL: URL) {
         Task { @MainActor in
             self.downloadVM.storeAppData = self.app
-            self.downloadVM.next(.downloading, 0.0, 0.7)
+            self.downloadVM.next(.downloading, 0.0, 0.85)
         }
 
         var tmpDir: URL?
@@ -267,12 +282,10 @@ final class DownloadApp: @unchecked Sendable {
                 downloader.addDownload(url: finalURL,
                                        destinationURL: tmpDir,
                                        onProgress: { progress in
-                    Task { @MainActor in
-                        self.downloadVM.progress = Double(progress)
-                    }
+                    self.downloadVM.updateProgress(Double(progress) * 0.85)
                 }, onCompletion: { error, fileURL in
                     Task { @MainActor in
-                        self.downloadVM.next(.integrity, 0.7, 0.95)
+                        self.downloadVM.next(.integrity, 0.85, 0.98)
 
                         if let error = error {
                             self.downloadVM.next(.failed, 0.95, 1.0)

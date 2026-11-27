@@ -55,29 +55,7 @@ struct StoreItemInspector: View {
 
                 Divider()
 
-                VStack(alignment: .leading, spacing: 10) {
-                    LabeledContent("settings.info.bundleIdentifier", value: app.bundleID)
-                        .font(.caption)
-                    LabeledContent("settings.info.bundleVersion", value: app.version)
-                        .font(.caption)
-                    let noneLabel = NSLocalizedString("ipaLibrary.info.checksum.none", comment: "")
-                    LabeledContent("ipaLibrary.info.checksum", value: app.checksum ?? noneLabel)
-                        .font(.caption)
-
-                    if let lookupURL = URL(string: app.itunesLookup) {
-                        Link(destination: lookupURL) {
-                            Label("ipaLibrary.info.itunes", systemImage: "arrow.up.right.square")
-                                .font(.caption)
-                        }
-                    }
-                    if let downloadURL = URL(string: app.link) {
-                        Link(destination: downloadURL) {
-                            Label("settings.info.url", systemImage: "link")
-                                .font(.caption)
-                        }
-                    }
-                }
-                .textSelection(.enabled)
+                metadataSection
             }
             .padding(16)
         }
@@ -131,11 +109,99 @@ struct StoreItemInspector: View {
                 } label: {
                     Label("store.downloadInstall", systemImage: "arrow.down.circle.fill")
                         .frame(maxWidth: .infinity)
+                        .frame(minHeight: 20)
                 }
                 .buttonStyle(.glassProminent)
+                .buttonBorderShape(.capsule)
+                .controlSize(.large)
+                .frame(minHeight: 34)
                 .disabled(downloadVM.inProgress)
             }
         }
+    }
+
+    private var metadataSection: some View {
+        let checksum = app.checksum?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let noneLabel = NSLocalizedString("ipaLibrary.info.checksum.none", comment: "")
+        return VStack(alignment: .leading, spacing: 10) {
+            copyableMetadataRow(
+                labelKey: "settings.info.bundleIdentifier",
+                value: app.bundleID,
+                canCopy: !app.bundleID.isEmpty,
+                monospaced: true
+            )
+
+            LabeledContent("settings.info.bundleVersion") {
+                Text(app.version)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            .font(.caption)
+
+            copyableMetadataRow(
+                labelKey: "ipaLibrary.info.checksum",
+                value: checksum.isEmpty ? noneLabel : checksum,
+                canCopy: !checksum.isEmpty,
+                monospaced: !checksum.isEmpty
+            )
+
+            if let lookupURL = URL(string: app.itunesLookup) {
+                Link(destination: lookupURL) {
+                    Label("ipaLibrary.info.itunes", systemImage: "arrow.up.right.square")
+                        .font(.caption)
+                }
+            }
+            if let downloadURL = URL(string: app.link) {
+                Link(destination: downloadURL) {
+                    Label("settings.info.url", systemImage: "link")
+                        .font(.caption)
+                }
+            }
+        }
+    }
+
+    private func copyableMetadataRow(
+        labelKey: LocalizedStringKey,
+        value: String,
+        canCopy: Bool,
+        monospaced: Bool
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Text(labelKey)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 4)
+                if canCopy {
+                    Button {
+                        copyToClipboard(value)
+                    } label: {
+                        Label("action.copy", systemImage: "doc.on.doc")
+                            .font(.caption)
+                            .labelStyle(.iconOnly)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("action.copy")
+                    .accessibilityLabel(Text("action.copy"))
+                }
+            }
+            Text(value)
+                .font(monospaced ? .caption.monospaced() : .caption)
+                .foregroundStyle(canCopy ? .primary : .secondary)
+                .lineLimit(2)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+        }
+    }
+
+    private func copyToClipboard(_ value: String) {
+        value.copyToClipBoard()
+        let preview = value.count > 28 ? "\(value.prefix(24))…" : value
+        dependencies.toastVM.showToast(
+            toastType: .notice,
+            toastDetails: "\(NSLocalizedString("action.copy", comment: "")): \(preview)"
+        )
     }
 
     private func versionBanner(

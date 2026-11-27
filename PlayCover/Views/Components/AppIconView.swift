@@ -5,6 +5,11 @@
 
 import SwiftUI
 
+private struct LoadedAppIcon {
+    let key: String
+    let image: NSImage
+}
+
 struct AppIconView: View {
     @Environment(PlayCoverDependencies.self) var dependencies
 
@@ -12,11 +17,26 @@ struct AppIconView: View {
     var size: CGFloat = 64
     var cornerRadius: CGFloat = 15
 
-    @State private var appIcon: NSImage?
+    @State private var loadedIcon: LoadedAppIcon?
+    @State private var completedLoadKey: String?
+
+    private var iconKey: String {
+        "\(app.url.path)|\(app.info.bundleIdentifier)|\(app.info.bundleVersion)"
+    }
+
+    private var displayedIcon: NSImage? {
+        if let loadedIcon, loadedIcon.key == iconKey {
+            return loadedIcon.image
+        }
+        return dependencies.cacher.getCachedMemoryIcon(
+            bundleIdentifier: app.info.bundleIdentifier,
+            bundleVersion: app.info.bundleVersion
+        )
+    }
 
     var body: some View {
         Group {
-            if let image = appIcon {
+            if let image = displayedIcon {
                 Image(nsImage: image)
                     .resizable()
                     .scaledToFit()
@@ -24,22 +44,30 @@ struct AppIconView: View {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .fill(.fill.quaternary)
                     .overlay {
-                        ProgressView()
-                            .controlSize(.small)
+                        if completedLoadKey == iconKey {
+                            Image(systemName: "app.dashed")
+                                .font(.system(size: max(12, size * 0.34)))
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
                     }
             }
         }
         .frame(width: size, height: size)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .shadow(color: .black.opacity(0.14), radius: 2, y: 1)
-        .task(id: app.url) {
+        .task(id: iconKey) {
+            let currentKey = iconKey
             let bundleIdentifier = app.info.bundleIdentifier
             let bundleVersion = app.info.bundleVersion
             if let cached = dependencies.cacher.getCachedMemoryIcon(
                 bundleIdentifier: bundleIdentifier,
                 bundleVersion: bundleVersion
             ) {
-                appIcon = cached
+                loadedIcon = LoadedAppIcon(key: currentKey, image: cached)
+                completedLoadKey = currentKey
                 return
             }
             let cacher = dependencies.cacher
@@ -53,7 +81,11 @@ struct AppIconView: View {
                     primaryIconName: primaryIconName
                 )
             }.value
-            appIcon = iconData.flatMap(NSImage.init(data:))
+            guard !Task.isCancelled else { return }
+            if let image = iconData.flatMap(NSImage.init(data:)) {
+                loadedIcon = LoadedAppIcon(key: currentKey, image: image)
+            }
+            completedLoadKey = currentKey
         }
     }
 }

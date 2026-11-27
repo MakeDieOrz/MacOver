@@ -20,6 +20,7 @@ struct ConfigNetworkPane: View {
     @Bindable var settings: AppSettings
     @Environment(MITMProxyCoordinator.self) var mitmCoordinator
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.locale) private var locale
 
     @State private var newPattern = ""
     @State private var newMitmHost = ""
@@ -27,6 +28,7 @@ struct ConfigNetworkPane: View {
     @State private var editingIndex: Int?
     @State private var editingText = ""
     @State private var certificates: [AppCertificateRecord] = []
+    @State private var showClearRulesConfirm = false
 
     private var bundleID: String {
         app.info.bundleIdentifier
@@ -61,21 +63,21 @@ struct ConfigNetworkPane: View {
         )
     }
 
-    private var proxyPortFormatter: NumberFormatter {
+    private static let proxyPortFormatter: NumberFormatter = {
         let fmt = NumberFormatter()
         fmt.numberStyle = .none
         fmt.minimum = 1
         fmt.maximum = 65_535
         return fmt
-    }
+    }()
 
-    private var mitmPortFormatter: NumberFormatter {
+    private static let mitmPortFormatter: NumberFormatter = {
         let fmt = NumberFormatter()
         fmt.numberStyle = .none
         fmt.minimum = 0
         fmt.maximum = 65_535
         return fmt
-    }
+    }()
 
     private var ruleStats: NetworkRuleStats {
         var stats = NetworkRuleStats()
@@ -94,6 +96,19 @@ struct ConfigNetworkPane: View {
 
     private var trimmedQuery: String {
         searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var trimmedNewPattern: String {
+        newPattern.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var isNewPatternInvalid: Bool {
+        guard !trimmedNewPattern.isEmpty else { return false }
+        let lines = trimmedNewPattern
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return lines.isEmpty || !lines.allSatisfy { NetworkRuleParser.isImportableRuleLine($0) }
     }
 
     private var filteredRules: [(offset: Int, element: String)] {
@@ -146,6 +161,14 @@ struct ConfigNetworkPane: View {
         .onChange(of: mitmCoordinator.certificateRevisions[bundleID] ?? 0) { _, _ in
             reloadCertificates()
         }
+        .alert("confirm.clearNetworkRules.title", isPresented: $showClearRulesConfirm) {
+            Button("button.Cancel", role: .cancel) {}
+            Button("settings.network.clear", role: .destructive) {
+                editingIndex = nil
+                editingText = ""
+                settings.update { $0.blockedURLPatterns.removeAll() }
+            }
+        }
     }
 
     private var proxyAndMITMSection: some View {
@@ -164,24 +187,35 @@ struct ConfigNetworkPane: View {
                     Text("HTTP / HTTPS").tag(ExternalProxyProtocol.http)
                     Text("SOCKS5").tag(ExternalProxyProtocol.socks5)
                 }
-                TextField("settings.network.proxyHost", text: $settings.settings.externalProxyHost)
-                    .textFieldStyle(.roundedBorder)
-                TextField("settings.network.proxyPort", value: $settings.settings.externalProxyPort,
-                          formatter: proxyPortFormatter)
-                    .textFieldStyle(.roundedBorder)
+                LabeledContent("settings.network.proxyHost") {
+                    TextField("", text: $settings.settings.externalProxyHost)
+                        .labelsHidden()
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 220)
+                }
+                LabeledContent("settings.network.proxyPort") {
+                    TextField("", value: $settings.settings.externalProxyPort, formatter: Self.proxyPortFormatter)
+                        .labelsHidden()
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 84)
+                        .multilineTextAlignment(.trailing)
+                        .monospacedDigit()
+                }
             }
 
             if mode == .builtInMITM {
-                HStack {
-                    TextField(
-                        "settings.network.mitmPort",
-                        value: $settings.settings.mitmPort,
-                        formatter: mitmPortFormatter
-                    )
-                    .textFieldStyle(.roundedBorder)
-                    Text("settings.network.mitmPortAutoHint")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                LabeledContent("settings.network.mitmPort") {
+                    HStack(spacing: 6) {
+                        TextField("", value: $settings.settings.mitmPort, formatter: Self.mitmPortFormatter)
+                            .labelsHidden()
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 84)
+                            .multilineTextAlignment(.trailing)
+                            .monospacedDigit()
+                        Text("settings.network.mitmPortAutoHint")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 LabeledContent("settings.network.mitmStatus") {
@@ -208,50 +242,31 @@ struct ConfigNetworkPane: View {
                 Toggle("settings.network.mitmAllHosts", isOn: $settings.settings.mitmAllHosts)
 
                 if !settings.settings.mitmAllHosts {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack(spacing: 8) {
-                            TextField("", text: $newMitmHost, prompt: Text("settings.network.mitmHostPlaceholder"))
-                                .labelsHidden()
-                                .textFieldStyle(.roundedBorder)
-                                .onSubmit { addMITMHostPattern() }
-                            Button("settings.network.addHost") {
-                                addMITMHostPattern()
-                            }
-                            .disabled(newMitmHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        }
-                        ForEach(settings.settings.mitmHostPatterns, id: \.self) { hostPattern in
-                            HStack {
-                                Text(hostPattern)
-                                    .font(.system(.caption, design: .monospaced))
-                                Spacer()
-                                Button(role: .destructive) {
-                                    settings.update { updated in
-                                        updated.mitmHostPatterns.removeAll { $0 == hostPattern }
-                                    }
-                                } label: {
-                                    Image(systemName: "trash").foregroundStyle(.secondary)
-                                }
-                                .buttonStyle(.borderless)
-                            }
-                        }
-                    }
+                    mitmHostsEditor
                 }
             }
 
             if mode != .direct {
-                Toggle("settings.network.hideProxy", isOn: $settings.settings.hideProxyFromApp)
-                Text("settings.network.hideProxy.help")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                Toggle(isOn: $settings.settings.hideProxyFromApp) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("settings.network.hideProxy")
+                        Text("settings.network.hideProxy.help")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
             }
 
             if certsOrMITMActive {
-                VStack(alignment: .leading, spacing: 2) {
-                    Toggle("settings.network.allowPinningBypass", isOn: $settings.settings.mitmAllowPinningBypass)
-                    Text("settings.network.allowPinningBypass.help")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                Toggle(isOn: $settings.settings.mitmAllowPinningBypass) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("settings.network.allowPinningBypass")
+                        Text("settings.network.allowPinningBypass.help")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
 
@@ -259,9 +274,49 @@ struct ConfigNetworkPane: View {
                 Text("settings.network.strictModeIndependentNote")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         } header: {
             Text("settings.network.section.proxyMITM")
+        }
+    }
+
+    private var mitmHostsEditor: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                TextField("", text: $newMitmHost, prompt: Text("settings.network.mitmHostPlaceholder"))
+                    .labelsHidden()
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { addMITMHostPattern() }
+                Button("settings.network.addHost") {
+                    addMITMHostPattern()
+                }
+                .disabled(newMitmHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+
+            if settings.settings.mitmHostPatterns.isEmpty {
+                Text("config.network.mitmHostsEmpty")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(settings.settings.mitmHostPatterns, id: \.self) { hostPattern in
+                    HStack {
+                        Text(hostPattern)
+                            .font(.system(.caption, design: .monospaced))
+                        Spacer()
+                        Button(role: .destructive) {
+                            settings.update { updated in
+                                updated.mitmHostPatterns.removeAll { $0 == hostPattern }
+                            }
+                        } label: {
+                            Image(systemName: "trash")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel(hostPattern)
+                    }
+                }
+            }
         }
     }
 
@@ -295,6 +350,7 @@ struct ConfigNetworkPane: View {
             Text("settings.network.certIsolationNote")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         } header: {
             Text("settings.network.section.certificates")
         }
@@ -309,17 +365,18 @@ struct ConfigNetworkPane: View {
             ))
             .toggleStyle(.checkbox)
             .labelsHidden()
+            .accessibilityLabel(cert.label)
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(cert.label)
                         .font(.caption.weight(.medium))
                         .lineLimit(1)
-                    Text(NSLocalizedString(
+                    Text(ConfigLabelFormatter.localized(
                         cert.source == .generatedBuiltIn
                             ? "settings.network.certBadge.builtIn"
                             : "settings.network.certBadge.imported",
-                        comment: ""
+                        locale: locale
                     ))
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(cert.source == .generatedBuiltIn ? .blue : .teal)
@@ -330,6 +387,10 @@ struct ConfigNetworkPane: View {
                         Text("settings.network.certBadge.expired")
                             .font(.caption2.weight(.semibold))
                             .foregroundStyle(.red)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Color.red.opacity(0.14)))
+                            .overlay(Capsule().strokeBorder(Color.red.opacity(0.32), lineWidth: 0.5))
                     }
                 }
                 HStack(spacing: 8) {
@@ -354,6 +415,7 @@ struct ConfigNetworkPane: View {
             }
             .buttonStyle(.borderless)
             .help("settings.network.exportCert")
+            .accessibilityLabel("settings.network.exportCert")
 
             Button(role: .destructive) {
                 deleteCertificate(cert)
@@ -362,6 +424,7 @@ struct ConfigNetworkPane: View {
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.borderless)
+            .accessibilityLabel(cert.label)
         }
     }
 
@@ -372,7 +435,7 @@ struct ConfigNetworkPane: View {
                 .disabled(!settings.settings.enableNetworkRules)
             LabeledContent("config.pane.network") {
                 Text(String(
-                    format: NSLocalizedString("settings.network.stats", comment: ""),
+                    format: ConfigLabelFormatter.localized("settings.network.stats", locale: locale),
                     stats.block,
                     stats.allow,
                     stats.disabled
@@ -487,34 +550,70 @@ struct ConfigNetworkPane: View {
     }
 
     private var addRuleBar: some View {
-        let canAdd = !newPattern.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        return HStack(spacing: 8) {
-            TextField("", text: $newPattern, prompt: Text("settings.network.placeholder"))
-                .labelsHidden()
-                .textFieldStyle(.roundedBorder)
-                .onSubmit {
+        let canAdd = !trimmedNewPattern.isEmpty && !isNewPatternInvalid
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                TextField("", text: $newPattern, prompt: Text("settings.network.placeholder"))
+                    .labelsHidden()
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit {
+                        guard canAdd else { return }
+                        addPatterns(from: newPattern)
+                        newPattern = ""
+                    }
+                Button("settings.network.add") {
                     addPatterns(from: newPattern)
                     newPattern = ""
                 }
-            Button("settings.network.add") {
-                addPatterns(from: newPattern)
-                newPattern = ""
-            }
-            .disabled(!canAdd)
+                .disabled(!canAdd)
 
-            Button("settings.network.addAllow") {
-                addPatterns(from: newPattern, forceAllow: true)
-                newPattern = ""
+                Button("settings.network.addAllow") {
+                    addPatterns(from: newPattern, forceAllow: true)
+                    newPattern = ""
+                }
+                .disabled(!canAdd)
             }
-            .disabled(!canAdd)
+
+            if isNewPatternInvalid {
+                Label("config.network.invalidRule", systemImage: "exclamationmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
         }
     }
 
     private var searchAndActionsBar: some View {
         HStack(spacing: 8) {
-            TextField("", text: $searchText, prompt: Text("settings.network.search"))
-                .labelsHidden()
-                .textFieldStyle(.roundedBorder)
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+                TextField("", text: $searchText, prompt: Text("settings.network.search"))
+                    .labelsHidden()
+                    .textFieldStyle(.plain)
+                if !searchText.isEmpty {
+                    Button {
+                        searchText = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("mitm.monitor.clear")
+                    .accessibilityLabel("mitm.monitor.clear")
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color(nsColor: .textBackgroundColor))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(Color.secondary.opacity(0.25), lineWidth: 1)
+            )
+
             Menu {
                 Button("settings.network.paste") {
                     if let pasted = NSPasteboard.general.string(forType: .string) {
@@ -536,14 +635,15 @@ struct ConfigNetworkPane: View {
                     .disabled(settings.settings.blockedURLPatterns.isEmpty)
                 Divider()
                 Button("settings.network.clear", role: .destructive) {
-                    editingIndex = nil
-                    settings.update { $0.blockedURLPatterns.removeAll() }
+                    showClearRulesConfirm = true
                 }
                 .disabled(settings.settings.blockedURLPatterns.isEmpty)
             } label: {
                 Label("settings.network.actions", systemImage: "ellipsis.circle")
             }
+            .menuIndicator(.hidden)
             .fixedSize()
+            .accessibilityLabel("settings.network.actions")
         }
     }
 
@@ -576,7 +676,10 @@ struct ConfigNetworkPane: View {
     }
 
     private func deleteRule(at idx: Int) {
-        if editingIndex == idx { editingIndex = nil }
+        if editingIndex == idx {
+            editingIndex = nil
+            editingText = ""
+        }
         settings.update { updated in
             if idx >= 0 && idx < updated.blockedURLPatterns.count {
                 updated.blockedURLPatterns.remove(at: idx)
@@ -585,16 +688,14 @@ struct ConfigNetworkPane: View {
     }
 
     private func commitEdit(at idx: Int) {
-        defer {
-            editingIndex = nil
-            editingText = ""
-        }
         let trimmed = editingText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, NetworkRuleParser.isImportableRuleLine(trimmed) else { return }
         settings.update { updated in
             guard idx >= 0 && idx < updated.blockedURLPatterns.count else { return }
             updated.blockedURLPatterns[idx] = trimmed
         }
+        editingIndex = nil
+        editingText = ""
     }
 
     private func importFromFile() {
@@ -633,6 +734,8 @@ struct ConfigNetworkPane: View {
 }
 
 private struct NetworkRuleRowView: View {
+    @Environment(\.locale) private var locale
+
     let rule: String
     let isEditing: Bool
     @Binding var editingText: String
@@ -642,12 +745,24 @@ private struct NetworkRuleRowView: View {
     let onCancelEdit: () -> Void
     let onDelete: () -> Void
 
+    private var trimmedEdit: String {
+        editingText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var isEditInvalid: Bool {
+        !trimmedEdit.isEmpty && !NetworkRuleParser.isImportableRuleLine(trimmedEdit)
+    }
+
+    private var canCommitEdit: Bool {
+        !trimmedEdit.isEmpty && NetworkRuleParser.isImportableRuleLine(trimmedEdit)
+    }
+
     var body: some View {
         let meta = NetworkRuleParser.classifyRule(rule)
-        HStack(spacing: 8) {
-            if isEditing {
-                editingRow()
-            } else {
+        if isEditing {
+            editingRow()
+        } else {
+            HStack(spacing: 8) {
                 displayRow(meta: meta)
             }
         }
@@ -655,18 +770,39 @@ private struct NetworkRuleRowView: View {
 
     @ViewBuilder
     private func editingRow() -> some View {
-        TextField("", text: $editingText)
-            .font(.system(.caption, design: .monospaced))
-            .textFieldStyle(.roundedBorder)
-            .onSubmit { onCommitEdit() }
-        Button(action: onCommitEdit) {
-            Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.accentColor)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                TextField("", text: $editingText)
+                    .labelsHidden()
+                    .font(.system(.caption, design: .monospaced))
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit {
+                        if canCommitEdit {
+                            onCommitEdit()
+                        }
+                    }
+                Button(action: onCommitEdit) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(Color.accentColor)
+                }
+                .buttonStyle(.borderless)
+                .disabled(!canCommitEdit)
+                .accessibilityLabel("button.OK")
+
+                Button(action: onCancelEdit) {
+                    Image(systemName: "xmark.circle")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("button.Cancel")
+            }
+
+            if isEditInvalid {
+                Label("config.network.invalidRule", systemImage: "exclamationmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
         }
-        .buttonStyle(.borderless)
-        Button(action: onCancelEdit) {
-            Image(systemName: "xmark.circle").foregroundStyle(.secondary)
-        }
-        .buttonStyle(.borderless)
     }
 
     @ViewBuilder
@@ -674,12 +810,13 @@ private struct NetworkRuleRowView: View {
         Toggle("", isOn: Binding(get: { meta.isEnabled }, set: onToggleEnabled))
             .toggleStyle(.checkbox)
             .labelsHidden()
+            .accessibilityLabel(meta.body)
 
-        Text(NSLocalizedString(
+        Text(ConfigLabelFormatter.localized(
             !meta.isEnabled
                 ? "settings.network.badge.disabled"
                 : (meta.isAllow ? "settings.network.badge.allow" : "settings.network.badge.block"),
-            comment: ""
+            locale: locale
         ))
         .font(.caption2.weight(.semibold))
         .foregroundStyle(!meta.isEnabled ? Color.secondary : (meta.isAllow ? Color.green : Color.red))
@@ -693,7 +830,7 @@ private struct NetworkRuleRowView: View {
             )
         )
 
-        Text(NSLocalizedString(meta.kindKey, comment: ""))
+        Text(ConfigLabelFormatter.localized(meta.kindKey, locale: locale))
             .font(.caption2.monospaced())
             .foregroundStyle(.secondary)
             .padding(.horizontal, 5)
@@ -712,13 +849,17 @@ private struct NetworkRuleRowView: View {
         Spacer(minLength: 4)
 
         Button(action: onStartEdit) {
-            Image(systemName: "pencil").foregroundStyle(.secondary)
+            Image(systemName: "pencil")
+                .foregroundStyle(.secondary)
         }
         .buttonStyle(.borderless)
+        .accessibilityLabel(meta.body)
 
         Button(role: .destructive, action: onDelete) {
-            Image(systemName: "trash").foregroundStyle(.secondary)
+            Image(systemName: "trash")
+                .foregroundStyle(.secondary)
         }
         .buttonStyle(.borderless)
+        .accessibilityLabel(meta.body)
     }
 }

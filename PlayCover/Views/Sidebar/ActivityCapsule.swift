@@ -17,13 +17,19 @@ struct ActivityCapsule: View {
     }
 
     private var activeProgress: Double {
+        let raw: Double
         if installVM.inProgress {
-            return installVM.progress
+            raw = installVM.progress
+        } else if downloadVM.inProgress {
+            raw = downloadVM.progress
+        } else {
+            raw = 0
         }
-        if downloadVM.inProgress {
-            return downloadVM.progress
-        }
-        return 0
+        return min(max(raw, 0), 1)
+    }
+
+    private var activePercentageText: String {
+        "\(Int((activeProgress * 100).rounded()))%"
     }
 
     private var activeLabel: String {
@@ -62,7 +68,7 @@ struct ActivityCapsule: View {
                 }
                 Spacer(minLength: 4)
                 if isBusy {
-                    Text("\(Int(activeProgress * 100))%")
+                    Text(activePercentageText)
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
@@ -73,6 +79,8 @@ struct ActivityCapsule: View {
             .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(Text("activity.title"))
+        .accessibilityValue(isBusy ? Text("\(activeLabel), \(activePercentageText)") : Text(activeLabel))
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(isBusy ? Color.accentColor.opacity(0.12) : Color.secondary.opacity(0.08))
@@ -148,6 +156,7 @@ struct SigningStatusCapsule: View {
             .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(Text(LocalizedStringKey(info.titleKey)))
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(Color.secondary.opacity(0.08))
