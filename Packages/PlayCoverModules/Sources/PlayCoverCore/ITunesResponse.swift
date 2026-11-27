@@ -60,7 +60,7 @@ public struct ITunesResponse: Codable, Sendable {
 }
 
 public func getITunesData(_ itunesLookup: String) async -> ITunesResponse? {
-    guard NetworkVM.isConnectedToNetwork(), let url = URL(string: itunesLookup) else {
+    guard await NetworkVM.isConnectedToNetworkAsync(), let url = URL(string: itunesLookup) else {
         return nil
     }
 

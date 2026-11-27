@@ -4,13 +4,51 @@
 //
 
 import Foundation
+import Synchronization
 
 public class AppInfo {
+    public struct CachedFields: Sendable {
+        public let bundleIdentifier: String
+        public let bundleName: String
+        public let displayName: String
+        public let bundleVersion: String
+        public let cfBundleVersion: String
+        public let executableName: String
+        public let installGeneration: String
+        public let primaryIconName: String
+
+        public init(
+            bundleIdentifier: String,
+            bundleName: String,
+            displayName: String,
+            bundleVersion: String,
+            cfBundleVersion: String,
+            executableName: String,
+            installGeneration: String,
+            primaryIconName: String
+        ) {
+            self.bundleIdentifier = bundleIdentifier
+            self.bundleName = bundleName
+            self.displayName = displayName
+            self.bundleVersion = bundleVersion
+            self.cfBundleVersion = cfBundleVersion
+            self.executableName = executableName
+            self.installGeneration = installGeneration
+            self.primaryIconName = primaryIconName
+        }
+    }
+
     public let url: URL
     fileprivate var rawStorage: NSMutableDictionary
     private var wasBinaryPlist: Bool = false
+    private let hydrationLock: Mutex<Bool>
+    private let unhydratedStringKeys: Set<String>
+    private var cachedPrimaryIconName: String?
 
     public init(contentsOf url: URL) {
+        self.hydrationLock = Mutex(true)
+        self.unhydratedStringKeys = []
+        self.cachedPrimaryIconName = nil
         do {
             let data = try Data(contentsOf: url)
             var format: PropertyListSerialization.PropertyListFormat = .xml
@@ -36,13 +74,70 @@ public class AppInfo {
         }
     }
 
+    public init(
+        cachedPlistURL url: URL,
+        cachedFields: CachedFields,
+        installGenerationKey: String = "MacOverInstallGeneration"
+    ) {
+        let storage = NSMutableDictionary()
+        storage["CFBundleIdentifier"] = cachedFields.bundleIdentifier
+        storage["CFBundleName"] = cachedFields.bundleName
+        storage["CFBundleDisplayName"] = cachedFields.displayName
+        storage["CFBundleShortVersionString"] = cachedFields.bundleVersion
+        storage["CFBundleVersion"] = cachedFields.cfBundleVersion
+        storage["CFBundleExecutable"] = cachedFields.executableName
+        storage[installGenerationKey] = cachedFields.installGeneration
+        self.url = url
+        self.rawStorage = storage
+        self.wasBinaryPlist = false
+        self.hydrationLock = Mutex(false)
+        self.unhydratedStringKeys = [
+            "CFBundleIdentifier",
+            "CFBundleName",
+            "CFBundleDisplayName",
+            "CFBundleShortVersionString",
+            "CFBundleVersion",
+            "CFBundleExecutable",
+            installGenerationKey
+        ]
+        self.cachedPrimaryIconName = cachedFields.primaryIconName
+    }
+
     private init(url: URL, rawStorage: NSMutableDictionary, wasBinaryPlist: Bool = false) {
         self.url = url
         self.rawStorage = rawStorage
         self.wasBinaryPlist = wasBinaryPlist
+        self.hydrationLock = Mutex(true)
+        self.unhydratedStringKeys = []
+        self.cachedPrimaryIconName = nil
+    }
+
+    private func ensureHydratedFromDisk() {
+        hydrationLock.withLock { isHydrated in
+            guard !isHydrated else { return }
+            defer { isHydrated = true }
+            cachedPrimaryIconName = nil
+            guard !url.path.isEmpty else { return }
+            do {
+                let data = try Data(contentsOf: url)
+                var format: PropertyListSerialization.PropertyListFormat = .xml
+                let parsed = try PropertyListSerialization.propertyList(
+                    from: data,
+                    options: .mutableContainersAndLeaves,
+                    format: &format
+                )
+                if let dict = parsed as? NSMutableDictionary {
+                    wasBinaryPlist = (format == .binary)
+                    rawStorage = dict
+                }
+            } catch {
+                PlayCoverDiagnostics.reportError(error)
+            }
+        }
     }
 
     public func retargeted(toURL url: URL) -> AppInfo {
+        ensureHydratedFromDisk()
         guard let copy = rawStorage.mutableCopy() as? NSMutableDictionary
         else { fatalError("Failed to copy rawStorage") }
         return AppInfo(url: url, rawStorage: copy, wasBinaryPlist: wasBinaryPlist)
@@ -50,6 +145,7 @@ public class AppInfo {
 
     /// Write a serialized representation of this info to the given URL, preserving binary format if originally binary
     public func write(toURL url: URL) throws {
+        ensureHydratedFromDisk()
         let format: PropertyListSerialization.PropertyListFormat = wasBinaryPlist ? .binary : .xml
         let data = try PropertyListSerialization.data(
             fromPropertyList: rawStorage,
@@ -66,86 +162,107 @@ public class AppInfo {
 
     public subscript(string index: String) -> String? {
         get {
-            rawStorage[index] as? String
+            if !unhydratedStringKeys.contains(index) {
+                ensureHydratedFromDisk()
+            }
+            return rawStorage[index] as? String
         }
         set {
+            ensureHydratedFromDisk()
             rawStorage[index] = newValue
         }
     }
 
     public subscript(object index: String) -> NSObject? {
         get {
-            rawStorage[index] as? NSObject
+            ensureHydratedFromDisk()
+            return rawStorage[index] as? NSObject
         }
         set {
+            ensureHydratedFromDisk()
             rawStorage[index] = newValue
         }
     }
 
     public subscript(dictionary index: String) -> NSMutableDictionary? {
         get {
-            rawStorage[index] as? NSMutableDictionary
+            ensureHydratedFromDisk()
+            return rawStorage[index] as? NSMutableDictionary
         }
         set {
+            ensureHydratedFromDisk()
             rawStorage[index] = newValue
         }
     }
 
     public subscript(strings index: String) -> [String]? {
         get {
-            rawStorage[index] as? [String]
+            ensureHydratedFromDisk()
+            return rawStorage[index] as? [String]
         }
         set {
+            ensureHydratedFromDisk()
             rawStorage[index] = newValue
         }
     }
 
     public subscript(array index: String) -> NSMutableArray? {
         get {
-            rawStorage[index] as? NSMutableArray
+            ensureHydratedFromDisk()
+            return rawStorage[index] as? NSMutableArray
         }
         set {
+            ensureHydratedFromDisk()
             rawStorage[index] = newValue
         }
     }
 
     public subscript(numbers index: String) -> [NSNumber]? {
         get {
-            rawStorage[index] as? [NSNumber]
+            ensureHydratedFromDisk()
+            return rawStorage[index] as? [NSNumber]
         }
         set {
+            ensureHydratedFromDisk()
             rawStorage[index] = newValue
         }
     }
 
     public subscript(ints index: String) -> [Int]? {
         get {
-            rawStorage[index] as? [Int]
+            ensureHydratedFromDisk()
+            return rawStorage[index] as? [Int]
         }
         set {
+            ensureHydratedFromDisk()
             rawStorage[index] = newValue
         }
     }
 
     public subscript(doubles index: String) -> [Double]? {
         get {
-            rawStorage[index] as? [Double]
+            ensureHydratedFromDisk()
+            return rawStorage[index] as? [Double]
         }
         set {
+            ensureHydratedFromDisk()
             rawStorage[index] = newValue
         }
     }
 
     public subscript(bool index: String) -> Bool? {
         get {
-            rawStorage[index] as? Bool
+            ensureHydratedFromDisk()
+            return rawStorage[index] as? Bool
         }
         set {
+            ensureHydratedFromDisk()
             rawStorage[index] = newValue
         }
     }
 
     public func setApplicationCategoryType(_ newValue: LSApplicationCategoryType, persist: Bool) {
+        ensureHydratedFromDisk()
         let current = self[string: "LSApplicationCategoryType"]
         if newValue == .none {
             guard current != nil else { return }
@@ -212,6 +329,14 @@ public class AppInfo {
     }
 
     public var primaryIconName: String {
+        let unhydratedCached = hydrationLock.withLock { isHydrated -> String? in
+            guard !isHydrated else { return nil }
+            return cachedPrimaryIconName
+        }
+        if let unhydratedCached, !unhydratedCached.isEmpty {
+            return unhydratedCached
+        }
+
         if let bundleIconDict = self[dictionary: "CFBundleIcons~ipad"],
            let primaryBundleIconDict = bundleIconDict["CFBundlePrimaryIcon"] as? [String: Any],
            let bundleIconFiles = primaryBundleIconDict["CFBundleIconFiles"] as? [String],
@@ -239,6 +364,7 @@ public class AppInfo {
             self[dictionary: "LSEnvironment"] as? [String: String] ?? [:]
         }
         set {
+            ensureHydratedFromDisk()
             var filtered = newValue
             if let dyldPath = filtered["DYLD_LIBRARY_PATH"], dyldPath.isEmpty {
                 filtered.removeValue(forKey: "DYLD_LIBRARY_PATH")

@@ -62,6 +62,24 @@ struct PlayCoverCoreSPMTests {
         let reloaded = AppInfo(contentsOf: plistURL)
         #expect(reloaded.applicationCategoryType == .games)
         #expect(reloaded.minimumOSVersion == "14.0")
+
+        let lazyInfo = AppInfo(
+            cachedPlistURL: plistURL,
+            cachedFields: AppInfo.CachedFields(
+                bundleIdentifier: "com.example.spm",
+                bundleName: "SampleApp",
+                displayName: "SampleApp",
+                bundleVersion: "1.2.3",
+                cfBundleVersion: "1",
+                executableName: "SampleApp",
+                installGeneration: "",
+                primaryIconName: "CustomIcon"
+            )
+        )
+        #expect(lazyInfo.bundleIdentifier == "com.example.spm")
+        #expect(lazyInfo.primaryIconName == "CustomIcon")
+        #expect(lazyInfo.minimumOSVersion == "14.0")
+        #expect(lazyInfo.applicationCategoryType == .games)
     }
 
     @Test
@@ -327,7 +345,7 @@ struct PlayCoverCoreSPMTests {
 
     @Test
     func networkVMConnectivityCheckIsThreadSafeAndFast() async {
-        let initial = NetworkVM.isConnectedToNetwork()
+        let initial = await NetworkVM.isConnectedToNetworkAsync()
         let results = await withTaskGroup(of: Bool.self, returning: [Bool].self) { group in
             for _ in 0..<8 {
                 group.addTask {
@@ -347,16 +365,19 @@ struct PlayCoverCoreSPMTests {
     @Test
     func appSettingsSchemaRoundTripMalformedFallbackAndOEMIDs() throws {
         var original = AppSettingsData()
+        #expect(!original.quitOnWindowClose)
         original.bundleIdentifier = "com.example.schema"
         original.strictEmulationMode = true
         original.strictViewportOrientation = .portrait
         original.strictViewportScaleMode = .native1x
         original.iosDeviceModel = "iPhone15,3"
         original.bypass = false
+        original.quitOnWindowClose = true
 
         let encoded = try PropertyListEncoder().encode(original)
         let decoded = try PropertyListDecoder().decode(AppSettingsData.self, from: encoded)
         #expect(decoded == original)
+        #expect(decoded.quitOnWindowClose)
         #expect(decoded.effectiveBypass)
         #expect(decoded.effectiveWindowWidth == 430)
         #expect(decoded.effectiveWindowHeight == 932)
@@ -371,6 +392,7 @@ struct PlayCoverCoreSPMTests {
         #expect(tolerant.customScaler == 3.0)
         #expect(tolerant.strictViewportOrientation == .landscape)
         #expect(tolerant.strictViewportScaleMode == .fitScreen)
+        #expect(!tolerant.quitOnWindowClose)
     }
 
     @Test
@@ -460,5 +482,29 @@ struct PlayCoverCoreSPMTests {
         #expect(notchAuto.height == 945)
         let plainAuto = AppSettingsPersistence.autoResolution(screenWidth: 1920, screenHeight: 1080, hasNotch: false)
         #expect(plainAuto == (1920, 1080))
+    }
+
+    @Test
+    func appRunStateTransitionsAndSortRanks() {
+        #expect(AppRunState.idle.sortRank == 2)
+        #expect(!AppRunState.idle.isRunning && !AppRunState.idle.isBusy)
+
+        let prep = AppRunState.preparing(.verifying)
+        #expect(prep.isStarting && prep.isBusy && !prep.isRunning)
+        #expect(prep.sortRank == 1)
+        #expect(AppLaunchStage.verifying.localizationKey == "app.state.preparing.verifying")
+        #expect(AppLaunchStage.unlocking.localizationKey == "app.state.preparing.unlocking")
+        #expect(AppLaunchStage.opening.localizationKey == "app.state.preparing.opening")
+
+        #expect(AppRunState.launching.isStarting && AppRunState.launching.sortRank == 1)
+        #expect(AppRunState.terminating.isTerminating && AppRunState.terminating.isBusy)
+        #expect(AppRunState.terminating.sortRank == 1)
+
+        let bgRunning = AppRunState.running(isActive: false)
+        #expect(bgRunning.isRunning && !bgRunning.isActive && !bgRunning.isBusy)
+        #expect(bgRunning.sortRank == 0)
+
+        let fgRunning = AppRunState.running(isActive: true)
+        #expect(fgRunning.isRunning && fgRunning.isActive && fgRunning.sortRank == 0)
     }
 }

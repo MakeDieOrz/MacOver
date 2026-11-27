@@ -16,20 +16,20 @@ public class NetworkVM {
         private let queue = DispatchQueue(label: "app.makedie.MacOver.NetworkVM.monitor", qos: .utility)
         private let monitor = NWPathMonitor()
         private let status = Mutex<NWPath.Status?>(nil)
-        private let initialSignal = DispatchSemaphore(value: 0)
-        private let didSignal = Mutex<Bool>(false)
+        private let waiters = Mutex<[UUID: CheckedContinuation<Bool, Never>]>([:])
 
         private init() {
             monitor.pathUpdateHandler = { [weak self] path in
                 guard let self else { return }
                 self.status.withLock { $0 = path.status }
-                let shouldSignal = self.didSignal.withLock { signaled -> Bool in
-                    guard !signaled else { return false }
-                    signaled = true
-                    return true
+                let connected = path.status == .satisfied
+                let pending = self.waiters.withLock { dict in
+                    let values = Array(dict.values)
+                    dict.removeAll()
+                    return values
                 }
-                if shouldSignal {
-                    self.initialSignal.signal()
+                for continuation in pending {
+                    continuation.resume(returning: connected)
                 }
             }
             monitor.start(queue: queue)
@@ -39,11 +39,33 @@ public class NetworkVM {
             if let current = status.withLock({ $0 }) {
                 return current == .satisfied
             }
-            _ = initialSignal.wait(timeout: .now() + .milliseconds(150))
-            if let updated = status.withLock({ $0 }) {
-                return updated == .satisfied
+            // Optimistic non-blocking return while NWPathMonitor delivers its initial path update.
+            return true
+        }
+
+        func isConnectedAsync() async -> Bool {
+            if let current = status.withLock({ $0 }) {
+                return current == .satisfied
             }
-            return monitor.currentPath.status == .satisfied
+            let waiterID = UUID()
+            return await withCheckedContinuation { continuation in
+                let resolvedNow: Bool? = status.withLock { current in
+                    if let current {
+                        return current == .satisfied
+                    }
+                    waiters.withLock { $0[waiterID] = continuation }
+                    return nil
+                }
+                if let resolvedNow {
+                    continuation.resume(returning: resolvedNow)
+                    return
+                }
+                queue.asyncAfter(deadline: .now() + .milliseconds(150)) { [weak self] in
+                    guard let self else { return }
+                    let timedOut = self.waiters.withLock { $0.removeValue(forKey: waiterID) }
+                    timedOut?.resume(returning: self.isConnected())
+                }
+            }
         }
     }
 
@@ -60,8 +82,21 @@ public class NetworkVM {
         return result
     }
 
+    public static func isConnectedToNetworkAsync() async -> Bool {
+        let result = await PathMonitorBox.shared.isConnectedAsync()
+
+        if !result && !PlayCoverDiagnostics.hasActiveToast(ofType: .network) {
+            PlayCoverDiagnostics.showToast(
+                toastType: .network,
+                toastDetails: NSLocalizedString("ipaLibrary.noNetworkConnection.toast", comment: "")
+            )
+        }
+
+        return result
+    }
+
     public static func isURLAccessible(url: URL, popup: Bool = false) async -> (URL?, Bool) {
-        guard isConnectedToNetwork() else {
+        guard await isConnectedToNetworkAsync() else {
             return (nil, false)
         }
 

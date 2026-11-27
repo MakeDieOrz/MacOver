@@ -4,6 +4,7 @@
 //
 
 import CryptoKit
+import Darwin
 import Foundation
 import MachO
 import PlayCoverCore
@@ -109,11 +110,114 @@ public enum InlineSyscallPatcher {
     private static let maxManifestFiles = 1024
     private static let maxManifestSites = 262_144
 
+    private struct SVCScannedFileStamp: Codable, Equatable, Sendable {
+        let relativePath: String
+        let inode: UInt64
+        let size: Int64
+        let mtimeSec: Int
+        let mtimeNSec: Int
+    }
+
+    private struct SVCScanCache: Codable, Equatable {
+        static let currentSchemaVersion = 1
+
+        let schemaVersion: Int
+        let bundleIdentifier: String
+        let hasPatchedSites: Bool
+        let manifestSHA256: String?
+        let scannedFiles: [SVCScannedFileStamp]
+    }
+
+    public static func scanCacheURL(for manifestURL: URL, bundleIdentifier: String) -> URL {
+        manifestURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Caches/SVCScanCache", isDirectory: true)
+            .appendingPathComponent("\(bundleIdentifier).json")
+    }
+
+    private static func candidateStamps(
+        for candidateFiles: [(relativePath: String, url: URL)]
+    ) -> [SVCScannedFileStamp] {
+        candidateFiles.compactMap { candidate in
+            var st = stat()
+            guard stat(candidate.url.path, &st) == 0 else { return nil }
+            return SVCScannedFileStamp(
+                relativePath: candidate.relativePath,
+                inode: UInt64(st.st_ino),
+                size: Int64(st.st_size),
+                mtimeSec: Int(st.st_mtimespec.tv_sec),
+                mtimeNSec: Int(st.st_mtimespec.tv_nsec)
+            )
+        }
+    }
+
+    private static func loadScanCacheIfValid(
+        at cacheURL: URL,
+        bundleIdentifier: String,
+        expectedStamps: [SVCScannedFileStamp]
+    ) -> SVCScanCache? {
+        guard !expectedStamps.isEmpty,
+              let data = try? Data(contentsOf: cacheURL),
+              let cache = try? JSONDecoder().decode(SVCScanCache.self, from: data),
+              cache.schemaVersion == SVCScanCache.currentSchemaVersion,
+              cache.bundleIdentifier == bundleIdentifier,
+              cache.scannedFiles == expectedStamps else {
+            return nil
+        }
+        return cache
+    }
+
+    private static func saveScanCache(
+        at cacheURL: URL,
+        bundleIdentifier: String,
+        hasPatchedSites: Bool,
+        manifestData: Data?,
+        candidateFiles: [(relativePath: String, url: URL)]
+    ) {
+        let stamps = candidateStamps(for: candidateFiles)
+        guard stamps.count == candidateFiles.count else { return }
+        let cache = SVCScanCache(
+            schemaVersion: SVCScanCache.currentSchemaVersion,
+            bundleIdentifier: bundleIdentifier,
+            hasPatchedSites: hasPatchedSites,
+            manifestSHA256: manifestData.map(sha256Hex),
+            scannedFiles: stamps
+        )
+        let dir = cacheURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        if let encoded = try? JSONEncoder().encode(cache) {
+            try? encoded.write(to: cacheURL, options: .atomic)
+        }
+    }
+
+    private static func verifyManifestOffsetsOnly(
+        appBundleURL: URL,
+        candidateFiles: [(relativePath: String, url: URL)],
+        manifest: SVCPatchManifest
+    ) throws -> Bool {
+        let candidatesByPath = Dictionary(uniqueKeysWithValues: candidateFiles.map { ($0.relativePath, $0.url) })
+        for entry in manifest.files {
+            guard let targetURL = candidatesByPath[entry.relativePath] ??
+                resolveSafeBundleChildURL(appBundleURL: appBundleURL, relativePath: entry.relativePath),
+                let isRegular = try? isRegularNonSymlinkFile(at: targetURL),
+                isRegular else {
+                return false
+            }
+            let data = try Data(contentsOf: targetURL, options: .mappedIfSafe)
+            guard verifyAllSites(in: data, sites: entry.sites, expectedWord: manifest.patchInstruction) else {
+                return false
+            }
+        }
+        return true
+    }
+
     private static func applyPatches(
         appBundleURL: URL,
         bundleIdentifier: String,
         manifestURL: URL
     ) throws -> ReconcileResult {
+        let rawManifestData = try? Data(contentsOf: manifestURL)
         let existingManifest: SVCPatchManifest?
         do {
             existingManifest = try loadValidManifestIfPresent(at: manifestURL)
@@ -126,6 +230,32 @@ public enum InlineSyscallPatcher {
             existingManifest = nil
         }
         let candidateFiles = try collectCandidateMachOFiles(in: appBundleURL)
+        let cacheURL = scanCacheURL(for: manifestURL, bundleIdentifier: bundleIdentifier)
+        let currentStamps = candidateStamps(for: candidateFiles)
+        if currentStamps.count == candidateFiles.count,
+           let scanCache = loadScanCacheIfValid(
+               at: cacheURL,
+               bundleIdentifier: bundleIdentifier,
+               expectedStamps: currentStamps
+           ) {
+            if !scanCache.hasPatchedSites && existingManifest == nil {
+                return ReconcileResult(modified: false, modifiedBinaryURLs: [], patchedSiteCount: 0)
+            }
+            if scanCache.hasPatchedSites,
+               let existingManifest,
+               existingManifest.bundleIdentifier == bundleIdentifier,
+               let rawManifestData,
+               sha256Hex(rawManifestData) == scanCache.manifestSHA256,
+               try verifyManifestOffsetsOnly(
+                   appBundleURL: appBundleURL,
+                   candidateFiles: candidateFiles,
+                   manifest: existingManifest
+               ) {
+                let totalSites = existingManifest.files.reduce(0) { $0 + $1.sites.count }
+                return ReconcileResult(modified: false, modifiedBinaryURLs: [], patchedSiteCount: totalSites)
+            }
+        }
+
         var existingByPath: [String: SVCPatchedFile] = [:]
         if let existingManifest, existingManifest.bundleIdentifier == bundleIdentifier {
             for entry in existingManifest.files {
@@ -143,6 +273,13 @@ public enum InlineSyscallPatcher {
                manifest: existingManifest,
                existingByPath: existingByPath
            ) {
+            saveScanCache(
+                at: cacheURL,
+                bundleIdentifier: bundleIdentifier,
+                hasPatchedSites: true,
+                manifestData: rawManifestData,
+                candidateFiles: candidateFiles
+            )
             let totalSites = existingManifest.files.reduce(0) { $0 + $1.sites.count }
             return ReconcileResult(modified: false, modifiedBinaryURLs: [], patchedSiteCount: totalSites)
         }
@@ -200,6 +337,13 @@ public enum InlineSyscallPatcher {
 
         if nextEntries.isEmpty {
             try removeManifestIfExists(at: manifestURL)
+            saveScanCache(
+                at: cacheURL,
+                bundleIdentifier: bundleIdentifier,
+                hasPatchedSites: false,
+                manifestData: nil,
+                candidateFiles: candidateFiles
+            )
             return ReconcileResult(
                 modified: false,
                 modifiedBinaryURLs: [],
@@ -233,8 +377,17 @@ public enum InlineSyscallPatcher {
             } else {
                 try? removeManifestIfExists(at: manifestURL)
             }
+            try? removeManifestIfExists(at: cacheURL)
             throw error
         }
+
+        saveScanCache(
+            at: cacheURL,
+            bundleIdentifier: bundleIdentifier,
+            hasPatchedSites: true,
+            manifestData: encodedManifest,
+            candidateFiles: candidateFiles
+        )
 
         let totalSites = updatedManifest.files.reduce(0) { $0 + $1.sites.count }
         return ReconcileResult(
@@ -262,6 +415,8 @@ public enum InlineSyscallPatcher {
         guard let manifest else {
             return ReconcileResult(modified: false, modifiedBinaryURLs: [], patchedSiteCount: 0)
         }
+
+        let cacheURL = scanCacheURL(for: manifestURL, bundleIdentifier: manifest.bundleIdentifier)
 
         var modifiedURLs: [URL] = []
         let origWord = manifest.originalInstruction
@@ -308,6 +463,7 @@ public enum InlineSyscallPatcher {
         }
 
         try removeManifestIfExists(at: manifestURL)
+        try? removeManifestIfExists(at: cacheURL)
         return ReconcileResult(
             modified: !modifiedURLs.isEmpty,
             modifiedBinaryURLs: modifiedURLs,

@@ -3,6 +3,7 @@
 //  PlayCover
 //
 
+import CryptoKit
 import Darwin
 import Foundation
 import MachO
@@ -58,6 +59,76 @@ public class PlayTools {
         var lastInstallError: Error?
     }
 
+    public struct FileStatStamp: Codable, Equatable, Sendable {
+        public let inode: UInt64
+        public let size: Int64
+        public let mtimeSec: Int
+        public let mtimeNSec: Int
+
+        public init(inode: UInt64, size: Int64, mtimeSec: Int, mtimeNSec: Int) {
+            self.inode = inode
+            self.size = size
+            self.mtimeSec = mtimeSec
+            self.mtimeNSec = mtimeNSec
+        }
+    }
+
+    private struct PlayToolsInstallStamp: Codable, Equatable {
+        static let currentSchemaVersion = 1
+
+        let schemaVersion: Int
+        let bundledPlayToolsSHA256: String
+        let bundledAKInterfaceSHA256: String
+        let bundledInfoPlistSHA256: String
+        let bundledStringsSHA256: String?
+        let installedPlayTools: FileStatStamp
+        let installedAKInterface: FileStatStamp
+    }
+
+    private static let installStampURL = frameworksURL.appendingPathComponent(".playtools-install-stamp.json")
+
+    public static func fileStamp(for url: URL) -> FileStatStamp? {
+        var st = stat()
+        guard stat(url.path, &st) == 0 else { return nil }
+        return FileStatStamp(
+            inode: UInt64(st.st_ino),
+            size: Int64(st.st_size),
+            mtimeSec: Int(st.st_mtimespec.tv_sec),
+            mtimeNSec: Int(st.st_mtimespec.tv_nsec)
+        )
+    }
+
+    private static func fileSHA256Hex(at url: URL) throws -> String {
+        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        let digest = SHA256.hash(data: data)
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func optionalFileSHA256Hex(at url: URL) -> String? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return try? fileSHA256Hex(at: url)
+    }
+
+    private static func bundledDigests(
+        at frameworkURL: URL
+    ) throws -> (playTools: String, akInterface: String, infoPlist: String, strings: String?) {
+        let playToolsURL = frameworkURL.appendingPathComponent("PlayTools")
+        let akURL = frameworkURL
+            .appendingPathComponent("PlugIns")
+            .appendingPathComponent("AKInterface.bundle/Contents/MacOS/AKInterface")
+        let infoURL = frameworkURL.appendingPathComponent("Resources/Info.plist")
+        let fallbackInfoURL = frameworkURL.appendingPathComponent("Info.plist")
+        let resolvedInfoURL = FileManager.default.fileExists(atPath: infoURL.path) ? infoURL : fallbackInfoURL
+        let stringsURL = frameworkURL.appendingPathComponent("Resources/Playtools.xcstrings")
+
+        return (
+            playTools: try fileSHA256Hex(at: playToolsURL),
+            akInterface: try fileSHA256Hex(at: akURL),
+            infoPlist: try fileSHA256Hex(at: resolvedInfoURL),
+            strings: optionalFileSHA256Hex(at: stringsURL)
+        )
+    }
+
     private static let installState = Mutex<InstallState>(InstallState())
 
     private static func clearExtendedAttributes(at url: URL) {
@@ -105,30 +176,66 @@ public class PlayTools {
         }
     }
 
-    private static func performStagedSystemInstall() throws {
+    @discardableResult
+    public static func ensureSystemInstall(
+        bundledFrameworkURL: URL? = nil,
+        installedFrameworkURL: URL? = nil,
+        stampURL: URL? = nil,
+        validator: ((URL) throws -> Void)? = nil
+    ) throws -> Bool {
+        let interval = PerformanceSignpost.beginInterval("PlayToolsEnsureSystemInstall")
+        defer { PerformanceSignpost.endInterval("PlayToolsEnsureSystemInstall", interval) }
+
+        let resolvedBundledURL = bundledFrameworkURL ?? Self.bundledPlayToolsFramework
+        let resolvedInstalledURL = installedFrameworkURL ?? Self.playToolsFramework
+
         let fm = FileManager.default
-        PlayCoverDiagnostics.log("Installing PlayTools")
+        let resolvedStampURL = stampURL
+            ?? resolvedInstalledURL.deletingLastPathComponent().appendingPathComponent(".playtools-install-stamp.json")
+        let targetParentURL = resolvedInstalledURL.deletingLastPathComponent()
 
-        if !fm.fileExists(atPath: frameworksURL.path) {
-            try fm.createDirectory(
-                atPath: frameworksURL.path,
-                withIntermediateDirectories: true,
-                attributes: [:]
-            )
-        }
-
-        guard fm.fileExists(atPath: bundledPlayToolsFramework.path) else {
+        guard fm.fileExists(atPath: resolvedBundledURL.path) else {
             throw PlayCoverError.playToolsError(
                 "Bundled PlayTools.framework not found inside MacOver.app."
             )
         }
 
-        let stagingDir = frameworksURL.appendingPathComponent(
+        let sourceDigests = try bundledDigests(at: resolvedBundledURL)
+        let installedExecURL = resolvedInstalledURL.appendingPathComponent("PlayTools")
+        let installedAKURL = resolvedInstalledURL
+            .appendingPathComponent("PlugIns")
+            .appendingPathComponent("AKInterface.bundle/Contents/MacOS/AKInterface")
+
+        if fm.fileExists(atPath: resolvedInstalledURL.path),
+           let installedPTStamp = fileStamp(for: installedExecURL),
+           let installedAKStamp = fileStamp(for: installedAKURL),
+           let stampData = try? Data(contentsOf: resolvedStampURL),
+           let savedStamp = try? JSONDecoder().decode(PlayToolsInstallStamp.self, from: stampData),
+           savedStamp.schemaVersion == PlayToolsInstallStamp.currentSchemaVersion,
+           savedStamp.bundledPlayToolsSHA256 == sourceDigests.playTools,
+           savedStamp.bundledAKInterfaceSHA256 == sourceDigests.akInterface,
+           savedStamp.bundledInfoPlistSHA256 == sourceDigests.infoPlist,
+           savedStamp.bundledStringsSHA256 == sourceDigests.strings,
+           savedStamp.installedPlayTools == installedPTStamp,
+           savedStamp.installedAKInterface == installedAKStamp {
+            return false
+        }
+
+        PlayCoverDiagnostics.log("Installing PlayTools")
+        if !fm.fileExists(atPath: targetParentURL.path) {
+            try fm.createDirectory(
+                atPath: targetParentURL.path,
+                withIntermediateDirectories: true,
+                attributes: [:]
+            )
+        }
+
+        let stagingDir = targetParentURL.appendingPathComponent(
             ".PlayTools.staging-\(UUID().uuidString)",
             isDirectory: true
         )
         let stagedFramework = stagingDir.appendingPathComponent(
-            "PlayTools.framework",
+            resolvedInstalledURL.lastPathComponent,
             isDirectory: true
         )
         try fm.createDirectory(at: stagingDir, withIntermediateDirectories: true)
@@ -137,14 +244,18 @@ public class PlayTools {
         }
 
         PlayCoverDiagnostics.log("Staging PlayTools in Frameworks")
-        try fm.copyItem(at: bundledPlayToolsFramework, to: stagedFramework)
+        try fm.copyItem(at: resolvedBundledURL, to: stagedFramework)
         clearExtendedAttributes(at: stagedFramework)
-        try validateFrameworkBundle(at: stagedFramework)
+        if let validator {
+            try validator(stagedFramework)
+        } else {
+            try validateFrameworkBundle(at: stagedFramework)
+        }
 
-        if fm.fileExists(atPath: playToolsFramework.path) {
+        if fm.fileExists(atPath: resolvedInstalledURL.path) {
             let swapRc = Darwin.renamex_np(
                 stagedFramework.path,
-                playToolsFramework.path,
+                resolvedInstalledURL.path,
                 UInt32(RENAME_SWAP)
             )
             if swapRc != 0 {
@@ -152,18 +263,39 @@ public class PlayTools {
                     "PlayTools.framework.backup",
                     isDirectory: true
                 )
-                try fm.moveItem(at: playToolsFramework, to: backupFramework)
+                try fm.moveItem(at: resolvedInstalledURL, to: backupFramework)
                 do {
-                    try fm.moveItem(at: stagedFramework, to: playToolsFramework)
+                    try fm.moveItem(at: stagedFramework, to: resolvedInstalledURL)
                 } catch {
-                    try? fm.moveItem(at: backupFramework, to: playToolsFramework)
+                    try? fm.moveItem(at: backupFramework, to: resolvedInstalledURL)
                     throw error
                 }
             }
         } else {
-            try fm.moveItem(at: stagedFramework, to: playToolsFramework)
+            try fm.moveItem(at: stagedFramework, to: resolvedInstalledURL)
         }
 
+        if let installedPTStamp = fileStamp(for: installedExecURL),
+           let installedAKStamp = fileStamp(for: installedAKURL) {
+            let stamp = PlayToolsInstallStamp(
+                schemaVersion: PlayToolsInstallStamp.currentSchemaVersion,
+                bundledPlayToolsSHA256: sourceDigests.playTools,
+                bundledAKInterfaceSHA256: sourceDigests.akInterface,
+                bundledInfoPlistSHA256: sourceDigests.infoPlist,
+                bundledStringsSHA256: sourceDigests.strings,
+                installedPlayTools: installedPTStamp,
+                installedAKInterface: installedAKStamp
+            )
+            if let encoded = try? JSONEncoder().encode(stamp) {
+                try? encoded.write(to: resolvedStampURL, options: .atomic)
+            }
+        }
+
+        return true
+    }
+
+    private static func performStagedSystemInstall() throws {
+        _ = try ensureSystemInstall()
         guard try isInstalled() else {
             throw PlayCoverError.playToolsError(
                 "PlayTools.framework verification failed after installation."

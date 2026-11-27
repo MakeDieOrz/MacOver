@@ -3,6 +3,7 @@
 //  PlayCover
 //
 
+import Darwin
 import Foundation
 import PlayCoverCore
 import Synchronization
@@ -47,15 +48,20 @@ public class SystemConfig {
     }
 
     public static func isRunningAMFIEnabled() -> Bool {
-        do {
-            let check = try Shell.run("/usr/sbin/sysctl", "kern.bootargs")
-            for option in NVRAM_OPTIONS where check.contains(option) {
-                return true
-            }
-            return false
-        } catch {
+        var size = 0
+        guard Darwin.sysctlbyname("kern.bootargs", nil, &size, nil, 0) == 0, size > 0 else {
             return false
         }
+        var buffer = [CChar](repeating: 0, count: size + 1)
+        guard Darwin.sysctlbyname("kern.bootargs", &buffer, &size, nil, 0) == 0 else {
+            return false
+        }
+        let endIndex = buffer.firstIndex(of: 0) ?? buffer.count
+        let bootArgs = String(
+            bytes: buffer.prefix(endIndex).map { UInt8(bitPattern: $0) },
+            encoding: .utf8
+        ) ?? ""
+        return NVRAM_OPTIONS.contains { bootArgs.contains($0) }
     }
 
     private static let NVRAM_OPTIONS = [

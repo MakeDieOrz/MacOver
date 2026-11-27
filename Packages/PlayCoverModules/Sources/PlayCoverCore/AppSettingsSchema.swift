@@ -43,6 +43,7 @@ public struct AppSettingsData: Codable, Equatable, Sendable {
     public var rightClickLongPress = true
     public var hideTitleBar = false
     public var floatingWindow = false
+    public var quitOnWindowClose = false
     public var checkMicPermissionSync = false
     public var limitMotionUpdateFrequency = false
     public var disableBuiltinMouse = false
@@ -112,6 +113,7 @@ public struct AppSettingsData: Codable, Equatable, Sendable {
         rightClickLongPress = (try? container.decodeIfPresent(Bool.self, forKey: .rightClickLongPress)) ?? true
         hideTitleBar = (try? container.decodeIfPresent(Bool.self, forKey: .hideTitleBar)) ?? false
         floatingWindow = (try? container.decodeIfPresent(Bool.self, forKey: .floatingWindow)) ?? false
+        quitOnWindowClose = (try? container.decodeIfPresent(Bool.self, forKey: .quitOnWindowClose)) ?? false
         checkMicPermissionSync = (try? container.decodeIfPresent(Bool.self, forKey: .checkMicPermissionSync)) ?? false
         limitMotionUpdateFrequency = (try? container.decodeIfPresent(
             Bool.self, forKey: .limitMotionUpdateFrequency

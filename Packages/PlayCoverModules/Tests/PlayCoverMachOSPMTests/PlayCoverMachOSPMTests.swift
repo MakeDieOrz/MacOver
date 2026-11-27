@@ -950,4 +950,113 @@ struct PlayCoverMachOSPMTests {
         #expect(try readUInt32LE(from: execURL, at: textFileStart) == InlineSyscallPatcher.brkInstruction)
         #expect(try readUInt32LE(from: execURL, at: customFileStart) == svcWord)
     }
+
+    @Test
+    func svcScanCacheFastPathsZeroSiteAndPatchedBundlesWithoutPollutingSVCPatches() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("svc-cache-test-\(UUID().uuidString)")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let appURL = root.appendingPathComponent("NoSvc.app", isDirectory: true)
+        try fm.createDirectory(at: appURL, withIntermediateDirectories: true)
+        try PropertyListSerialization.data(
+            fromPropertyList: [
+                "CFBundleIdentifier": "com.example.nosvc",
+                "CFBundleExecutable": "NoSvc"
+            ],
+            format: .xml,
+            options: 0
+        ).write(to: appURL.appendingPathComponent("Info.plist"))
+
+        let cleanSynth = buildSyntheticArm64BinaryWithSVC(filetype: UInt32(MH_EXECUTE), codeSvcCount: 1)
+        var cleanData = cleanSynth.data
+        var nopLE = UInt32(0xD503_201F).littleEndian
+        let nopBytes = withUnsafeBytes(of: &nopLE) { Array($0) }
+        for offset in cleanSynth.codeSvcFileOffsets {
+            cleanData.replaceSubrange(offset..<(offset + 4), with: nopBytes)
+        }
+        let execURL = appURL.appendingPathComponent("NoSvc")
+        try cleanData.write(to: execURL)
+
+        let svcDir = root.appendingPathComponent("SVCPatches", isDirectory: true)
+        let manifestURL = svcDir.appendingPathComponent("com.example.nosvc.json")
+        let cacheURL = InlineSyscallPatcher.scanCacheURL(for: manifestURL, bundleIdentifier: "com.example.nosvc")
+
+        let first = try InlineSyscallPatcher.reconcile(
+            appBundleURL: appURL,
+            bundleIdentifier: "com.example.nosvc",
+            manifestURL: manifestURL,
+            enabled: true
+        )
+        #expect(!first.modified && first.patchedSiteCount == 0)
+        #expect(!fm.fileExists(atPath: manifestURL.path))
+        #expect(fm.fileExists(atPath: cacheURL.path))
+
+        let svcDirItems = (try? fm.contentsOfDirectory(atPath: svcDir.path)) ?? []
+        #expect(svcDirItems.isEmpty)
+
+        // Cached 0-site fast path skips instruction scan completely on repeat launch.
+        let second = try InlineSyscallPatcher.reconcile(
+            appBundleURL: appURL,
+            bundleIdentifier: "com.example.nosvc",
+            manifestURL: manifestURL,
+            enabled: true
+        )
+        #expect(!second.modified && second.patchedSiteCount == 0)
+
+        // Modifying binary size/mtime invalidates scan cache cleanly.
+        let dirtySynth = buildSyntheticArm64BinaryWithSVC(filetype: UInt32(MH_EXECUTE), codeSvcCount: 1)
+        try dirtySynth.data.write(to: execURL)
+        let third = try InlineSyscallPatcher.reconcile(
+            appBundleURL: appURL,
+            bundleIdentifier: "com.example.nosvc",
+            manifestURL: manifestURL,
+            enabled: true
+        )
+        #expect(third.modified && third.patchedSiteCount == 1)
+        #expect(fm.fileExists(atPath: manifestURL.path))
+    }
+
+    @Test
+    func playToolsEnsureSystemInstallSkipsUnchangedAndReinstallsOnChange() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("pt-stamp-test-\(UUID().uuidString)")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let bundledFW = root.appendingPathComponent("Bundled/PlayTools.framework", isDirectory: true)
+        let installedFW = root.appendingPathComponent("Installed/PlayTools.framework", isDirectory: true)
+        let akMacOS = bundledFW.appendingPathComponent("PlugIns/AKInterface.bundle/Contents/MacOS", isDirectory: true)
+        let resources = bundledFW.appendingPathComponent("Resources", isDirectory: true)
+        try fm.createDirectory(at: akMacOS, withIntermediateDirectories: true)
+        try fm.createDirectory(at: resources, withIntermediateDirectories: true)
+
+        try Data("pt-v1".utf8).write(to: bundledFW.appendingPathComponent("PlayTools"))
+        try Data("ak-v1".utf8).write(to: akMacOS.appendingPathComponent("AKInterface"))
+        try Data("plist-v1".utf8).write(to: resources.appendingPathComponent("Info.plist"))
+
+        var validations = 0
+        let firstInstalled = try PlayTools.ensureSystemInstall(
+            bundledFrameworkURL: bundledFW,
+            installedFrameworkURL: installedFW,
+            validator: { _ in validations += 1 }
+        )
+        #expect(firstInstalled && validations == 1)
+
+        let secondInstalled = try PlayTools.ensureSystemInstall(
+            bundledFrameworkURL: bundledFW,
+            installedFrameworkURL: installedFW,
+            validator: { _ in validations += 1 }
+        )
+        #expect(!secondInstalled && validations == 1)
+
+        try Data("pt-v2".utf8).write(to: bundledFW.appendingPathComponent("PlayTools"))
+        let thirdInstalled = try PlayTools.ensureSystemInstall(
+            bundledFrameworkURL: bundledFW,
+            installedFrameworkURL: installedFW,
+            validator: { _ in validations += 1 }
+        )
+        #expect(thirdInstalled && validations == 2)
+    }
 }

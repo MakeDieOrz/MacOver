@@ -180,4 +180,9 @@ struct PlayCoverSandboxSPMTests {
         )
         #expect(crComposed["com.apple.security.app-sandbox"] == nil)
     }
+
+    @Test
+    func systemConfigAMFICheckRunsInProcessWithoutSubprocess() {
+        _ = SystemConfig.isRunningAMFIEnabled()
+    }
 }
