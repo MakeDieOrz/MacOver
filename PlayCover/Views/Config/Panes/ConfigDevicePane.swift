@@ -156,37 +156,20 @@ struct ConfigDevicePane: View {
             format: ConfigLabelFormatter.localized("device.legacyBanner", locale: locale),
             DeviceProfileOption.displayName(for: currentModel)
         )
-        return ViewThatFits(in: .horizontal) {
-            HStack(spacing: 10) {
+        return AdaptiveLeadingTrailingLayout(horizontalSpacing: 10, verticalSpacing: 8) {
+            HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
                     .accessibilityHidden(true)
                 Text(message)
                     .font(.callout)
                     .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 8)
-                Button("device.upgradeToM1") {
-                    settings.update { $0.iosDeviceModel = "iPad13,8" }
-                }
-                .buttonStyle(.borderedProminent)
-                .fixedSize()
             }
-
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                        .accessibilityHidden(true)
-                    Text(message)
-                        .font(.callout)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Button("device.upgradeToM1") {
-                    settings.update { $0.iosDeviceModel = "iPad13,8" }
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
+            Button("device.upgradeToM1") {
+                settings.update { $0.iosDeviceModel = "iPad13,8" }
             }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
         }
     }
 
@@ -195,41 +178,22 @@ struct ConfigDevicePane: View {
             format: ConfigLabelFormatter.localized("device.ios13ModelMismatch", locale: locale),
             DeviceProfileOption.displayName(for: currentModel)
         )
-        return ViewThatFits(in: .horizontal) {
-            HStack(spacing: 10) {
+        return AdaptiveLeadingTrailingLayout(horizontalSpacing: 10, verticalSpacing: 8) {
+            HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "info.circle.fill")
                     .foregroundStyle(.orange)
                     .accessibilityHidden(true)
                 Text(message)
                     .font(.callout)
                     .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 8)
-                Button("device.switchToIOS13Model") {
-                    settings.update {
-                        $0.iosDeviceModel = DeviceProfileOption.recommendedIOS13Model(isIPhone: isIPhone)
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .fixedSize()
             }
-
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: "info.circle.fill")
-                        .foregroundStyle(.orange)
-                        .accessibilityHidden(true)
-                    Text(message)
-                        .font(.callout)
-                        .fixedSize(horizontal: false, vertical: true)
+            Button("device.switchToIOS13Model") {
+                settings.update {
+                    $0.iosDeviceModel = DeviceProfileOption.recommendedIOS13Model(isIPhone: isIPhone)
                 }
-                Button("device.switchToIOS13Model") {
-                    settings.update {
-                        $0.iosDeviceModel = DeviceProfileOption.recommendedIOS13Model(isIPhone: isIPhone)
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
             }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
         }
     }
 

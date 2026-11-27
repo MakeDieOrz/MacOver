@@ -40656,6 +40656,64 @@
         }
       }
     },
+    "settings.toggle.quitOnWindowClose" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Quit app when window closes"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ウインドウを閉じたときにアプリを終了"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "关闭窗口时退出应用"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "關閉視窗時結束應用程式"
+          }
+        }
+      }
+    },
+    "settings.toggle.quitOnWindowClose.help" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "When off, clicking the red close button only closes the window and keeps the app running in the background. Quit with ⌘Q or from MacOver."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "オフの場合、赤い閉じるボタンはウインドウのみを閉じ、アプリはバックグラウンドで実行を続けます。⌘Q または MacOver から終了できます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "关闭时，点击标题栏红色关闭按钮仅关闭窗口、应用继续在后台运行；可通过 ⌘Q 或在 MacOver 中彻底退出。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "關閉時，點擊標題列紅色關閉按鈕僅關閉視窗、應用程式繼續在背景執行；可透過 ⌘Q 或在 MacOver 中徹底結束。"
+          }
+        }
+      }
+    },
     "settings.toggle.rightClickLongPress" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -43834,6 +43892,125 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "无法清除应用数据（系统权限受限）"
+          }
+        }
+      }
+    },
+    "action.bringToFront" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bring to Front"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "前置窗口"
+          }
+        }
+      }
+    },
+    "app.state.launching" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Launching..."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "启动中..."
+          }
+        }
+      }
+    },
+    "app.state.preparing.opening" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Opening..."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "拉起中..."
+          }
+        }
+      }
+    },
+    "app.state.preparing.unlocking" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Unlocking..."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "解锁中..."
+          }
+        }
+      }
+    },
+    "app.state.preparing.verifying" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Verifying..."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "校验中..."
+          }
+        }
+      }
+    },
+    "app.state.runningActive" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Active"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "运行中（前台）"
+          }
+        }
+      }
+    },
+    "app.state.terminating" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Quitting..."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在退出..."
           }
         }
       }

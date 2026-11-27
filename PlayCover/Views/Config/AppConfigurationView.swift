@@ -164,7 +164,7 @@ struct AppConfigurationView: View {
                         Task { await app.terminate() }
                     } else {
                         Task(priority: .userInitiated) {
-                            if !app.isStarting {
+                            if !app.isBusy {
                                 await app.launch()
                             }
                         }
@@ -176,19 +176,19 @@ struct AppConfigurationView: View {
                     )
                 }
                 .tint(app.isRunning ? .red : .accentColor)
-                .disabled(!app.isRunning && app.isStarting)
+                .disabled(app.isBusy)
 
                 Menu {
                     Button("action.launchSafeMode", systemImage: "shield.lefthalf.filled") {
                         Task {
                             if app.isRunning {
                                 await app.restart(safeModeOneShot: true)
-                            } else if !app.isStarting {
+                            } else if !app.isBusy {
                                 await app.launch(safeModeOneShot: true)
                             }
                         }
                     }
-                    .disabled(!app.isRunning && app.isStarting)
+                    .disabled(app.isBusy)
                     Divider()
                     Button("settings.resetSettings", systemImage: "arrow.counterclockwise", role: .destructive) {
                         showResetConfirm = true
@@ -213,11 +213,7 @@ struct AppConfigurationView: View {
             }
         }
         .task(id: app.url) {
-            let executable = app.executable
-            let installed = await Task.detached(priority: .background) {
-                (try? PlayTools.installedInExec(atURL: executable)) ?? true
-            }.value
-            hasPlayTools = installed
+            hasPlayTools = app.hasPlayToolsCached
         }
         .onDisappear {
             app.settings.flush()
@@ -237,25 +233,12 @@ struct AppConfigurationView: View {
     }
 
     private var restartBanner: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 10) {
+        AdaptiveLeadingTrailingLayout(horizontalSpacing: 10, verticalSpacing: 8) {
+            HStack(alignment: .top, spacing: 10) {
                 restartBannerIcon
                 restartBannerTexts
-                    .fixedSize(horizontal: true, vertical: false)
-                Spacer(minLength: 8)
-                restartBannerActions
             }
-
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .top, spacing: 10) {
-                    restartBannerIcon
-                    restartBannerTexts
-                }
-                HStack(spacing: 8) {
-                    restartBannerActions
-                    Spacer(minLength: 0)
-                }
-            }
+            restartBannerActions
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)

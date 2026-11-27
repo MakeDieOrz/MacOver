@@ -7,6 +7,8 @@ import PlayCoverCore
 import SwiftUI
 
 struct PixelBudgetMeter: View {
+    @Environment(\.locale) private var locale
+
     let budget: PixelBudget
     var titleKey: LocalizedStringKey = "budget.title"
     var compact: Bool = false
@@ -42,7 +44,8 @@ struct PixelBudgetMeter: View {
 
     private var readoutText: String {
         String(
-            format: NSLocalizedString("budget.readout", comment: ""),
+            format: ConfigLabelFormatter.localized("budget.readout", locale: locale),
+            locale: locale,
             weightedMegapixels,
             limitMegapixels
         )
@@ -50,7 +53,8 @@ struct PixelBudgetMeter: View {
 
     private var renderedDetailsText: String {
         String(
-            format: NSLocalizedString("budget.renderedDetails", comment: ""),
+            format: ConfigLabelFormatter.localized("budget.renderedDetails", locale: locale),
+            locale: locale,
             budget.renderedWidth,
             budget.renderedHeight,
             budget.memoryTier.label
@@ -73,16 +77,9 @@ struct PixelBudgetMeter: View {
     }
 
     private var headerRow: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 6) {
-                headerLeadingLabels
-                Spacer(minLength: 6)
-                readoutLabel
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                headerLeadingLabels
-                readoutLabel
-            }
+        AdaptiveLeadingTrailingLayout(horizontalSpacing: 6, verticalSpacing: 2) {
+            headerLeadingLabels
+            readoutLabel
         }
     }
 
@@ -108,18 +105,9 @@ struct PixelBudgetMeter: View {
     }
 
     private var detailsRow: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 6) {
-                renderedDetailsLabel
-                    .fixedSize(horizontal: true, vertical: false)
-                Spacer(minLength: 4)
-                textureEdgeBadge
-            }
-            VStack(alignment: .leading, spacing: 4) {
-                renderedDetailsLabel
-                    .fixedSize(horizontal: false, vertical: true)
-                textureEdgeBadge
-            }
+        AdaptiveLeadingTrailingLayout(horizontalSpacing: 6, verticalSpacing: 4) {
+            renderedDetailsLabel
+            textureEdgeBadge
         }
     }
 
@@ -128,6 +116,7 @@ struct PixelBudgetMeter: View {
             .font(.caption2.monospacedDigit())
             .foregroundStyle(.secondary)
             .lineLimit(2)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     @ViewBuilder
@@ -145,16 +134,9 @@ struct PixelBudgetMeter: View {
     }
 
     private func suggestedFitRow(onFitToBudget: @escaping (Double) -> Void) -> some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 8) {
-                suggestedScalerLabel
-                Spacer(minLength: 6)
-                fitButton(onFitToBudget: onFitToBudget)
-            }
-            VStack(alignment: .leading, spacing: 6) {
-                suggestedScalerLabel
-                fitButton(onFitToBudget: onFitToBudget)
-            }
+        AdaptiveLeadingTrailingLayout(horizontalSpacing: 8, verticalSpacing: 6) {
+            suggestedScalerLabel
+            fitButton(onFitToBudget: onFitToBudget)
         }
     }
 

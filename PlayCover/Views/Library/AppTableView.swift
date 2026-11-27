@@ -40,12 +40,12 @@ struct AppTableView: View {
             .width(min: 60, ideal: 72, max: 90)
 
             TableColumn("library.table.device", value: \.sortDevice) { app in
-                TableAppDeviceCell(settings: app.settings)
+                TableAppDeviceCell(app: app)
             }
             .width(min: 205, ideal: 250)
 
             TableColumn("library.table.pixelLoad", value: \.sortPixelRatio) { app in
-                TableAppLoadCell(settings: app.settings)
+                TableAppLoadCell(app: app)
             }
             .width(min: 96, ideal: 112, max: 130)
 
@@ -66,14 +66,10 @@ struct AppTableView: View {
         } primaryAction: { selectedIDs in
             guard let firstID = selectedIDs.first,
                   let target = apps.first(where: { $0.id == firstID }) else { return }
-            if target.isRunning,
-               let running = NSRunningApplication.runningApplications(
-                   withBundleIdentifier: target.info.bundleIdentifier
-               ).first(where: { !$0.isTerminated }) {
-                _ = running.activate()
+            if target.isRunning, target.activateRunningApplication() {
                 return
             }
-            guard !target.isStarting else { return }
+            guard !target.isBusy else { return }
             Task(priority: .userInitiated) {
                 await target.launch()
             }
@@ -90,7 +86,7 @@ private struct TableAppNameCell: View {
             Text(app.name)
                 .fontWeight(.medium)
                 .lineLimit(1)
-            if app.isStarting {
+            if app.isBusy {
                 ProgressView()
                     .controlSize(.small)
             }
@@ -99,12 +95,12 @@ private struct TableAppNameCell: View {
 }
 
 private struct TableAppDeviceCell: View {
-    var settings: AppSettings
+    var app: PlayApp
 
     var body: some View {
-        let deviceName = DeviceProfileOption.displayName(for: settings.settings.effectiveIOSDeviceModel)
+        let deviceName = DeviceProfileOption.displayName(for: app.effectiveIOSDeviceModelCached)
         HStack(spacing: 4) {
-            if settings.settings.strictEmulationMode {
+            if app.strictEmulationModeCached {
                 Image(systemName: "lock.shield.fill")
                     .font(.caption)
                     .foregroundStyle(Color.accentColor)
@@ -121,20 +117,22 @@ private struct TableAppDeviceCell: View {
 }
 
 private struct TableAppLoadCell: View {
-    var settings: AppSettings
+    var app: PlayApp
 
     var body: some View {
-        let budget = settings.settings.pixelBudget
-        let tint: Color = switch budget.level {
-        case .ok: .green
-        case .caution: .orange
-        case .over: .red
+        let ratio = app.pixelBudgetRatioCached
+        let tint: Color = if ratio >= 1.0 {
+            .red
+        } else if ratio >= 0.75 {
+            .orange
+        } else {
+            .green
         }
         HStack(spacing: 6) {
-            ProgressView(value: min(max(budget.ratio, 0), 1))
+            ProgressView(value: min(max(ratio, 0), 1))
                 .tint(tint)
                 .frame(width: 56)
-            Text(String(format: "%.0f%%", budget.ratio * 100))
+            Text(String(format: "%.0f%%", ratio * 100))
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
         }
@@ -143,15 +141,27 @@ private struct TableAppLoadCell: View {
 
 private struct TableAppStatusCell: View {
     var app: PlayApp
-    @State private var hasPlayTools = true
 
     var body: some View {
-        Group {
-            if app.isRunning {
-                Label("sidebar.runningBadge", systemImage: "circle.fill")
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.green)
-            } else if !hasPlayTools {
+        switch app.runState {
+        case .preparing(let stage):
+            Label(LocalizedStringKey(stage.localizationKey), systemImage: "hourglass")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(Color.accentColor)
+        case .launching:
+            Label("app.state.launching", systemImage: "hourglass")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(Color.accentColor)
+        case .terminating:
+            Label("app.state.terminating", systemImage: "hourglass")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.orange)
+        case .running(let isActive):
+            Label(isActive ? "app.state.runningActive" : "sidebar.runningBadge", systemImage: "circle.fill")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.green)
+        case .idle:
+            if !app.hasPlayToolsCached {
                 Label("library.status.noPlayTools", systemImage: "exclamationmark.triangle.fill")
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.orange)
@@ -160,13 +170,6 @@ private struct TableAppStatusCell: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-        }
-        .task(id: app.url) {
-            let executable = app.executable
-            let installed = await Task.detached(priority: .background) {
-                (try? PlayTools.installedInExec(atURL: executable)) ?? true
-            }.value
-            hasPlayTools = installed
         }
     }
 }

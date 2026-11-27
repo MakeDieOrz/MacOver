@@ -341,6 +341,8 @@ struct ConfigDisplayPane: View {
         Section {
             Toggle("settings.toggle.disableDisplaySleep", isOn: $settings.settings.disableTimeout)
                 .help("settings.toggle.disableDisplaySleep.help")
+            Toggle("settings.toggle.quitOnWindowClose", isOn: $settings.settings.quitOnWindowClose)
+                .help("settings.toggle.quitOnWindowClose.help")
             Toggle("settings.toggle.hideTitleBar", isOn: $settings.settings.hideTitleBar)
             Toggle("settings.toggle.floatingWindow", isOn: $settings.settings.floatingWindow)
         }

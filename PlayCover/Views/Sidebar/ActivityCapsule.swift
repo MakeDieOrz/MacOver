@@ -11,6 +11,7 @@ struct ActivityCapsule: View {
     @Environment(DownloadVM.self) var downloadVM
     @Environment(PlayCoverDependencies.self) var dependencies
     @Environment(AppNavigationState.self) var navState
+    @Environment(\.locale) private var locale
 
     private var isBusy: Bool {
         installVM.inProgress || downloadVM.inProgress
@@ -34,14 +35,14 @@ struct ActivityCapsule: View {
 
     private var activeLabel: String {
         if installVM.inProgress {
-            return NSLocalizedString(installVM.status.rawValue, comment: "")
+            return ConfigLabelFormatter.localized(installVM.status.rawValue, locale: locale)
         }
         if downloadVM.inProgress {
             let name = downloadVM.storeAppData?.name ?? ""
-            let base = NSLocalizedString(downloadVM.status.rawValue, comment: "")
+            let base = ConfigLabelFormatter.localized(downloadVM.status.rawValue, locale: locale)
             return name.isEmpty ? base : "\(base) \(name)"
         }
-        return NSLocalizedString("activity.idle", comment: "")
+        return ConfigLabelFormatter.localized("activity.idle", locale: locale)
     }
 
     var body: some View {

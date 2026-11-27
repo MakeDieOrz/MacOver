@@ -224,9 +224,7 @@ struct StoreLibraryDetailView: View {
     }
 
     private func checkConnectivity(resolveSources: Bool) async {
-        let connected = await Task.detached(priority: .utility) {
-            NetworkVM.isConnectedToNetwork()
-        }.value
+        let connected = await NetworkVM.isConnectedToNetworkAsync()
         isConnected = connected
         if connected && resolveSources {
             storeVM.resolveSources()

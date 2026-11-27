@@ -141,40 +141,17 @@ struct ConfigInfoPane: View {
     }
 
     private var fileActionsRow: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 10) {
-                openCacheButton.fixedSize()
-                showInFinderButton.fixedSize()
-                Spacer(minLength: 0)
-            }
-            VStack(alignment: .leading, spacing: 8) {
-                openCacheButton
-                showInFinderButton
-            }
+        AdaptiveWrappingRowLayout(horizontalSpacing: 10, verticalSpacing: 8) {
+            openCacheButton
+            showInFinderButton
         }
     }
 
     private var maintenanceActionsRow: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 10) {
-                clearCacheButton.fixedSize()
-                clearPreferencesButton.fixedSize()
-                clearPlayChainButton.fixedSize()
-                Spacer(minLength: 0)
-            }
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 10) {
-                    clearCacheButton.fixedSize()
-                    clearPreferencesButton.fixedSize()
-                    Spacer(minLength: 0)
-                }
-                clearPlayChainButton.fixedSize()
-            }
-            VStack(alignment: .leading, spacing: 8) {
-                clearCacheButton
-                clearPreferencesButton
-                clearPlayChainButton
-            }
+        AdaptiveWrappingRowLayout(horizontalSpacing: 10, verticalSpacing: 8) {
+            clearCacheButton
+            clearPreferencesButton
+            clearPlayChainButton
         }
     }
 

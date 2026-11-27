@@ -13,7 +13,7 @@ struct LibrarySidebar: View {
     @State private var showSources = true
 
     private var runningApps: [PlayApp] {
-        appsVM.apps.filter(\.isRunning)
+        appsVM.apps.filter { $0.isRunning || $0.isBusy }
     }
 
     var body: some View {
@@ -71,11 +71,25 @@ private struct SidebarRunningAppRow: View {
                 .fontWeight(isSelectedInLibrary ? .semibold : .regular)
                 .lineLimit(1)
             Spacer(minLength: 4)
-            Image(systemName: "circle.fill")
-                .font(.system(size: 7))
-                .foregroundStyle(.green)
-                .symbolEffect(.pulse, value: app.isRunning)
-                .accessibilityHidden(true)
+            if app.isBusy {
+                ProgressView()
+                    .controlSize(.mini)
+            } else {
+                Image(systemName: "circle.fill")
+                    .font(.system(size: 7))
+                    .foregroundStyle(.green)
+                    .symbolEffect(.pulse, value: app.runState.isActive)
+                    .accessibilityHidden(true)
+                Button {
+                    _ = app.activateRunningApplication()
+                } label: {
+                    Image(systemName: "arrow.up.forward.app")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("action.bringToFront")
+                .accessibilityLabel(Text("action.bringToFront"))
+            }
             Button {
                 Task { await app.terminate() }
             } label: {
@@ -83,6 +97,7 @@ private struct SidebarRunningAppRow: View {
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
+            .disabled(app.isTerminating)
             .help("sidebar.quit")
             .accessibilityLabel(Text("sidebar.quit"))
         }
@@ -99,12 +114,18 @@ private struct SidebarRunningAppRow: View {
             navState.selectedAppID = app.id
         }
         .contextMenu {
+            if app.isRunning {
+                Button("action.bringToFront", systemImage: "arrow.up.forward.app") {
+                    _ = app.activateRunningApplication()
+                }
+            }
             Button("action.configure", systemImage: "slider.horizontal.3") {
                 navState.openConfiguration(for: app, pane: .overview)
             }
             Button("action.quit", systemImage: "stop.fill", role: .destructive) {
                 Task { await app.terminate() }
             }
+            .disabled(app.isTerminating)
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Text(app.name))

@@ -73,16 +73,15 @@ struct AppIconView: View {
             let cacher = dependencies.cacher
             let appURL = app.url
             let primaryIconName = app.info.primaryIconName
-            let iconData = await Task.detached(priority: .utility) {
-                cacher.resolveLocalIconData(
-                    at: appURL,
-                    bundleIdentifier: bundleIdentifier,
-                    bundleVersion: bundleVersion,
-                    primaryIconName: primaryIconName
-                )
-            }.value
+            let iconCG = await cacher.loadLocalIcon(
+                at: appURL,
+                bundleIdentifier: bundleIdentifier,
+                bundleVersion: bundleVersion,
+                primaryIconName: primaryIconName
+            )
             guard !Task.isCancelled else { return }
-            if let image = iconData.flatMap(NSImage.init(data:)) {
+            if let iconCG {
+                let image = NSImage(cgImage: iconCG, size: NSSize(width: iconCG.width, height: iconCG.height))
                 loadedIcon = LoadedAppIcon(key: currentKey, image: image)
             }
             completedLoadKey = currentKey

@@ -20,20 +20,27 @@ struct PlayAppContextMenu: View {
             Task {
                 if app.isRunning {
                     await app.terminate()
-                } else if !app.isStarting {
+                } else if !app.isBusy {
                     await app.launch()
                 }
+            }
+        }
+        .disabled(app.isBusy)
+        if app.isRunning {
+            Button("action.bringToFront", systemImage: "arrow.up.forward.app") {
+                _ = app.activateRunningApplication()
             }
         }
         Button("action.launchSafeMode", systemImage: "shield.lefthalf.filled") {
             Task {
                 if app.isRunning {
                     await app.restart(safeModeOneShot: true)
-                } else if !app.isStarting {
+                } else if !app.isBusy {
                     await app.launch(safeModeOneShot: true)
                 }
             }
         }
+        .disabled(app.isBusy)
         Divider()
         Button("playapp.settings", systemImage: "gear") {
             navState.openConfiguration(for: app, pane: .overview)
@@ -76,7 +83,6 @@ struct AppCardView: View {
     @Environment(AppNavigationState.self) var navState
 
     var app: PlayApp
-    var settings: AppSettings
 
     let isSelected: Bool
     let onClearPreferences: (PlayApp) -> Void
@@ -85,10 +91,24 @@ struct AppCardView: View {
     @Namespace private var actionNamespace
     @FocusState private var isFocused: Bool
     @State private var isHovered = false
-    @State private var hasPlayTools = true
 
     private var showsHeaderActions: Bool {
-        isHovered || app.isStarting
+        isHovered || app.isBusy
+    }
+
+    private var statusPillKind: AppStatusPill.Kind? {
+        switch app.runState {
+        case .preparing(let stage):
+            return .preparing(stage)
+        case .launching:
+            return .launching
+        case .running(let isActive):
+            return isActive ? .runningActive : .running
+        case .terminating:
+            return .terminating
+        case .idle:
+            return nil
+        }
     }
 
     var body: some View {
@@ -136,7 +156,7 @@ struct AppCardView: View {
             Task(priority: .userInitiated) {
                 if app.isRunning {
                     await app.terminate()
-                } else if !app.isStarting {
+                } else if !app.isBusy {
                     await app.launch()
                 }
             }
@@ -150,6 +170,7 @@ struct AppCardView: View {
             }
         }
         .animation(.snappy(duration: 0.16), value: isSelected)
+        .animation(.snappy(duration: 0.18), value: app.runState)
         .gesture(TapGesture(count: 2).onEnded {
             navState.selectedAppID = app.id
             launchOrActivateApp()
@@ -170,20 +191,13 @@ struct AppCardView: View {
             guard isSelected else { return }
             DispatchQueue.main.async { isFocused = true }
         }
-        .task(id: app.url) {
-            let executable = app.executable
-            let installed = await Task.detached(priority: .background) {
-                (try? PlayTools.installedInExec(atURL: executable)) ?? true
-            }.value
-            hasPlayTools = installed
-        }
     }
 
     private var headerBand: some View {
         HStack(spacing: 4) {
-            if app.isRunning {
-                AppStatusPill(kind: .running, compact: true)
-            } else if !hasPlayTools {
+            if let statusPillKind {
+                AppStatusPill(kind: statusPillKind, compact: true)
+            } else if !app.hasPlayToolsCached {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(.orange)
@@ -206,7 +220,7 @@ struct AppCardView: View {
                 .truncationMode(.tail)
                 .multilineTextAlignment(.center)
             HStack(spacing: 3) {
-                if settings.settings.strictEmulationMode {
+                if app.strictEmulationModeCached {
                     Image(systemName: "lock.shield.fill")
                         .foregroundStyle(Color.accentColor)
                         .help("strict.banner.title")
@@ -222,15 +236,11 @@ struct AppCardView: View {
     }
 
     private func launchOrActivateApp() {
-        if app.isRunning,
-           let running = NSRunningApplication.runningApplications(
-               withBundleIdentifier: app.info.bundleIdentifier
-           ).first(where: { !$0.isTerminated }) {
-            _ = running.activate()
+        if app.isRunning, app.activateRunningApplication() {
             return
         }
         Task(priority: .userInitiated) {
-            if !app.isStarting {
+            if !app.isBusy {
                 await app.launch()
             }
         }
@@ -240,11 +250,13 @@ struct AppCardView: View {
         var parts = [app.info.bundleVersion]
         if app.isRunning {
             parts.append(NSLocalizedString("sidebar.runningBadge", comment: ""))
+        } else if app.isBusy {
+            parts.append(NSLocalizedString("app.state.launching", comment: ""))
         }
-        if !hasPlayTools {
+        if !app.hasPlayToolsCached {
             parts.append(NSLocalizedString("settings.noPlayTools", comment: ""))
         }
-        if settings.settings.strictEmulationMode {
+        if app.strictEmulationModeCached {
             parts.append(NSLocalizedString("strict.banner.title", comment: ""))
         }
         return parts.joined(separator: ", ")
@@ -254,6 +266,10 @@ struct AppCardView: View {
         let fillColor: Color
         if isSelected {
             fillColor = appearsActive ? Color.accentColor.opacity(0.15) : Color.secondary.opacity(0.13)
+        } else if app.isRunning {
+            fillColor = Color.green.opacity(app.runState.isActive ? 0.11 : 0.06)
+        } else if app.isBusy {
+            fillColor = Color.accentColor.opacity(0.08)
         } else if isHovered || isFocused {
             fillColor = Color.secondary.opacity(0.08)
         } else {
@@ -268,6 +284,12 @@ struct AppCardView: View {
         if isSelected {
             strokeColor = appearsActive ? Color.accentColor : Color.secondary.opacity(0.30)
             lineWidth = appearsActive ? 2 : 1
+        } else if app.isRunning {
+            strokeColor = Color.green.opacity(app.runState.isActive ? 0.55 : 0.35)
+            lineWidth = 1.25
+        } else if app.isBusy {
+            strokeColor = Color.accentColor.opacity(0.45)
+            lineWidth = 1.25
         } else if isFocused {
             strokeColor = Color.accentColor.opacity(0.55)
             lineWidth = 1.5
@@ -285,7 +307,7 @@ struct AppCardView: View {
     private var hoverActionBar: some View {
         GlassEffectContainer(spacing: 4) {
             HStack(spacing: 4) {
-                if app.isStarting {
+                if app.isBusy {
                     ProgressView()
                         .controlSize(.mini)
                         .frame(width: 22, height: 22)

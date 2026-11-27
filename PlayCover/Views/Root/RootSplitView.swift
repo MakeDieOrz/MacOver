@@ -53,6 +53,7 @@ struct RootSplitView: View {
             .navigationSplitViewColumnWidth(min: 210, ideal: 236, max: 300)
         } detail: {
             detailContent
+                .navigationSplitViewColumnWidth(min: 420, ideal: 560)
                 .inspector(isPresented: $navState.showInspector) {
                     InspectorRouter()
                         .inspectorColumnWidth(min: 260, ideal: 296, max: 360)
@@ -76,8 +77,12 @@ struct RootSplitView: View {
                 navState.sidebarDestination = .storeAll
             }
             if autoFetchOnAppear {
-                appsVM.fetchApps()
+                appsVM.fetchAppsIfNeeded()
             }
+        }
+        .task {
+            guard autoFetchOnAppear else { return }
+            await dependencies.performDeferredStartupTasks()
         }
         .onChange(of: urlObserved.action) {
             if urlObserved.type == .source {

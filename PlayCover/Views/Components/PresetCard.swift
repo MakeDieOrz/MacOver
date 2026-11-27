@@ -27,30 +27,18 @@ struct PresetCard: View {
                     }
                 }
 
-                ViewThatFits(in: .horizontal) {
-                    Text(LocalizedStringKey(preset.titleKey))
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                    Text(LocalizedStringKey(preset.titleKey))
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                Text(LocalizedStringKey(preset.titleKey))
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.85)
+                    .fixedSize(horizontal: false, vertical: true)
 
-                ViewThatFits(in: .vertical) {
-                    Text(LocalizedStringKey(preset.subtitleKey))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(LocalizedStringKey(preset.subtitleKey))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(3)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                Text(LocalizedStringKey(preset.subtitleKey))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 Spacer(minLength: 0)
             }
@@ -103,13 +91,21 @@ struct RestartFieldBadge: View {
 /// Running = green, Strict Emulation = accent (locked/authentic), PlayTools missing = orange (actionable).
 struct AppStatusPill: View {
     enum Kind {
+        case preparing(AppLaunchStage)
+        case launching
         case running
+        case runningActive
+        case terminating
         case strict
         case noPlayTools
 
         var titleKey: LocalizedStringKey {
             switch self {
+            case .preparing(let stage): return LocalizedStringKey(stage.localizationKey)
+            case .launching: return "app.state.launching"
             case .running: return "sidebar.runningBadge"
+            case .runningActive: return "app.state.runningActive"
+            case .terminating: return "app.state.terminating"
             case .strict: return "strict.pill"
             case .noPlayTools: return "library.status.noPlayTools"
             }
@@ -117,7 +113,8 @@ struct AppStatusPill: View {
 
         var systemImage: String {
             switch self {
-            case .running: return "circle.fill"
+            case .preparing, .launching, .terminating: return "hourglass"
+            case .running, .runningActive: return "circle.fill"
             case .strict: return "lock.shield.fill"
             case .noPlayTools: return "exclamationmark.triangle.fill"
             }
@@ -125,7 +122,9 @@ struct AppStatusPill: View {
 
         var tint: Color {
             switch self {
-            case .running: return .green
+            case .preparing, .launching: return .accentColor
+            case .running, .runningActive: return .green
+            case .terminating: return .orange
             case .strict: return .accentColor
             case .noPlayTools: return .orange
             }
@@ -133,9 +132,22 @@ struct AppStatusPill: View {
 
         var helpKey: LocalizedStringKey {
             switch self {
+            case .preparing(let stage): return LocalizedStringKey(stage.localizationKey)
+            case .launching: return "app.state.launching"
             case .running: return "sidebar.runningBadge"
+            case .runningActive: return "app.state.runningActive"
+            case .terminating: return "app.state.terminating"
             case .strict: return "strict.banner.title"
             case .noPlayTools: return "settings.noPlayTools"
+            }
+        }
+
+        var showsSpinner: Bool {
+            switch self {
+            case .preparing, .launching, .terminating:
+                return true
+            case .running, .runningActive, .strict, .noPlayTools:
+                return false
             }
         }
     }
@@ -144,13 +156,17 @@ struct AppStatusPill: View {
     var compact = false
 
     var body: some View {
-        Label {
+        HStack(spacing: compact ? 4 : 5) {
+            if kind.showsSpinner {
+                ProgressView()
+                    .controlSize(.mini)
+                    .tint(kind.tint)
+            } else {
+                Image(systemName: kind.systemImage)
+                    .imageScale(.small)
+            }
             Text(kind.titleKey)
-        } icon: {
-            Image(systemName: kind.systemImage)
-                .imageScale(.small)
         }
-        .labelStyle(.titleAndIcon)
         .font((compact ? Font.caption2 : Font.caption).weight(.semibold))
         .lineLimit(1)
         .foregroundStyle(kind.tint)
@@ -188,20 +204,12 @@ struct ConfigStateCallout: View {
     }
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(alignment: .center, spacing: 10) {
+        AdaptiveLeadingTrailingLayout(horizontalSpacing: 10, verticalSpacing: 8) {
+            HStack(alignment: .top, spacing: 10) {
                 icon
                 texts
-                Spacer(minLength: 8)
-                actionButton
             }
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .top, spacing: 10) {
-                    icon
-                    texts
-                }
-                actionButton
-            }
+            actionButton
         }
         .accessibilityElement(children: .contain)
     }
@@ -263,5 +271,209 @@ struct StrictLockedNote: View {
 extension PlayCoverRestartField {
     var localizedKey: String {
         "restart.field.\(rawValue)"
+    }
+}
+
+/// Deterministic inline-or-stacked layout for a leading/trailing pair that avoids
+/// swapping view identities (which triggers AppKit constraint-update loops in split views).
+struct AdaptiveLeadingTrailingLayout: Layout {
+    var horizontalSpacing: CGFloat = 10
+    var verticalSpacing: CGFloat = 8
+    var inlineAlignment: VerticalAlignment = .center
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) -> CGSize {
+        if subviews.isEmpty {
+            return .zero
+        }
+        if subviews.count == 1 {
+            return subviews[0].sizeThatFits(proposal)
+        }
+        let leading = subviews[0]
+        let trailing = subviews[1]
+        if proposal.width == 0 {
+            let lMin = leading.sizeThatFits(.zero)
+            let tMin = trailing.sizeThatFits(.zero)
+            return CGSize(
+                width: max(lMin.width, tMin.width),
+                height: lMin.height + verticalSpacing + tMin.height
+            )
+        }
+        let lIdeal = leading.sizeThatFits(.unspecified)
+        let tIdeal = trailing.sizeThatFits(.unspecified)
+        guard let width = proposal.width, width.isFinite else {
+            return CGSize(
+                width: lIdeal.width + horizontalSpacing + tIdeal.width,
+                height: max(lIdeal.height, tIdeal.height)
+            )
+        }
+        if lIdeal.width + horizontalSpacing + tIdeal.width <= width {
+            return CGSize(width: width, height: max(lIdeal.height, tIdeal.height))
+        }
+        let lWrapped = leading.sizeThatFits(ProposedViewSize(width: width, height: nil))
+        let tWrapped = trailing.sizeThatFits(ProposedViewSize(width: width, height: nil))
+        return CGSize(
+            width: width,
+            height: lWrapped.height + verticalSpacing + tWrapped.height
+        )
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        if subviews.isEmpty {
+            return
+        }
+        if subviews.count == 1 {
+            subviews[0].place(
+                at: CGPoint(x: bounds.minX, y: bounds.minY),
+                anchor: .topLeading,
+                proposal: ProposedViewSize(width: bounds.width, height: bounds.height)
+            )
+            return
+        }
+        let leading = subviews[0]
+        let trailing = subviews[1]
+        let width = bounds.width
+        let lIdeal = leading.sizeThatFits(.unspecified)
+        let tIdeal = trailing.sizeThatFits(.unspecified)
+
+        if lIdeal.width + horizontalSpacing + tIdeal.width <= width {
+            let rowHeight = max(lIdeal.height, tIdeal.height)
+            let lY = inlineY(rowOriginY: bounds.minY, rowHeight: rowHeight, itemHeight: lIdeal.height)
+            let tY = inlineY(rowOriginY: bounds.minY, rowHeight: rowHeight, itemHeight: tIdeal.height)
+            leading.place(
+                at: CGPoint(x: bounds.minX, y: lY),
+                anchor: .topLeading,
+                proposal: ProposedViewSize(lIdeal)
+            )
+            trailing.place(
+                at: CGPoint(x: bounds.maxX - tIdeal.width, y: tY),
+                anchor: .topLeading,
+                proposal: ProposedViewSize(tIdeal)
+            )
+        } else {
+            let lWrapped = leading.sizeThatFits(ProposedViewSize(width: width, height: nil))
+            let tWrapped = trailing.sizeThatFits(ProposedViewSize(width: width, height: nil))
+            leading.place(
+                at: CGPoint(x: bounds.minX, y: bounds.minY),
+                anchor: .topLeading,
+                proposal: ProposedViewSize(width: width, height: lWrapped.height)
+            )
+            trailing.place(
+                at: CGPoint(x: bounds.minX, y: bounds.minY + lWrapped.height + verticalSpacing),
+                anchor: .topLeading,
+                proposal: ProposedViewSize(width: min(tWrapped.width, width), height: tWrapped.height)
+            )
+        }
+    }
+
+    private func inlineY(rowOriginY: CGFloat, rowHeight: CGFloat, itemHeight: CGFloat) -> CGFloat {
+        switch inlineAlignment {
+        case .top:
+            return rowOriginY
+        case .bottom:
+            return rowOriginY + rowHeight - itemHeight
+        default:
+            return rowOriginY + (rowHeight - itemHeight) * 0.5
+        }
+    }
+}
+
+/// Deterministic wrapping flow row that keeps NSButton identities intact across resizes.
+struct AdaptiveWrappingRowLayout: Layout {
+    var horizontalSpacing: CGFloat = 10
+    var verticalSpacing: CGFloat = 8
+    var pinLastToTrailingWhenSingleRow: Bool = false
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) -> CGSize {
+        guard !subviews.isEmpty else { return .zero }
+        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        if proposal.width == 0 {
+            let maxW = sizes.map(\.width).max() ?? 0
+            let totalH = sizes.map(\.height).reduce(0, +)
+                + verticalSpacing * CGFloat(max(0, sizes.count - 1))
+            return CGSize(width: maxW, height: totalH)
+        }
+        guard let width = proposal.width, width.isFinite else {
+            let totalW = sizes.map(\.width).reduce(0, +)
+                + horizontalSpacing * CGFloat(max(0, sizes.count - 1))
+            let maxH = sizes.map(\.height).max() ?? 0
+            return CGSize(width: totalW, height: maxH)
+        }
+        let rows = computeRows(availableWidth: width, sizes: sizes)
+        let totalH = rows.reduce(CGFloat.zero) { acc, row in
+            let rowH = row.map(\.size.height).max() ?? 0
+            return acc + rowH
+        } + verticalSpacing * CGFloat(max(0, rows.count - 1))
+        return CGSize(width: width, height: totalH)
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        guard !subviews.isEmpty else { return }
+        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        let rows = computeRows(availableWidth: bounds.width, sizes: sizes)
+
+        var y = bounds.minY
+        let shouldPinLast = rows.count == 1 && pinLastToTrailingWhenSingleRow && subviews.count > 1
+
+        for row in rows {
+            let rowHeight = row.map(\.size.height).max() ?? 0
+            var x = bounds.minX
+            for (posInRow, item) in row.enumerated() {
+                let isPinnedTrailing = shouldPinLast && posInRow == row.count - 1
+                let itemWidth = min(item.size.width, bounds.width)
+                let placeX = isPinnedTrailing ? max(bounds.minX, bounds.maxX - itemWidth) : x
+                let placeY = y + (rowHeight - item.size.height) * 0.5
+                subviews[item.index].place(
+                    at: CGPoint(x: placeX, y: placeY),
+                    anchor: .topLeading,
+                    proposal: ProposedViewSize(width: itemWidth, height: item.size.height)
+                )
+                x += itemWidth + horizontalSpacing
+            }
+            y += rowHeight + verticalSpacing
+        }
+    }
+
+    private func computeRows(
+        availableWidth: CGFloat,
+        sizes: [CGSize]
+    ) -> [[(index: Int, size: CGSize)]] {
+        var rows: [[(index: Int, size: CGSize)]] = []
+        var currentRow: [(index: Int, size: CGSize)] = []
+        var currentWidth: CGFloat = 0
+
+        for (idx, size) in sizes.enumerated() {
+            let effectiveWidth = min(size.width, availableWidth)
+            let neededWidth = currentRow.isEmpty ? effectiveWidth : (currentWidth + horizontalSpacing + effectiveWidth)
+            if !currentRow.isEmpty && neededWidth > availableWidth {
+                rows.append(currentRow)
+                currentRow = [(index: idx, size: size)]
+                currentWidth = effectiveWidth
+            } else {
+                currentRow.append((index: idx, size: size))
+                currentWidth = neededWidth
+            }
+        }
+        if !currentRow.isEmpty {
+            rows.append(currentRow)
+        }
+        return rows
     }
 }

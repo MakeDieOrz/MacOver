@@ -71,14 +71,14 @@ struct ConfigPluginsPane: View {
                     Task {
                         if app.isRunning {
                             await app.restart(safeModeOneShot: true)
-                        } else if !app.isStarting {
+                        } else if !app.isBusy {
                             await app.launch(safeModeOneShot: true)
                         }
                     }
                 } label: {
                     Label("action.launchSafeMode", systemImage: "shield.lefthalf.filled")
                 }
-                .disabled(!app.isRunning && app.isStarting)
+                .disabled(app.isBusy)
             }
 
             Section("PlayTools") {
@@ -204,6 +204,7 @@ struct ConfigPluginsPane: View {
             }
             let updated = (try? PlayTools.installedInExec(atURL: executable)) ?? currentlyInstalled
             await MainActor.run {
+                app.hasPlayToolsCached = updated
                 hasPlayTools = updated
                 appsVM.fetchApps()
             }

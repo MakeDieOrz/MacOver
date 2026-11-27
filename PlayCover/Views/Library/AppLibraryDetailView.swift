@@ -48,7 +48,6 @@ struct AppLibraryDetailView: View {
                             ForEach(appsVM.filteredApps) { app in
                                 AppCardView(
                                     app: app,
-                                    settings: app.settings,
                                     isSelected: navState.selectedAppID == app.id,
                                     onClearPreferences: { clearPrefsApp = $0 },
                                     onClearPlayChain: { clearPlayChainApp = $0 }
@@ -57,6 +56,7 @@ struct AppLibraryDetailView: View {
                             }
                         }
                         .padding(18)
+                        .animation(.snappy(duration: 0.24), value: appsVM.filteredApps.map(\.id))
                     }
                     .scrollEdgeEffectStyle(.soft, for: .top)
                     .contentShape(Rectangle())

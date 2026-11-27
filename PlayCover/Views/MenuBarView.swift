@@ -190,8 +190,14 @@ struct PlayCoverMenuBarExtraContent: View {
             Divider()
             Section("sidebar.section.running") {
                 ForEach(runningApps) { app in
-                    Button("\(app.name) — \(NSLocalizedString("action.quit", comment: ""))") {
-                        Task { await app.terminate() }
+                    Menu(app.name) {
+                        Button("action.bringToFront") {
+                            _ = app.activateRunningApplication()
+                        }
+                        Button("action.quit") {
+                            Task { await app.terminate() }
+                        }
+                        .disabled(app.isTerminating)
                     }
                 }
             }
@@ -205,20 +211,22 @@ struct PlayCoverMenuBarExtraContent: View {
                         Task {
                             if app.isRunning {
                                 await app.terminate()
-                            } else if !app.isStarting {
+                            } else if !app.isBusy {
                                 await app.launch()
                             }
                         }
                     }
+                    .disabled(app.isBusy)
                     Button("action.launchSafeMode") {
                         Task {
                             if app.isRunning {
                                 await app.restart(safeModeOneShot: true)
-                            } else if !app.isStarting {
+                            } else if !app.isBusy {
                                 await app.launch(safeModeOneShot: true)
                             }
                         }
                     }
+                    .disabled(app.isBusy)
                 }
             }
         }

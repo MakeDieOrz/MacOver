@@ -302,6 +302,7 @@ private enum SnapshotSupport {
         ]
     }
 
+    @MainActor
     static func configureDemoApps(_ apps: [PlayApp]) {
         apps[0].settings.update { data in
             data.resolution = 2; data.aspectRatio = 1

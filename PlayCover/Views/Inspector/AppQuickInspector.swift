@@ -52,7 +52,8 @@ struct AppQuickInspector: View {
 
     @State private var keymapURLs: [URL] = []
     @State private var defaultKeymapURL: URL?
-    @State private var hasPlayTools = true
+
+    private var hasPlayTools: Bool { app.hasPlayToolsCached }
 
     private let presetColumns = [
         GridItem(.flexible(), spacing: 8),
@@ -121,11 +122,6 @@ struct AppQuickInspector: View {
             app.keymapping.reloadKeymapCache()
             keymapURLs = app.keymapping.keymapConfig.keymapOrder
             defaultKeymapURL = app.keymapping.keymapConfig.defaultKm
-            let executable = app.executable
-            let installed = await Task.detached(priority: .background) {
-                (try? PlayTools.installedInExec(atURL: executable)) ?? true
-            }.value
-            hasPlayTools = installed
         }
     }
 
@@ -140,8 +136,17 @@ struct AppQuickInspector: View {
                     Text(app.info.bundleVersion)
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
-                    if app.isRunning {
-                        AppStatusPill(kind: .running, compact: true)
+                    switch app.runState {
+                    case .preparing(let stage):
+                        AppStatusPill(kind: .preparing(stage), compact: true)
+                    case .launching:
+                        AppStatusPill(kind: .launching, compact: true)
+                    case .running(let isActive):
+                        AppStatusPill(kind: isActive ? .runningActive : .running, compact: true)
+                    case .terminating:
+                        AppStatusPill(kind: .terminating, compact: true)
+                    case .idle:
+                        EmptyView()
                     }
                     if settings.settings.strictEmulationMode {
                         AppStatusPill(kind: .strict, compact: true)
@@ -185,37 +190,58 @@ struct AppQuickInspector: View {
                 Task { await app.terminate() }
             } else {
                 Task(priority: .userInitiated) {
-                    if !app.isStarting {
+                    if !app.isBusy {
                         await app.launch()
                     }
                 }
             }
         } label: {
             Group {
-                if !app.isRunning && app.isStarting {
+                switch app.runState {
+                case .preparing(let stage):
                     HStack(spacing: 6) {
                         ProgressView()
                             .controlSize(.small)
                             .tint(.white)
-                        Text("action.launch")
+                        Text(LocalizedStringKey(stage.localizationKey))
                     }
-                } else if app.isRunning {
+                case .launching:
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(.white)
+                        Text("app.state.launching")
+                    }
+                case .terminating:
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(.white)
+                        Text("app.state.terminating")
+                    }
+                case .running:
                     Label("action.quit", systemImage: "stop.fill")
-                } else {
+                case .idle:
                     Label("action.launch", systemImage: "play.fill")
                 }
             }
             .frame(maxWidth: .infinity)
         }
         .buttonStyle(InspectorProminentCapsuleStyle(
-            tint: app.isRunning ? .red : .accentColor,
+            tint: (app.isRunning || app.isTerminating) ? .red : .accentColor,
             height: actionRowHeight
         ))
-        .disabled(!app.isRunning && app.isStarting)
+        .disabled(app.isBusy)
     }
 
     private var moreActionsMenu: some View {
         Menu {
+            if app.isRunning {
+                Button("action.bringToFront", systemImage: "arrow.up.forward.app") {
+                    _ = app.activateRunningApplication()
+                }
+            }
+
             Button(
                 app.isRunning ? "action.restartSafeMode" : "action.launchSafeMode",
                 systemImage: "shield.lefthalf.filled"
@@ -223,11 +249,12 @@ struct AppQuickInspector: View {
                 Task {
                     if app.isRunning {
                         await app.restart(safeModeOneShot: true)
-                    } else if !app.isStarting {
+                    } else if !app.isBusy {
                         await app.launch(safeModeOneShot: true)
                     }
                 }
             }
+            .disabled(app.isBusy)
 
             Divider()
 

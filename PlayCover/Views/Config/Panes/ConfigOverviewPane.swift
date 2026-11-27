@@ -147,70 +147,53 @@ struct ConfigOverviewPane: View {
     }
 
     private var quickActionsBar: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 10) {
-                safeModeButton(expanded: false)
-                    .fixedSize()
-                openCacheButton(expanded: false)
-                    .fixedSize()
-                showInFinderButton(expanded: false)
-                    .fixedSize()
-                Spacer(minLength: 8)
-                resetButton(expanded: false)
-                    .fixedSize()
-            }
-
-            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
-                GridRow {
-                    safeModeButton(expanded: true)
-                    openCacheButton(expanded: true)
-                }
-                GridRow {
-                    showInFinderButton(expanded: true)
-                    resetButton(expanded: true)
-                }
-            }
+        AdaptiveWrappingRowLayout(
+            horizontalSpacing: 10,
+            verticalSpacing: 8,
+            pinLastToTrailingWhenSingleRow: true
+        ) {
+            safeModeButton()
+            openCacheButton()
+            showInFinderButton()
+            resetButton()
         }
     }
 
-    private func safeModeButton(expanded: Bool) -> some View {
+    private func safeModeButton() -> some View {
         Button {
             Task {
                 if app.isRunning {
                     await app.restart(safeModeOneShot: true)
-                } else if !app.isStarting {
+                } else if !app.isBusy {
                     await app.launch(safeModeOneShot: true)
                 }
             }
         } label: {
             Label("action.launchSafeMode", systemImage: "shield.lefthalf.filled")
                 .lineLimit(1)
-                .frame(maxWidth: expanded ? .infinity : nil)
         }
-        .disabled(!app.isRunning && app.isStarting)
+        .disabled(app.isBusy)
     }
 
-    private func openCacheButton(expanded: Bool) -> some View {
+    private func openCacheButton() -> some View {
         Button {
             app.openAppCache()
         } label: {
             Text("playapp.openCache")
                 .lineLimit(1)
-                .frame(maxWidth: expanded ? .infinity : nil)
         }
     }
 
-    private func showInFinderButton(expanded: Bool) -> some View {
+    private func showInFinderButton() -> some View {
         Button {
             app.showInFinder()
         } label: {
             Text("playapp.showInFinder")
                 .lineLimit(1)
-                .frame(maxWidth: expanded ? .infinity : nil)
         }
     }
 
-    private func resetButton(expanded: Bool) -> some View {
+    private func resetButton() -> some View {
         Button(role: .destructive) {
             if let onRequestReset {
                 onRequestReset()
@@ -220,7 +203,6 @@ struct ConfigOverviewPane: View {
         } label: {
             Text("settings.resetSettings")
                 .lineLimit(1)
-                .frame(maxWidth: expanded ? .infinity : nil)
         }
     }
 
@@ -259,7 +241,6 @@ struct ConfigOverviewPane: View {
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
-            .backgroundExtensionEffect()
         }
     }
 }

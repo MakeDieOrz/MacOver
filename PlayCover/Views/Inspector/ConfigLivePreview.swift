@@ -143,10 +143,6 @@ struct ConfigLivePreview: View {
     }
 
     private var windowSchematic: some View {
-        let hostAspect: CGFloat = {
-            let frame = NSScreen.main?.frame ?? CGRect(x: 0, y: 0, width: 16, height: 10)
-            return max(frame.width / max(frame.height, 1), 1.0)
-        }()
         let clampedAppAspect = min(max(targetAspectRatio, 0.45), 2.5)
 
         return ZStack {
@@ -156,7 +152,6 @@ struct ConfigLivePreview: View {
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .strokeBorder(Color.secondary.opacity(0.25), lineWidth: 1)
                 )
-                .aspectRatio(hostAspect, contentMode: .fit)
 
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(Color.accentColor.opacity(0.20))
@@ -171,6 +166,7 @@ struct ConfigLivePreview: View {
                 .padding(14)
         }
         .frame(maxWidth: .infinity)
+        .frame(height: 148)
     }
 
     private var pendingRestartSection: some View {
