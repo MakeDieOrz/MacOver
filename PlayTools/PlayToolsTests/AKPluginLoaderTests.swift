@@ -1,23 +1,20 @@
 import Foundation
-import XCTest
+import Testing
 
-final class AKPluginLoaderTests: XCTestCase {
-    private var tempDir: URL?
+extension PlayToolsGlobalStateScope {
+@Suite(.serialized)
+final class AKPluginLoaderTests {
+    private let tempDir: URL
 
-    override func setUpWithError() throws {
-        try super.setUpWithError()
+    init() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("AKPluginLoaderTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         tempDir = dir
     }
 
-    override func tearDownWithError() throws {
-        if let dir = tempDir {
-            try? FileManager.default.removeItem(at: dir)
-        }
-        tempDir = nil
-        try super.tearDownWithError()
+    deinit {
+        try? FileManager.default.removeItem(at: tempDir)
     }
 
     private func buildBundle(
@@ -26,14 +23,13 @@ final class AKPluginLoaderTests: XCTestCase {
         principalClassName: String?,
         objcSource: String?
     ) throws -> URL {
-        let dir = try XCTUnwrap(tempDir)
-        let bundleURL = dir.appendingPathComponent("\(bundleName).bundle", isDirectory: true)
+        let bundleURL = tempDir.appendingPathComponent("\(bundleName).bundle", isDirectory: true)
         let contentsURL = bundleURL.appendingPathComponent("Contents", isDirectory: true)
         let macOSURL = contentsURL.appendingPathComponent("MacOS", isDirectory: true)
         try FileManager.default.createDirectory(at: macOSURL, withIntermediateDirectories: true)
 
         if let executableName, let objcSource {
-            let srcURL = dir.appendingPathComponent("\(bundleName).m")
+            let srcURL = tempDir.appendingPathComponent("\(bundleName).m")
             try objcSource.write(to: srcURL, atomically: true, encoding: .utf8)
             let execURL = macOSURL.appendingPathComponent(executableName)
 
@@ -55,7 +51,7 @@ final class AKPluginLoaderTests: XCTestCase {
             if process.terminationStatus != 0 {
                 let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
                 let errMsg = String(data: errData, encoding: .utf8) ?? ""
-                XCTFail("clang failed (\(process.terminationStatus)): \(errMsg)")
+                Issue.record("clang failed (\(process.terminationStatus)): \(errMsg)")
             }
         }
 
@@ -74,7 +70,8 @@ final class AKPluginLoaderTests: XCTestCase {
         return bundleURL
     }
 
-    func testLoadPluginValidNonConformingMissingPrincipalAndMissingBundle() throws {
+    @Test
+    func loadPluginValidNonConformingMissingPrincipalAndMissingBundle() throws {
         let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "")
         let goodClass = "GoodAKPlugin_\(suffix)"
         let badClass = "BadAKPlugin_\(suffix)"
@@ -136,8 +133,7 @@ final class AKPluginLoaderTests: XCTestCase {
         @end
         """
 
-        let dir = try XCTUnwrap(tempDir)
-        let missingURL = dir.appendingPathComponent("Missing.bundle")
+        let missingURL = tempDir.appendingPathComponent("Missing.bundle")
         let missingPrincipalURL = try buildBundle(
             named: "NoPrincipal",
             executableName: nil,
@@ -157,23 +153,24 @@ final class AKPluginLoaderTests: XCTestCase {
             objcSource: goodSource
         )
 
-        XCTAssertNil(AKInterface.loadPlugin(from: [nil, missingURL]))
-        XCTAssertNil(AKInterface.loadPlugin(from: [missingPrincipalURL]))
-        XCTAssertNil(AKInterface.loadPlugin(from: [nonConformingURL]))
+        #expect(AKInterface.loadPlugin(from: [nil, missingURL]) == nil)
+        #expect(AKInterface.loadPlugin(from: [missingPrincipalURL]) == nil)
+        #expect(AKInterface.loadPlugin(from: [nonConformingURL]) == nil)
 
-        let loaded = try XCTUnwrap(AKInterface.loadPlugin(from: [missingURL, nonConformingURL, validURL]))
-        XCTAssertEqual(loaded.screenCount, 2)
-        XCTAssertEqual(loaded.mousePoint, CGPoint(x: 12, y: 34))
-        XCTAssertEqual(loaded.windowFrame, CGRect(x: 0, y: 0, width: 800, height: 600))
-        XCTAssertTrue(loaded.isMainScreenEqualToFirst)
-        XCTAssertFalse(loaded.isFullscreen)
-        XCTAssertEqual(loaded.urlForApplicationWithBundleIdentifier("com.test")?.path, "/Applications/Test.app")
+        let loaded = try #require(AKInterface.loadPlugin(from: [missingURL, nonConformingURL, validURL]))
+        #expect(loaded.screenCount == 2)
+        #expect(loaded.mousePoint == CGPoint(x: 12, y: 34))
+        #expect(loaded.windowFrame == CGRect(x: 0, y: 0, width: 800, height: 600))
+        #expect(loaded.isMainScreenEqualToFirst)
+        #expect(!loaded.isFullscreen)
+        #expect(loaded.urlForApplicationWithBundleIdentifier("com.test")?.path == "/Applications/Test.app")
 
         AKInterface.initialize()
-        XCTAssertNil(AKInterface.shared)
+        #expect(AKInterface.shared == nil)
     }
 
-    func testSequoiaOptionalGeometryAndOrientationBridgeMethods() throws {
+    @Test
+    func sequoiaOptionalGeometryAndOrientationBridgeMethods() throws {
         let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "")
         let seqClass = "SequoiaAKPlugin_\(suffix)"
         let source = """
@@ -257,15 +254,16 @@ final class AKPluginLoaderTests: XCTestCase {
             principalClassName: seqClass,
             objcSource: source
         )
-        let loaded = try XCTUnwrap(AKInterface.loadPlugin(from: [seqURL]))
-        XCTAssertEqual(loaded.isSequoiaOrNewer, true)
+        let loaded = try #require(AKInterface.loadPlugin(from: [seqURL]))
+        #expect(loaded.isSequoiaOrNewer == true)
 
         var observedFrames: [CGRect] = []
         loaded.setupWindowGeometryChanged? { observedFrames.append($0) }
         loaded.setWindowContentSize?(CGSize(width: 1280, height: 720))
-        XCTAssertEqual(loaded.windowFrame.size, CGSize(width: 1280, height: 720))
+        #expect(loaded.windowFrame.size == CGSize(width: 1280, height: 720))
         loaded.setWindowOrientation?(portrait: true, targetSize: CGSize(width: 1920, height: 1080))
-        XCTAssertEqual(loaded.windowFrame.size, CGSize(width: 1080, height: 1920))
-        XCTAssertEqual(observedFrames.count, 2)
+        #expect(loaded.windowFrame.size == CGSize(width: 1080, height: 1920))
+        #expect(observedFrames.count == 2)
     }
+}
 }

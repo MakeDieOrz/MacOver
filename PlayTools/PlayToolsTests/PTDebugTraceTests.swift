@@ -1,15 +1,18 @@
 import Darwin
-import XCTest
+import Foundation
+import Testing
 
-final class PTDebugTraceTests: XCTestCase {
-    override func tearDownWithError() throws {
+extension PlayToolsGlobalStateScope {
+@Suite(.serialized)
+final class PTDebugTraceTests {
+    deinit {
         pt_debug_trace_reset_for_testing(-1)
-        try super.tearDownWithError()
     }
 
-    func testDebugTraceDisabledEmitsNothingAndPreservesErrno() throws {
+    @Test
+    func debugTraceDisabledEmitsNothingAndPreservesErrno() {
         var fds: [Int32] = [-1, -1]
-        XCTAssertEqual(Darwin.pipe(&fds), 0)
+        #expect(Darwin.pipe(&fds) == 0)
         defer {
             Darwin.close(fds[0])
             Darwin.close(fds[1])
@@ -20,19 +23,20 @@ final class PTDebugTraceTests: XCTestCase {
 
         errno = ENOENT
         pt_debug_trace_emit_cstr("test", "testDisabled", "trace_should_not_appear")
-        XCTAssertEqual(errno, ENOENT)
+        #expect(errno == ENOENT)
 
         Darwin.close(fds[1])
         fds[1] = -1
 
         var buf = [UInt8](repeating: 0, count: 64)
         let n = Darwin.read(fds[0], &buf, buf.count)
-        XCTAssertEqual(n, 0)
+        #expect(n == 0)
     }
 
-    func testDebugTraceEnabledFormatsOutputPreservesErrnoAndTruncatesSafely() throws {
+    @Test
+    func debugTraceEnabledFormatsOutputPreservesErrnoAndTruncatesSafely() throws {
         var fds: [Int32] = [-1, -1]
-        XCTAssertEqual(Darwin.pipe(&fds), 0)
+        #expect(Darwin.pipe(&fds) == 0)
         defer {
             if fds[0] >= 0 { Darwin.close(fds[0]) }
             if fds[1] >= 0 { Darwin.close(fds[1]) }
@@ -43,7 +47,7 @@ final class PTDebugTraceTests: XCTestCase {
 
         errno = EACCES
         pt_debug_trace_emit_cstr("test", "testEnabled", "short_event")
-        XCTAssertEqual(errno, EACCES)
+        #expect(errno == EACCES)
 
         let hugePayload = String(repeating: "X", count: 2048)
         pt_debug_trace_emit_cstr("test", "testEnabled", hugePayload)
@@ -59,12 +63,13 @@ final class PTDebugTraceTests: XCTestCase {
             collected.append(contentsOf: chunk.prefix(n))
         }
 
-        let text = try XCTUnwrap(String(data: collected, encoding: .utf8))
+        let text = try #require(String(data: collected, encoding: .utf8))
         let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
-        XCTAssertEqual(lines.count, 2)
-        XCTAssertTrue(lines[0].hasPrefix("[PlayTools] [test]"))
-        XCTAssertTrue(lines[0].contains("short_event"))
-        XCTAssertTrue(lines[1].hasPrefix("[PlayTools] [test]"))
-        XCTAssertLessThanOrEqual(lines[1].utf8.count, 511)
+        #expect(lines.count == 2)
+        #expect(lines[0].hasPrefix("[PlayTools] [test]"))
+        #expect(lines[0].contains("short_event"))
+        #expect(lines[1].hasPrefix("[PlayTools] [test]"))
+        #expect(lines[1].utf8.count <= 511)
     }
+}
 }

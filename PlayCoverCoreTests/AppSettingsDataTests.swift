@@ -2,25 +2,27 @@ import AppKit
 import Foundation
 import PlayCoverCore
 import Synchronization
-import XCTest
+import Testing
 @testable import PlayCover
 
-final class AppSettingsDataTests: XCTestCase {
-    func testDefaultValuesAndCodableRoundTrip() throws {
+@Suite
+struct AppSettingsDataTests {
+    @Test
+    func defaultValuesAndCodableRoundTrip() throws {
         var original = AppSettingsData()
-        XCTAssertEqual(original.bundleIdentifier, "")
-        XCTAssertEqual(original.sensitivity, 50)
-        XCTAssertEqual(original.windowWidth, 1920)
-        XCTAssertEqual(original.windowHeight, 1080)
-        XCTAssertEqual(original.customScaler, 2.0)
-        XCTAssertEqual(original.iosDeviceModel, "iPad13,8")
-        XCTAssertEqual(original.notch, NSScreen.hasNotch())
-        XCTAssertTrue(original.playChain)
-        XCTAssertTrue(original.networkBlockMock200)
-        XCTAssertFalse(original.enableNetworkRules)
-        XCTAssertFalse(original.strictEmulationMode)
-        XCTAssertEqual(original.strictViewportOrientation, .landscape)
-        XCTAssertEqual(original.strictViewportScaleMode, .fitScreen)
+        #expect(original.bundleIdentifier == "")
+        #expect(original.sensitivity == 50)
+        #expect(original.windowWidth == 1920)
+        #expect(original.windowHeight == 1080)
+        #expect(original.customScaler == 2.0)
+        #expect(original.iosDeviceModel == "iPad13,8")
+        #expect(!original.notch)
+        #expect(original.playChain)
+        #expect(original.networkBlockMock200)
+        #expect(!original.enableNetworkRules)
+        #expect(!original.strictEmulationMode)
+        #expect(original.strictViewportOrientation == .landscape)
+        #expect(original.strictViewportScaleMode == .fitScreen)
 
         original.bundleIdentifier = "com.example.game"
         original.sensitivity = 72.5
@@ -39,14 +41,15 @@ final class AppSettingsDataTests: XCTestCase {
         plistEncoder.outputFormat = .xml
         let plistData = try plistEncoder.encode(original)
         let decodedPlist = try PropertyListDecoder().decode(AppSettingsData.self, from: plistData)
-        XCTAssertEqual(decodedPlist, original)
+        #expect(decodedPlist == original)
 
         let jsonData = try JSONEncoder().encode(original)
         let decodedJSON = try JSONDecoder().decode(AppSettingsData.self, from: jsonData)
-        XCTAssertEqual(decodedJSON, original)
+        #expect(decodedJSON == original)
     }
 
-    func testTolerantDecodingForLegacyAndMixedNumericTypes() throws {
+    @Test
+    func tolerantDecodingForLegacyAndMixedNumericTypes() throws {
         let json = """
         {
           "bundleIdentifier": "com.legacy.app",
@@ -58,42 +61,44 @@ final class AppSettingsDataTests: XCTestCase {
         """
         let data = Data(json.utf8)
         let decoded = try JSONDecoder().decode(AppSettingsData.self, from: data)
-        XCTAssertEqual(decoded.bundleIdentifier, "com.legacy.app")
-        XCTAssertEqual(decoded.sensitivity, 65.0)
-        XCTAssertEqual(decoded.customScaler, 3.0)
-        XCTAssertEqual(decoded.keymappingDisabledAt, 12.5)
-        XCTAssertFalse(decoded.playChain)
-        XCTAssertEqual(decoded.notch, NSScreen.hasNotch())
-        XCTAssertTrue(decoded.networkBlockMock200)
-        XCTAssertEqual(decoded.blockedURLPatterns, [])
-        XCTAssertFalse(decoded.strictEmulationMode)
-        XCTAssertEqual(decoded.strictViewportOrientation, .landscape)
-        XCTAssertEqual(decoded.strictViewportScaleMode, .fitScreen)
+        #expect(decoded.bundleIdentifier == "com.legacy.app")
+        #expect(decoded.sensitivity == 65.0)
+        #expect(decoded.customScaler == 3.0)
+        #expect(decoded.keymappingDisabledAt == 12.5)
+        #expect(!decoded.playChain)
+        #expect(!decoded.notch)
+        #expect(decoded.networkBlockMock200)
+        #expect(decoded.blockedURLPatterns == [])
+        #expect(!decoded.strictEmulationMode)
+        #expect(decoded.strictViewportOrientation == .landscape)
+        #expect(decoded.strictViewportScaleMode == .fitScreen)
 
         let emptyDecoded = try JSONDecoder().decode(AppSettingsData.self, from: Data("{}".utf8))
-        XCTAssertEqual(emptyDecoded, AppSettingsData())
+        #expect(emptyDecoded == AppSettingsData())
     }
 
-    func testDiscordActivityDefaultsAndPartialDecoding() throws {
+    @Test
+    func discordActivityDefaultsAndPartialDecoding() throws {
         let defaults = DiscordActivity()
-        XCTAssertFalse(defaults.enable)
-        XCTAssertEqual(defaults.applicationID, "")
-        XCTAssertEqual(defaults.details, "")
-        XCTAssertEqual(defaults.state, "")
-        XCTAssertEqual(defaults.image, "")
+        #expect(!defaults.enable)
+        #expect(defaults.applicationID == "")
+        #expect(defaults.details == "")
+        #expect(defaults.state == "")
+        #expect(defaults.image == "")
 
         let partial = try JSONDecoder().decode(
             DiscordActivity.self,
             from: Data(#"{"enable":true,"details":"Boss Fight"}"#.utf8)
         )
-        XCTAssertTrue(partial.enable)
-        XCTAssertEqual(partial.applicationID, "")
-        XCTAssertEqual(partial.details, "Boss Fight")
-        XCTAssertEqual(partial.state, "")
-        XCTAssertEqual(partial.image, "")
+        #expect(partial.enable)
+        #expect(partial.applicationID == "")
+        #expect(partial.details == "Boss Fight")
+        #expect(partial.state == "")
+        #expect(partial.image == "")
     }
 
-    func testMalformedFieldsFallbackAndExtremeNumericBounds() throws {
+    @Test
+    func malformedFieldsFallbackAndExtremeNumericBounds() throws {
         let malformedJSON = """
         {
           "bundleIdentifier": 999,
@@ -111,21 +116,22 @@ final class AppSettingsDataTests: XCTestCase {
         }
         """
         let decoded = try JSONDecoder().decode(AppSettingsData.self, from: Data(malformedJSON.utf8))
-        XCTAssertEqual(decoded.bundleIdentifier, "")
-        XCTAssertEqual(decoded.sensitivity, 50)
-        XCTAssertEqual(decoded.customScaler, 2.0)
-        XCTAssertEqual(decoded.discordActivity, DiscordActivity())
-        XCTAssertEqual(decoded.blockedURLPatterns, [])
-        XCTAssertEqual(decoded.windowWidth, 1920)
-        XCTAssertEqual(decoded.windowHeight, -100)
-        XCTAssertEqual(decoded.keymappingDisabledAt, 999999.5)
-        XCTAssertEqual(decoded.version, "99.0.0-future")
-        XCTAssertFalse(decoded.strictEmulationMode)
-        XCTAssertEqual(decoded.strictViewportOrientation, .landscape)
-        XCTAssertEqual(decoded.strictViewportScaleMode, .fitScreen)
+        #expect(decoded.bundleIdentifier == "")
+        #expect(decoded.sensitivity == 50)
+        #expect(decoded.customScaler == 2.0)
+        #expect(decoded.discordActivity == DiscordActivity())
+        #expect(decoded.blockedURLPatterns == [])
+        #expect(decoded.windowWidth == 1920)
+        #expect(decoded.windowHeight == -100)
+        #expect(decoded.keymappingDisabledAt == 999999.5)
+        #expect(decoded.version == "99.0.0-future")
+        #expect(!decoded.strictEmulationMode)
+        #expect(decoded.strictViewportOrientation == .landscape)
+        #expect(decoded.strictViewportScaleMode == .fitScreen)
     }
 
-    func testStrictEmulationDerivedSettingsAreNonDestructive() {
+    @Test
+    func strictEmulationDerivedSettingsAreNonDestructive() {
         var data = AppSettingsData()
         data.bypass = false
         data.interceptInlineSyscalls = false
@@ -146,80 +152,79 @@ final class AppSettingsDataTests: XCTestCase {
         data.strictViewportScaleMode = .native1x
 
         // Stored non-strict values remain intact.
-        XCTAssertFalse(data.bypass)
-        XCTAssertFalse(data.interceptInlineSyscalls)
-        XCTAssertFalse(data.rootWorkDir)
-        XCTAssertTrue(data.metalHUD)
-        XCTAssertTrue(data.playChainDebugging)
-        XCTAssertTrue(data.notch)
-        XCTAssertEqual(data.resolution, 6)
-        XCTAssertEqual(data.windowWidth, 1920)
-        XCTAssertEqual(data.windowHeight, 1080)
-        XCTAssertEqual(data.customScaler, 1.25)
-        XCTAssertEqual(data.windowCompatibility, .invertedMetrics)
-        XCTAssertEqual(data.displayRotation, 2)
+        #expect(!data.bypass)
+        #expect(!data.interceptInlineSyscalls)
+        #expect(!data.rootWorkDir)
+        #expect(data.metalHUD)
+        #expect(data.playChainDebugging)
+        #expect(data.notch)
+        #expect(data.resolution == 6)
+        #expect(data.windowWidth == 1920)
+        #expect(data.windowHeight == 1080)
+        #expect(data.customScaler == 1.25)
+        #expect(data.windowCompatibility == .invertedMetrics)
+        #expect(data.displayRotation == 2)
 
         // Effective strict values enforce hardware & security parity.
-        XCTAssertTrue(data.effectiveBypass)
-        XCTAssertTrue(data.effectiveInterceptInlineSyscalls)
-        XCTAssertTrue(data.effectiveRootWorkDir)
-        XCTAssertFalse(data.effectiveMetalHUD)
-        XCTAssertFalse(data.effectivePlayChainDebugging)
-        XCTAssertFalse(data.effectiveNotch)
-        XCTAssertFalse(data.effectiveHasIntrospection(true))
-        XCTAssertFalse(data.effectiveOpenWithLLDB(true))
-        XCTAssertEqual(data.effectiveResolution, 5)
-        XCTAssertEqual(data.effectiveWindowCompatibility, .standard)
-        XCTAssertEqual(data.effectiveCustomScaler, 2.0)
-        XCTAssertEqual(data.effectiveWindowWidth, 1032)
-        XCTAssertEqual(data.effectiveWindowHeight, 1376)
-        XCTAssertEqual(data.effectiveDisplayRotation, 1)
-        XCTAssertEqual(
-            data.activeTroubleshootingCount(hasIntrospection: true, hasIosFrameworks: false, openWithLLDB: true),
-            0
+        #expect(data.effectiveBypass)
+        #expect(data.effectiveInterceptInlineSyscalls)
+        #expect(data.effectiveRootWorkDir)
+        #expect(!data.effectiveMetalHUD)
+        #expect(!data.effectivePlayChainDebugging)
+        #expect(!data.effectiveNotch)
+        #expect(!data.effectiveHasIntrospection(true))
+        #expect(!data.effectiveOpenWithLLDB(true))
+        #expect(data.effectiveResolution == 5)
+        #expect(data.effectiveWindowCompatibility == .standard)
+        #expect(data.effectiveCustomScaler == 2.0)
+        #expect(data.effectiveWindowWidth == 1032)
+        #expect(data.effectiveWindowHeight == 1376)
+        #expect(data.effectiveDisplayRotation == 1)
+        #expect(
+            data.activeTroubleshootingCount(hasIntrospection: true, hasIosFrameworks: false, openWithLLDB: true) == 0
         )
-        XCTAssertFalse(PlayAppSettingsPreset.balanced.matches(data))
+        #expect(!PlayAppSettingsPreset.balanced.matches(data))
 
         data.strictViewportOrientation = .landscape
-        XCTAssertEqual(data.effectiveWindowWidth, 1376)
-        XCTAssertEqual(data.effectiveWindowHeight, 1032)
-        XCTAssertEqual(data.effectiveDisplayRotation, 0)
+        #expect(data.effectiveWindowWidth == 1376)
+        #expect(data.effectiveWindowHeight == 1032)
+        #expect(data.effectiveDisplayRotation == 0)
 
         data.iosDeviceModel = "iPhone18,2"
         data.strictViewportOrientation = .portrait
-        XCTAssertEqual(data.effectiveCustomScaler, 3.0)
-        XCTAssertEqual(data.effectiveWindowWidth, 440)
-        XCTAssertEqual(data.effectiveWindowHeight, 956)
+        #expect(data.effectiveCustomScaler == 3.0)
+        #expect(data.effectiveWindowWidth == 440)
+        #expect(data.effectiveWindowHeight == 956)
         let gib: UInt64 = 1_073_741_824
         let strictBudget = data.effectivePixelBudget(physicalMemoryBytes: 8 * gib)
-        XCTAssertEqual(strictBudget.renderedWidth, 1320)
-        XCTAssertEqual(strictBudget.renderedHeight, 2868)
-        XCTAssertEqual(strictBudget.weightedPixels, 3_785_760, accuracy: 0.5)
-        XCTAssertEqual(strictBudget.level, .caution)
+        #expect(strictBudget.renderedWidth == 1320)
+        #expect(strictBudget.renderedHeight == 2868)
+        #expect(abs(strictBudget.weightedPixels - 3_785_760) <= 0.5)
+        #expect(strictBudget.level == .caution)
 
         // Disabling strict mode restores effective accessors immediately to stored values.
         data.strictEmulationMode = false
-        XCTAssertFalse(data.effectiveBypass)
-        XCTAssertFalse(data.effectiveInterceptInlineSyscalls)
-        XCTAssertFalse(data.effectiveRootWorkDir)
-        XCTAssertTrue(data.effectiveMetalHUD)
-        XCTAssertTrue(data.effectivePlayChainDebugging)
-        XCTAssertTrue(data.effectiveNotch)
-        XCTAssertTrue(data.effectiveHasIntrospection(true))
-        XCTAssertTrue(data.effectiveOpenWithLLDB(true))
-        XCTAssertEqual(data.effectiveResolution, 6)
-        XCTAssertEqual(data.effectiveWindowWidth, 1920)
-        XCTAssertEqual(data.effectiveWindowHeight, 1080)
-        XCTAssertEqual(data.effectiveCustomScaler, 1.25)
-        XCTAssertEqual(data.effectiveWindowCompatibility, .invertedMetrics)
-        XCTAssertEqual(data.effectiveDisplayRotation, 2)
-        XCTAssertEqual(
-            data.activeTroubleshootingCount(hasIntrospection: true, hasIosFrameworks: false, openWithLLDB: true),
-            5
+        #expect(!data.effectiveBypass)
+        #expect(!data.effectiveInterceptInlineSyscalls)
+        #expect(!data.effectiveRootWorkDir)
+        #expect(data.effectiveMetalHUD)
+        #expect(data.effectivePlayChainDebugging)
+        #expect(data.effectiveNotch)
+        #expect(data.effectiveHasIntrospection(true))
+        #expect(data.effectiveOpenWithLLDB(true))
+        #expect(data.effectiveResolution == 6)
+        #expect(data.effectiveWindowWidth == 1920)
+        #expect(data.effectiveWindowHeight == 1080)
+        #expect(data.effectiveCustomScaler == 1.25)
+        #expect(data.effectiveWindowCompatibility == .invertedMetrics)
+        #expect(data.effectiveDisplayRotation == 2)
+        #expect(
+            data.activeTroubleshootingCount(hasIntrospection: true, hasIosFrameworks: false, openWithLLDB: true) == 5
         )
     }
 
-    func testStrictIntrospectionStripAndNonStrictRestoration() throws {
+    @Test
+    func strictIntrospectionStripAndNonStrictRestoration() throws {
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appendingPathComponent("introspection-restore-\(UUID().uuidString)")
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
@@ -245,31 +250,31 @@ final class AppSettingsDataTests: XCTestCase {
 
         let app = PlayApp(appUrl: appURL)
         defer { _ = app.settings.flush() }
-        XCTAssertFalse(app.settings.settings.storedHasIntrospection)
-        XCTAssertFalse(app.settings.settings.storedHasIosFrameworks)
+        #expect(!app.settings.settings.storedHasIntrospection)
+        #expect(!app.settings.settings.storedHasIosFrameworks)
 
         // Strict launch strips both introspection and iosFrameworks from Info.plist,
         // syncs in-memory info, preserves custom entries, and records stored flags non-destructively.
         let strictLaunchInfo = AppInfo(contentsOf: plistURL)
-        XCTAssertTrue(app.stripIntrospectionForStrictLaunch(launchInfo: strictLaunchInfo))
-        XCTAssertTrue(app.settings.settings.storedHasIntrospection)
-        XCTAssertTrue(app.settings.settings.storedHasIosFrameworks)
+        #expect(app.stripIntrospectionForStrictLaunch(launchInfo: strictLaunchInfo))
+        #expect(app.settings.settings.storedHasIntrospection)
+        #expect(app.settings.settings.storedHasIosFrameworks)
         let afterStrictDisk = AppInfo(contentsOf: plistURL)
-        XCTAssertEqual(afterStrictDisk.lsEnvironment["DYLD_LIBRARY_PATH"], "/custom/dyld")
-        XCTAssertEqual(app.info.lsEnvironment["DYLD_LIBRARY_PATH"], "/custom/dyld")
+        #expect(afterStrictDisk.lsEnvironment["DYLD_LIBRARY_PATH"] == "/custom/dyld")
+        #expect(app.info.lsEnvironment["DYLD_LIBRARY_PATH"] == "/custom/dyld")
 
         // Second strict pass is a no-op.
-        XCTAssertFalse(app.stripIntrospectionForStrictLaunch(launchInfo: afterStrictDisk))
+        #expect(!app.stripIntrospectionForStrictLaunch(launchInfo: afterStrictDisk))
 
         // Non-strict launch restores both introspection and iosFrameworks when stored flags are true.
         let nonStrictLaunchInfo = AppInfo(contentsOf: plistURL)
-        XCTAssertTrue(app.restoreIntrospectionForNonStrictLaunch(launchInfo: nonStrictLaunchInfo))
+        #expect(app.restoreIntrospectionForNonStrictLaunch(launchInfo: nonStrictLaunchInfo))
         let afterRestoreDisk = AppInfo(contentsOf: plistURL)
         let restoredEntries = (afterRestoreDisk.lsEnvironment["DYLD_LIBRARY_PATH"] ?? "").split(separator: ":")
-        XCTAssertTrue(restoredEntries.contains(Substring(PlayApp.introspection)))
-        XCTAssertTrue(restoredEntries.contains(Substring(PlayApp.iosFrameworks)))
-        XCTAssertTrue(restoredEntries.contains("/custom/dyld"))
-        XCTAssertEqual(app.info.lsEnvironment["DYLD_LIBRARY_PATH"], afterRestoreDisk.lsEnvironment["DYLD_LIBRARY_PATH"])
+        #expect(restoredEntries.contains(Substring(PlayApp.introspection)))
+        #expect(restoredEntries.contains(Substring(PlayApp.iosFrameworks)))
+        #expect(restoredEntries.contains("/custom/dyld"))
+        #expect(app.info.lsEnvironment["DYLD_LIBRARY_PATH"] == afterRestoreDisk.lsEnvironment["DYLD_LIBRARY_PATH"])
 
         // When stored flags == false and stripped, non-strict launch does not inject host paths.
         app.settings.update {
@@ -277,16 +282,17 @@ final class AppSettingsDataTests: XCTestCase {
             $0.storedHasIosFrameworks = false
         }
         let cleanLaunchInfo = AppInfo(contentsOf: plistURL)
-        XCTAssertTrue(app.stripIntrospectionForStrictLaunch(launchInfo: cleanLaunchInfo))
+        #expect(app.stripIntrospectionForStrictLaunch(launchInfo: cleanLaunchInfo))
         // Note: strip sets stored flags = true when it had to strip; explicit off clears them.
         app.settings.update {
             $0.storedHasIntrospection = false
             $0.storedHasIosFrameworks = false
         }
-        XCTAssertFalse(app.restoreIntrospectionForNonStrictLaunch(launchInfo: AppInfo(contentsOf: plistURL)))
+        #expect(!app.restoreIntrospectionForNonStrictLaunch(launchInfo: AppInfo(contentsOf: plistURL)))
     }
 
-    func testMetalHUDUpdatesSerializeAndCoalesceToLatestState() async throws {
+    @Test
+    func metalHUDUpdatesSerializeAndCoalesceToLatestState() async throws {
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appendingPathComponent("metal-hud-serial-\(UUID().uuidString)")
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
@@ -335,6 +341,6 @@ final class AppSettingsDataTests: XCTestCase {
         )
 
         let finalValue = recorded.withLock { $0.last }
-        XCTAssertEqual(finalValue, false)
+        #expect(finalValue == false)
     }
 }

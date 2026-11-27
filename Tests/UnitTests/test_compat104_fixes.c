@@ -105,80 +105,44 @@ static void test_getgroups_filter(void) {
     assert(out_n == 1 && out[0] == 501U);
 }
 
-static int is_hidden_sysctl_name(const char *name, int compat13_7, int e_cores) {
-    if (name == NULL || name[0] == '\0') {
-        return 0;
-    }
-    if (strcmp(name, "sysctl.proc_translated") == 0 || strcmp(name, "sysctl.proc_native") == 0 ||
-        strcmp(name, "kern.iossupportversion") == 0 || strncmp(name, "kern.hibernate", 14) == 0 ||
-        strcmp(name, "hw.use_kernelmanagerd") == 0 || strcmp(name, "vm.swapusage") == 0) {
-        return 1;
-    }
-    if (strncmp(name, "hw.perflevel1.", 14) == 0 && e_cores == 0) {
-        return 1;
-    }
-    if (strncmp(name, "hw.optional.arm.FEAT_", 21) == 0 && compat13_7) {
-        return 1;
-    }
-    return 0;
-}
-
 static void test_sysctl_filters(void) {
-    assert(is_hidden_sysctl_name("sysctl.proc_translated", 0, 4) == 1);
-    assert(is_hidden_sysctl_name("kern.hibernatewakenotification", 0, 4) == 1);
-    assert(is_hidden_sysctl_name("kern.hibernatefile", 0, 4) == 1);
-    assert(is_hidden_sysctl_name("hw.optional.arm.FEAT_BF16", 1, 4) == 1);
-    assert(is_hidden_sysctl_name("hw.optional.arm.FEAT_BF16", 0, 4) == 0);
-    assert(is_hidden_sysctl_name("vm.swapfileprefix", 1, 4) == 0);
+    assert(pt_is_hidden_sysctl_name_cstr("sysctl.proc_translated", false, 4U));
+    assert(pt_is_hidden_sysctl_name_cstr("kern.hibernatewakenotification", false, 4U));
+    assert(pt_is_hidden_sysctl_name_cstr("kern.hibernatefile", false, 4U));
+    assert(pt_is_hidden_sysctl_name_cstr("hw.optional.arm.FEAT_BF16", true, 4U));
+    assert(!pt_is_hidden_sysctl_name_cstr("hw.optional.arm.FEAT_BF16", false, 4U));
+    assert(!pt_is_hidden_sysctl_name_cstr("vm.swapfileprefix", true, 4U));
+    assert(pt_is_hidden_sysctl_name_cstr("hw.perflevel1.physicalcpu", false, 0U));
+    assert(!pt_is_hidden_sysctl_name_cstr("hw.perflevel1.physicalcpu", false, 4U));
+    assert(pt_is_hidden_sysctl_name_cstr("hw.perflevel1.physicalcpu", true, 4U));
+    assert(pt_is_hidden_sysctl_name_cstr("security.mac.amfi.qa_root_certs_allowed", false, 4U));
+    assert(!pt_is_hidden_sysctl_name_cstr("security.mac.amfi.developer_mode_status", false, 4U));
 }
 
 /* ---------- Batch 2 Unit Tests ---------- */
 
-static void replace_substr(char *buf, size_t cap, const char *needle, const char *repl) {
-    size_t nlen = strlen(needle), rlen = strlen(repl);
-    if (nlen == 0 || strcmp(needle, repl) == 0)
-        return;
-    size_t pos = 0;
-    while (1) {
-        char *hit = strstr(buf + pos, needle);
-        if (!hit)
-            break;
-        size_t off = (size_t)(hit - buf);
-        size_t cur = strlen(buf);
-        if (cur - nlen + rlen >= cap)
-            break;
-        if (rlen != nlen)
-            memmove(hit + rlen, hit + nlen, cur - off - nlen + 1U);
-        memcpy(hit, repl, rlen);
-        pos = off + rlen;
-    }
-}
-
-static void sanitize_io_compat13(char *buf, size_t cap) {
-    static const char *const kSocs[] = {"T8103", "T8101", "T810x", "T6000"};
-    for (size_t i = 0; i < sizeof(kSocs) / sizeof(kSocs[0]); i++) {
-        replace_substr(buf, cap, kSocs[i], "T8027");
-    }
-    if (strstr(buf, "AGX") != NULL) {
-        replace_substr(buf, cap, "G13", "G11");
-    }
-    if (strstr(buf, "CamIn") != NULL) {
-        replace_substr(buf, cap, "H13", "H11");
-    }
-}
-
 static void test_ioreg_compat13_sanitize(void) {
     char b1[128] = "AGXFirmwareKextG13RTBuddy";
-    sanitize_io_compat13(b1, sizeof(b1));
-    assert(strcmp(b1, "AGXFirmwareKextG11RTBuddy") == 0);
+    pt_sanitize_io_hardware_name_cstr(b1, sizeof(b1), "t8027", "G11P", "N841AP", "applegpu_g11p", true);
+    assert(strcmp(b1, "AGXFirmwareKextG11PRTBuddy") == 0);
 
     char b2[128] = "AppleH13CamIn";
-    sanitize_io_compat13(b2, sizeof(b2));
+    pt_sanitize_io_hardware_name_cstr(b2, sizeof(b2), "t8027", "G11P", "N841AP", "applegpu_g11p", true);
     assert(strcmp(b2, "AppleH11CamIn") == 0);
 
     char b3[256] = "IOService:/AppleT810xIO/gpio@T8101GPIOIC/pci@T8103";
-    sanitize_io_compat13(b3, sizeof(b3));
+    pt_sanitize_io_hardware_name_cstr(b3, sizeof(b3), "t8027", "G11P", "N841AP", "applegpu_g11p", true);
     assert(strcmp(b3, "IOService:/AppleT8027IO/gpio@T8027GPIOIC/pci@T8027") == 0);
+
+    char b4[256] = "Mac14,2/J413AP/applegpu_g14g/AGXAcceleratorG14G_B0";
+    pt_sanitize_io_hardware_name_cstr(b4, sizeof(b4), "t8103", "G12P", "J522AP", "applegpu_g12p", false);
+    assert(strcmp(b4, "Mac14,2/J522AP/applegpu_g12p/AGXAcceleratorG12P_B0") == 0);
+
+    /* Tight buffer bounds must not overflow */
+    char tiny[12] = "T8103";
+    pt_sanitize_io_hardware_name_cstr(tiny, sizeof(tiny), "t8103_long_soc_name", "G13G", "J522AP", "applegpu_g13g",
+                                      false);
+    assert(strlen(tiny) < sizeof(tiny));
 }
 
 /* ---------- Batch 3 Unit Tests ---------- */
@@ -201,15 +165,6 @@ static void test_sf_symbols_and_versions(void) {
 
 /* ---------- Batch 4 Unit Tests ---------- */
 
-static int is_code_res_key_dirty(const char *k) {
-    if (!k)
-        return 0;
-    return (strstr(k, "PlayTools") != NULL || strstr(k, "AKInterface") != NULL || strstr(k, "SVCPatches") != NULL ||
-            strstr(k, "Playtools.strings") != NULL || strstr(k, "UserPlugins") != NULL)
-               ? 1
-               : 0;
-}
-
 static void test_network_and_coderesources(void) {
     assert(pt_is_hidden_network_ifname_prefix_cstr("anpi0"));
     assert(pt_is_hidden_network_ifname_prefix_cstr("anpi2"));
@@ -225,9 +180,9 @@ static void test_network_and_coderesources(void) {
     assert(pt_is_secondary_en_ifname_cstr("en12"));
     assert(!pt_is_secondary_en_ifname_cstr("en0"));
 
-    assert(is_code_res_key_dirty("Frameworks/AKInterface.framework/AKInterface") == 1);
-    assert(is_code_res_key_dirty("Frameworks/PlayTools.framework/PlayTools") == 1);
-    assert(is_code_res_key_dirty("Info.plist") == 0);
+    assert(pt_is_dirty_code_resources_key_cstr("Frameworks/AKInterface.framework/AKInterface"));
+    assert(pt_is_dirty_code_resources_key_cstr("Frameworks/PlayTools.framework/PlayTools"));
+    assert(!pt_is_dirty_code_resources_key_cstr("Info.plist"));
 }
 
 /* ---------- Round 1 Hardening Unit Tests ---------- */
@@ -414,38 +369,14 @@ static void test_sf_symbols_multisuffix(void) {
     assert(pt_is_post13_7_sf_symbol_name_cstr("theatermasks"));
 }
 
-static int ci_contains(const char *hay, const char *needle) {
-    size_t nlen = strlen(needle);
-    if (nlen == 0)
-        return 1;
-    for (const char *p = hay; *p; p++) {
-        size_t i = 0;
-        while (i < nlen && p[i]) {
-            char a = p[i], b = needle[i];
-            if (a >= 'A' && a <= 'Z')
-                a = (char)(a - 'A' + 'a');
-            if (b >= 'A' && b <= 'Z')
-                b = (char)(b - 'A' + 'a');
-            if (a != b)
-                break;
-            i++;
-        }
-        if (i == nlen)
-            return 1;
-    }
-    return 0;
-}
-
 static void test_coderesources_case_insensitive_and_attr_fallback(void) {
     const char *dirty[] = {"Frameworks/playtools.framework/PlayTools", "Playtools.strings",
                            "Frameworks/akinterface.framework/AKInterface", "SVCPatches/patch.bin",
-                           "UserPlugins/foo.dylib"};
+                           "UserPlugins/foo.dylib", "MacOverHelper.plist", "com.apple.PlayCover.extra"};
     for (size_t i = 0; i < sizeof(dirty) / sizeof(dirty[0]); i++) {
-        int hit = ci_contains(dirty[i], "playtools") || ci_contains(dirty[i], "akinterface") ||
-                  ci_contains(dirty[i], "svcpatches") || ci_contains(dirty[i], "userplugins");
-        assert(hit == 1);
+        assert(pt_is_dirty_code_resources_key_cstr(dirty[i]));
     }
-    assert(ci_contains("Info.plist", "playtools") == 0);
+    assert(!pt_is_dirty_code_resources_key_cstr("Info.plist"));
 
     /* getattrlistbulk 13-byte slot cannot grow to "/dev/disk0s1s2" (15B), must fall back to "/dev/disk0s1" (13B) */
     char slot[13];
@@ -556,24 +487,6 @@ static void test_round2_macos_framework_and_font_filters(void) {
     }
 }
 
-static uint64_t sanitize_osvariant_status(uint64_t raw) {
-    /* XNU bsd/sys/variant_internal.h:
-     * - bits [0..27]: 14 two-bit status pairs (0b00=UNKNOWN, 0b10=NO, 0b11=YES)
-     * - bits [28..31]: fixed sentinel 0xF (OS_VARIANT_STATUS_INITIAL_BITS = 0x70000000F0000000ULL)
-     * - bits [60..62]: initial/version nibble 0x7
-     * Clearing ~0x05555555ULL turns YES (0b11) -> NO (0b10) while preserving NO/UNKNOWN,
-     * bits [28..31] == 0xF, and high32 bits [60..62] == 0x7. */
-    return raw & ~0x05555555ULL;
-}
-
-static int is_sensitive_af_unix_path(const char *sun_path) {
-    if (sun_path == NULL || sun_path[0] == '\0')
-        return 0;
-    return (strncmp(sun_path, "/Users/", 7U) == 0 || ci_contains(sun_path, "/Library/Containers/") ||
-            ci_contains(sun_path, "MacOver") || ci_contains(sun_path, "PlayTools") ||
-            ci_contains(sun_path, "PlayCover"));
-}
-
 static void test_round2_xattr_osvariant_and_afunix(void) {
     const char *bad_xattrs[] = {"com.apple.quarantine",   "com.apple.provenance",
                                 "com.apple.macl",         "com.apple.FinderInfo",
@@ -605,7 +518,7 @@ static void test_round2_xattr_osvariant_and_afunix(void) {
     /* kern.osvariant_status 2-bit pair sanitization: YES (0b11) -> NO (0b10), preserving bits [28..31] == 0xF and
      * [60..62] == 0x7 */
     uint64_t dirty_variant = 0x70010000F3FFAB3BULL;
-    uint64_t clean_variant = sanitize_osvariant_status(dirty_variant);
+    uint64_t clean_variant = pt_sanitize_osvariant_status_u64(dirty_variant);
     assert(((clean_variant >> 28) & 0xFULL) == 0xFULL);
     assert(((clean_variant >> 60) & 0x7ULL) == 0x7ULL);
     for (unsigned bit = 0; bit < 28; bit += 2) {
@@ -624,13 +537,18 @@ static void test_round2_xattr_osvariant_and_afunix(void) {
     uint64_t fallback_variant = 0x70010000F288828AULL;
     assert(((fallback_variant >> 28) & 0xFULL) == 0xFULL);
     assert(((fallback_variant >> 60) & 0x7ULL) == 0x7ULL);
-    assert(sanitize_osvariant_status(fallback_variant) == fallback_variant);
+    assert(pt_sanitize_osvariant_status_u64(fallback_variant) == fallback_variant);
 
-    /* AF_UNIX sun_path sensitivity detection */
-    assert(is_sensitive_af_unix_path("/Users/alice/Library/Containers/app.makedie.MacOver/Data/tmp/s.sock") == 1);
-    assert(is_sensitive_af_unix_path("/tmp/PlayTools-ipc.sock") == 1);
-    assert(is_sensitive_af_unix_path("/var/run/syslog") == 0);
-    assert(is_sensitive_af_unix_path("/private/var/mobile/Containers/Data/Application/UUID/tmp/app.sock") == 0);
+    /* AF_UNIX sun_path token sensitivity detection (token check runs before /Users virtualization fallback) */
+    assert(pt_is_sensitive_unix_socket_token_cstr("/var/folders/xx/yy/T/s.sock"));
+    assert(pt_is_sensitive_unix_socket_token_cstr("/tmp/com.apple.launchd.abc/Listeners"));
+    assert(pt_is_sensitive_unix_socket_token_cstr("/tmp/discord-ipc-0"));
+    assert(pt_is_sensitive_unix_socket_token_cstr("/tmp/PlayTools-ipc.sock"));
+    assert(pt_is_sensitive_unix_socket_token_cstr("/tmp/MacOver.sock"));
+    assert(pt_is_sensitive_unix_socket_token_cstr("/tmp/app.makedie.sock"));
+    assert(!pt_is_sensitive_unix_socket_token_cstr("/var/run/syslog"));
+    assert(!pt_is_sensitive_unix_socket_token_cstr(
+        "/private/var/mobile/Containers/Data/Application/UUID/tmp/app.sock"));
 }
 
 static void put_be32(uint8_t *p, uint32_t v) {
@@ -718,21 +636,6 @@ static void test_round2_sha1_sha256_cd_and_sfsymbols(void) {
     assert(!pt_is_post13_7_sf_symbol_name_cstr("house.fill"));
 }
 
-static uint32_t l1i_cache_size_for_machine(const char *machine) {
-    if (machine == NULL)
-        return 131072U;
-    /* A9X (iPad6,7 / iPad6,8): 64 KiB */
-    if (strcmp(machine, "iPad6,7") == 0 || strcmp(machine, "iPad6,8") == 0)
-        return 65536U;
-    /* A14+ / M1+ (iPhone13+, iPad13+): 192 KiB */
-    if (strncmp(machine, "iPhone13,", 9) == 0 || strncmp(machine, "iPhone14,", 9) == 0 ||
-        strncmp(machine, "iPhone15,", 9) == 0 || strncmp(machine, "iPad13,", 7) == 0 ||
-        strncmp(machine, "iPad14,", 7) == 0)
-        return 196608U;
-    /* A12X / A13 (iPad8,x / iPhone12,x): 128 KiB */
-    return 131072U;
-}
-
 static void test_round3_cdhash_kernel_version_and_l1i(void) {
     /* Primary CodeDirectory SHA-256[:20] must equal csops(5) CS_OPS_CDHASH */
     uint8_t cd[128];
@@ -773,12 +676,30 @@ static void test_round3_cdhash_kernel_version_and_l1i(void) {
     assert(strstr(host_kv, "RELEASE_ARM64_") != NULL);
     assert(strstr(host_kv, "19.6.0") != NULL);
 
-    /* hw.l1icachesize per SoC family */
-    assert(l1i_cache_size_for_machine("iPad6,7") == 65536U);
-    assert(l1i_cache_size_for_machine("iPad8,6") == 131072U);
-    assert(l1i_cache_size_for_machine("iPhone12,5") == 131072U);
-    assert(l1i_cache_size_for_machine("iPad13,4") == 196608U);
-    assert(l1i_cache_size_for_machine("iPhone14,2") == 196608U);
+    /* hw.l1icachesize / hw.l1dcachesize / L2 per GPU family */
+    assert(pt_spoofed_l1i_cache_size_u64(1003U, false) == 65536ULL);
+    assert(pt_spoofed_l1i_cache_size_u64(1006U, false) == 131072ULL);
+    assert(pt_spoofed_l1i_cache_size_u64(1007U, false) == 196608ULL);
+    assert(pt_spoofed_l1i_cache_size_u64(1006U, true) == 65536ULL);
+    assert(pt_spoofed_l1i_cache_size_u64(1007U, true) == 131072ULL);
+
+    assert(pt_spoofed_l1d_cache_size_u64(1003U, false) == 32768ULL);
+    assert(pt_spoofed_l1d_cache_size_u64(1006U, false) == 65536ULL);
+    assert(pt_spoofed_l1d_cache_size_u64(1008U, false) == 131072ULL);
+    assert(pt_spoofed_l1d_cache_size_u64(1006U, true) == 32768ULL);
+    assert(pt_spoofed_l1d_cache_size_u64(1007U, true) == 65536ULL);
+
+    uint64_t p_l2 = 0, e_l2 = 0;
+    pt_spoofed_l2_cache_sizes_u64(1003U, "iPad6,7", &p_l2, &e_l2);
+    assert(p_l2 == (3ULL << 20) && e_l2 == 0ULL);
+    pt_spoofed_l2_cache_sizes_u64(1006U, "iPad8,6", &p_l2, &e_l2);
+    assert(p_l2 == (8ULL << 20) && e_l2 == (4ULL << 20));
+    pt_spoofed_l2_cache_sizes_u64(1007U, "iPad13,8", &p_l2, &e_l2);
+    assert(p_l2 == (12ULL << 20) && e_l2 == (4ULL << 20));
+    pt_spoofed_l2_cache_sizes_u64(1008U, "iPhone14,3", &p_l2, &e_l2);
+    assert(p_l2 == (12ULL << 20) && e_l2 == (4ULL << 20));
+    pt_spoofed_l2_cache_sizes_u64(1008U, "iPad16,6", &p_l2, &e_l2);
+    assert(p_l2 == (16ULL << 20) && e_l2 == (4ULL << 20));
 }
 
 static void test_round3_fs_case_gid_and_prot(void) {
@@ -799,16 +720,11 @@ static void test_round3_fs_case_gid_and_prot(void) {
         assert(mapped == gids_exp[i]);
     }
 
-    /* F_GETPROTECTIONCLASS: macOS returns 0 (PROTECTION_CLASS_NONE) -> spoof to 4
+    /* F_GETPROTECTIONCLASS: macOS returns 0 (PROTECTION_CLASS_NONE) -> spoof to 3
      * (NSFileProtectionCompleteUntilFirstUserAuthentication) */
     int raw_prot = 0;
-    int spoofed_prot = (raw_prot == 0) ? 4 : raw_prot;
-    assert(spoofed_prot > 0 && spoofed_prot == 4);
-}
-
-static int is_icu_age_post_13_7(uint8_t major, uint8_t minor) {
-    /* iOS 13.7 ships ICU 64.2 / Unicode 12.1 */
-    return (major > 12U) || (major == 12U && minor > 1U);
+    int spoofed_prot = (raw_prot == 0) ? 3 : raw_prot;
+    assert(spoofed_prot > 0 && spoofed_prot == 3);
 }
 
 static int verify_swift_length_prefixed_mangling(const char *s) {
@@ -863,12 +779,12 @@ static void test_round3_extended_dlsym_fw_icu_swift(void) {
     assert(!pt_is_macos_only_framework_path_cstr("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"));
 
     /* ICU u_charAge > 12.1 predicate */
-    assert(is_icu_age_post_13_7(12U, 1U) == 0);
-    assert(is_icu_age_post_13_7(12U, 0U) == 0);
-    assert(is_icu_age_post_13_7(11U, 0U) == 0);
-    assert(is_icu_age_post_13_7(13U, 0U) == 1);
-    assert(is_icu_age_post_13_7(14U, 0U) == 1);
-    assert(is_icu_age_post_13_7(15U, 1U) == 1);
+    assert(!pt_is_icu_age_post_13_7_c(12U, 1U));
+    assert(!pt_is_icu_age_post_13_7_c(12U, 0U));
+    assert(!pt_is_icu_age_post_13_7_c(11U, 0U));
+    assert(pt_is_icu_age_post_13_7_c(13U, 0U));
+    assert(pt_is_icu_age_post_13_7_c(14U, 0U));
+    assert(pt_is_icu_age_post_13_7_c(15U, 1U));
 
     /* Swift length-prefixed mangling accuracy (zero off-by-one length bugs) */
     const char *mangled[] = {"10Foundation16AttributedStringV", "s8DurationV", "8StoreKit7ProductV",
@@ -919,44 +835,6 @@ static void test_round3_hidden_bundle_ids_regression(void) {
     for (size_t i = 0; i < sizeof(safe_ios_bundles) / sizeof(safe_ios_bundles[0]); i++) {
         assert(!pt_is_hidden_bundle_id_rule_cstr(safe_ios_bundles[i], false));
         assert(!pt_is_hidden_bundle_id_rule_cstr(safe_ios_bundles[i], true));
-    }
-}
-
-static int mock_is_app_embedded(const char *path) {
-    return (strstr(path, ".app/Frameworks/") != NULL || strstr(path, ".app/Contents/Frameworks/") != NULL ||
-            strstr(path, ".app/PlugIns/") != NULL || strstr(path, ".appex/Frameworks/") != NULL);
-}
-
-static void mock_strip_nested_image_versions(const char *p, char *out, size_t out_sz) {
-    size_t plen = strlen(p);
-    assert(plen < out_sz);
-    memcpy(out, p, plen + 1U);
-    for (int iter = 0; iter < 8; iter++) {
-        const char *fw_ver = strstr(out, ".framework/Versions/");
-        const char *bdl_ver = strstr(out, ".bundle/Versions/");
-        const char *bdl_mac = strstr(out, ".bundle/Contents/MacOS/");
-        const char *hit = fw_ver;
-        size_t keep_ext_len = 10U;
-        size_t skip_prefix_len = 20U;
-        if (bdl_ver != NULL && (hit == NULL || bdl_ver < hit)) {
-            hit = bdl_ver;
-            keep_ext_len = 7U;
-            skip_prefix_len = 17U;
-        }
-        if (bdl_mac != NULL && (hit == NULL || bdl_mac < hit)) {
-            hit = bdl_mac;
-            keep_ext_len = 7U;
-            skip_prefix_len = 22U;
-        }
-        if (hit == NULL)
-            break;
-        const char *rest = (hit == bdl_mac) ? (hit + skip_prefix_len) : strchr(hit + skip_prefix_len, '/');
-        if (rest == NULL)
-            break;
-        size_t prefix_len = (size_t)(hit - out) + keep_ext_len;
-        size_t rest_len = strlen(rest);
-        assert(prefix_len + rest_len < out_sz);
-        memmove(out + prefix_len, rest, rest_len + 1U);
     }
 }
 
@@ -1061,34 +939,42 @@ static void test_round4_audit_regressions(void) {
     assert(kSysOpenatDprotectedNp != kSysOther478);
     assert(kSysOpenatDprotectedNp == 218);
 
-    /* 9. Path-component boundary & app-embedded bundle exemption must NOT match MyCocoa.framework as Cocoa.framework */
+    /* 9. Path-component boundary, app-embedded bundle exemption & post-13.7 framework filter via production PTDetectionRules */
     assert(pt_path_has_component("/System/Library/Frameworks/Cocoa.framework/Cocoa", "Cocoa.framework"));
     assert(pt_path_has_component("/System/Library/Frameworks/Cocoa.framework", "Cocoa.framework"));
     assert(!pt_path_has_component(
         "/var/containers/Bundle/Application/X/DemoApp.app/Frameworks/MyCocoa.framework/MyCocoa", "Cocoa.framework"));
-    assert(mock_is_app_embedded(
-               "/var/containers/Bundle/Application/X/DemoApp.app/Frameworks/MyCocoa.framework/MyCocoa") == 1);
-    assert(mock_is_app_embedded(
-               "/var/containers/Bundle/Application/X/DemoApp.app/Frameworks/Charts.framework/Charts") == 1);
-    assert(mock_is_app_embedded("/System/Library/Frameworks/Charts.framework/Charts") == 0);
+    assert(pt_is_app_embedded_bundle_path_cstr(
+        "/var/containers/Bundle/Application/X/DemoApp.app/Frameworks/MyCocoa.framework/MyCocoa"));
+    assert(pt_is_app_embedded_bundle_path_cstr(
+        "/var/containers/Bundle/Application/X/DemoApp.app/Frameworks/Charts.framework/Charts"));
+    assert(!pt_is_app_embedded_bundle_path_cstr("/System/Library/Frameworks/Charts.framework/Charts"));
+    assert(!pt_is_post13_7_framework_path_cstr(
+        "/var/containers/Bundle/Application/X/DemoApp.app/Frameworks/Charts.framework/Charts"));
+    assert(pt_is_post13_7_framework_path_cstr("/System/Library/Frameworks/Charts.framework/Charts"));
+    assert(pt_is_post13_7_framework_path_cstr("/System/Library/Frameworks/TipKit.framework/TipKit"));
+    assert(!pt_is_post13_7_framework_path_cstr("/System/Library/Frameworks/UIKit.framework/UIKit"));
 
-    /* 10. Nested .framework/Versions/ and .bundle/Contents/MacOS/ image path stripping */
+    /* 10. Nested .framework/Versions/ and .bundle/Contents/MacOS/ image path collapsing via production PTDetectionRules */
     char stripped_img[512];
-    mock_strip_nested_image_versions(
-        "/System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vImage.framework/Versions/A/vImage",
-        stripped_img, sizeof(stripped_img));
+    snprintf(stripped_img, sizeof(stripped_img), "%s",
+             "/System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vImage.framework/Versions/A/vImage");
+    assert(pt_collapse_macos_framework_versions_in_place_cstr(stripped_img, sizeof(stripped_img)));
     assert(strcmp(stripped_img, "/System/Library/Frameworks/Accelerate.framework/Frameworks/vImage.framework/vImage") ==
            0);
-    mock_strip_nested_image_versions("/System/Library/CoreServices/RawCamera.bundle/Contents/MacOS/RawCamera",
-                                     stripped_img, sizeof(stripped_img));
+    snprintf(stripped_img, sizeof(stripped_img), "%s",
+             "/System/Library/CoreServices/RawCamera.bundle/Contents/MacOS/RawCamera");
+    assert(pt_collapse_macos_framework_versions_in_place_cstr(stripped_img, sizeof(stripped_img)));
     assert(strcmp(stripped_img, "/System/Library/CoreServices/RawCamera.bundle/RawCamera") == 0);
-    mock_strip_nested_image_versions("/System/Library/AccessibilityBundles/AccessibilitySettingsLoader.bundle/Versions/"
-                                     "A/AccessibilitySettingsLoader",
-                                     stripped_img, sizeof(stripped_img));
+    snprintf(stripped_img, sizeof(stripped_img), "%s",
+             "/System/Library/AccessibilityBundles/AccessibilitySettingsLoader.bundle/Versions/"
+             "A/AccessibilitySettingsLoader");
+    assert(pt_collapse_macos_framework_versions_in_place_cstr(stripped_img, sizeof(stripped_img)));
     assert(
         strcmp(stripped_img,
                "/System/Library/AccessibilityBundles/AccessibilitySettingsLoader.bundle/AccessibilitySettingsLoader") ==
         0);
+    assert(!pt_collapse_macos_framework_versions_in_place_cstr(stripped_img, sizeof(stripped_img)));
 }
 
 static uint32_t mock_encode_adrp_x16(uintptr_t stub_pc, uintptr_t target_page) {
@@ -1196,12 +1082,12 @@ static void test_v105_macos_frameworks_and_vm_read_got_sanitize(void) {
     for (size_t i = 0; i < sizeof(macos_paths) / sizeof(macos_paths[0]); i++) {
         assert(pt_path_has_component(macos_paths[i], comps[i]));
         assert(pt_is_macos_only_framework_path_cstr(macos_paths[i]));
-        assert(mock_is_app_embedded(macos_paths[i]) == 0);
+        assert(!pt_is_app_embedded_bundle_path_cstr(macos_paths[i]));
     }
     assert(!pt_path_has_component("/System/Library/Frameworks/OpenGLES.framework/OpenGLES", "OpenGL.framework"));
     assert(!pt_path_has_component("/System/Library/Frameworks/QuickLook.framework/QuickLook", "QuickLookUI.framework"));
-    assert(mock_is_app_embedded(
-               "/var/containers/Bundle/Application/X/DemoApp.app/Frameworks/OpenGL.framework/OpenGL") == 1);
+    assert(pt_is_app_embedded_bundle_path_cstr(
+        "/var/containers/Bundle/Application/X/DemoApp.app/Frameworks/OpenGL.framework/OpenGL"));
 
     /* Aligned vm_read GOT/lazy slot sanitization window math */
     const uintptr_t sec_start = 0x104008000ULL;
@@ -1521,6 +1407,25 @@ static void test_cf_internal_carboncore_bridge_rules(void) {
     assert(!pt_is_cf_internal_carboncore_bridge_caller_cstr(NULL, NULL));
 }
 
+static void test_v108_regression_edge_cases(void) {
+    /* NULL, empty, and boundary inputs for PTDetectionRules functions */
+    assert(!pt_is_hidden_sysctl_name_cstr(NULL, false, 0));
+    assert(!pt_is_hidden_sysctl_name_cstr("", false, 0));
+    assert(!pt_is_hidden_sysctl_name_cstr("hw.perflevel1.physicalcpu", false, 4));
+    assert(pt_is_hidden_sysctl_name_cstr("hw.perflevel1.physicalcpu", false, 0));
+    /* Regression guard: non-perflevel1 sysctls must not be gated by e_cores == 0 */
+    assert(!pt_is_hidden_sysctl_name_cstr("hw.ncpu", false, 0));
+
+    assert(!pt_is_hidden_desktop_font_name_cstr(NULL));
+    assert(!pt_is_hidden_desktop_font_name_cstr(""));
+    assert(pt_is_hidden_desktop_font_name_cstr("Monaco"));
+
+    assert(!pt_is_hidden_bundle_id_rule_cstr(NULL, true));
+    assert(!pt_is_hidden_bundle_id_rule_cstr("", true));
+    assert(!pt_is_hidden_env_key_cstr(NULL));
+    assert(!pt_is_hidden_env_key_cstr(""));
+}
+
 int main(void) {
     test_der_entitlements_encoding_and_superblob_rewrite();
     test_attr_ref_zero_fill();
@@ -1550,6 +1455,7 @@ int main(void) {
     test_production_c_modules_extra();
     test_swift_hidden_type_boundary_rules();
     test_cf_internal_carboncore_bridge_rules();
+    test_v108_regression_edge_cases();
     printf("All compat104 unit tests passed.\n");
     return 0;
 }

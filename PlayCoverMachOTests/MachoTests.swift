@@ -1,30 +1,25 @@
 import Foundation
 import MachO
-import XCTest
+import Testing
 @testable import PlayCover
 
-final class MachoTests: XCTestCase {
-    private var tempDir: URL?
+@Suite
+final class MachoTests {
+    private let tempDir: URL
 
-    override func setUpWithError() throws {
-        try super.setUpWithError()
+    init() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("PlayCoverMachOTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         tempDir = dir
     }
 
-    override func tearDownWithError() throws {
-        if let dir = tempDir {
-            try? FileManager.default.removeItem(at: dir)
-        }
-        tempDir = nil
-        try super.tearDownWithError()
+    deinit {
+        try? FileManager.default.removeItem(at: tempDir)
     }
 
     private func makeTempFile(named name: String, data: Data) throws -> URL {
-        let dir = try XCTUnwrap(tempDir)
-        let url = dir.appendingPathComponent(name)
+        let url = tempDir.appendingPathComponent(name)
         try data.write(to: url)
         return url
     }
@@ -226,16 +221,17 @@ final class MachoTests: XCTestCase {
 
     // MARK: - Tests
 
-    func testInspectArm64SliceThinAndFatAndCorrupted() throws {
+    @Test
+    func inspectArm64SliceThinAndFatAndCorrupted() throws {
         let thinData = makeThinArm64MachO(extraCommands: [
             makeBuildVersionCommand(platform: UInt32(PLATFORM_MACCATALYST))
         ])
         let thinURL = try makeTempFile(named: "thin_arm64", data: thinData)
 
         let thinCtx = try Macho.inspectArm64Slice(at: thinURL)
-        XCTAssertFalse(thinCtx.isFat)
-        XCTAssertEqual(thinCtx.sliceOffset, 0)
-        XCTAssertEqual(thinCtx.sliceSize, UInt64(thinData.count))
+        #expect(!thinCtx.isFat)
+        #expect(thinCtx.sliceOffset == 0)
+        #expect(thinCtx.sliceSize == UInt64(thinData.count))
 
         let fatData = makeFatMachO(slices: [
             (CPU_TYPE_X86_64, CPU_SUBTYPE_X86_64_ALL, makeThinX86Dummy()),
@@ -244,30 +240,31 @@ final class MachoTests: XCTestCase {
         let fatURL = try makeTempFile(named: "fat_universal", data: fatData)
 
         let fatCtx = try Macho.inspectArm64Slice(at: fatURL)
-        XCTAssertTrue(fatCtx.isFat)
-        XCTAssertEqual(fatCtx.sliceOffset, 0x2000)
-        XCTAssertEqual(fatCtx.sliceSize, UInt64(thinData.count))
+        #expect(fatCtx.isFat)
+        #expect(fatCtx.sliceOffset == 0x2000)
+        #expect(fatCtx.sliceSize == UInt64(thinData.count))
 
         let truncatedURL = try makeTempFile(named: "truncated", data: Data([0xCF, 0xFA, 0xED, 0xFE]))
-        XCTAssertThrowsError(try Macho.inspectArm64Slice(at: truncatedURL)) { error in
-            XCTAssertEqual(error as? PlayCoverError, PlayCoverError.appCorrupted)
+        #expect(throws: PlayCoverError.appCorrupted) {
+            try Macho.inspectArm64Slice(at: truncatedURL)
         }
 
         let nonMachOURL = try makeTempFile(named: "not_macho", data: Data(repeating: 0x41, count: 256))
-        XCTAssertThrowsError(try Macho.inspectArm64Slice(at: nonMachOURL)) { error in
-            XCTAssertEqual(error as? PlayCoverError, PlayCoverError.appCorrupted)
+        #expect(throws: PlayCoverError.appCorrupted) {
+            try Macho.inspectArm64Slice(at: nonMachOURL)
         }
 
         let x86OnlyFatData = makeFatMachO(slices: [
             (CPU_TYPE_X86_64, CPU_SUBTYPE_X86_64_ALL, makeThinX86Dummy())
         ])
         let x86OnlyURL = try makeTempFile(named: "fat_x86_only", data: x86OnlyFatData)
-        XCTAssertThrowsError(try Macho.inspectArm64Slice(at: x86OnlyURL)) { error in
-            XCTAssertEqual(error as? PlayCoverError, PlayCoverError.failedToStripBinary)
+        #expect(throws: PlayCoverError.failedToStripBinary) {
+            try Macho.inspectArm64Slice(at: x86OnlyURL)
         }
     }
 
-    func testIterateLoadCommandsTraversalEarlyExitAndCorruptionGuards() throws {
+    @Test
+    func iterateLoadCommandsTraversalEarlyExitAndCorruptionGuards() throws {
         let data = makeThinArm64MachO(extraCommands: [
             makeBuildVersionCommand(platform: UInt32(PLATFORM_IOS)),
             makeLoadDylibCommand(path: "/usr/lib/libSystem.B.dylib")
@@ -279,12 +276,12 @@ final class MachoTests: XCTestCase {
             visitedCmds.append(lc.cmd)
             return false
         }
-        XCTAssertEqual(visitedCmds, [
+        #expect(visitedCmds == [
             UInt32(LC_SEGMENT_64),
             UInt32(LC_BUILD_VERSION),
             UInt32(LC_LOAD_DYLIB)
         ])
-        XCTAssertGreaterThan(endOffset, MemoryLayout<mach_header_64>.size)
+        #expect(endOffset > MemoryLayout<mach_header_64>.size)
 
         var earlyVisited: [UInt32] = []
         let earlyEnd = try Macho.iterateLoadCommands(binary: data) { offset, _ in
@@ -292,24 +289,24 @@ final class MachoTests: XCTestCase {
             earlyVisited.append(lc.cmd)
             return lc.cmd == UInt32(LC_BUILD_VERSION)
         }
-        XCTAssertEqual(earlyVisited, [UInt32(LC_SEGMENT_64), UInt32(LC_BUILD_VERSION)])
-        XCTAssertLessThan(earlyEnd, endOffset)
+        #expect(earlyVisited == [UInt32(LC_SEGMENT_64), UInt32(LC_BUILD_VERSION)])
+        #expect(earlyEnd < endOffset)
 
         // sizeofcmds == 0
         var zeroCmds = data
         var hdr = try zeroCmds.extract(mach_header_64.self)
         hdr.sizeofcmds = 0
         withUnsafeBytes(of: &hdr) { zeroCmds.replaceSubrange(0..<MemoryLayout<mach_header_64>.size, with: $0) }
-        XCTAssertThrowsError(try Macho.iterateLoadCommands(binary: zeroCmds) { _, _ in false }) { error in
-            XCTAssertEqual(error as? PlayCoverError, PlayCoverError.appCorrupted)
+        #expect(throws: PlayCoverError.appCorrupted) {
+            try Macho.iterateLoadCommands(binary: zeroCmds) { _, _ in false }
         }
 
         // sizeofcmds > binary.count
         var oversizedCmds = data
         hdr.sizeofcmds = UInt32(data.count + 1024)
         withUnsafeBytes(of: &hdr) { oversizedCmds.replaceSubrange(0..<MemoryLayout<mach_header_64>.size, with: $0) }
-        XCTAssertThrowsError(try Macho.iterateLoadCommands(binary: oversizedCmds) { _, _ in false }) { error in
-            XCTAssertEqual(error as? PlayCoverError, PlayCoverError.appCorrupted)
+        #expect(throws: PlayCoverError.appCorrupted) {
+            try Macho.iterateLoadCommands(binary: oversizedCmds) { _, _ in false }
         }
 
         // cmdsize == 0 on first load command (must throw without Data.extract SIGTRAP)
@@ -319,54 +316,57 @@ final class MachoTests: XCTestCase {
         withUnsafeBytes(of: &badCmd) {
             zeroCmdSize.replaceSubrange(firstCmdOffset..<(firstCmdOffset + MemoryLayout<load_command>.size), with: $0)
         }
-        XCTAssertThrowsError(try Macho.iterateLoadCommands(binary: zeroCmdSize) { _, _ in false }) { error in
-            XCTAssertEqual(error as? PlayCoverError, PlayCoverError.appCorrupted)
+        #expect(throws: PlayCoverError.appCorrupted) {
+            try Macho.iterateLoadCommands(binary: zeroCmdSize) { _, _ in false }
         }
     }
 
-    func testIsMachoValidArchPlatformDetection() throws {
+    @Test
+    func isMachoValidArchPlatformDetection() throws {
         let iosURL = try makeTempFile(
             named: "ios_bin",
             data: makeThinArm64MachO(extraCommands: [makeBuildVersionCommand(platform: UInt32(PLATFORM_IOS))])
         )
-        XCTAssertFalse(try Macho.isMachoValidArch(iosURL))
+        #expect(!(try Macho.isMachoValidArch(iosURL)))
 
         let catalystURL = try makeTempFile(
             named: "catalyst_bin",
             data: makeThinArm64MachO(extraCommands: [makeBuildVersionCommand(platform: UInt32(PLATFORM_MACCATALYST))])
         )
-        XCTAssertTrue(try Macho.isMachoValidArch(catalystURL))
+        #expect(try Macho.isMachoValidArch(catalystURL))
 
         let noVersionURL = try makeTempFile(named: "no_ver_bin", data: makeThinArm64MachO())
-        XCTAssertFalse(try Macho.isMachoValidArch(noVersionURL))
+        #expect(!(try Macho.isMachoValidArch(noVersionURL)))
     }
 
-    func testIsMachoEncryptedDetection() throws {
+    @Test
+    func isMachoEncryptedDetection() throws {
         let plainURL = try makeTempFile(named: "plain_bin", data: makeThinArm64MachO())
-        XCTAssertFalse(try Macho.isMachoEncrypted(atURL: plainURL))
+        #expect(!(try Macho.isMachoEncrypted(atURL: plainURL)))
 
         let decryptedURL = try makeTempFile(
             named: "decrypted_bin",
             data: makeThinArm64MachO(extraCommands: [makeEncryptionInfoCommand(cryptid: 0)])
         )
-        XCTAssertFalse(try Macho.isMachoEncrypted(atURL: decryptedURL))
+        #expect(!(try Macho.isMachoEncrypted(atURL: decryptedURL)))
 
         let encryptedURL = try makeTempFile(
             named: "encrypted_bin",
             data: makeThinArm64MachO(extraCommands: [makeEncryptionInfoCommand(cryptid: 1)])
         )
-        XCTAssertTrue(try Macho.isMachoEncrypted(atURL: encryptedURL))
+        #expect(try Macho.isMachoEncrypted(atURL: encryptedURL))
     }
 
-    func testInspectBinaryDetectsPlayToolsAndCatalyst() throws {
+    @Test
+    func inspectBinaryDetectsPlayToolsAndCatalyst() throws {
         let playToolsPath = "@rpath/PlayTools.framework/PlayTools"
         let untouchedURL = try makeTempFile(
             named: "untouched",
             data: makeThinArm64MachO(extraCommands: [makeBuildVersionCommand(platform: UInt32(PLATFORM_IOS))])
         )
         let untouched = try Macho.inspectBinary(atURL: untouchedURL, playToolsPath: playToolsPath)
-        XCTAssertFalse(untouched.hasPlayTools)
-        XCTAssertFalse(untouched.isCatalyst)
+        #expect(!untouched.hasPlayTools)
+        #expect(!untouched.isCatalyst)
 
         let patchedURL = try makeTempFile(
             named: "patched",
@@ -376,11 +376,12 @@ final class MachoTests: XCTestCase {
             ])
         )
         let patched = try Macho.inspectBinary(atURL: patchedURL, playToolsPath: playToolsPath)
-        XCTAssertTrue(patched.hasPlayTools)
-        XCTAssertTrue(patched.isCatalyst)
+        #expect(patched.hasPlayTools)
+        #expect(patched.isCatalyst)
     }
 
-    func testInjectAndRemoveLoadCommandAndTightSpaceError() throws {
+    @Test
+    func injectAndRemoveLoadCommandAndTightSpaceError() throws {
         let dylibPath = "@rpath/PlayTools.framework/PlayTools"
         let binURL = try makeTempFile(
             named: "injectable",
@@ -394,38 +395,38 @@ final class MachoTests: XCTestCase {
             cmdType: UInt32(LC_LOAD_DYLIB),
             dylibPath: dylibPath
         )
-        XCTAssertTrue(insertedFirst)
-        XCTAssertTrue(try Macho.inspectBinary(atURL: binURL, playToolsPath: dylibPath).hasPlayTools)
+        #expect(insertedFirst)
+        #expect(try Macho.inspectBinary(atURL: binURL, playToolsPath: dylibPath).hasPlayTools)
 
         let insertedSecond = try Macho.injectLoadCommand(
             at: binURL,
             cmdType: UInt32(LC_LOAD_DYLIB),
             dylibPath: dylibPath
         )
-        XCTAssertFalse(insertedSecond)
+        #expect(!insertedSecond)
 
         let removed = try Macho.removeLoadCommand(at: binURL, dylibPaths: [dylibPath])
-        XCTAssertTrue(removed)
-        XCTAssertFalse(try Macho.inspectBinary(atURL: binURL, playToolsPath: dylibPath).hasPlayTools)
+        #expect(removed)
+        #expect(!(try Macho.inspectBinary(atURL: binURL, playToolsPath: dylibPath).hasPlayTools))
 
         let removedAgain = try Macho.removeLoadCommand(at: binURL, dylibPaths: [dylibPath])
-        XCTAssertFalse(removedAgain)
+        #expect(!removedAgain)
 
         let tightURL = try makeTempFile(
             named: "tight",
             data: makeThinArm64MachO(tightPadding: true)
         )
-        XCTAssertThrowsError(
+        let capErr = #expect(throws: MachoCapacityError.self) {
             try Macho.injectLoadCommand(at: tightURL, cmdType: UInt32(LC_LOAD_DYLIB), dylibPath: dylibPath)
-        ) { error in
-            guard case MachoCapacityError.insufficientLoadCommandSpace = error else {
-                XCTFail("Expected MachoCapacityError.insufficientLoadCommandSpace, got \(error)")
-                return
-            }
+        }
+        guard case .insufficientLoadCommandSpace = capErr else {
+            Issue.record("Expected MachoCapacityError.insufficientLoadCommandSpace, got \(String(describing: capErr))")
+            return
         }
     }
 
-    func testReplaceLibraryAndReplaceVersionCommand() throws {
+    @Test
+    func replaceLibraryAndReplaceVersionCommand() throws {
         var binary = makeThinArm64MachO(extraCommands: [
             makeVersionMinIphoneOSCommand(),
             makeLoadDylibCommand(path: "@rpath/libswiftUIKit.dylib")
@@ -438,10 +439,10 @@ final class MachoTests: XCTestCase {
             "/System/iOSSupport/usr/lib/swift/libswiftUIKit.dylib",
             totalSize: binary.count
         )
-        XCTAssertTrue(replacedLib)
+        #expect(replacedLib)
 
         let patchedURL = try makeTempFile(named: "replaced", data: binary)
-        XCTAssertTrue(try Macho.isMachoValidArch(patchedURL))
+        #expect(try Macho.isMachoValidArch(patchedURL))
 
         var loadedPaths: [String] = []
         _ = try Macho.iterateLoadCommands(binary: binary) { offset, shouldSwap in
@@ -465,11 +466,12 @@ final class MachoTests: XCTestCase {
             }
             return false
         }
-        XCTAssertEqual(loadedPaths, ["/System/iOSSupport/usr/lib/swift/libswiftUIKit.dylib"])
-        XCTAssertFalse(try Macho.replaceLibrary(&binary, "@rpath/Missing.dylib", "/usr/lib/Missing.dylib"))
+        #expect(loadedPaths == ["/System/iOSSupport/usr/lib/swift/libswiftUIKit.dylib"])
+        #expect(!(try Macho.replaceLibrary(&binary, "@rpath/Missing.dylib", "/usr/lib/Missing.dylib")))
     }
 
-    func testStripBinaryExtractsArm64AndThrowsWhenMissing() throws {
+    @Test
+    func stripBinaryExtractsArm64AndThrowsWhenMissing() throws {
         let arm64Slice = makeThinArm64MachO(extraCommands: [
             makeBuildVersionCommand(platform: UInt32(PLATFORM_MACCATALYST))
         ])
@@ -479,13 +481,13 @@ final class MachoTests: XCTestCase {
         ])
 
         try Macho.stripBinary(&fat)
-        XCTAssertEqual(fat, arm64Slice)
+        #expect(fat == arm64Slice)
 
         var x86OnlyFat = makeFatMachO(slices: [
             (CPU_TYPE_X86_64, CPU_SUBTYPE_X86_64_ALL, makeThinX86Dummy())
         ])
-        XCTAssertThrowsError(try Macho.stripBinary(&x86OnlyFat)) { error in
-            XCTAssertEqual(error as? PlayCoverError, PlayCoverError.failedToStripBinary)
+        #expect(throws: PlayCoverError.failedToStripBinary) {
+            try Macho.stripBinary(&x86OnlyFat)
         }
     }
 
@@ -585,17 +587,18 @@ final class MachoTests: XCTestCase {
         return data
     }
 
-    func testStripBinaryMalformedFatAndTruncatedSlicesThrow() {
+    @Test
+    func stripBinaryMalformedFatAndTruncatedSlicesThrow() {
         var tiny = Data([0xCA, 0xFE])
-        XCTAssertThrowsError(try Macho.stripBinary(&tiny)) { error in
-            XCTAssertEqual(error as? PlayCoverError, PlayCoverError.failedToStripBinary)
+        #expect(throws: PlayCoverError.failedToStripBinary) {
+            try Macho.stripBinary(&tiny)
         }
 
         var badNfatHeader = fat_header(magic: FAT_CIGAM, nfat_arch: UInt32(100).bigEndian)
         var badNfatData = Data(count: MemoryLayout<fat_header>.size)
         withUnsafeBytes(of: &badNfatHeader) { badNfatData.replaceSubrange(0..<8, with: $0) }
-        XCTAssertThrowsError(try Macho.stripBinary(&badNfatData)) { error in
-            XCTAssertEqual(error as? PlayCoverError, PlayCoverError.failedToStripBinary)
+        #expect(throws: PlayCoverError.failedToStripBinary) {
+            try Macho.stripBinary(&badNfatData)
         }
 
         var oobHeader = fat_header(magic: FAT_CIGAM, nfat_arch: UInt32(1).bigEndian)
@@ -609,8 +612,8 @@ final class MachoTests: XCTestCase {
         var oobData = Data(count: MemoryLayout<fat_header>.size + MemoryLayout<fat_arch>.size)
         withUnsafeBytes(of: &oobHeader) { oobData.replaceSubrange(0..<8, with: $0) }
         withUnsafeBytes(of: &oobArch) { oobData.replaceSubrange(8..<28, with: $0) }
-        XCTAssertThrowsError(try Macho.stripBinary(&oobData)) { error in
-            XCTAssertEqual(error as? PlayCoverError, PlayCoverError.failedToStripBinary)
+        #expect(throws: PlayCoverError.failedToStripBinary) {
+            try Macho.stripBinary(&oobData)
         }
 
         var overflowArch = fat_arch(
@@ -623,8 +626,8 @@ final class MachoTests: XCTestCase {
         var overflowData = Data(count: MemoryLayout<fat_header>.size + MemoryLayout<fat_arch>.size)
         withUnsafeBytes(of: &oobHeader) { overflowData.replaceSubrange(0..<8, with: $0) }
         withUnsafeBytes(of: &overflowArch) { overflowData.replaceSubrange(8..<28, with: $0) }
-        XCTAssertThrowsError(try Macho.stripBinary(&overflowData)) { error in
-            XCTAssertEqual(error as? PlayCoverError, PlayCoverError.failedToStripBinary)
+        #expect(throws: PlayCoverError.failedToStripBinary) {
+            try Macho.stripBinary(&overflowData)
         }
 
         var fat64Header = fat_header(magic: FAT_CIGAM_64, nfat_arch: UInt32(1).bigEndian)
@@ -639,12 +642,13 @@ final class MachoTests: XCTestCase {
         var fat64OverflowData = Data(count: MemoryLayout<fat_header>.size + MemoryLayout<fat_arch_64>.size)
         withUnsafeBytes(of: &fat64Header) { fat64OverflowData.replaceSubrange(0..<8, with: $0) }
         withUnsafeBytes(of: &fat64OverflowArch) { fat64OverflowData.replaceSubrange(8..<40, with: $0) }
-        XCTAssertThrowsError(try Macho.stripBinary(&fat64OverflowData)) { error in
-            XCTAssertEqual(error as? PlayCoverError, PlayCoverError.failedToStripBinary)
+        #expect(throws: PlayCoverError.failedToStripBinary) {
+            try Macho.stripBinary(&fat64OverflowData)
         }
     }
 
-    func testTruncatedLoadCommandStructSizesThrowCorrupted() throws {
+    @Test
+    func truncatedLoadCommandStructSizesThrowCorrupted() throws {
         func makeSingleTruncatedCmdBinary(cmd: UInt32, cmdsize: UInt32) -> Data {
             let headerSize = MemoryLayout<mach_header_64>.size
             var header = mach_header_64(
@@ -667,28 +671,29 @@ final class MachoTests: XCTestCase {
         }
 
         var truncDylib = makeSingleTruncatedCmdBinary(cmd: UInt32(LC_LOAD_DYLIB), cmdsize: 8)
-        XCTAssertThrowsError(try Macho.replaceLibrary(&truncDylib, "@rpath/foo.dylib", "/usr/lib/foo.dylib")) { error in
-            XCTAssertEqual(error as? PlayCoverError, PlayCoverError.appCorrupted)
+        #expect(throws: PlayCoverError.appCorrupted) {
+            try Macho.replaceLibrary(&truncDylib, "@rpath/foo.dylib", "/usr/lib/foo.dylib")
         }
 
         let truncEncURL = try makeTempFile(
             named: "trunc_enc",
             data: makeSingleTruncatedCmdBinary(cmd: UInt32(LC_ENCRYPTION_INFO_64), cmdsize: 8)
         )
-        XCTAssertThrowsError(try Macho.isMachoEncrypted(atURL: truncEncURL)) { error in
-            XCTAssertEqual(error as? PlayCoverError, PlayCoverError.appCorrupted)
+        #expect(throws: PlayCoverError.appCorrupted) {
+            try Macho.isMachoEncrypted(atURL: truncEncURL)
         }
 
         let truncVerURL = try makeTempFile(
             named: "trunc_buildver",
             data: makeSingleTruncatedCmdBinary(cmd: UInt32(LC_BUILD_VERSION), cmdsize: 8)
         )
-        XCTAssertThrowsError(try Macho.isMachoValidArch(truncVerURL)) { error in
-            XCTAssertEqual(error as? PlayCoverError, PlayCoverError.appCorrupted)
+        #expect(throws: PlayCoverError.appCorrupted) {
+            try Macho.isMachoValidArch(truncVerURL)
         }
     }
 
-    func testIterateLoadCommandsRejects32BitMagicAndSizeofcmdsMismatch() throws {
+    @Test
+    func iterateLoadCommandsRejects32BitMagicAndSizeofcmdsMismatch() throws {
         var header32 = mach_header(
             magic: MH_MAGIC,
             cputype: CPU_TYPE_ARM,
@@ -702,8 +707,8 @@ final class MachoTests: XCTestCase {
         withUnsafeBytes(of: &header32) { data32.replaceSubrange(0..<MemoryLayout<mach_header>.size, with: $0) }
         var dummyLC = load_command(cmd: UInt32(LC_SEGMENT), cmdsize: 8)
         withUnsafeBytes(of: &dummyLC) { data32.replaceSubrange(32..<40, with: $0) }
-        XCTAssertThrowsError(try Macho.iterateLoadCommands(binary: data32) { _, _ in false }) { error in
-            XCTAssertEqual(error as? PlayCoverError, PlayCoverError.appCorrupted)
+        #expect(throws: PlayCoverError.appCorrupted) {
+            try Macho.iterateLoadCommands(binary: data32) { _, _ in false }
         }
 
         // ncmds = 0, sizeofcmds = 32
@@ -712,8 +717,8 @@ final class MachoTests: XCTestCase {
         hdr.ncmds = 0
         hdr.sizeofcmds = 32
         withUnsafeBytes(of: &hdr) { mismatchZero.replaceSubrange(0..<MemoryLayout<mach_header_64>.size, with: $0) }
-        XCTAssertThrowsError(try Macho.iterateLoadCommands(binary: mismatchZero) { _, _ in false }) { error in
-            XCTAssertEqual(error as? PlayCoverError, PlayCoverError.appCorrupted)
+        #expect(throws: PlayCoverError.appCorrupted) {
+            try Macho.iterateLoadCommands(binary: mismatchZero) { _, _ in false }
         }
 
         // ncmds = 1, actual cmdsize = 24, header sizeofcmds = 64
@@ -732,12 +737,13 @@ final class MachoTests: XCTestCase {
         withUnsafeBytes(of: &partialHdr) { mismatchPartial.replaceSubrange(0..<headerSize, with: $0) }
         let verCmd = makeBuildVersionCommand(platform: UInt32(PLATFORM_MACCATALYST))
         mismatchPartial.replaceSubrange(headerSize..<(headerSize + verCmd.count), with: verCmd)
-        XCTAssertThrowsError(try Macho.iterateLoadCommands(binary: mismatchPartial) { _, _ in false }) { error in
-            XCTAssertEqual(error as? PlayCoverError, PlayCoverError.appCorrupted)
+        #expect(throws: PlayCoverError.appCorrupted) {
+            try Macho.iterateLoadCommands(binary: mismatchPartial) { _, _ in false }
         }
     }
 
-    func testReplaceLibrariesHandlesDuplicatesAndAccurateCapacityError() throws {
+    @Test
+    func replaceLibrariesHandlesDuplicatesAndAccurateCapacityError() throws {
         let dupURL = try makeTempFile(
             named: "dup_uikit",
             data: makeThinArm64MachO(extraCommands: [
@@ -771,31 +777,28 @@ final class MachoTests: XCTestCase {
             }
             return false
         }
-        XCTAssertFalse(paths.contains("@rpath/libswiftUIKit.dylib"))
-        XCTAssertEqual(
-            paths.filter { $0 == "/System/iOSSupport/usr/lib/swift/libswiftUIKit.dylib" }.count,
-            2
-        )
-        XCTAssertFalse(try Macho.fixLibrariesIfNeeded(atURL: dupURL))
+        #expect(!paths.contains("@rpath/libswiftUIKit.dylib"))
+        #expect(paths.filter { $0 == "/System/iOSSupport/usr/lib/swift/libswiftUIKit.dylib" }.count == 2)
+        #expect(!(try Macho.fixLibrariesIfNeeded(atURL: dupURL)))
 
         // Tight binary with machoURL == nil must preserve actual growth delta (24 bytes), not libDylib.utf8.count
         var tightData = makeThinArm64MachO(
             extraCommands: [makeLoadDylibCommand(path: "@rpath/libswiftUIKit.dylib")],
             tightPadding: true
         )
-        XCTAssertThrowsError(
+        let capErr = #expect(throws: MachoCapacityError.self) {
             try Macho.replaceLibraries(&tightData, machoURL: nil, totalSize: tightData.count)
-        ) { error in
-            guard case let MachoCapacityError.insufficientLoadCommandSpace(needed, available) = error else {
-                XCTFail("Expected MachoCapacityError.insufficientLoadCommandSpace, got \(error)")
-                return
-            }
-            XCTAssertEqual(needed, 24)
-            XCTAssertEqual(available, 0)
         }
+        guard case let .insufficientLoadCommandSpace(needed, available) = capErr else {
+            Issue.record("Expected MachoCapacityError.insufficientLoadCommandSpace, got \(String(describing: capErr))")
+            return
+        }
+        #expect(needed == 24)
+        #expect(available == 0)
     }
 
-    func testFat64AndZeroArchAndSwappedCigam64RoundTrip() throws {
+    @Test
+    func fat64AndZeroArchAndSwappedCigam64RoundTrip() throws {
         var arm64Big = makeThinArm64MachO(
             extraCommands: [makeBuildVersionCommand(platform: UInt32(PLATFORM_MACCATALYST))],
             totalFileSize: 12_288
@@ -808,13 +811,13 @@ final class MachoTests: XCTestCase {
             (CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL, arm64Big)
         ])
         try Macho.stripBinary(&fat64)
-        XCTAssertEqual(fat64, arm64Big)
+        #expect(fat64 == arm64Big)
 
         var zeroArchHeader = fat_header(magic: FAT_CIGAM, nfat_arch: 0)
         var zeroArchData = Data(count: MemoryLayout<fat_header>.size)
         withUnsafeBytes(of: &zeroArchHeader) { zeroArchData.replaceSubrange(0..<8, with: $0) }
-        XCTAssertThrowsError(try Macho.stripBinary(&zeroArchData)) { error in
-            XCTAssertEqual(error as? PlayCoverError, PlayCoverError.failedToStripBinary)
+        #expect(throws: PlayCoverError.failedToStripBinary) {
+            try Macho.stripBinary(&zeroArchData)
         }
 
         // LC_BUILD_VERSION with ntools = 1 (cmdsize = 32)
@@ -829,7 +832,7 @@ final class MachoTests: XCTestCase {
         var bvWithTool = Data(count: 32)
         withUnsafeBytes(of: &bv) { bvWithTool.replaceSubrange(0..<24, with: $0) }
         let bvToolURL = try makeTempFile(named: "bv_ntools", data: makeThinArm64MachO(extraCommands: [bvWithTool]))
-        XCTAssertTrue(try Macho.isMachoValidArch(bvToolURL))
+        #expect(try Macho.isMachoValidArch(bvToolURL))
 
         // MH_CIGAM_64 round-trip: convert, inject, remove
         let swappedURL = try makeTempFile(
@@ -840,18 +843,17 @@ final class MachoTests: XCTestCase {
             ])
         )
         try Macho.convertMacho(swappedURL)
-        XCTAssertTrue(try Macho.isMachoValidArch(swappedURL))
+        #expect(try Macho.isMachoValidArch(swappedURL))
         let playToolsPath = "@rpath/PlayTools.framework/PlayTools"
-        XCTAssertTrue(try Macho.injectLoadCommand(at: swappedURL, cmdType: UInt32(LC_LOAD_DYLIB), dylibPath: playToolsPath))
-        XCTAssertTrue(try Macho.inspectBinary(atURL: swappedURL, playToolsPath: playToolsPath).hasPlayTools)
-        XCTAssertTrue(try Macho.removeLoadCommand(at: swappedURL, dylibPaths: [playToolsPath]))
-        XCTAssertFalse(try Macho.inspectBinary(atURL: swappedURL, playToolsPath: playToolsPath).hasPlayTools)
+        #expect(try Macho.injectLoadCommand(at: swappedURL, cmdType: UInt32(LC_LOAD_DYLIB), dylibPath: playToolsPath))
+        #expect(try Macho.inspectBinary(atURL: swappedURL, playToolsPath: playToolsPath).hasPlayTools)
+        #expect(try Macho.removeLoadCommand(at: swappedURL, dylibPaths: [playToolsPath]))
+        #expect(!(try Macho.inspectBinary(atURL: swappedURL, playToolsPath: playToolsPath).hasPlayTools))
     }
 
-    func testCapacityBoundaryExactFitOneByteShortAndDirtyPadding() throws {
+    @Test
+    func capacityBoundaryExactFitOneByteShortAndDirtyPadding() throws {
         let playToolsPath = "@rpath/PlayTools.framework/PlayTools"
-        // Fixed 24 + 35 utf8 + 5 padding = 64? Let's compute exact cmdSize:
-        // 35 % 8 == 3 -> padding = 5 -> 24 + 35 + 5 = 64? Wait: "@rpath/PlayTools.framework/PlayTools".utf8.count == 36?
         let fixed = MemoryLayout<dylib_command>.size
         let strLen = playToolsPath.utf8.count
         let cmdSize = fixed + strLen + (8 - (strLen % 8))
@@ -888,37 +890,36 @@ final class MachoTests: XCTestCase {
         }
 
         let exactURL = try makeTempFile(named: "exact_fit", data: makeMachoWithAvailablePadding(cmdSize))
-        XCTAssertTrue(try Macho.injectLoadCommand(at: exactURL, cmdType: UInt32(LC_LOAD_DYLIB), dylibPath: playToolsPath))
+        #expect(try Macho.injectLoadCommand(at: exactURL, cmdType: UInt32(LC_LOAD_DYLIB), dylibPath: playToolsPath))
 
         let oneShortURL = try makeTempFile(named: "one_short", data: makeMachoWithAvailablePadding(cmdSize - 1))
-        XCTAssertThrowsError(
+        let shortErr = #expect(throws: MachoCapacityError.self) {
             try Macho.injectLoadCommand(at: oneShortURL, cmdType: UInt32(LC_LOAD_DYLIB), dylibPath: playToolsPath)
-        ) { error in
-            guard case let MachoCapacityError.insufficientLoadCommandSpace(needed, available) = error else {
-                XCTFail("Expected MachoCapacityError, got \(error)")
-                return
-            }
-            XCTAssertEqual(needed, cmdSize)
-            XCTAssertEqual(available, cmdSize - 1)
         }
+        guard case let .insufficientLoadCommandSpace(shortNeeded, shortAvail) = shortErr else {
+            Issue.record("Expected MachoCapacityError.insufficientLoadCommandSpace, got \(String(describing: shortErr))")
+            return
+        }
+        #expect(shortNeeded == cmdSize)
+        #expect(shortAvail == cmdSize - 1)
 
         let dirtyURL = try makeTempFile(
             named: "dirty_pad",
             data: makeMachoWithAvailablePadding(cmdSize, fillByte: 0xDE)
         )
-        XCTAssertThrowsError(
+        let dirtyErr = #expect(throws: MachoCapacityError.self) {
             try Macho.injectLoadCommand(at: dirtyURL, cmdType: UInt32(LC_LOAD_DYLIB), dylibPath: playToolsPath)
-        ) { error in
-            guard case let MachoCapacityError.insufficientLoadCommandSpace(needed, available) = error else {
-                XCTFail("Expected MachoCapacityError, got \(error)")
-                return
-            }
-            XCTAssertEqual(needed, cmdSize)
-            XCTAssertEqual(available, 0)
         }
+        guard case let .insufficientLoadCommandSpace(dirtyNeeded, dirtyAvail) = dirtyErr else {
+            Issue.record("Expected MachoCapacityError.insufficientLoadCommandSpace, got \(String(describing: dirtyErr))")
+            return
+        }
+        #expect(dirtyNeeded == cmdSize)
+        #expect(dirtyAvail == 0)
     }
 
-    func testFixLibrariesIfNeededPermissionsRepairAndCache() throws {
+    @Test
+    func fixLibrariesIfNeededPermissionsRepairAndCache() throws {
         let fm = FileManager.default
         let cleanURL = try makeTempFile(
             named: "perms_clean",
@@ -929,12 +930,12 @@ final class MachoTests: XCTestCase {
         try fm.setAttributes([.posixPermissions: NSNumber(value: 0o644)], ofItemAtPath: cleanURL.path)
 
         // First call repairs non-executable permissions to 0755 and stamps cache
-        XCTAssertTrue(try Macho.fixLibrariesIfNeeded(atURL: cleanURL))
+        #expect(try Macho.fixLibrariesIfNeeded(atURL: cleanURL))
         let repairedPerms = (try fm.attributesOfItem(atPath: cleanURL.path)[.posixPermissions] as? NSNumber)?.intValue
-        XCTAssertEqual((repairedPerms ?? 0) & 0o777, 0o755)
+        #expect(((repairedPerms ?? 0) & 0o777) == 0o755)
 
         // Second call hits verifiedStamps cache and returns false
-        XCTAssertFalse(try Macho.fixLibrariesIfNeeded(atURL: cleanURL))
+        #expect(!(try Macho.fixLibrariesIfNeeded(atURL: cleanURL)))
 
         // Binary needing dylib fix rewrites once then hits cache on second call
         let unpatchedURL = try makeTempFile(
@@ -945,11 +946,12 @@ final class MachoTests: XCTestCase {
             ])
         )
         try fm.setAttributes([.posixPermissions: NSNumber(value: 0o755)], ofItemAtPath: unpatchedURL.path)
-        XCTAssertTrue(try Macho.fixLibrariesIfNeeded(atURL: unpatchedURL))
-        XCTAssertFalse(try Macho.fixLibrariesIfNeeded(atURL: unpatchedURL))
+        #expect(try Macho.fixLibrariesIfNeeded(atURL: unpatchedURL))
+        #expect(!(try Macho.fixLibrariesIfNeeded(atURL: unpatchedURL)))
     }
 
-    func testRemoveLoadCommandMiddleAndMultipleEntries() throws {
+    @Test
+    func removeLoadCommandMiddleAndMultipleEntries() throws {
         let aDylib = "@rpath/A.dylib"
         let bDylib = "@rpath/B.dylib"
         let libSystem = "/usr/lib/libSystem.B.dylib"
@@ -964,8 +966,8 @@ final class MachoTests: XCTestCase {
             ])
         )
 
-        XCTAssertTrue(try Macho.removeLoadCommand(at: middleURL, dylibPaths: [aDylib, bDylib]))
-        XCTAssertTrue(try Macho.isMachoValidArch(middleURL))
+        #expect(try Macho.removeLoadCommand(at: middleURL, dylibPaths: [aDylib, bDylib]))
+        #expect(try Macho.isMachoValidArch(middleURL))
 
         let patched = try Data(contentsOf: middleURL)
         var remainingCmds: [UInt32] = []
@@ -992,12 +994,12 @@ final class MachoTests: XCTestCase {
             }
             return false
         }
-        XCTAssertEqual(remainingCmds, [
+        #expect(remainingCmds == [
             UInt32(LC_SEGMENT_64),
             UInt32(LC_BUILD_VERSION),
             UInt32(LC_LOAD_DYLIB)
         ])
-        XCTAssertEqual(remainingDylibs, [libSystem])
+        #expect(remainingDylibs == [libSystem])
 
         // Also verify middle removal on byte-swapped MH_CIGAM_64
         let swappedMiddleURL = try makeTempFile(
@@ -1008,30 +1010,31 @@ final class MachoTests: XCTestCase {
                 makeLoadDylibCommand(path: libSystem)
             ])
         )
-        XCTAssertTrue(try Macho.removeLoadCommand(at: swappedMiddleURL, dylibPaths: [aDylib]))
-        XCTAssertTrue(try Macho.isMachoValidArch(swappedMiddleURL))
+        #expect(try Macho.removeLoadCommand(at: swappedMiddleURL, dylibPaths: [aDylib]))
+        #expect(try Macho.isMachoValidArch(swappedMiddleURL))
     }
 
-    func testReplaceHelpersRejectTruncatedDataAndHandleSlices() throws {
+    @Test
+    func replaceHelpersRejectTruncatedDataAndHandleSlices() throws {
         var tiny = Data([0xCF, 0xFA, 0xED, 0xFE])
-        XCTAssertThrowsError(try Macho.replaceVersionCommand(&tiny)) { error in
-            XCTAssertEqual(error as? PlayCoverError, PlayCoverError.appCorrupted)
+        #expect(throws: PlayCoverError.appCorrupted) {
+            try Macho.replaceVersionCommand(&tiny)
         }
-        XCTAssertThrowsError(try Macho.replaceLibrary(&tiny, "@rpath/a.dylib", "/usr/lib/a.dylib")) { error in
-            XCTAssertEqual(error as? PlayCoverError, PlayCoverError.appCorrupted)
+        #expect(throws: PlayCoverError.appCorrupted) {
+            try Macho.replaceLibrary(&tiny, "@rpath/a.dylib", "/usr/lib/a.dylib")
         }
-        XCTAssertThrowsError(try Macho.replaceLibraries(&tiny)) { error in
-            XCTAssertEqual(error as? PlayCoverError, PlayCoverError.appCorrupted)
+        #expect(throws: PlayCoverError.appCorrupted) {
+            try Macho.replaceLibraries(&tiny)
         }
 
         var empty = Data()
-        XCTAssertThrowsError(try Macho.replaceLastCommand(
-            &empty,
-            satisfy: { _, _ in false },
-            with: { _ in nil },
-            atEnd: true
-        )) { error in
-            XCTAssertEqual(error as? PlayCoverError, PlayCoverError.appCorrupted)
+        #expect(throws: PlayCoverError.appCorrupted) {
+            try Macho.replaceLastCommand(
+                &empty,
+                satisfy: { _, _ in false },
+                with: { _ in nil },
+                atEnd: true
+            )
         }
 
         // Non-zero startIndex Data slices must not trigger Data.extract SIGTRAP
@@ -1041,14 +1044,14 @@ final class MachoTests: XCTestCase {
         ])
         let prefixed = Data(repeating: 0xAA, count: 16) + thin
         var slice = prefixed[16..<prefixed.count]
-        XCTAssertEqual(slice.startIndex, 16)
+        #expect(slice.startIndex == 16)
 
         let endOff = try Macho.iterateLoadCommands(binary: slice) { _, _ in false }
-        XCTAssertGreaterThan(endOff, MemoryLayout<mach_header_64>.size)
-        XCTAssertGreaterThan(try Macho.earliestContentOffset(in: slice), MemoryLayout<mach_header_64>.size)
+        #expect(endOff > MemoryLayout<mach_header_64>.size)
+        #expect(try Macho.earliestContentOffset(in: slice) > MemoryLayout<mach_header_64>.size)
 
         try Macho.replaceVersionCommand(&slice, totalSize: slice.count)
-        XCTAssertTrue(try Macho.replaceLibrary(
+        #expect(try Macho.replaceLibrary(
             &slice,
             "@rpath/libswiftUIKit.dylib",
             "/System/iOSSupport/usr/lib/swift/libswiftUIKit.dylib",
@@ -1059,34 +1062,35 @@ final class MachoTests: XCTestCase {
             (CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL, thin)
         ])
         var fatSlice = fatPrefixed[16..<fatPrefixed.count]
-        XCTAssertEqual(fatSlice.startIndex, 16)
+        #expect(fatSlice.startIndex == 16)
         try Macho.stripBinary(&fatSlice)
-        XCTAssertEqual(fatSlice, thin)
+        #expect(fatSlice == thin)
     }
 
-    func testDataExtractThrowsAppCorruptedInsteadOfCrashing() throws {
+    @Test
+    func dataExtractThrowsAppCorruptedInsteadOfCrashing() throws {
         let empty = Data()
-        XCTAssertThrowsError(try empty.extract(UInt32.self)) { error in
-            XCTAssertEqual(error as? PlayCoverError, PlayCoverError.appCorrupted)
+        #expect(throws: PlayCoverError.appCorrupted) {
+            try empty.extract(UInt32.self)
         }
 
         let fourBytes = Data([0x01, 0x02, 0x03, 0x04])
-        XCTAssertThrowsError(try fourBytes.extract(UInt32.self, offset: -1)) { error in
-            XCTAssertEqual(error as? PlayCoverError, PlayCoverError.appCorrupted)
+        #expect(throws: PlayCoverError.appCorrupted) {
+            try fourBytes.extract(UInt32.self, offset: -1)
         }
-        XCTAssertThrowsError(try fourBytes.extract(UInt32.self, offset: 2)) { error in
-            XCTAssertEqual(error as? PlayCoverError, PlayCoverError.appCorrupted)
+        #expect(throws: PlayCoverError.appCorrupted) {
+            try fourBytes.extract(UInt32.self, offset: 2)
         }
-        XCTAssertThrowsError(try fourBytes.extract(UInt32.self, offset: Int.max)) { error in
-            XCTAssertEqual(error as? PlayCoverError, PlayCoverError.appCorrupted)
+        #expect(throws: PlayCoverError.appCorrupted) {
+            try fourBytes.extract(UInt32.self, offset: Int.max)
         }
 
         let sliced = (Data([0xAA, 0xBB, 0xCC, 0xDD]) + fourBytes)[4..<8]
-        XCTAssertEqual(sliced.startIndex, 4)
-        XCTAssertThrowsError(try sliced.extract(UInt32.self, offset: 0)) { error in
-            XCTAssertEqual(error as? PlayCoverError, PlayCoverError.appCorrupted)
+        #expect(sliced.startIndex == 4)
+        #expect(throws: PlayCoverError.appCorrupted) {
+            try sliced.extract(UInt32.self, offset: 0)
         }
         let extracted = try sliced.extract(UInt32.self, offset: 4)
-        XCTAssertEqual(extracted.littleEndian, 0x04030201)
+        #expect(extracted.littleEndian == 0x04030201)
     }
 }

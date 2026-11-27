@@ -3,8 +3,7 @@ import Foundation
 import PlayCoverCore
 import PlayCoverUI
 import SwiftUI
-import UniformTypeIdentifiers
-import XCTest
+import Testing
 @testable import PlayCover
 
 private struct DemoAppSpec {
@@ -24,7 +23,8 @@ private struct CaptureSpec {
 
 private struct CaptureResult {
     let width, height, uniqueColors: Int
-    let attachment: XCTAttachment?
+    let windowWidth, backingScale: CGFloat
+    let pngData: Data?
 }
 
 private struct ConfigTarget {
@@ -43,17 +43,16 @@ private struct DemoContext {
 }
 
 @MainActor
-final class WorkspaceUISnapshotTests: XCTestCase {
+private final class SnapshotFixture {
     private static let suiteName = "app.makedie.MacOverCoreTests.WorkspaceUISnapshots"
 
-    private var tempDir: URL?
+    private let tempDir: URL
     private var createdBundleIDs: [String] = []
-    private var isolatedDefaults: UserDefaults?
-    private var savedLayoutRaw: String?
-    private var savedLegacyList: Any?
+    private let isolatedDefaults: UserDefaults?
+    private let savedLayoutRaw: String?
+    private let savedLegacyList: Any?
 
-    override func setUp() async throws {
-        try await super.setUp()
+    init() throws {
         savedLayoutRaw = UserDefaults.standard.string(forKey: "AppLibraryLayoutMode")
         savedLegacyList = UserDefaults.standard.object(forKey: "AppLibraryView")
         let dir = FileManager.default.temporaryDirectory
@@ -65,7 +64,7 @@ final class WorkspaceUISnapshotTests: XCTestCase {
         isolatedDefaults = defaults
     }
 
-    override func tearDown() async throws {
+    func cleanup() {
         restoreUserDefaults()
         for bundleID in createdBundleIDs {
             let settingsURL = AppSettings.appSettingsDir
@@ -74,19 +73,94 @@ final class WorkspaceUISnapshotTests: XCTestCase {
             try? FileManager.default.removeItem(at: Keymapping.keymappingDir.appendingPathComponent(bundleID))
         }
         createdBundleIDs.removeAll()
-        if let dir = tempDir { try? FileManager.default.removeItem(at: dir) }
-        tempDir = nil
+        try? FileManager.default.removeItem(at: tempDir)
         isolatedDefaults?.removePersistentDomain(forName: Self.suiteName)
-        isolatedDefaults = nil
-        try await super.tearDown()
     }
 
-    func testCaptureRealMacOS26UIScreenshots() throws {
-        let context = try makeDemoContext()
+    func makeDemoContext() throws -> DemoContext {
+        let defaults = try #require(isolatedDefaults)
+        let deps = PlayCoverDependencies(userDefaults: defaults, loadInitialData: false, configureDiagnostics: false)
+        deps.appIntegrity.integrityOff = false
+        deps.startupAlerts.activeAlert = nil
+        deps.keyCoverObservable.isKeyCoverUnlockingPromptShown = false
+        deps.toastVM.isShown = false
+        let apps = try SnapshotSupport.demoSpecs().map { spec in
+            createdBundleIDs.append(spec.bundleID)
+            return try SnapshotSupport.makeDemoApp(spec: spec, in: tempDir, deps: deps)
+        }
+        SnapshotSupport.configureDemoApps(apps)
+        deps.appsVM.updatingApps = false
+        deps.appsVM.apps = apps
+        deps.appsVM.applyFilter()
+        return DemoContext(
+            deps: deps, navState: AppNavigationState(), updaterVM: UpdaterViewModel(startUpdater: false),
+            starlight: apps[0], chrono: apps[1], aether: apps[2], retro: apps[3]
+        )
+    }
+
+    private func restoreUserDefaults() {
+        if let savedLayoutRaw {
+            UserDefaults.standard.set(savedLayoutRaw, forKey: "AppLibraryLayoutMode")
+        } else {
+            UserDefaults.standard.removeObject(forKey: "AppLibraryLayoutMode")
+        }
+        if let savedLegacyList {
+            UserDefaults.standard.set(savedLegacyList, forKey: "AppLibraryView")
+        } else {
+            UserDefaults.standard.removeObject(forKey: "AppLibraryView")
+        }
+    }
+}
+
+@Suite(.serialized)
+enum PlayCoverGlobalHostScope {}
+
+extension PlayCoverGlobalHostScope {
+@Suite(.serialized)
+@MainActor
+struct WorkspaceUISnapshotTests {
+    @Test
+    func captureRealMacOS26UIScreenshots() throws {
+        let fixture = try SnapshotFixture()
+        defer { fixture.cleanup() }
+        let context = try fixture.makeDemoContext()
         defer { context.apps.forEach { $0.settings.flush() } }
         captureLibraryScreens(context: context)
         captureConfigScreens(context: context)
         captureAuxiliaryScreens(context: context)
+    }
+
+    @Test
+    func narrowWindowConfigurationLayoutStability() throws {
+        let fixture = try SnapshotFixture()
+        defer { fixture.cleanup() }
+        let context = try fixture.makeDemoContext()
+        defer { context.apps.forEach { $0.settings.flush() } }
+        context.navState.libraryLayout = .grid
+        context.navState.showInspector = true
+        let panes: [(ConfigPane, PlayApp, String)] = [
+            (.overview, context.starlight, "Overview"),
+            (.display, context.aether, "Display"),
+            (.device, context.retro, "Device"),
+            (.network, context.starlight, "Network")
+        ]
+        for (pane, app, label) in panes {
+            context.navState.configTargetID = app.id
+            context.navState.activeConfigPane = pane
+            let rootView = withDependencies(RootSplitView(autoFetchOnAppear: false), context: context)
+                .environment(\.locale, Locale(identifier: "en"))
+            let spec = CaptureSpec(
+                name: "narrow_1024_\(pane.rawValue)",
+                windowTitle: "\(app.name) — \(label)",
+                size: NSSize(width: 1024, height: 677),
+                appearance: .aqua,
+                toolbarStyle: .unified,
+                delay: 0.8
+            )
+            let result = captureWindow(rootView, spec: spec)
+            #expect(result.windowWidth <= 1024.5)
+            #expect(result.width == Int((1024.0 * max(1.0, result.backingScale)).rounded()))
+        }
     }
 
     private func captureLibraryScreens(context: DemoContext) {
@@ -184,51 +258,25 @@ final class WorkspaceUISnapshotTests: XCTestCase {
             .environment(context.navState)
     }
 
-    private func captureWindow<Content: View>(_ rootView: Content, spec: CaptureSpec) {
+    @discardableResult
+    private func captureWindow<Content: View>(_ rootView: Content, spec: CaptureSpec) -> CaptureResult {
         let result = SnapshotSupport.renderAndSave(rootView: rootView, spec: spec)
-        XCTAssertGreaterThan(result.width, 0, "Zero width bitmap for \(spec.name)")
-        XCTAssertGreaterThan(result.height, 0, "Zero height bitmap for \(spec.name)")
-        XCTAssertGreaterThan(result.uniqueColors, 15, "Snapshot \(spec.name) appears blank")
-        if let attachment = result.attachment {
-            add(attachment)
+        #expect(result.width > 0, "Zero width bitmap for \(spec.name)")
+        #expect(result.height > 0, "Zero height bitmap for \(spec.name)")
+        #expect(result.uniqueColors > 15, "Snapshot \(spec.name) appears blank")
+        if let pngData = result.pngData {
+            Attachment.record(pngData, named: "\(spec.name).png")
         } else {
-            XCTFail("Failed to capture PNG for \(spec.name)")
+            Issue.record("Failed to capture PNG for \(spec.name)")
         }
+        return result
     }
+}
+}
 
-    private func makeDemoContext() throws -> DemoContext {
-        let defaults = try XCTUnwrap(isolatedDefaults)
-        let deps = PlayCoverDependencies(userDefaults: defaults, loadInitialData: false, configureDiagnostics: false)
-        deps.appIntegrity.integrityOff = false
-        deps.startupAlerts.activeAlert = nil
-        deps.keyCoverObservable.isKeyCoverUnlockingPromptShown = false
-        deps.toastVM.isShown = false
-        let dir = try XCTUnwrap(tempDir)
-        let apps = try SnapshotSupport.demoSpecs().map { spec in
-            createdBundleIDs.append(spec.bundleID)
-            return try SnapshotSupport.makeDemoApp(spec: spec, in: dir, deps: deps)
-        }
-        SnapshotSupport.configureDemoApps(apps)
-        deps.appsVM.updatingApps = false
-        deps.appsVM.apps = apps
-        deps.appsVM.applyFilter()
-        return DemoContext(
-            deps: deps, navState: AppNavigationState(), updaterVM: UpdaterViewModel(startUpdater: false),
-            starlight: apps[0], chrono: apps[1], aether: apps[2], retro: apps[3]
-        )
-    }
-
-    private func restoreUserDefaults() {
-        if let savedLayoutRaw {
-            UserDefaults.standard.set(savedLayoutRaw, forKey: "AppLibraryLayoutMode")
-        } else {
-            UserDefaults.standard.removeObject(forKey: "AppLibraryLayoutMode")
-        }
-        if let savedLegacyList {
-            UserDefaults.standard.set(savedLegacyList, forKey: "AppLibraryView")
-        } else {
-            UserDefaults.standard.removeObject(forKey: "AppLibraryView")
-        }
+private final class UnconstrainedSnapshotWindow: NSWindow {
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        frameRect
     }
 }
 
@@ -291,13 +339,19 @@ private enum SnapshotSupport {
     static func renderAndSave<Content: View>(rootView: Content, spec: CaptureSpec) -> CaptureResult {
         let colorScheme: ColorScheme = spec.appearance == .darkAqua ? .dark : .light
         let controller = NSHostingController(rootView: rootView.preferredColorScheme(colorScheme))
-        let window = NSWindow(contentViewController: controller)
+        let window = UnconstrainedSnapshotWindow(
+            contentRect: NSRect(origin: .zero, size: spec.size),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
         window.title = spec.windowTitle
-        window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
         window.toolbarStyle = spec.toolbarStyle
-        window.setContentSize(spec.size)
         window.appearance = NSAppearance(named: spec.appearance)
         window.backgroundColor = .windowBackgroundColor
+        window.contentViewController = controller
+        window.setContentSize(spec.size)
         window.orderBack(nil)
         defer { window.close() }
         RunLoop.main.run(until: Date().addingTimeInterval(spec.delay))
@@ -305,25 +359,40 @@ private enum SnapshotSupport {
         window.displayIfNeeded()
         guard let captureTarget = window.contentView?.superview ?? window.contentView,
               let bitmap = captureTarget.bitmapImageRepForCachingDisplay(in: captureTarget.bounds) else {
-            return CaptureResult(width: 0, height: 0, uniqueColors: 0, attachment: nil)
+            return CaptureResult(
+                width: 0,
+                height: 0,
+                uniqueColors: 0,
+                windowWidth: window.frame.width,
+                backingScale: window.backingScaleFactor,
+                pngData: nil
+            )
         }
         window.effectiveAppearance.performAsCurrentDrawingAppearance {
             captureTarget.cacheDisplay(in: captureTarget.bounds, to: bitmap)
         }
         guard let pngData = bitmap.representation(using: .png, properties: [:]) else {
-            return CaptureResult(width: bitmap.pixelsWide, height: bitmap.pixelsHigh, uniqueColors: 0, attachment: nil)
+            return CaptureResult(
+                width: bitmap.pixelsWide,
+                height: bitmap.pixelsHigh,
+                uniqueColors: 0,
+                windowWidth: window.frame.width,
+                backingScale: window.backingScaleFactor,
+                pngData: nil
+            )
         }
         if let outputPath = ProcessInfo.processInfo.environment["PLAYCOVER_UI_SNAPSHOT_DIR"], !outputPath.isEmpty {
             let outputDir = URL(fileURLWithPath: outputPath, isDirectory: true)
             try? FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
             try? pngData.write(to: outputDir.appendingPathComponent("\(spec.name).png"), options: .atomic)
         }
-        let attachment = XCTAttachment(data: pngData, uniformTypeIdentifier: UTType.png.identifier)
-        attachment.name = "\(spec.name).png"
-        attachment.lifetime = .keepAlways
         return CaptureResult(
-            width: bitmap.pixelsWide, height: bitmap.pixelsHigh,
-            uniqueColors: sampledColorCount(in: bitmap), attachment: attachment
+            width: bitmap.pixelsWide,
+            height: bitmap.pixelsHigh,
+            uniqueColors: sampledColorCount(in: bitmap),
+            windowWidth: window.frame.width,
+            backingScale: window.backingScaleFactor,
+            pngData: pngData
         )
     }
 
@@ -383,6 +452,6 @@ private enum SnapshotSupport {
             configured.draw(in: rect)
         }
         NSGraphicsContext.restoreGraphicsState()
-        return try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        return try #require(bitmap.representation(using: .png, properties: [:]))
     }
 }

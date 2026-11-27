@@ -1,22 +1,24 @@
 import Foundation
-import XCTest
+import Testing
 @testable import PlayCover
 
-final class KeymapAndLegacySettingsTests: XCTestCase {
-    func testKeymapAndKeymapConfigCodableRoundTrip() throws {
+@Suite
+struct KeymapAndLegacySettingsTests {
+    @Test
+    func keymapAndKeymapConfigCodableRoundTrip() throws {
         let btn = ButtonModel(
             keyCode: 44,
             keyName: "",
             transform: KeyModelTransform(size: 8, xCoord: 25, yCoord: 75)
         )
-        XCTAssertEqual(btn.keyName, "Spc")
+        #expect(btn.keyName == "Spc")
 
         let fallbackBtn = ButtonModel(
             keyCode: 99999,
             keyName: "",
             transform: KeyModelTransform(size: 5, xCoord: 10, yCoord: 20)
         )
-        XCTAssertEqual(fallbackBtn.keyName, "Btn")
+        #expect(fallbackBtn.keyName == "Btn")
 
         let keymap = Keymap(
             buttonModels: [btn],
@@ -44,22 +46,23 @@ final class KeymapAndLegacySettingsTests: XCTestCase {
 
         let encoded = try PropertyListEncoder().encode(keymap)
         let decoded = try PropertyListDecoder().decode(Keymap.self, from: encoded)
-        XCTAssertEqual(decoded.bundleIdentifier, "com.example.keymap")
-        XCTAssertEqual(decoded.buttonModels.count, 1)
-        XCTAssertEqual(decoded.buttonModels.first?.keyName, "Spc")
-        XCTAssertEqual(decoded.joystickModel.first?.mode, .FLOATING)
-        XCTAssertEqual(decoded.mouseAreaModel.first?.keyName, "Look")
+        #expect(decoded.bundleIdentifier == "com.example.keymap")
+        #expect(decoded.buttonModels.count == 1)
+        #expect(decoded.buttonModels.first?.keyName == "Spc")
+        #expect(decoded.joystickModel.first?.mode == .FLOATING)
+        #expect(decoded.mouseAreaModel.first?.keyName == "Look")
 
         let defaultURL = URL(fileURLWithPath: "/tmp/default.plist")
         let altURL = URL(fileURLWithPath: "/tmp/alt.plist")
         let config = KeymapConfig(defaultKm: defaultURL, keymapOrder: [defaultURL, altURL])
         let cfgData = try JSONEncoder().encode(config)
         let decodedCfg = try JSONDecoder().decode(KeymapConfig.self, from: cfgData)
-        XCTAssertEqual(decodedCfg.defaultKm, defaultURL)
-        XCTAssertEqual(decodedCfg.keymapOrder, [defaultURL, altURL])
+        #expect(decodedCfg.defaultKm == defaultURL)
+        #expect(decodedCfg.keymapOrder == [defaultURL, altURL])
     }
 
-    func testFailableDecodableDropsMalformedItemsGracefully() throws {
+    @Test
+    func failableDecodableDropsMalformedItemsGracefully() throws {
         let json = """
         {
           "buttonModels": [
@@ -70,9 +73,9 @@ final class KeymapAndLegacySettingsTests: XCTestCase {
         }
         """
         let decoded = try JSONDecoder().decode(Keymap.self, from: Data(json.utf8))
-        XCTAssertEqual(decoded.bundleIdentifier, "com.test.failable")
-        XCTAssertEqual(decoded.buttonModels.count, 1)
-        XCTAssertEqual(decoded.buttonModels.first?.keyCode, 4)
+        #expect(decoded.bundleIdentifier == "com.test.failable")
+        #expect(decoded.buttonModels.count == 1)
+        #expect(decoded.buttonModels.first?.keyCode == 4)
 
         let cfgJSON = """
         {
@@ -81,11 +84,12 @@ final class KeymapAndLegacySettingsTests: XCTestCase {
         }
         """
         let decodedCfg = try JSONDecoder().decode(KeymapConfig.self, from: Data(cfgJSON.utf8))
-        XCTAssertEqual(decodedCfg.keymapOrder, [URL(fileURLWithPath: "/tmp/default.plist")])
+        #expect(decodedCfg.keymapOrder == [URL(fileURLWithPath: "/tmp/default.plist")])
     }
 
-    func testLegacySettingsDictAndKeymapArrayConversion() {
-        XCTAssertNil(LegacySettings.convertLegacySettingsDict([:]))
+    @Test
+    func legacySettingsDictAndKeymapArrayConversion() {
+        #expect(LegacySettings.convertLegacySettingsDict([:]) == nil)
 
         let dict: [String: Any] = [
             "pc.keymapping": false,
@@ -93,10 +97,10 @@ final class KeymapAndLegacySettingsTests: XCTestCase {
             "pc.disableTimeout": true
         ]
         let converted = LegacySettings.convertLegacySettingsDict(dict)
-        XCTAssertNotNil(converted)
-        XCTAssertEqual(converted?.keymapping, false)
-        XCTAssertEqual(converted?.sensitivity, 82.5)
-        XCTAssertEqual(converted?.disableTimeout, true)
+        #expect(converted != nil)
+        #expect(converted?.keymapping == false)
+        #expect(converted?.sensitivity == 82.5)
+        #expect(converted?.disableTimeout == true)
 
         let legacyLayout: [Any] = [
             [4, CGFloat(10), CGFloat(20), CGFloat(6)] as [Any],                  // 4-item button
@@ -106,47 +110,49 @@ final class KeymapAndLegacySettingsTests: XCTestCase {
             ["ignored", 1, 2] as [Any]                                           // unknown length skipped
         ]
         let keymap = LegacySettings.convertLegacyKeymapArray(legacyLayout, "com.legacy.game")
-        XCTAssertEqual(keymap?.bundleIdentifier, "com.legacy.game")
-        XCTAssertEqual(keymap?.buttonModels.count, 1)
-        XCTAssertEqual(keymap?.buttonModels.first?.keyName, "A")
-        XCTAssertEqual(keymap?.mouseAreaModel.count, 1)
-        XCTAssertEqual(keymap?.mouseAreaModel.first?.transform.size, 25)
-        XCTAssertEqual(keymap?.joystickModel.count, 1)
-        XCTAssertEqual(keymap?.joystickModel.first?.upKeyCode, 26)
-        XCTAssertEqual(keymap?.joystickModel.first?.downKeyCode, 22)
-        XCTAssertEqual(keymap?.joystickModel.first?.leftKeyCode, 4)
-        XCTAssertEqual(keymap?.joystickModel.first?.rightKeyCode, 7)
-        XCTAssertEqual(keymap?.draggableButtonModels.count, 1)
-        XCTAssertEqual(keymap?.draggableButtonModels.first?.keyName, "Mouse")
+        #expect(keymap?.bundleIdentifier == "com.legacy.game")
+        #expect(keymap?.buttonModels.count == 1)
+        #expect(keymap?.buttonModels.first?.keyName == "A")
+        #expect(keymap?.mouseAreaModel.count == 1)
+        #expect(keymap?.mouseAreaModel.first?.transform.size == 25)
+        #expect(keymap?.joystickModel.count == 1)
+        #expect(keymap?.joystickModel.first?.upKeyCode == 26)
+        #expect(keymap?.joystickModel.first?.downKeyCode == 22)
+        #expect(keymap?.joystickModel.first?.leftKeyCode == 4)
+        #expect(keymap?.joystickModel.first?.rightKeyCode == 7)
+        #expect(keymap?.draggableButtonModels.count == 1)
+        #expect(keymap?.draggableButtonModels.first?.keyName == "Mouse")
     }
 
-    func testLegacySettingsNumericCoercionForIntAndDouble() {
+    @Test
+    func legacySettingsNumericCoercionForIntAndDouble() {
         let intDict: [String: Any] = ["pc.sensivity": 75]
         let fromInt = LegacySettings.convertLegacySettingsDict(intDict)
-        XCTAssertEqual(fromInt?.sensitivity, 75.0)
+        #expect(fromInt?.sensitivity == 75.0)
 
         let doubleDict: [String: Any] = ["pc.sensivity": Double(82.5)]
         let fromDouble = LegacySettings.convertLegacySettingsDict(doubleDict)
-        XCTAssertEqual(fromDouble?.sensitivity, 82.5)
+        #expect(fromDouble?.sensitivity == 82.5)
 
         let boolTrapDict: [String: Any] = ["pc.sensivity": true]
         let fromBool = LegacySettings.convertLegacySettingsDict(boolTrapDict)
-        XCTAssertEqual(fromBool?.sensitivity, 50.0)
+        #expect(fromBool?.sensitivity == 50.0)
 
         let intLayout: [Any] = [
             [4, 10, 20, 6] as [Any],
             [Double(50.5), 55] as [Any]
         ]
         let km = LegacySettings.convertLegacyKeymapArray(intLayout, "com.test.int")
-        XCTAssertEqual(km?.buttonModels.first?.keyCode, 4)
-        XCTAssertEqual(km?.buttonModels.first?.transform.xCoord, 10)
-        XCTAssertEqual(km?.buttonModels.first?.transform.yCoord, 20)
-        XCTAssertEqual(km?.buttonModels.first?.transform.size, 6)
-        XCTAssertEqual(km?.mouseAreaModel.first?.transform.xCoord, 50.5)
-        XCTAssertEqual(km?.mouseAreaModel.first?.transform.yCoord, 55)
+        #expect(km?.buttonModels.first?.keyCode == 4)
+        #expect(km?.buttonModels.first?.transform.xCoord == 10)
+        #expect(km?.buttonModels.first?.transform.yCoord == 20)
+        #expect(km?.buttonModels.first?.transform.size == 6)
+        #expect(km?.mouseAreaModel.first?.transform.xCoord == 50.5)
+        #expect(km?.mouseAreaModel.first?.transform.yCoord == 55)
     }
 
-    func testConvertLegacyKeymapFileFromXMLPlistAndCorruptedPlist() throws {
+    @Test
+    func convertLegacyKeymapFileFromXMLPlistAndCorruptedPlist() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("LegacyKeymapTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -171,24 +177,25 @@ final class KeymapAndLegacySettingsTests: XCTestCase {
         </plist>
         """
         try Data(xmlPlist.utf8).write(to: validURL)
-        let converted = try XCTUnwrap(LegacySettings.convertLegacyKeymapFile(validURL))
-        XCTAssertEqual(converted.bundleIdentifier, "com.example.legacy")
-        XCTAssertEqual(converted.buttonModels.count, 1)
-        XCTAssertEqual(converted.buttonModels.first?.keyCode, 4)
-        XCTAssertEqual(converted.buttonModels.first?.transform.xCoord, 12.5)
-        XCTAssertEqual(converted.buttonModels.first?.transform.size, 7.0)
+        let converted = try #require(LegacySettings.convertLegacyKeymapFile(validURL))
+        #expect(converted.bundleIdentifier == "com.example.legacy")
+        #expect(converted.buttonModels.count == 1)
+        #expect(converted.buttonModels.first?.keyCode == 4)
+        #expect(converted.buttonModels.first?.transform.xCoord == 12.5)
+        #expect(converted.buttonModels.first?.transform.size == 7.0)
 
         let missingLayoutURL = dir.appendingPathComponent("nolayout.plist")
         try Data("<plist version=\"1.0\"><dict><key>other</key><true/></dict></plist>".utf8)
             .write(to: missingLayoutURL)
-        XCTAssertNil(LegacySettings.convertLegacyKeymapFile(missingLayoutURL))
+        #expect(LegacySettings.convertLegacyKeymapFile(missingLayoutURL) == nil)
 
         let corruptURL = dir.appendingPathComponent("corrupt.plist")
         try Data("not a valid plist".utf8).write(to: corruptURL)
-        XCTAssertNil(LegacySettings.convertLegacyKeymapFile(corruptURL))
+        #expect(LegacySettings.convertLegacyKeymapFile(corruptURL) == nil)
     }
 
-    func testKeymapFailableDecodableAllArraysAndInvalidTransformOrMode() throws {
+    @Test
+    func keymapFailableDecodableAllArraysAndInvalidTransformOrMode() throws {
         let json = """
         {
           "buttonModels": [
@@ -217,25 +224,26 @@ final class KeymapAndLegacySettingsTests: XCTestCase {
         }
         """
         let decoded = try JSONDecoder().decode(Keymap.self, from: Data(json.utf8))
-        XCTAssertEqual(decoded.buttonModels.count, 1)
-        XCTAssertEqual(decoded.buttonModels.first?.transform.size, 5)
-        XCTAssertEqual(decoded.buttonModels.first?.transform.xCoord, 0)
-        XCTAssertEqual(decoded.buttonModels.first?.transform.yCoord, 15)
-        XCTAssertEqual(decoded.draggableButtonModels.count, 1)
-        XCTAssertEqual(decoded.joystickModel.count, 1)
-        XCTAssertEqual(decoded.joystickModel.first?.mode, .FIXED)
-        XCTAssertEqual(decoded.mouseAreaModel.count, 1)
-        XCTAssertEqual(decoded.mouseAreaModel.first?.transform.size, 25)
+        #expect(decoded.buttonModels.count == 1)
+        #expect(decoded.buttonModels.first?.transform.size == 5)
+        #expect(decoded.buttonModels.first?.transform.xCoord == 0)
+        #expect(decoded.buttonModels.first?.transform.yCoord == 15)
+        #expect(decoded.draggableButtonModels.count == 1)
+        #expect(decoded.joystickModel.count == 1)
+        #expect(decoded.joystickModel.first?.mode == .FIXED)
+        #expect(decoded.mouseAreaModel.count == 1)
+        #expect(decoded.mouseAreaModel.first?.transform.size == 25)
     }
 
-    func testKeymapConfigMissingDefaultKmThrows() {
+    @Test
+    func keymapConfigMissingDefaultKmThrows() {
         let missingDefaultJSON = """
         {
           "keymapOrder": ["file:///tmp/default.plist"]
         }
         """
-        XCTAssertThrowsError(
+        #expect(throws: (any Error).self) {
             try JSONDecoder().decode(KeymapConfig.self, from: Data(missingDefaultJSON.utf8))
-        )
+        }
     }
 }

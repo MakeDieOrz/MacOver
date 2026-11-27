@@ -1,22 +1,25 @@
 import AppKit
 import Foundation
-import XCTest
+import Testing
 @testable import PlayCover
 
-final class LaunchGuardsTests: XCTestCase {
-    func testProcessInfoIsRunningUnitTestsIsTrue() {
-        XCTAssertTrue(ProcessInfo.isRunningUnitTests)
+@Suite
+struct LaunchGuardsTests {
+    @Test
+    func processInfoIsRunningUnitTestsIsTrue() {
+        #expect(ProcessInfo.isRunningUnitTests)
     }
 
+    @Test
     @MainActor
-    func testGuardedServicesAndAppDelegateExecuteSafelyInUnitTests() {
+    func guardedServicesAndAppDelegateExecuteSafelyInUnitTests() {
         let deps = PlayCoverDependencies(loadInitialData: false)
         let beforeCount = deps.log.logdata.count
         deps.log.msg("LaunchGuardsTests.msg")
         deps.log.error("LaunchGuardsTests.error")
-        XCTAssertGreaterThan(deps.log.logdata.count, beforeCount)
-        XCTAssertTrue(deps.log.logdata.contains("LaunchGuardsTests.msg"))
-        XCTAssertTrue(deps.log.logdata.contains("ERROR: LaunchGuardsTests.error"))
+        #expect(deps.log.logdata.count > beforeCount)
+        #expect(deps.log.logdata.contains("LaunchGuardsTests.msg"))
+        #expect(deps.log.logdata.contains("ERROR: LaunchGuardsTests.error"))
 
         deps.notifyService.allowNotify()
         deps.notifyService.notify("Title", "Message")
@@ -24,7 +27,7 @@ final class LaunchGuardsTests: XCTestCase {
         UpdateScheme.checkForUpdate()
 
         let updater = UpdaterViewModel()
-        XCTAssertFalse(updater.canCheckForUpdates)
+        #expect(!updater.canCheckForUpdates)
         updater.checkForUpdates()
 
         let delegate = AppDelegate(dependencies: deps)

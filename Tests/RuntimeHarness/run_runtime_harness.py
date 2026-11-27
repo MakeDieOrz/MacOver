@@ -1749,7 +1749,29 @@ int main(int argc, const char *argv[]) {
                         mach_port_deallocate(mach_task_self(), ports[0]);
                     }
                 }
-                s11SmallCapExcPortsOK = (kr == KERN_SUCCESS && noOverflow && noBrkPort);
+                BOOL zeroCapOK = NO;
+                {
+                    exception_mask_t masks0[EXC_TYPES_COUNT] = {0};
+                    mach_msg_type_number_t count0 = 0;
+                    mach_port_t ports0[EXC_TYPES_COUNT] = {0};
+                    exception_behavior_t behaviors0[EXC_TYPES_COUNT] = {0};
+                    thread_state_flavor_t flavors0[EXC_TYPES_COUNT] = {0};
+                    kern_return_t kr0 = task_get_exception_ports(
+                        mach_task_self(), EXC_MASK_ALL, masks0, &count0, ports0, behaviors0, flavors0);
+                    BOOL zeroNoBrk = YES;
+                    if (kr0 == KERN_SUCCESS && count0 <= EXC_TYPES_COUNT) {
+                        for (mach_msg_type_number_t idx = 0; idx < count0; idx++) {
+                            if ((masks0[idx] & EXC_MASK_BREAKPOINT) != 0 && MACH_PORT_VALID(ports0[idx])) {
+                                zeroNoBrk = NO;
+                            }
+                            if (MACH_PORT_VALID(ports0[idx])) {
+                                mach_port_deallocate(mach_task_self(), ports0[idx]);
+                            }
+                        }
+                        zeroCapOK = zeroNoBrk;
+                    }
+                }
+                s11SmallCapExcPortsOK = (kr == KERN_SUCCESS && noOverflow && noBrkPort && zeroCapOK);
             }
 
             // 3. CoreMotion virtual vs unarchived genuine isEqual: and multiplyByInverseOfAttitude: no-crash
@@ -1851,7 +1873,54 @@ int main(int argc, const char *argv[]) {
                                  [attrs[(__bridge id)kSecAttrTokenID] isEqual:(__bridge id)kSecAttrTokenIDSecureEnclave]);
                     CFRelease(seKey11);
                 }
-                s11PlayChainAppGroupAndSEOK = (grpAddSt == errSecSuccess && nullGrpSt == errSecParam && seAttrsOK);
+
+                // Mix permanent exportable key + permanent SE key under same tag: kSecReturnData must return exportable key
+                BOOL mixedKeyReturnDataOK = NO;
+                NSData *mixTag = [[NSString stringWithFormat:@"sc11.mix.%d", getpid()] dataUsingEncoding:NSUTF8StringEncoding];
+                NSDictionary *expParams = @{
+                    (__bridge id)kSecAttrKeyType: (__bridge id)kSecAttrKeyTypeECSECPrimeRandom,
+                    (__bridge id)kSecAttrKeySizeInBits: @256,
+                    (__bridge id)kSecPrivateKeyAttrs: @{
+                        (__bridge id)kSecAttrIsPermanent: @YES,
+                        (__bridge id)kSecAttrApplicationTag: mixTag,
+                    },
+                };
+                NSDictionary *seMixParams = @{
+                    (__bridge id)kSecAttrKeyType: (__bridge id)kSecAttrKeyTypeECSECPrimeRandom,
+                    (__bridge id)kSecAttrKeySizeInBits: @256,
+                    (__bridge id)kSecAttrTokenID: (__bridge id)kSecAttrTokenIDSecureEnclave,
+                    (__bridge id)kSecPrivateKeyAttrs: @{
+                        (__bridge id)kSecAttrIsPermanent: @YES,
+                        (__bridge id)kSecAttrApplicationTag: mixTag,
+                    },
+                };
+                SecKeyRef expKey = SecKeyCreateRandomKey((__bridge CFDictionaryRef)expParams, NULL);
+                SecKeyRef seMixKey = SecKeyCreateRandomKey((__bridge CFDictionaryRef)seMixParams, NULL);
+                if (expKey != NULL && seMixKey != NULL) {
+                    CFTypeRef mixOut = NULL;
+                    NSDictionary *mixQuery = @{
+                        (__bridge id)kSecClass: (__bridge id)kSecClassKey,
+                        (__bridge id)kSecAttrApplicationTag: mixTag,
+                        (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitAll,
+                        (__bridge id)kSecReturnData: @YES,
+                    };
+                    OSStatus mixSt = SecItemCopyMatching((__bridge CFDictionaryRef)mixQuery, &mixOut);
+                    NSArray *mixArr = CFBridgingRelease(mixOut);
+                    mixedKeyReturnDataOK = (mixSt == errSecSuccess &&
+                                            [mixArr isKindOfClass:[NSArray class]] &&
+                                            mixArr.count == 1 &&
+                                            [mixArr.firstObject isKindOfClass:[NSData class]]);
+                } else if (expKey != NULL) {
+                    mixedKeyReturnDataOK = YES;
+                }
+                if (expKey != NULL) CFRelease(expKey);
+                if (seMixKey != NULL) CFRelease(seMixKey);
+                SecItemDelete((__bridge CFDictionaryRef)@{
+                    (__bridge id)kSecClass: (__bridge id)kSecClassKey,
+                    (__bridge id)kSecAttrApplicationTag: mixTag,
+                });
+
+                s11PlayChainAppGroupAndSEOK = (grpAddSt == errSecSuccess && nullGrpSt == errSecParam && seAttrsOK && mixedKeyReturnDataOK);
             }
 
             // 5. version.imp_unwrap_catalyst_bool: CoreFoundation IMP returns NO
@@ -2103,7 +2172,8 @@ int main(int argc, const char *argv[]) {
                 if (fnSandbox != NULL) {
                     int dockRC = fnSandbox(getpid(), "mach-lookup", 2, "com.apple.dock.server");
                     int wsRC = fnSandbox(getpid(), "mach-lookup", 2, "com.apple.windowserver.active");
-                    s11SandboxDlsymOK = (dockRC == 1 && wsRC == 1);
+                    int noRepRC = fnSandbox(getpid(), "mach-lookup", 2 | (int)0x40000000U /* SANDBOX_CHECK_NO_REPORT */, "com.apple.system.logger");
+                    s11SandboxDlsymOK = (dockRC == 1 && wsRC == 1 && (noRepRC == 0 || noRepRC == 1));
                 }
             }
 
@@ -3251,6 +3321,19 @@ int main(int argc, const char *argv[]) {
         const char *testS12Env = getenv("HARNESS_TEST_SCENARIO12");
         if (testS12Env != NULL && strcmp(testS12Env, "1") == 0) {
             s12FreadlinkHiddenOK = (dlsym(RTLD_DEFAULT, "freadlink") == NULL);
+            {
+                CFBundleRef sysKrnBundle = CFBundleCreate(
+                    kCFAllocatorDefault,
+                    (__bridge CFURLRef)[NSURL fileURLWithPath:@"/usr/lib/system/libsystem_c.dylib"]);
+                if (sysKrnBundle != NULL) {
+                    void *fnFreadlink = CFBundleGetFunctionPointerForName(sysKrnBundle, CFSTR("freadlink"));
+                    void *fnScandirat = CFBundleGetFunctionPointerForName(sysKrnBundle, CFSTR("scandirat"));
+                    if (fnFreadlink != NULL || fnScandirat != NULL) {
+                        s12FreadlinkHiddenOK = NO;
+                    }
+                    CFRelease(sysKrnBundle);
+                }
+            }
 
             {
                 unsigned int clsCount = 0;
@@ -3375,6 +3458,16 @@ int main(int argc, const char *argv[]) {
                         }
                     }
 
+                    NSString *guardedSrc =
+                        @"#include <metal_stdlib>\n"
+                        "#if __METAL_VERSION__ >= 230\n"
+                        "#include <metal_simdgroup_matrix>\n"
+                        "#endif\n"
+                        "using namespace metal;\n"
+                        "kernel void k_guarded(device float *o [[buffer(0)]]) { o[0] = 1.0f; }\n";
+                    NSError * __autoreleasing errGuarded = nil;
+                    id libGuarded = fnNewLib(dev, newLibSel, guardedSrc, optsBenign, &errGuarded);
+
                     s12MetalCompat13GateOK = (defaultVer == ((2U << 16) | 2U) &&
                                               !bcSupported &&
                                               !f32Supported &&
@@ -3384,6 +3477,7 @@ int main(int argc, const char *argv[]) {
                                               [errSimd.domain isEqualToString:@"MTLLibraryErrorDomain"] && errSimd.code == 3 &&
                                               mtlDiagAlignedOK &&
                                               mtl32fNearestOK &&
+                                              libGuarded != nil && errGuarded == nil &&
                                               libBenign != nil && errBenign == nil);
                 }
             }
@@ -5706,6 +5800,7 @@ int main(int argc, char **argv) {
         BOOL rogueTrusted = roguePath ? eval_leaf([NSString stringWithUTF8String:roguePath], @"api.harness.test") : NO;
 
         CFDictionaryRef sysProxy = CFNetworkCopySystemProxySettings();
+        BOOL sysProxyNonNil = (sysProxy != NULL);
         NSString *cfProxyHost = @"";
         NSInteger cfProxyPort = 0;
         if (sysProxy != NULL) {
@@ -5851,6 +5946,7 @@ int main(int argc, char **argv) {
         }
 
         NSDictionary *out = @{
+            @"sysProxyNonNil": @(sysProxyNonNil),
             @"apiTrusted": @(apiTrusted),
             @"otherTrusted": @(otherTrusted),
             @"rogueTrusted": @(rogueTrusted),
@@ -5969,6 +6065,12 @@ int main(int argc, char **argv) {
                 "mitmPort": 0,
                 "mitmRuntimePort": mitm_port,
             }, include_certs=True, safe_mode=True, run_http=True)
+            rc14_e, info14_e = run_s14_sub({
+                "bypass": True,
+                "networkProxyMode": "direct",
+                "hideProxyFromApp": True,
+                "enableCustomCertificates": False,
+            }, include_certs=False)
         finally:
             mitm_stop.set()
             try:
@@ -6020,6 +6122,11 @@ int main(int argc, char **argv) {
             info14_d.get("apiTrusted") is False,
             info14_d.get("cfgProxyHost") == "",
             info14_d.get("sharedOK") is False,
+            rc14_e == 0,
+            info14_e.get("sysProxyNonNil") is True,
+            info14_e.get("cfProxyPort") != mitm_port,
+            info14_e.get("cfProxyHost") == info14_a.get("cfProxyHost"),
+            info14_e.get("cfProxyPort") == info14_a.get("cfProxyPort"),
         ]
         res14 = ScenarioResult(
             name="14. Per-app custom CA SecTrust injection, proxy cloaking & Safe Mode",
@@ -6030,9 +6137,16 @@ int main(int argc, char **argv) {
                 "runB_injectedHidden": info14_b,
                 "runC_proxyVisible": info14_c,
                 "runD_safeMode": info14_d,
+                "runE_directHideProxy": info14_e,
             }, sort_keys=True),
         )
-        payload14 = {"runA": info14_a, "runB": info14_b, "runC": info14_c, "runD": info14_d}
+        payload14 = {
+            "runA": info14_a,
+            "runB": info14_b,
+            "runC": info14_c,
+            "runD": info14_d,
+            "runE": info14_e,
+        }
         return [(14, res14, [f"  Scenario 14 payload: {payload14}"])]
 
     # Scenario 15: Wave 1-5 adversarial parity across MIG/IOKit/MG/Metal/Display/Sensors/Fonts/Net/WebKit/JSC/ICU.
@@ -6341,11 +6455,28 @@ int main(int argc, char **argv) {
                                  MIN(nat.width, nat.height) <= 2048.0);
             BOOL hapticsIpadOK = ![[CHHapticEngine capabilitiesForHardware] supportsHaptics];
             NSDictionary *wvInfo = pt_w5_run_webview_checks(NO);
+            __block BOOL netRulesMock200OK = NO;
+            {
+                NSURLSessionConfiguration *nrCfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+                NSURLSession *nrSess = [NSURLSession sessionWithConfiguration:nrCfg];
+                dispatch_semaphore_t nrSem = dispatch_semaphore_create(0);
+                NSURLSessionDataTask *nrTask = [nrSess dataTaskWithURL:[NSURL URLWithString:@"https://blocked.wave5.test/ping"]
+                                                     completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+                    NSHTTPURLResponse *httpResp = [resp isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)resp : nil;
+                    NSString *bodyStr = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : @"";
+                    netRulesMock200OK = (err == nil && httpResp.statusCode == 200 && [bodyStr isEqualToString:@"{}"]);
+                    dispatch_semaphore_signal(nrSem);
+                }];
+                [nrTask resume];
+                dispatch_semaphore_wait(nrSem, dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC));
+                [nrSess invalidateAndCancel];
+            }
             NSDictionary *outB = @{
                 @"natW": @(nat.width),
                 @"natH": @(nat.height),
                 @"natCeilingOK": @(natCeilingOK),
                 @"hapticsIpadOK": @(hapticsIpadOK),
+                @"netRulesMock200OK": @(netRulesMock200OK),
                 @"webview": wvInfo,
             };
             NSData *jd = [NSJSONSerialization dataWithJSONObject:outB options:0 error:nil];
@@ -6742,10 +6873,13 @@ int main(int argc, char **argv) {
         BOOL icuParityOK = NO;
         BOOL tzDataOK = NO;
         BOOL swiftConformsOK = NO;
+        BOOL swiftMetatypeNotHiddenOK = NO;
         NSDictionary *wvA = nil;
         {
             typedef const void *(*SwiftConformsFn)(const void *, const void *);
+            typedef const void *(*SwiftLookupMangledFn)(const char *, size_t, const void *, const void * const *);
             SwiftConformsFn fnConforms = (SwiftConformsFn)dlsym(RTLD_DEFAULT, "swift_conformsToProtocol");
+            SwiftLookupMangledFn fnLookup = (SwiftLookupMangledFn)dlsym(RTLD_DEFAULT, "swift_getTypeByMangledNameInContext");
             const void *strMeta = dlsym(RTLD_DEFAULT, "$sSSN");
             const void *eqProto = dlsym(RTLD_DEFAULT, "$sSQMp");
             if (fnConforms != NULL && strMeta != NULL && eqProto != NULL) {
@@ -6761,6 +6895,13 @@ int main(int argc, char **argv) {
                 } fakeFmtProto = { 3U, 0, (int32_t)(offsetof(__typeof__(fakeFmtProto), nameBuf) - offsetof(__typeof__(fakeFmtProto), name)), 0U, 0U, 0, "FormatStyle" };
                 const void *fmtWT = fnConforms(strMeta, &fakeFmtProto);
                 swiftConformsOK = (eqWT != NULL && fmtWT == NULL);
+            }
+            if (fnLookup != NULL) {
+                const char *visMeta = "SSm";
+                const char *hidMeta = "10Foundation16AttributedStringVm";
+                const void *visPtr = fnLookup(visMeta, strlen(visMeta), NULL, NULL);
+                const void *hidPtr = fnLookup(hidMeta, strlen(hidMeta), NULL, NULL);
+                swiftMetatypeNotHiddenOK = (visPtr != NULL && hidPtr == NULL);
             }
             JSContext *jctx = [[JSContext alloc] init];
             JSValue *jv = [jctx evaluateScript:
@@ -7006,6 +7147,7 @@ int main(int argc, char **argv) {
             @"icuParityOK": @(icuParityOK),
             @"tzDataOK": @(tzDataOK),
             @"swiftConformsOK": @(swiftConformsOK),
+            @"swiftMetatypeNotHiddenOK": @(swiftMetatypeNotHiddenOK),
             @"customInputHostOK": @(customInputHostOK),
             @"customInputDiag": customInputDiag,
             @"webviewA": wvA ?: @{},
@@ -7083,6 +7225,9 @@ int main(int argc, char **argv) {
             "strictEmulationMode": False,
             "windowWidth": 1920,
             "windowHeight": 1080,
+            "enableNetworkRules": True,
+            "networkBlockMock200": True,
+            "blockedURLPatterns": ["||blocked.wave5.test"],
         })
 
         wvA = info15_a.get("webviewA", {})
@@ -7115,12 +7260,14 @@ int main(int argc, char **argv) {
             info15_a.get("icuParityOK") is True,
             info15_a.get("tzDataOK") is True,
             info15_a.get("swiftConformsOK") is True,
+            info15_a.get("swiftMetatypeNotHiddenOK") is True,
             info15_a.get("customInputHostOK") is True,
             wvA.get("navDone") is True,
             wvA.get("iframeClean") is True,
             wvA.get("cssContainerUnsupported") is True,
             info15_b.get("natCeilingOK") is True,
             info15_b.get("hapticsIpadOK") is True,
+            info15_b.get("netRulesMock200OK") is True,
             wvB.get("navDone") is True,
             wvB.get("defaultWorldClean") is True,
             wvB.get("namedWorldClean") is True,

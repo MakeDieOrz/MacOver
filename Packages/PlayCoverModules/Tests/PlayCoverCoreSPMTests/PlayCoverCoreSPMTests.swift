@@ -202,6 +202,14 @@ struct PlayCoverCoreSPMTests {
 
         let extremeBudget = PixelBudget(width: 7680, height: 4320, scaler: 2.0, physicalMemoryBytes: 8 * gib)
         #expect(abs(extremeBudget.fittedScaler - 0.5) <= 0.001)
+
+        let hugeBudget = PixelBudget(width: 7680, height: 4320, scaler: 1e16, physicalMemoryBytes: 8 * gib)
+        #expect(hugeBudget.renderedWidth == Int.max)
+        #expect(hugeBudget.renderedHeight == Int.max)
+        #expect(hugeBudget.exceedsMaxTextureEdge)
+        let infBudget = PixelBudget(width: 7680, height: 4320, scaler: .infinity, physicalMemoryBytes: 8 * gib)
+        #expect(infBudget.renderedWidth == 0)
+        #expect(infBudget.renderedHeight == 0)
     }
 
     @Test
@@ -305,7 +313,7 @@ struct PlayCoverCoreSPMTests {
         #expect(!ReportedIOSVersionMode.isMinimumOSVersion("12.4", higherThan: 13, minor: 7))
         #expect(!ReportedIOSVersionMode.isMinimumOSVersion("", higherThan: 13, minor: 7))
 
-        #expect(PlayCoverRestartField.allCases.count == 28)
+        #expect(PlayCoverRestartField.allCases.count == 29)
         #expect(PlayCoverRestartField.allCases.contains(.networkProxy))
         #expect(PlayCoverRestartField.allCases.contains(.windowCompatibility))
         #expect(PlayCoverRestartField.allCases.contains(.frameRateTarget))
@@ -314,6 +322,7 @@ struct PlayCoverCoreSPMTests {
         #expect(PlayCoverRestartField.allCases.contains(.strictEmulationMode))
         #expect(PlayCoverRestartField.allCases.contains(.strictViewportOrientation))
         #expect(PlayCoverRestartField.allCases.contains(.strictViewportScaleMode))
+        #expect(PlayCoverRestartField.allCases.contains(.injectIosFrameworks))
     }
 
     @Test
@@ -333,5 +342,123 @@ struct PlayCoverCoreSPMTests {
         }
         #expect(results.count == 8)
         #expect(results.allSatisfy { $0 == initial })
+    }
+
+    @Test
+    func appSettingsSchemaRoundTripMalformedFallbackAndOEMIDs() throws {
+        var original = AppSettingsData()
+        original.bundleIdentifier = "com.example.schema"
+        original.strictEmulationMode = true
+        original.strictViewportOrientation = .portrait
+        original.strictViewportScaleMode = .native1x
+        original.iosDeviceModel = "iPhone15,3"
+        original.bypass = false
+
+        let encoded = try PropertyListEncoder().encode(original)
+        let decoded = try PropertyListDecoder().decode(AppSettingsData.self, from: encoded)
+        #expect(decoded == original)
+        #expect(decoded.effectiveBypass)
+        #expect(decoded.effectiveWindowWidth == 430)
+        #expect(decoded.effectiveWindowHeight == 932)
+        #expect(decoded.effectiveCustomScaler == 3.0)
+        #expect(decoded.effectiveDisplayRotation == 1)
+        #expect(StrictDeviceDisplaySpec.oemID(for: "iPhone15,3") == "D74AP")
+        #expect(StrictDeviceDisplaySpec.oemID(for: "unknown") == "J522AP")
+
+        let malformed = Data(#"{"sensitivity":"bad","customScaler":3,"strictViewportOrientation":99}"#.utf8)
+        let tolerant = try JSONDecoder().decode(AppSettingsData.self, from: malformed)
+        #expect(tolerant.sensitivity == 50)
+        #expect(tolerant.customScaler == 3.0)
+        #expect(tolerant.strictViewportOrientation == .landscape)
+        #expect(tolerant.strictViewportScaleMode == .fitScreen)
+    }
+
+    @Test
+    func keyCoverVaultStorePBKDF2PermsAndKeyEncryption() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("KeyCoverVaultSPM-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let storeDir = root.appendingPathComponent("KeyCover", isDirectory: true)
+        let chainDir = root.appendingPathComponent("PlayChain", isDirectory: true)
+        try FileManager.default.createDirectory(at: chainDir, withIntermediateDirectories: true)
+
+        let vault = KeyCoverVaultStore(storeDirectory: storeDir)
+        let record = try #require(vault.makePasswordVerifierRecord(password: "correct-horse", iterations: 10_000))
+        try vault.writeRecord(record)
+
+        let attrs = try FileManager.default.attributesOfItem(atPath: vault.recordURL.path)
+        let perms = (attrs[.posixPermissions] as? NSNumber)?.intValue
+        #expect(perms == 0o600)
+
+        let loaded = try #require(vault.readRecord())
+        #expect(vault.verify(password: "correct-horse", against: loaded))
+        #expect(!vault.verify(password: "wrong-password", against: loaded))
+
+        let selfRecord = vault.makeSelfGeneratedRecord(key: KeyCoverVaultStore.generateSecurePassword())
+        try vault.writeRecord(selfRecord)
+        #expect(vault.readRecord() == selfRecord)
+
+        let key = KeyCoverKey(appBundleID: "com.example.vault", playChainDirectory: chainDir)
+        try Data("sqlite-bytes".utf8).write(to: key.decryptedKeyDB)
+        try Data("wal".utf8).write(to: URL(fileURLWithPath: key.decryptedKeyDB.path + "-wal"))
+        #expect(KeyCoverVaultStore.listKeychains(in: chainDir) == [key])
+        #expect(KeyCoverVaultStore.unlockedCount(in: [key]) == 1)
+
+        try key.encryptKeyDB(plainTextKey: "secret-pass")
+        #expect(key.chainEncryptionStatus)
+        #expect(!FileManager.default.fileExists(atPath: key.decryptedKeyDB.path))
+        #expect(!FileManager.default.fileExists(atPath: key.decryptedKeyDB.path + "-wal"))
+        #expect(key.canDecrypt(plainTextKey: "secret-pass"))
+        #expect(!key.canDecrypt(plainTextKey: "bad-pass"))
+
+        try key.decryptKeyDB(plainTextKey: "secret-pass")
+        #expect(!key.chainEncryptionStatus)
+        #expect(try Data(contentsOf: key.decryptedKeyDB) == Data("sqlite-bytes".utf8))
+    }
+
+    @Test
+    func appSettingsPersistencePreservesDiskKeysAndAutoResolution() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AppSettingsPersistenceSPM-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let settingsURL = dir.appendingPathComponent("com.example.app.plist")
+        let initialPlist = try PropertyListSerialization.data(
+            fromPropertyList: [
+                "bundleIdentifier": "com.example.app",
+                "keymappingDisabledAt": 42.5,
+                "customExtraKey": "keep-me"
+            ],
+            format: .xml,
+            options: 0
+        )
+        try initialPlist.write(to: settingsURL)
+
+        var snapshot = try AppSettingsPersistence.decode(from: settingsURL)
+        snapshot.bypass = false
+        let persisted = try AppSettingsPersistence.encode(snapshot, to: settingsURL, preservingExistingKeys: true)
+        #expect(persisted.keymappingDisabledAt == 42.5)
+
+        let rawDisk = try PropertyListSerialization.propertyList(
+            from: Data(contentsOf: settingsURL), options: [], format: nil
+        ) as? [String: Any]
+        #expect(rawDisk?["customExtraKey"] as? String == "keep-me")
+        #expect(rawDisk?["bypass"] as? Bool == false)
+
+        let bakURL = AppSettingsPersistence.preserveUnreadableFileIfPresent(
+            at: settingsURL,
+            bundleIdentifier: "com.example.app"
+        )
+        #expect(bakURL != nil)
+        #expect(FileManager.default.fileExists(atPath: settingsURL.appendingPathExtension("bak").path))
+
+        let notchAuto = AppSettingsPersistence.autoResolution(screenWidth: 1512, screenHeight: 982, hasNotch: true)
+        #expect(notchAuto.width == 1512)
+        #expect(notchAuto.height == 945)
+        let plainAuto = AppSettingsPersistence.autoResolution(screenWidth: 1920, screenHeight: 1080, hasNotch: false)
+        #expect(plainAuto == (1920, 1080))
     }
 }

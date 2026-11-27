@@ -791,4 +791,231 @@ struct PlayCoverNetworkSPMTests {
         #expect(harText.contains("\\\"hello\\\":\\\"world\\\""))
         #expect(!harText.contains("\"encoding\" : \"base64\""))
     }
+
+    @Test
+    func localMITMProxyServerCoalescesConnectRefusesFastAndPreservesWebSocket101() async throws {
+        let mitmCA = try X509CertificateGenerator.generateRootCA(commonName: "MacOver Regress MITM CA")
+        let originCA = try X509CertificateGenerator.generateRootCA(commonName: "Regress Origin CA")
+        let originIssuer = try X509LeafIssuer(
+            rootCertificateDER: originCA.certificateDER,
+            rootPrivateKeyDER: originCA.privateKeyDER
+        )
+        let originIdentity = try originIssuer.makeSecIdentity(for: "coalesce.example.test")
+
+        let originTLS = NWProtocolTLS.Options()
+        sec_protocol_options_set_local_identity(originTLS.securityProtocolOptions, originIdentity)
+        sec_protocol_options_add_tls_application_protocol(originTLS.securityProtocolOptions, "http/1.1")
+        let originParams = NWParameters(tls: originTLS, tcp: .init())
+        originParams.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: .any)
+
+        let originListener = try NWListener(using: originParams)
+        let originQueue = DispatchQueue(label: "test.coalesce.origin")
+        originListener.newConnectionHandler = { conn in
+            conn.start(queue: originQueue)
+            conn.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { _, _, _, _ in
+                let resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                conn.send(content: Data(resp.utf8), completion: .contentProcessed { _ in
+                    conn.cancel()
+                })
+            }
+        }
+        let originPort: UInt16 = try await withCheckedThrowingContinuation { cont in
+            let settled = Mutex(false)
+            originListener.stateUpdateHandler = { state in
+                guard !settled.withLock({ $0 }) else { return }
+                if case .ready = state, let port = originListener.port?.rawValue {
+                    settled.withLock { $0 = true }
+                    cont.resume(returning: port)
+                } else if case let .failed(err) = state {
+                    settled.withLock { $0 = true }
+                    cont.resume(throwing: err)
+                }
+            }
+            originListener.start(queue: originQueue)
+        }
+        defer { originListener.cancel() }
+
+        // Allocate and immediately close a loopback TCP socket to obtain an unbound dead port
+        let deadSock = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        #expect(deadSock >= 0)
+        var deadAddr = sockaddr_in()
+        deadAddr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        deadAddr.sin_family = sa_family_t(AF_INET)
+        deadAddr.sin_port = 0
+        deadAddr.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+        let bindDeadRC = withUnsafePointer(to: &deadAddr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(deadSock, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        #expect(bindDeadRC == 0)
+        var boundDeadLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+        _ = withUnsafeMutablePointer(to: &deadAddr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.getsockname(deadSock, $0, &boundDeadLen)
+            }
+        }
+        let deadPort = UInt16(bigEndian: deadAddr.sin_port)
+        Darwin.close(deadSock)
+        #expect(deadPort > 0)
+
+        // WebSocket 101 origin listener
+        let wsParams = NWParameters.tcp
+        wsParams.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: .any)
+        let wsListener = try NWListener(using: wsParams)
+        let wsQueue = DispatchQueue(label: "test.ws101.origin")
+        wsListener.newConnectionHandler = { conn in
+            conn.start(queue: wsQueue)
+            conn.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { _, _, _, _ in
+                let reply = "HTTP/1.1 101 Switching Protocols\r\n" +
+                    "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: dummy\r\n\r\n"
+                conn.send(content: Data(reply.utf8), completion: .contentProcessed { _ in
+                    conn.cancel()
+                })
+            }
+        }
+        let wsPort: UInt16 = try await withCheckedThrowingContinuation { cont in
+            let settled = Mutex(false)
+            wsListener.stateUpdateHandler = { state in
+                guard !settled.withLock({ $0 }) else { return }
+                if case .ready = state, let port = wsListener.port?.rawValue {
+                    settled.withLock { $0 = true }
+                    cont.resume(returning: port)
+                } else if case let .failed(err) = state {
+                    settled.withLock { $0 = true }
+                    cont.resume(throwing: err)
+                }
+            }
+            wsListener.start(queue: wsQueue)
+        }
+        defer { wsListener.cancel() }
+
+        let captureStore = TrafficCaptureStore(bundleID: "com.example.mitmreg")
+        let serverConfig = MITMServerConfiguration(
+            bundleID: "com.example.mitmreg",
+            listenPort: 0,
+            mitmAllHosts: false,
+            mitmHostPatterns: ["coalesce.example.test"],
+            captureBodies: true,
+            hostOverrides: [
+                "coalesce.example.test": "127.0.0.1",
+                "dead.example.test": "127.0.0.1",
+                "ws.example.test": "127.0.0.1"
+            ]
+        )
+        let proxyServer = try LocalMITMProxyServer(
+            rootCertificateDER: mitmCA.certificateDER,
+            rootPrivateKeyDER: mitmCA.privateKeyDER,
+            configuration: serverConfig,
+            captureStore: captureStore,
+            upstreamTrustOverrideDER: originCA.certificateDER
+        )
+        let proxyPort = try await proxyServer.start()
+        defer { Task { await proxyServer.stop() } }
+
+        final class RegressDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegate, @unchecked Sendable {
+            let rootDER: Data
+            init(rootDER: Data) { self.rootDER = rootDER }
+            private func handle(
+                _ challenge: URLAuthenticationChallenge,
+                completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+            ) {
+                guard let trust = challenge.protectionSpace.serverTrust,
+                      let anchor = SecCertificateCreateWithData(nil, rootDER as CFData) else {
+                    completionHandler(.cancelAuthenticationChallenge, nil)
+                    return
+                }
+                SecTrustSetAnchorCertificates(trust, [anchor] as CFArray)
+                SecTrustSetAnchorCertificatesOnly(trust, false)
+                completionHandler(.useCredential, URLCredential(trust: trust))
+            }
+            func urlSession(
+                _ session: URLSession,
+                didReceive challenge: URLAuthenticationChallenge,
+                completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+            ) { handle(challenge, completionHandler: completionHandler) }
+            func urlSession(
+                _ session: URLSession,
+                task: URLSessionTask,
+                didReceive challenge: URLAuthenticationChallenge,
+                completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+            ) { handle(challenge, completionHandler: completionHandler) }
+        }
+
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.connectionProxyDictionary = [
+            kCFNetworkProxiesHTTPEnable as String: true,
+            kCFNetworkProxiesHTTPProxy as String: "127.0.0.1",
+            kCFNetworkProxiesHTTPPort as String: Int(proxyPort),
+            kCFNetworkProxiesHTTPSEnable as String: true,
+            kCFNetworkProxiesHTTPSProxy as String: "127.0.0.1",
+            kCFNetworkProxiesHTTPSPort as String: Int(proxyPort)
+        ]
+        let delegate = RegressDelegate(rootDER: mitmCA.certificateDER)
+        let session = URLSession(configuration: cfg, delegate: delegate, delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+
+        // 1. Concurrent CONNECT requests to the same host coalesce through pendingTerminators
+        let targetURL = try #require(URL(string: "https://coalesce.example.test:\(originPort)/ping"))
+        try await withThrowingTaskGroup(of: (Data, Int).self) { group in
+            for _ in 0..<6 {
+                group.addTask {
+                    let (data, resp) = try await session.data(from: targetURL)
+                    let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                    return (data, code)
+                }
+            }
+            for try await (data, code) in group {
+                #expect(code == 200)
+                #expect(String(data: data, encoding: .utf8) == "ok")
+            }
+        }
+
+        // 2. Refused upstream loopback port fails fast instead of stalling
+        let startFail = ContinuousClock.now
+        let deadURL = try #require(URL(string: "http://dead.example.test:\(deadPort)/fail"))
+        let (_, deadResp) = try await session.data(from: deadURL)
+        #expect((deadResp as? HTTPURLResponse)?.statusCode == 502)
+        #expect(startFail.duration(to: .now) < .seconds(5))
+
+        // 3. WebSocket 101 Switching Protocols preserves Connection: Upgrade
+        let wsClient = NWConnection(
+            host: "127.0.0.1",
+            port: try #require(NWEndpoint.Port(rawValue: proxyPort)),
+            using: .tcp
+        )
+        let wsClientQueue = DispatchQueue(label: "test.ws101.client")
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            let settled = Mutex(false)
+            wsClient.stateUpdateHandler = { state in
+                guard !settled.withLock({ $0 }) else { return }
+                if case .ready = state {
+                    settled.withLock { $0 = true }
+                    cont.resume()
+                } else if case let .failed(err) = state {
+                    settled.withLock { $0 = true }
+                    cont.resume(throwing: err)
+                }
+            }
+            wsClient.start(queue: wsClientQueue)
+        }
+        defer { wsClient.cancel() }
+
+        let wsReq = "GET http://ws.example.test:\(wsPort)/chat HTTP/1.1\r\n" +
+            "Host: ws.example.test:\(wsPort)\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            wsClient.send(content: Data(wsReq.utf8), completion: .contentProcessed { err in
+                if let err { cont.resume(throwing: err) } else { cont.resume() }
+            })
+        }
+        let wsRespData: Data = try await withCheckedThrowingContinuation { cont in
+            wsClient.receive(minimumIncompleteLength: 1, maximumLength: 8192) { data, _, _, err in
+                if let err { cont.resume(throwing: err) } else { cont.resume(returning: data ?? Data()) }
+            }
+        }
+        let wsRespText = String(data: wsRespData, encoding: .utf8) ?? ""
+        #expect(wsRespText.contains("101 Switching Protocols"))
+        #expect(wsRespText.localizedCaseInsensitiveContains("Connection: Upgrade"))
+        #expect(wsRespText.localizedCaseInsensitiveContains("Upgrade: websocket"))
+    }
 }

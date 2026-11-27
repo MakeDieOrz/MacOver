@@ -813,4 +813,141 @@ struct PlayCoverMachOSPMTests {
         MachOByteSwap.swapEncryptionCommand64(&enc)
         #expect(enc.cryptid == 3 && enc.pad == 4)
     }
+
+    @Test
+    func inlineSyscallPatcherIgnoresNonTextExecSegmentAndRejectsCorruptManifest() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("svc-seg-test-\(UUID().uuidString)")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let appURL = root.appendingPathComponent("SegApp.app", isDirectory: true)
+        try fm.createDirectory(at: appURL, withIntermediateDirectories: true)
+        let infoData = try PropertyListSerialization.data(
+            fromPropertyList: ["CFBundleExecutable": "SegApp"],
+            format: .xml,
+            options: 0
+        )
+        try infoData.write(to: appURL.appendingPathComponent("Info.plist"))
+
+        // Build arm64 binary with __TEXT (1 svc) + executable __CUSTOM segment (1 svc)
+        let textFileStart = 0x1000
+        let customFileStart = 0x2000
+        let totalSize = 0x3000
+        let svcWord = InlineSyscallPatcher.svcInstruction
+        let retWord: UInt32 = 0xD65F_03C0
+
+        var textSeg = segment_command_64(
+            cmd: UInt32(LC_SEGMENT_64),
+            cmdsize: UInt32(MemoryLayout<segment_command_64>.size + MemoryLayout<section_64>.size),
+            segname: appendFixed16String("__TEXT"),
+            vmaddr: 0x1_0000_0000,
+            vmsize: 0x2000,
+            fileoff: 0,
+            filesize: 0x2000,
+            maxprot: VM_PROT_READ | VM_PROT_EXECUTE,
+            initprot: VM_PROT_READ | VM_PROT_EXECUTE,
+            nsects: 1,
+            flags: 0
+        )
+        var textSect = section_64(
+            sectname: appendFixed16String("__text"),
+            segname: appendFixed16String("__TEXT"),
+            addr: 0x1_0000_0000 + UInt64(textFileStart),
+            size: 8,
+            offset: UInt32(textFileStart),
+            align: 2,
+            reloff: 0,
+            nreloc: 0,
+            flags: UInt32(S_ATTR_PURE_INSTRUCTIONS) | UInt32(S_ATTR_SOME_INSTRUCTIONS),
+            reserved1: 0,
+            reserved2: 0,
+            reserved3: 0
+        )
+        var customSeg = segment_command_64(
+            cmd: UInt32(LC_SEGMENT_64),
+            cmdsize: UInt32(MemoryLayout<segment_command_64>.size + MemoryLayout<section_64>.size),
+            segname: appendFixed16String("__CUSTOM"),
+            vmaddr: 0x1_0000_2000,
+            vmsize: 0x1000,
+            fileoff: UInt64(customFileStart),
+            filesize: 0x1000,
+            maxprot: VM_PROT_READ | VM_PROT_EXECUTE,
+            initprot: VM_PROT_READ | VM_PROT_EXECUTE,
+            nsects: 1,
+            flags: 0
+        )
+        var customSect = section_64(
+            sectname: appendFixed16String("__cust_exec"),
+            segname: appendFixed16String("__CUSTOM"),
+            addr: 0x1_0000_2000,
+            size: 8,
+            offset: UInt32(customFileStart),
+            align: 2,
+            reloff: 0,
+            nreloc: 0,
+            flags: UInt32(S_ATTR_PURE_INSTRUCTIONS) | UInt32(S_ATTR_SOME_INSTRUCTIONS),
+            reserved1: 0,
+            reserved2: 0,
+            reserved3: 0
+        )
+        var mh = mach_header_64(
+            magic: MH_MAGIC_64,
+            cputype: CPU_TYPE_ARM64,
+            cpusubtype: CPU_SUBTYPE_ARM64_ALL,
+            filetype: UInt32(MH_EXECUTE),
+            ncmds: 2,
+            sizeofcmds: textSeg.cmdsize + customSeg.cmdsize,
+            flags: 0,
+            reserved: 0
+        )
+        var bin = Data(count: totalSize)
+        var cursor = 0
+        withUnsafeBytes(of: &mh) {
+            bin.replaceSubrange(cursor..<(cursor + $0.count), with: $0)
+            cursor += $0.count
+        }
+        withUnsafeBytes(of: &textSeg) {
+            bin.replaceSubrange(cursor..<(cursor + $0.count), with: $0)
+            cursor += $0.count
+        }
+        withUnsafeBytes(of: &textSect) {
+            bin.replaceSubrange(cursor..<(cursor + $0.count), with: $0)
+            cursor += $0.count
+        }
+        withUnsafeBytes(of: &customSeg) {
+            bin.replaceSubrange(cursor..<(cursor + $0.count), with: $0)
+            cursor += $0.count
+        }
+        withUnsafeBytes(of: &customSect) {
+            bin.replaceSubrange(cursor..<(cursor + $0.count), with: $0)
+            cursor += $0.count
+        }
+
+        var w0 = svcWord.littleEndian
+        var w1 = retWord.littleEndian
+        withUnsafeBytes(of: &w0) { bin.replaceSubrange(textFileStart..<(textFileStart + 4), with: $0) }
+        withUnsafeBytes(of: &w1) { bin.replaceSubrange((textFileStart + 4)..<(textFileStart + 8), with: $0) }
+        withUnsafeBytes(of: &w0) { bin.replaceSubrange(customFileStart..<(customFileStart + 4), with: $0) }
+        withUnsafeBytes(of: &w1) { bin.replaceSubrange((customFileStart + 4)..<(customFileStart + 8), with: $0) }
+
+        let execURL = appURL.appendingPathComponent("SegApp")
+        try bin.write(to: execURL)
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: execURL.path)
+
+        let corruptManifestURL = root.appendingPathComponent("SVCPatches/corrupt.json")
+        try fm.createDirectory(at: corruptManifestURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("{not-valid-json".utf8).write(to: corruptManifestURL)
+
+        let res = try InlineSyscallPatcher.reconcile(
+            appBundleURL: appURL,
+            bundleIdentifier: "com.example.seg",
+            manifestURL: corruptManifestURL,
+            enabled: true
+        )
+        #expect(res.modified)
+        #expect(res.patchedSiteCount == 1)
+        #expect(try readUInt32LE(from: execURL, at: textFileStart) == InlineSyscallPatcher.brkInstruction)
+        #expect(try readUInt32LE(from: execURL, at: customFileStart) == svcWord)
+    }
 }

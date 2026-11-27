@@ -1,11 +1,12 @@
 import Foundation
-import XCTest
+import Testing
 
-final class PTPluginContainerTests: XCTestCase {
-    private var tempDir: URL?
+extension PlayToolsGlobalStateScope {
+@Suite(.serialized)
+final class PTPluginContainerTests {
+    private let tempDir: URL
 
-    override func setUpWithError() throws {
-        try super.setUpWithError()
+    init() throws {
         pt_reset_hidden_registry_for_testing()
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("PTPluginContainerTests-\(UUID().uuidString)", isDirectory: true)
@@ -13,16 +14,13 @@ final class PTPluginContainerTests: XCTestCase {
         tempDir = dir
     }
 
-    override func tearDownWithError() throws {
+    deinit {
         pt_reset_hidden_registry_for_testing()
-        if let dir = tempDir {
-            try? FileManager.default.removeItem(at: dir)
-        }
-        tempDir = nil
-        try super.tearDownWithError()
+        try? FileManager.default.removeItem(at: tempDir)
     }
 
-    func testManifestDecodingAndSemanticVersionComparison() throws {
+    @Test
+    func manifestDecodingAndSemanticVersionComparison() throws {
         let json = """
         {
           "manifestVersion": "1.0",
@@ -37,22 +35,22 @@ final class PTPluginContainerTests: XCTestCase {
         }
         """
         let decoded = try JSONDecoder().decode(PluginManifest.self, from: Data(json.utf8))
-        XCTAssertEqual(decoded.manifestVersion, "1.0")
-        XCTAssertEqual(decoded.identifier, "com.example.plugin.sample-sync")
-        XCTAssertEqual(decoded.loadPriority, 50)
-        XCTAssertEqual(decoded.capabilities, ["sample-bridge", "sample-hooks"])
+        #expect(decoded.manifestVersion == "1.0")
+        #expect(decoded.identifier == "com.example.plugin.sample-sync")
+        #expect(decoded.loadPriority == 50)
+        #expect(decoded.capabilities == ["sample-bridge", "sample-hooks"])
 
-        XCTAssertLessThan(try XCTUnwrap(PTSemanticVersion("4.2.0")), try XCTUnwrap(PTSemanticVersion("5.0.0")))
-        XCTAssertLessThan(try XCTUnwrap(PTSemanticVersion("4.2")), try XCTUnwrap(PTSemanticVersion("4.2.1")))
-        XCTAssertEqual(try XCTUnwrap(PTSemanticVersion("5.0")), try XCTUnwrap(PTSemanticVersion("5.0.0")))
-        XCTAssertNil(PTSemanticVersion(""))
-        XCTAssertNil(PTSemanticVersion("invalid"))
+        #expect(try #require(PTSemanticVersion("4.2.0")) < #require(PTSemanticVersion("5.0.0")))
+        #expect(try #require(PTSemanticVersion("4.2")) < #require(PTSemanticVersion("4.2.1")))
+        #expect(try #require(PTSemanticVersion("5.0")) == #require(PTSemanticVersion("5.0.0")))
+        #expect(PTSemanticVersion("") == nil)
+        #expect(PTSemanticVersion("invalid") == nil)
     }
 
-    func testPriorityOrderingLegacySynthesisValidationAndDynamicRegistration() throws {
-        let root = try XCTUnwrap(tempDir)
-        let pluginsDir = root.appendingPathComponent("UserPlugins", isDirectory: true)
-        let logURL = root.appendingPathComponent("plugin-diag.log")
+    @Test
+    func priorityOrderingLegacySynthesisValidationAndDynamicRegistration() throws {
+        let pluginsDir = tempDir.appendingPathComponent("UserPlugins", isDirectory: true)
+        let logURL = tempDir.appendingPathComponent("plugin-diag.log")
         try FileManager.default.createDirectory(at: pluginsDir, withIntermediateDirectories: true)
 
         // 1. Subdir manifest plugin with priority 10
@@ -176,62 +174,61 @@ final class PTPluginContainerTests: XCTestCase {
         )
 
         // Execution order: priority 10 (libSampleFastPlugin) -> legacy 100 (SampleLegacyPlugin) -> priority 200 (SlowHelper)
-        XCTAssertEqual(openedPaths, [
+        #expect(openedPaths == [
             "libSampleFastPlugin.dylib",
             "SampleLegacyPlugin.dylib",
             "SlowHelper.dylib"
         ])
 
         // Dynamic anti-detection registration includes lib-stripped "SampleFastPlugin" & synthesized legacy module
-        XCTAssertTrue(pt_is_registered_hidden_module("SampleFastPlugin"))
-        XCTAssertTrue(pt_is_registered_hidden_module("libSampleFastPlugin.dylib"))
-        XCTAssertTrue(pt_is_registered_hidden_module("SampleLegacyPlugin.dylib"))
-        XCTAssertTrue(pt_is_registered_hidden_module("com.example.fast"))
+        #expect(pt_is_registered_hidden_module("SampleFastPlugin"))
+        #expect(pt_is_registered_hidden_module("libSampleFastPlugin.dylib"))
+        #expect(pt_is_registered_hidden_module("SampleLegacyPlugin.dylib"))
+        #expect(pt_is_registered_hidden_module("com.example.fast"))
 
         // SlowHelper failure captured dlerror and wrote diagnostic log
-        XCTAssertTrue(records.contains {
+        #expect(records.contains {
             $0.identifier == "com.example.fast" && $0.status == .loaded && !$0.isLegacySynthesized
         })
-        XCTAssertTrue(records.contains {
+        #expect(records.contains {
             $0.identifier == "legacy.SampleLegacyPlugin" && $0.status == .loaded && $0.isLegacySynthesized
         })
-        XCTAssertTrue(records.contains {
+        #expect(records.contains {
             $0.identifier == "com.example.slow" &&
             $0.status == .failed("dlopen(\(pluginsDir.appendingPathComponent("SlowHelper.dylib").path)): symbol not found _missing_sym")
         })
-        XCTAssertTrue(records.contains {
+        #expect(records.contains {
             $0.identifier == "com.example.other" && $0.status == .skippedBundleMismatch
         })
-        XCTAssertEqual(
+        #expect(
             records.filter {
                 if case .validationFailed = $0.status { return true }
                 return false
-            }.count,
-            3
+            }.count == 3
         )
 
         let diagText = try String(contentsOf: logURL, encoding: .utf8)
-        XCTAssertTrue(diagText.contains("symbol not found _missing_sym"))
+        #expect(diagText.contains("symbol not found _missing_sym"))
     }
 
-    func testSafeModeBlocksUserPluginsAndRecoversPostMortemBreadcrumb() throws {
-        let root = try XCTUnwrap(tempDir)
-        let stateDir = root.appendingPathComponent("SafeModeState", isDirectory: true)
+    @Test
+    func safeModeBlocksUserPluginsAndRecoversPostMortemBreadcrumb() async throws {
+        let stateDir = tempDir.appendingPathComponent("SafeModeState", isDirectory: true)
         let safeMode = PTSafeMode(stateDirectory: stateDir, bundleIdentifier: "com.example.crashy")
 
         // First launch: clean -> writes .launching_in_progress, Safe Mode inactive
-        XCTAssertFalse(safeMode.evaluateAndBeginLaunch(environment: [:], stabilityWindow: 5.0))
-        XCTAssertFalse(safeMode.isSafeModeActive)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: safeMode.breadcrumbURL.path))
+        #expect(!safeMode.evaluateAndBeginLaunch(environment: [:], stabilityWindow: 5.0))
+        #expect(!safeMode.isSafeModeActive)
+        #expect(FileManager.default.fileExists(atPath: safeMode.breadcrumbURL.path))
 
         // Simulate crash before stabilityWindow: second launch sees stale breadcrumb -> enters Safe Mode!
-        XCTAssertTrue(safeMode.evaluateAndBeginLaunch(environment: [:], stabilityWindow: 5.0))
-        XCTAssertTrue(safeMode.isSafeModeActive)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: safeMode.breadcrumbURL.path))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: safeMode.lastTriggeredURL.path))
+        #expect(safeMode.evaluateAndBeginLaunch(environment: [:], stabilityWindow: 5.0))
+        #expect(safeMode.isSafeModeActive)
+        #expect(!FileManager.default.fileExists(atPath: safeMode.breadcrumbURL.path))
+        #expect(FileManager.default.fileExists(atPath: safeMode.lastTriggeredURL.path))
 
         // While Safe Mode is active, PTPluginContainer skips dlopen completely
-        let pluginsDir = root.appendingPathComponent("UserPlugins", isDirectory: true)
+        let pluginsDir = tempDir.appendingPathComponent("UserPlugins", isDirectory: true)
         try FileManager.default.createDirectory(at: pluginsDir, withIntermediateDirectories: true)
         try Data().write(to: pluginsDir.appendingPathComponent("AnyLegacy.dylib"))
 
@@ -249,44 +246,41 @@ final class PTPluginContainerTests: XCTestCase {
             currentPlayToolsVersion: "5.0.0",
             isSafeModeActive: safeMode.isSafeModeActive
         )
-        XCTAssertEqual(dlopenCalls, 0)
-        XCTAssertEqual(blocked.count, 1)
-        XCTAssertEqual(blocked.first?.status, .blockedBySafeMode)
+        #expect(dlopenCalls == 0)
+        #expect(blocked.count == 1)
+        #expect(blocked.first?.status == .blockedBySafeMode)
 
         // Third launch after Safe Mode recovers to normal and clears breadcrumb after stability window
-        XCTAssertFalse(safeMode.evaluateAndBeginLaunch(environment: [:], stabilityWindow: 0.05))
-        let exp = expectation(description: "stability timer removes breadcrumb")
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.25) {
-            exp.fulfill()
-        }
-        wait(for: [exp], timeout: 2.0)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: safeMode.breadcrumbURL.path))
+        #expect(!safeMode.evaluateAndBeginLaunch(environment: [:], stabilityWindow: 0.05))
+        try await Task.sleep(for: .milliseconds(250))
+        #expect(!FileManager.default.fileExists(atPath: safeMode.breadcrumbURL.path))
 
         // Environment override tests ("1" forces ON, "0" forces OFF)
-        XCTAssertTrue(safeMode.evaluateAndBeginLaunch(environment: ["PLAYTOOLS_SAFE_MODE": "1"], stabilityWindow: 5.0))
-        XCTAssertTrue(safeMode.isSafeModeActive)
-        XCTAssertFalse(safeMode.evaluateAndBeginLaunch(environment: ["PLAYTOOLS_SAFE_MODE": "0"], stabilityWindow: 5.0))
-        XCTAssertFalse(safeMode.isSafeModeActive)
+        #expect(safeMode.evaluateAndBeginLaunch(environment: ["PLAYTOOLS_SAFE_MODE": "1"], stabilityWindow: 5.0))
+        #expect(safeMode.isSafeModeActive)
+        #expect(!safeMode.evaluateAndBeginLaunch(environment: ["PLAYTOOLS_SAFE_MODE": "0"], stabilityWindow: 5.0))
+        #expect(!safeMode.isSafeModeActive)
         safeMode.markGracefulTermination()
-        XCTAssertFalse(FileManager.default.fileExists(atPath: safeMode.breadcrumbURL.path))
+        #expect(!FileManager.default.fileExists(atPath: safeMode.breadcrumbURL.path))
     }
 
-    func testDiagnosticLoggerDefaultLogURLUsesProcessTemporaryDirectory() throws {
+    @Test
+    func diagnosticLoggerDefaultLogURLUsesProcessTemporaryDirectory() {
         let logURL = PTDiagnosticLogger.defaultLogURL(bundleIdentifier: "com.example.app")
         let expectedDir = FileManager.default.temporaryDirectory.standardizedFileURL
-        XCTAssertEqual(logURL.deletingLastPathComponent().standardizedFileURL, expectedDir)
-        XCTAssertEqual(logURL.lastPathComponent, "PlayTools-com.example.app.log")
+        #expect(logURL.deletingLastPathComponent().standardizedFileURL == expectedDir)
+        #expect(logURL.lastPathComponent == "PlayTools-com.example.app.log")
 
         let globalTmp = URL(fileURLWithPath: "/private/tmp").standardizedFileURL
         if expectedDir != globalTmp {
-            XCTAssertNotEqual(logURL.deletingLastPathComponent().standardizedFileURL, globalTmp)
+            #expect(logURL.deletingLastPathComponent().standardizedFileURL != globalTmp)
         }
     }
 
-    func testMacOverVersionCompatibilityAcceptsPlayCoverEraPluginsAndRejectsHigherVersions() throws {
-        let root = try XCTUnwrap(tempDir)
-        let pluginsDir = root.appendingPathComponent("UserPluginsCompat", isDirectory: true)
-        let logURL = root.appendingPathComponent("compat-diag.log")
+    @Test
+    func macOverVersionCompatibilityAcceptsPlayCoverEraPluginsAndRejectsHigherVersions() throws {
+        let pluginsDir = tempDir.appendingPathComponent("UserPluginsCompat", isDirectory: true)
+        let logURL = tempDir.appendingPathComponent("compat-diag.log")
         try FileManager.default.createDirectory(at: pluginsDir, withIntermediateDirectories: true)
 
         let cases: [(id: String, minVer: String, shouldLoad: Bool)] = [
@@ -331,16 +325,18 @@ final class PTPluginContainerTests: XCTestCase {
         )
 
         for item in cases {
-            guard let record = records.first(where: { $0.identifier == item.id }) else {
-                return XCTFail("Missing record for \(item.id)")
-            }
+            let record = try #require(
+                records.first(where: { $0.identifier == item.id }),
+                "Missing record for \(item.id)"
+            )
             if item.shouldLoad {
-                XCTAssertEqual(record.status, .loaded, "Expected \(item.id) (\(item.minVer)) to load on 1.0.2")
+                #expect(record.status == .loaded, "Expected \(item.id) (\(item.minVer)) to load on 1.0.2")
             } else if case .validationFailed = record.status {
                 // Expected rejection
             } else {
-                XCTFail("Expected \(item.id) (\(item.minVer)) to fail validation on 1.0.2, got \(record.status)")
+                Issue.record("Expected \(item.id) (\(item.minVer)) to fail validation on 1.0.2, got \(record.status)")
             }
         }
     }
+}
 }

@@ -1,6 +1,6 @@
 import Foundation
 import Synchronization
-import XCTest
+import Testing
 
 private let ptRegistryDynamicCounter = Mutex<Int32>(0)
 
@@ -12,11 +12,14 @@ private func ptRegistryDynamicResolver() -> UnsafeMutableRawPointer? {
     return UnsafeMutableRawPointer(bitPattern: 0x1_0000_2000 + Int(next) * 0x10)
 }
 
-final class PTInterposeRegistryTests: XCTestCase {
-    func testLookupHandlesStandardWeakCompatAndDynamicEntries() throws {
-        let targetA = try XCTUnwrap(UnsafeRawPointer(bitPattern: 0x1_0000_1000))
-        let targetB = try XCTUnwrap(UnsafeRawPointer(bitPattern: 0x1_0000_1100))
-        let weakGuardNonNull = try XCTUnwrap(UnsafeRawPointer(bitPattern: 0x1_0000_9000))
+extension PlayToolsGlobalStateScope {
+@Suite(.serialized)
+struct PTInterposeRegistryTests {
+    @Test
+    func lookupHandlesStandardWeakCompatAndDynamicEntries() throws {
+        let targetA = try #require(UnsafeRawPointer(bitPattern: 0x1_0000_1000))
+        let targetB = try #require(UnsafeRawPointer(bitPattern: 0x1_0000_1100))
+        let weakGuardNonNull = try #require(UnsafeRawPointer(bitPattern: 0x1_0000_9000))
         let resolverFn: pt_dlsym_resolver_fn = {
             return ptRegistryDynamicResolver()
         }
@@ -76,45 +79,45 @@ final class PTInterposeRegistryTests: XCTestCase {
                                     )
                                 }
                             }
-                            XCTAssertEqual(dups, 0)
-                            XCTAssertEqual(index.count, 5)
+                            #expect(dups == 0)
+                            #expect(index.count == 5)
 
                             // Null and empty inputs are safe
-                            XCTAssertNil(pt_dlsym_index_lookup(&index, nil, false))
-                            XCTAssertNil(pt_dlsym_index_lookup(&index, "", false))
-                            XCTAssertNil(pt_dlsym_index_lookup(&index, "missing_symbol", false))
+                            #expect(pt_dlsym_index_lookup(&index, nil, false) == nil)
+                            #expect(pt_dlsym_index_lookup(&index, "", false) == nil)
+                            #expect(pt_dlsym_index_lookup(&index, "missing_symbol", false) == nil)
 
                             // Standard entry
-                            XCTAssertEqual(
-                                pt_dlsym_index_lookup(&index, "open", false),
-                                UnsafeMutableRawPointer(mutating: targetA)
+                            #expect(
+                                pt_dlsym_index_lookup(&index, "open", false) ==
+                                    UnsafeMutableRawPointer(mutating: targetA)
                             )
 
                             // Weak guard present vs missing
-                            XCTAssertEqual(
-                                pt_dlsym_index_lookup(&index, "weak_present", false),
-                                UnsafeMutableRawPointer(mutating: targetB)
+                            #expect(
+                                pt_dlsym_index_lookup(&index, "weak_present", false) ==
+                                    UnsafeMutableRawPointer(mutating: targetB)
                             )
-                            XCTAssertNil(pt_dlsym_index_lookup(&index, "weak_missing", false))
+                            #expect(pt_dlsym_index_lookup(&index, "weak_missing", false) == nil)
 
                             // Compat 13.7 visibility flag
-                            XCTAssertEqual(
-                                pt_dlsym_index_lookup(&index, "objc_enumerateClasses", false),
-                                UnsafeMutableRawPointer(mutating: targetA)
+                            #expect(
+                                pt_dlsym_index_lookup(&index, "objc_enumerateClasses", false) ==
+                                    UnsafeMutableRawPointer(mutating: targetA)
                             )
-                            XCTAssertEqual(
-                                pt_dlsym_index_lookup(&index, "objc_enumerateClasses", true),
-                                UnsafeMutableRawPointer(bitPattern: -1)
+                            #expect(
+                                pt_dlsym_index_lookup(&index, "objc_enumerateClasses", true) ==
+                                    UnsafeMutableRawPointer(bitPattern: -1)
                             )
 
                             // Dynamic resolver invoked per lookup
-                            XCTAssertEqual(
-                                pt_dlsym_index_lookup(&index, "environ", false),
-                                UnsafeMutableRawPointer(bitPattern: 0x1_0000_2010)
+                            #expect(
+                                pt_dlsym_index_lookup(&index, "environ", false) ==
+                                    UnsafeMutableRawPointer(bitPattern: 0x1_0000_2010)
                             )
-                            XCTAssertEqual(
-                                pt_dlsym_index_lookup(&index, "environ", false),
-                                UnsafeMutableRawPointer(bitPattern: 0x1_0000_2020)
+                            #expect(
+                                pt_dlsym_index_lookup(&index, "environ", false) ==
+                                    UnsafeMutableRawPointer(bitPattern: 0x1_0000_2020)
                             )
                         }
                     }
@@ -123,9 +126,10 @@ final class PTInterposeRegistryTests: XCTestCase {
         }
     }
 
-    func testDuplicateDetectionKeepsFirstEntryAndCountsDuplicates() throws {
-        let firstTarget = try XCTUnwrap(UnsafeRawPointer(bitPattern: 0x1_0000_3000))
-        let secondTarget = try XCTUnwrap(UnsafeRawPointer(bitPattern: 0x1_0000_4000))
+    @Test
+    func duplicateDetectionKeepsFirstEntryAndCountsDuplicates() throws {
+        let firstTarget = try #require(UnsafeRawPointer(bitPattern: 0x1_0000_3000))
+        let secondTarget = try #require(UnsafeRawPointer(bitPattern: 0x1_0000_4000))
 
         "dup_sym".withCString { symA in
             "dup_sym".withCString { symB in
@@ -157,13 +161,14 @@ final class PTInterposeRegistryTests: XCTestCase {
                         )
                     }
                 }
-                XCTAssertEqual(dups, 1)
-                XCTAssertEqual(index.duplicate_count, 1)
-                XCTAssertEqual(
-                    pt_dlsym_index_lookup(&index, "dup_sym", false),
-                    UnsafeMutableRawPointer(mutating: firstTarget)
+                #expect(dups == 1)
+                #expect(index.duplicate_count == 1)
+                #expect(
+                    pt_dlsym_index_lookup(&index, "dup_sym", false) ==
+                        UnsafeMutableRawPointer(mutating: firstTarget)
                 )
             }
         }
     }
+}
 }

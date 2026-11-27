@@ -1,44 +1,46 @@
 import CoreGraphics
-import XCTest
+import Testing
 
-final class PTCoordinateMathTests: XCTestCase {
-    func testCursorPositionCenteredAndAspectRatio() throws {
+@Suite
+struct PTCoordinateMathTests {
+    @Test
+    func cursorPositionCenteredAndAspectRatio() throws {
         let viewRect = CGRect(x: 0, y: 0, width: 1920, height: 1080)
         let windowFrame = CGRect(x: 0, y: 0, width: 960, height: 540)
 
-        let center = try XCTUnwrap(PTCoordinateMath.cursorPosition(
+        let center = try #require(PTCoordinateMath.cursorPosition(
             mousePoint: CGPoint(x: 480, y: 270),
             windowFrame: windowFrame,
             viewRect: viewRect,
             resizable: false,
             fullscreen: false
         ))
-        XCTAssertEqual(center.x, 960, accuracy: 0.001)
-        XCTAssertEqual(center.y, 540, accuracy: 0.001)
+        #expect(abs(center.x - 960) <= 0.001)
+        #expect(abs(center.y - 540) <= 0.001)
 
         // Wide 16:10 window with 16:9 content (horizontal pillarbox centering)
         let wideWindow = CGRect(x: 0, y: 0, width: 1200, height: 540)
-        let wideCenter = try XCTUnwrap(PTCoordinateMath.cursorPosition(
+        let wideCenter = try #require(PTCoordinateMath.cursorPosition(
             mousePoint: CGPoint(x: 600, y: 270),
             windowFrame: wideWindow,
             viewRect: viewRect,
             resizable: false,
             fullscreen: false
         ))
-        XCTAssertEqual(wideCenter.x, 960, accuracy: 0.001)
-        XCTAssertEqual(wideCenter.y, 540, accuracy: 0.001)
+        #expect(abs(wideCenter.x - 960) <= 0.001)
+        #expect(abs(wideCenter.y - 540) <= 0.001)
 
         // Tall 4:3 window in fullscreen vs non-fullscreen
         let tallWindow = CGRect(x: 0, y: 0, width: 960, height: 720)
-        let fsCenter = try XCTUnwrap(PTCoordinateMath.cursorPosition(
+        let fsCenter = try #require(PTCoordinateMath.cursorPosition(
             mousePoint: CGPoint(x: 480, y: 360),
             windowFrame: tallWindow,
             viewRect: viewRect,
             resizable: true,
             fullscreen: true
         ))
-        XCTAssertEqual(fsCenter.x, 960, accuracy: 0.001)
-        XCTAssertEqual(fsCenter.y, 540, accuracy: 0.001)
+        #expect(abs(fsCenter.x - 960) <= 0.001)
+        #expect(abs(fsCenter.y - 540) <= 0.001)
 
         // Traffic light rejection when non-fullscreen and point.y * rate > viewRect.height
         let aboveTrafficLight = PTCoordinateMath.cursorPosition(
@@ -48,207 +50,209 @@ final class PTCoordinateMathTests: XCTestCase {
             resizable: false,
             fullscreen: false
         )
-        XCTAssertNil(aboveTrafficLight)
+        #expect(aboveTrafficLight == nil)
     }
 
-    func testCursorPositionEdgeMarginAndDegenerateBounds() {
+    @Test
+    func cursorPositionEdgeMarginAndDegenerateBounds() {
         let viewRect = CGRect(x: 0, y: 0, width: 1920, height: 1080)
         let windowFrame = CGRect(x: 0, y: 0, width: 960, height: 540)
 
-        XCTAssertNil(PTCoordinateMath.cursorPosition(
+        #expect(PTCoordinateMath.cursorPosition(
             mousePoint: CGPoint(x: 9.9, y: 100),
             windowFrame: windowFrame,
             viewRect: viewRect,
             resizable: true,
             fullscreen: false
-        ))
-        XCTAssertNotNil(PTCoordinateMath.cursorPosition(
+        ) == nil)
+        #expect(PTCoordinateMath.cursorPosition(
             mousePoint: CGPoint(x: 10.0, y: 100),
             windowFrame: windowFrame,
             viewRect: viewRect,
             resizable: true,
             fullscreen: false
-        ))
-        XCTAssertNil(PTCoordinateMath.cursorPosition(
+        ) != nil)
+        #expect(PTCoordinateMath.cursorPosition(
             mousePoint: CGPoint(x: 100, y: 100),
             windowFrame: CGRect(x: 0, y: 0, width: 0.5, height: 540),
             viewRect: viewRect,
             resizable: false,
             fullscreen: false
-        ))
-        XCTAssertNil(PTCoordinateMath.cursorPosition(
+        ) == nil)
+        #expect(PTCoordinateMath.cursorPosition(
             mousePoint: CGPoint(x: 100, y: 100),
             windowFrame: windowFrame,
             viewRect: .zero,
             resizable: false,
             fullscreen: false
-        ))
+        ) == nil)
     }
 
-    func testAspectRatioAndRelativeAbsoluteConversions() {
-        XCTAssertEqual(PTCoordinateMath.aspectRatio(width: 1920, height: 1080), 1920.0 / 1080.0, accuracy: 0.0001)
-        XCTAssertEqual(PTCoordinateMath.aspectRatio(width: 1080, height: 1920), 1920.0 / 1080.0, accuracy: 0.0001)
-        XCTAssertEqual(PTCoordinateMath.aspectRatio(width: 1000, height: 1000), 1.0, accuracy: 0.0001)
-        XCTAssertEqual(PTCoordinateMath.aspectRatio(width: 0, height: 1080), 0)
-        XCTAssertEqual(PTCoordinateMath.aspectRatio(width: -10, height: 1080), 0)
+    @Test
+    func aspectRatioAndRelativeAbsoluteConversions() {
+        #expect(abs(PTCoordinateMath.aspectRatio(width: 1920, height: 1080) - (1920.0 / 1080.0)) <= 0.0001)
+        #expect(abs(PTCoordinateMath.aspectRatio(width: 1080, height: 1920) - (1920.0 / 1080.0)) <= 0.0001)
+        #expect(abs(PTCoordinateMath.aspectRatio(width: 1000, height: 1000) - 1.0) <= 0.0001)
+        #expect(PTCoordinateMath.aspectRatio(width: 0, height: 1080) == 0)
+        #expect(PTCoordinateMath.aspectRatio(width: -10, height: 1080) == 0)
 
         let screenSize = CGSize(width: 1920, height: 1080)
-        XCTAssertEqual(PTCoordinateMath.screenPercent(for: screenSize), 19.2, accuracy: 0.0001)
+        #expect(abs(PTCoordinateMath.screenPercent(for: screenSize) - 19.2) <= 0.0001)
 
         let relX = PTCoordinateMath.relativeX(960, screenWidth: screenSize.width)
         let relY = PTCoordinateMath.relativeY(270, screenHeight: screenSize.height)
         let relSize = PTCoordinateMath.relativeSize(96, screenSize: screenSize)
-        XCTAssertEqual(PTCoordinateMath.absoluteX(relX, screenWidth: screenSize.width), 960, accuracy: 0.0001)
-        XCTAssertEqual(PTCoordinateMath.absoluteY(relY, screenHeight: screenSize.height), 270, accuracy: 0.0001)
-        XCTAssertEqual(PTCoordinateMath.absoluteSize(relSize, screenSize: screenSize), 96, accuracy: 0.0001)
+        #expect(abs(PTCoordinateMath.absoluteX(relX, screenWidth: screenSize.width) - 960) <= 0.0001)
+        #expect(abs(PTCoordinateMath.absoluteY(relY, screenHeight: screenSize.height) - 270) <= 0.0001)
+        #expect(abs(PTCoordinateMath.absoluteSize(relSize, screenSize: screenSize) - 96) <= 0.0001)
 
-        XCTAssertEqual(PTCoordinateMath.relativeX(10, screenWidth: 0), 0)
-        XCTAssertEqual(PTCoordinateMath.relativeY(10, screenHeight: 0), 0)
-        XCTAssertEqual(PTCoordinateMath.relativeSize(10, screenSize: .zero), 0)
+        #expect(PTCoordinateMath.relativeX(10, screenWidth: 0) == 0)
+        #expect(PTCoordinateMath.relativeY(10, screenHeight: 0) == 0)
+        #expect(PTCoordinateMath.relativeSize(10, screenSize: .zero) == 0)
     }
 
-    func testSwipeOutOfBoundsVelocityScalerAndDelta() {
+    @Test
+    func swipeOutOfBoundsVelocityScalerAndDelta() {
         let bounds = CGSize(width: 1000, height: 600)
-        XCTAssertFalse(PTCoordinateMath.isPointOutOfBounds(CGPoint(x: 0, y: 0), boundsSize: bounds))
-        XCTAssertFalse(PTCoordinateMath.isPointOutOfBounds(CGPoint(x: 1000, y: 600), boundsSize: bounds))
-        XCTAssertTrue(PTCoordinateMath.isPointOutOfBounds(CGPoint(x: -0.1, y: 10), boundsSize: bounds))
-        XCTAssertTrue(PTCoordinateMath.isPointOutOfBounds(CGPoint(x: 1000.1, y: 10), boundsSize: bounds))
-        XCTAssertTrue(PTCoordinateMath.isPointOutOfBounds(CGPoint(x: 10, y: -1), boundsSize: bounds))
-        XCTAssertTrue(PTCoordinateMath.isPointOutOfBounds(CGPoint(x: 10, y: 601), boundsSize: bounds))
+        #expect(!PTCoordinateMath.isPointOutOfBounds(CGPoint(x: 0, y: 0), boundsSize: bounds))
+        #expect(!PTCoordinateMath.isPointOutOfBounds(CGPoint(x: 1000, y: 600), boundsSize: bounds))
+        #expect(PTCoordinateMath.isPointOutOfBounds(CGPoint(x: -0.1, y: 10), boundsSize: bounds))
+        #expect(PTCoordinateMath.isPointOutOfBounds(CGPoint(x: 1000.1, y: 10), boundsSize: bounds))
+        #expect(PTCoordinateMath.isPointOutOfBounds(CGPoint(x: 10, y: -1), boundsSize: bounds))
+        #expect(PTCoordinateMath.isPointOutOfBounds(CGPoint(x: 10, y: 601), boundsSize: bounds))
 
         let inBoundsScaler = PTCoordinateMath.velocityScaler(
             predicted: CGPoint(x: 800, y: 500),
             current: CGPoint(x: 500, y: 300),
             boundsSize: bounds
         )
-        XCTAssertEqual(inBoundsScaler, 1.0, accuracy: 0.0001)
+        #expect(abs(inBoundsScaler - 1.0) <= 0.0001)
 
         let leftOverflow = PTCoordinateMath.velocityScaler(
             predicted: CGPoint(x: -100, y: 300),
             current: CGPoint(x: 100, y: 300),
             boundsSize: bounds
         )
-        XCTAssertEqual(leftOverflow, 0.5, accuracy: 0.0001)
+        #expect(abs(leftOverflow - 0.5) <= 0.0001)
 
         let diagonalOverflow = PTCoordinateMath.velocityScaler(
             predicted: CGPoint(x: 1500, y: 1200),
             current: CGPoint(x: 500, y: 400),
             boundsSize: bounds
         )
-        XCTAssertEqual(diagonalOverflow, 0.25, accuracy: 0.0001)
+        #expect(abs(diagonalOverflow - 0.25) <= 0.0001)
 
         let zeroDelta = PTCoordinateMath.velocityScaler(
             predicted: CGPoint(x: 500, y: 300),
             current: CGPoint(x: 500, y: 300),
             boundsSize: bounds
         )
-        XCTAssertEqual(zeroDelta, 1.0, accuracy: 0.0001)
+        #expect(abs(zeroDelta - 1.0) <= 0.0001)
 
         let moved = PTCoordinateMath.applySwipeDelta(CGPoint(x: 100, y: 200), deltaX: 15, deltaY: 25)
-        XCTAssertEqual(moved, CGPoint(x: 115, y: 175))
+        #expect(moved == CGPoint(x: 115, y: 175))
     }
 
-    func testCameraDeltaAndClampPoint() {
+    @Test
+    func cameraDeltaAndClampPoint() {
         let delta = PTCoordinateMath.scaledCameraDelta(deltaX: 10, deltaY: -20, sensitivity: 5.0)
-        XCTAssertEqual(delta.dx, 30.0, accuracy: 0.0001)
-        XCTAssertEqual(delta.dy, 60.0, accuracy: 0.0001)
+        #expect(abs(delta.dx - 30.0) <= 0.0001)
+        #expect(abs(delta.dy - 60.0) <= 0.0001)
 
         let zeroSens = PTCoordinateMath.scaledCameraDelta(deltaX: 10, deltaY: 20, sensitivity: 0)
-        XCTAssertEqual(zeroSens, .zero)
+        #expect(zeroSens == .zero)
 
         let rect = CGRect(x: 10, y: 20, width: 100, height: 50)
-        XCTAssertEqual(PTCoordinateMath.clampPoint(CGPoint(x: -5, y: 90), to: rect), CGPoint(x: 10, y: 70))
-        XCTAssertEqual(PTCoordinateMath.clampPoint(CGPoint(x: 50, y: 40), to: rect), CGPoint(x: 50, y: 40))
-        XCTAssertEqual(PTCoordinateMath.clampPoint(CGPoint(x: 50, y: 40), to: .null), .zero)
+        #expect(PTCoordinateMath.clampPoint(CGPoint(x: -5, y: 90), to: rect) == CGPoint(x: 10, y: 70))
+        #expect(PTCoordinateMath.clampPoint(CGPoint(x: 50, y: 40), to: rect) == CGPoint(x: 50, y: 40))
+        #expect(PTCoordinateMath.clampPoint(CGPoint(x: 50, y: 40), to: .null) == .zero)
     }
 
-    func testNonFiniteAndDegenerateGeometryEdges() {
+    @Test
+    func nonFiniteAndDegenerateGeometryEdges() {
         let validView = CGRect(x: 0, y: 0, width: 1920, height: 1080)
         let validWindow = CGRect(x: 0, y: 0, width: 960, height: 540)
 
-        XCTAssertNil(PTCoordinateMath.cursorPosition(
+        #expect(PTCoordinateMath.cursorPosition(
             mousePoint: CGPoint(x: CGFloat.nan, y: 100),
             windowFrame: validWindow,
             viewRect: validView,
             resizable: false,
             fullscreen: false
-        ))
-        XCTAssertNil(PTCoordinateMath.cursorPosition(
+        ) == nil)
+        #expect(PTCoordinateMath.cursorPosition(
             mousePoint: CGPoint(x: CGFloat.infinity, y: 100),
             windowFrame: validWindow,
             viewRect: validView,
             resizable: false,
             fullscreen: false
-        ))
-        XCTAssertNil(PTCoordinateMath.cursorPosition(
+        ) == nil)
+        #expect(PTCoordinateMath.cursorPosition(
             mousePoint: CGPoint(x: 100, y: 100),
             windowFrame: CGRect(x: 0, y: 0, width: CGFloat.infinity, height: 540),
             viewRect: validView,
             resizable: false,
             fullscreen: false
-        ))
-        XCTAssertNil(PTCoordinateMath.cursorPosition(
+        ) == nil)
+        #expect(PTCoordinateMath.cursorPosition(
             mousePoint: CGPoint(x: 100, y: 100),
             windowFrame: validWindow,
             viewRect: CGRect(x: 0, y: 0, width: 1920, height: CGFloat.nan),
             resizable: false,
             fullscreen: false
-        ))
-        XCTAssertNil(PTCoordinateMath.cursorPosition(
+        ) == nil)
+        #expect(PTCoordinateMath.cursorPosition(
             mousePoint: CGPoint(x: 100, y: 100),
             windowFrame: CGRect(x: 100, y: 100, width: -50, height: -50),
             viewRect: validView,
             resizable: false,
             fullscreen: false
-        ))
-        XCTAssertNil(PTCoordinateMath.cursorPosition(
+        ) == nil)
+        #expect(PTCoordinateMath.cursorPosition(
             mousePoint: CGPoint(x: 5, y: 5),
             windowFrame: CGRect(x: 0, y: 0, width: 10, height: 10),
             viewRect: validView,
             resizable: true,
             fullscreen: false,
             edgeMargin: 10
-        ))
+        ) == nil)
 
         let negSize = CGSize(width: -100, height: -50)
-        XCTAssertEqual(PTCoordinateMath.screenPercent(for: negSize), 0)
-        XCTAssertEqual(PTCoordinateMath.absoluteSize(10, screenSize: negSize), 0)
-        XCTAssertEqual(PTCoordinateMath.aspectRatio(width: .nan, height: 100), 0)
+        #expect(PTCoordinateMath.screenPercent(for: negSize) == 0)
+        #expect(PTCoordinateMath.absoluteSize(10, screenSize: negSize) == 0)
+        #expect(PTCoordinateMath.aspectRatio(width: .nan, height: 100) == 0)
 
-        XCTAssertEqual(
+        #expect(
             PTCoordinateMath.velocityScaler(
                 predicted: CGPoint(x: 100, y: 100),
                 current: CGPoint(x: 50, y: 50),
                 boundsSize: .zero
-            ),
-            0
+            ) == 0
         )
-        XCTAssertEqual(
+        #expect(
             PTCoordinateMath.velocityScaler(
                 predicted: CGPoint(x: 100, y: 100),
                 current: CGPoint(x: -10, y: 50),
                 boundsSize: CGSize(width: 960, height: 540)
-            ),
-            0
+            ) == 0
         )
-        XCTAssertEqual(
+        #expect(
             PTCoordinateMath.velocityScaler(
                 predicted: CGPoint(x: -.infinity, y: 100),
                 current: CGPoint(x: 50, y: 50),
                 boundsSize: CGSize(width: 960, height: 540)
-            ),
-            0
+            ) == 0
         )
 
-        XCTAssertEqual(PTCoordinateMath.clampPoint(CGPoint(x: CGFloat.nan, y: 50), to: validWindow), .zero)
-        XCTAssertEqual(PTCoordinateMath.clampPoint(CGPoint(x: 50, y: 50), to: .infinite), .zero)
-        XCTAssertEqual(
-            PTCoordinateMath.clampPoint(CGPoint(x: 50, y: 50), to: CGRect(x: 100, y: 100, width: -50, height: -50)),
-            .zero
+        #expect(PTCoordinateMath.clampPoint(CGPoint(x: CGFloat.nan, y: 50), to: validWindow) == .zero)
+        #expect(PTCoordinateMath.clampPoint(CGPoint(x: 50, y: 50), to: .infinite) == .zero)
+        #expect(
+            PTCoordinateMath.clampPoint(CGPoint(x: 50, y: 50), to: CGRect(x: 100, y: 100, width: -50, height: -50)) ==
+                .zero
         )
 
         // Subnormal underflow & finite overflow guards (G-02)
-        XCTAssertNil(PTCoordinateMath.cursorPosition(
+        #expect(PTCoordinateMath.cursorPosition(
             mousePoint: CGPoint(x: 500, y: 500),
             windowFrame: CGRect(x: 0, y: 0, width: 1000, height: 1000),
             viewRect: CGRect(
@@ -259,62 +263,59 @@ final class PTCoordinateMathTests: XCTestCase {
             ),
             resizable: false,
             fullscreen: false
-        ))
-        XCTAssertNil(PTCoordinateMath.cursorPosition(
+        ) == nil)
+        #expect(PTCoordinateMath.cursorPosition(
             mousePoint: CGPoint(x: -1e308, y: 100),
             windowFrame: validWindow,
             viewRect: validView,
             resizable: false,
             fullscreen: false
-        ))
+        ) == nil)
 
-        XCTAssertEqual(PTCoordinateMath.aspectRatio(width: 1e308, height: 0.5), 0)
-        XCTAssertEqual(PTCoordinateMath.relativeX(1e308, screenWidth: 0.5), 0)
-        XCTAssertEqual(PTCoordinateMath.relativeY(1e308, screenHeight: 0.5), 0)
-        XCTAssertEqual(PTCoordinateMath.relativeSize(1e308, screenSize: CGSize(width: 0.5, height: 0.5)), 0)
-        XCTAssertEqual(PTCoordinateMath.absoluteX(1e308, screenWidth: 10), 0)
-        XCTAssertEqual(PTCoordinateMath.absoluteY(1e308, screenHeight: 10), 0)
-        XCTAssertEqual(PTCoordinateMath.absoluteSize(1e308, screenSize: CGSize(width: 1000, height: 1000)), 0)
+        #expect(PTCoordinateMath.aspectRatio(width: 1e308, height: 0.5) == 0)
+        #expect(PTCoordinateMath.relativeX(1e308, screenWidth: 0.5) == 0)
+        #expect(PTCoordinateMath.relativeY(1e308, screenHeight: 0.5) == 0)
+        #expect(PTCoordinateMath.relativeSize(1e308, screenSize: CGSize(width: 0.5, height: 0.5)) == 0)
+        #expect(PTCoordinateMath.absoluteX(1e308, screenWidth: 10) == 0)
+        #expect(PTCoordinateMath.absoluteY(1e308, screenHeight: 10) == 0)
+        #expect(PTCoordinateMath.absoluteSize(1e308, screenSize: CGSize(width: 1000, height: 1000)) == 0)
 
-        XCTAssertEqual(
-            PTCoordinateMath.scaledCameraDelta(deltaX: .nan, deltaY: .infinity, sensitivity: 1.0),
-            .zero
+        #expect(
+            PTCoordinateMath.scaledCameraDelta(deltaX: .nan, deltaY: .infinity, sensitivity: 1.0) == .zero
         )
-        XCTAssertEqual(
-            PTCoordinateMath.scaledCameraDelta(deltaX: 10, deltaY: 20, sensitivity: Float.nan),
-            .zero
+        #expect(
+            PTCoordinateMath.scaledCameraDelta(deltaX: 10, deltaY: 20, sensitivity: Float.nan) == .zero
         )
-        XCTAssertEqual(
-            PTCoordinateMath.scaledCameraDelta(deltaX: 1e308, deltaY: 1, sensitivity: 10.0),
-            .zero
+        #expect(
+            PTCoordinateMath.scaledCameraDelta(deltaX: 1e308, deltaY: 1, sensitivity: 10.0) == .zero
         )
 
-        XCTAssertEqual(
-            PTCoordinateMath.applySwipeDelta(CGPoint(x: CGFloat.nan, y: 10), deltaX: 1, deltaY: 2),
-            .zero
+        #expect(
+            PTCoordinateMath.applySwipeDelta(CGPoint(x: CGFloat.nan, y: 10), deltaX: 1, deltaY: 2) == .zero
         )
-        XCTAssertEqual(
-            PTCoordinateMath.applySwipeDelta(CGPoint(x: 100, y: 200), deltaX: .nan, deltaY: 2),
-            CGPoint(x: 100, y: 200)
+        #expect(
+            PTCoordinateMath.applySwipeDelta(CGPoint(x: 100, y: 200), deltaX: .nan, deltaY: 2) ==
+                CGPoint(x: 100, y: 200)
         )
-        XCTAssertEqual(
-            PTCoordinateMath.applySwipeDelta(CGPoint(x: 1e308, y: 200), deltaX: 1e308, deltaY: 0),
-            CGPoint(x: 1e308, y: 200)
+        #expect(
+            PTCoordinateMath.applySwipeDelta(CGPoint(x: 1e308, y: 200), deltaX: 1e308, deltaY: 0) ==
+                CGPoint(x: 1e308, y: 200)
         )
     }
 
-    func testDeadZoneAndMouseMoveCoalescer() throws {
-        XCTAssertTrue(PTCoordinateMath.isWithinDeadZone(
+    @Test
+    func deadZoneAndMouseMoveCoalescer() throws {
+        #expect(PTCoordinateMath.isWithinDeadZone(
             from: CGPoint(x: 10, y: 10),
             to: CGPoint(x: 10.15, y: 10.15),
             deadZone: 0.25
         ))
-        XCTAssertFalse(PTCoordinateMath.isWithinDeadZone(
+        #expect(!PTCoordinateMath.isWithinDeadZone(
             from: CGPoint(x: 10, y: 10),
             to: CGPoint(x: 11, y: 10),
             deadZone: 0.25
         ))
-        XCTAssertFalse(PTCoordinateMath.isWithinDeadZone(
+        #expect(!PTCoordinateMath.isWithinDeadZone(
             from: CGPoint(x: CGFloat.nan, y: 10),
             to: CGPoint(x: 10, y: 10),
             deadZone: 0.25
@@ -327,42 +328,55 @@ final class PTCoordinateMathTests: XCTestCase {
             initialTimestampNanoseconds: 0
         )
         // Before 8ms: accumulates
-        XCTAssertNil(coalescer.ingest(deltaX: 2.0, deltaY: 1.0, timestampNanoseconds: 2_000_000))
-        XCTAssertNil(coalescer.ingest(deltaX: .nan, deltaY: 1.0, timestampNanoseconds: 3_000_000))
-        XCTAssertNil(coalescer.ingest(deltaX: 3.0, deltaY: -0.5, timestampNanoseconds: 7_999_999))
+        let before2ms = coalescer.ingest(deltaX: 2.0, deltaY: 1.0, timestampNanoseconds: 2_000_000)
+        #expect(before2ms == nil)
+        let before3ms = coalescer.ingest(deltaX: .nan, deltaY: 1.0, timestampNanoseconds: 3_000_000)
+        #expect(before3ms == nil)
+        let before8ms = coalescer.ingest(deltaX: 3.0, deltaY: -0.5, timestampNanoseconds: 7_999_999)
+        #expect(before8ms == nil)
 
         // At 8ms boundary: flushes accumulated sum (5.0, 0.5)
-        let flushed = try XCTUnwrap(coalescer.ingest(deltaX: 1.0, deltaY: 1.5, timestampNanoseconds: 8_000_000))
-        XCTAssertEqual(flushed.dx, 6.0, accuracy: 0.0001)
-        XCTAssertEqual(flushed.dy, 2.0, accuracy: 0.0001)
+        let flushedRaw = coalescer.ingest(deltaX: 1.0, deltaY: 1.5, timestampNanoseconds: 8_000_000)
+        let flushed = try #require(flushedRaw)
+        #expect(abs(flushed.dx - 6.0) <= 0.0001)
+        #expect(abs(flushed.dy - 2.0) <= 0.0001)
 
         // Below dead-zone even after 8ms: stays held until exceeding deadZone
-        XCTAssertNil(coalescer.ingest(deltaX: 0.2, deltaY: 0.2, timestampNanoseconds: 20_000_000))
-        let second = try XCTUnwrap(coalescer.ingest(deltaX: 0.5, deltaY: 0.0, timestampNanoseconds: 28_000_000))
-        XCTAssertEqual(second.dx, 0.7, accuracy: 0.0001)
-        XCTAssertEqual(second.dy, 0.2, accuracy: 0.0001)
+        let subDeadZone = coalescer.ingest(deltaX: 0.2, deltaY: 0.2, timestampNanoseconds: 20_000_000)
+        #expect(subDeadZone == nil)
+        let secondRaw = coalescer.ingest(deltaX: 0.5, deltaY: 0.0, timestampNanoseconds: 28_000_000)
+        let second = try #require(secondRaw)
+        #expect(abs(second.dx - 0.7) <= 0.0001)
+        #expect(abs(second.dy - 0.2) <= 0.0001)
     }
 
-    func testWindowGeometryMathClampingOrientationAndCentering() {
+    @Test
+    func windowGeometryMathClampingOrientationAndCentering() {
         let visible = CGRect(x: 0, y: 25, width: 1440, height: 875)
         let clamped = PTWindowGeometryMath.clampedContentSize(
             requested: CGSize(width: 2560, height: 1440),
             visibleScreenFrame: visible,
             aspectRatio: CGSize(width: 16, height: 9)
         )
-        XCTAssertLessThanOrEqual(clamped.width, visible.width)
-        XCTAssertLessThanOrEqual(clamped.height, visible.height)
-        XCTAssertEqual(clamped.width / clamped.height, 16.0 / 9.0, accuracy: 0.02)
+        #expect(clamped.width <= visible.width)
+        #expect(clamped.height <= visible.height)
+        #expect(abs((clamped.width / clamped.height) - (16.0 / 9.0)) <= 0.02)
 
-        XCTAssertEqual(PTWindowGeometryMath.clampedContentSize(requested: .zero, visibleScreenFrame: visible), .zero)
-        XCTAssertEqual(
-            PTWindowGeometryMath.clampedContentSize(requested: CGSize(width: CGFloat.nan, height: 600), visibleScreenFrame: visible),
-            .zero
+        #expect(PTWindowGeometryMath.clampedContentSize(requested: .zero, visibleScreenFrame: visible) == .zero)
+        #expect(
+            PTWindowGeometryMath.clampedContentSize(
+                requested: CGSize(width: CGFloat.nan, height: 600),
+                visibleScreenFrame: visible
+            ) == .zero
         )
 
         let base = CGSize(width: 1920, height: 1080)
-        XCTAssertEqual(PTWindowGeometryMath.orientedSize(baseSize: base, portrait: true), CGSize(width: 1080, height: 1920))
-        XCTAssertEqual(PTWindowGeometryMath.orientedSize(baseSize: base, portrait: false), CGSize(width: 1920, height: 1080))
+        #expect(
+            PTWindowGeometryMath.orientedSize(baseSize: base, portrait: true) == CGSize(width: 1080, height: 1920)
+        )
+        #expect(
+            PTWindowGeometryMath.orientedSize(baseSize: base, portrait: false) == CGSize(width: 1920, height: 1080)
+        )
 
         let centered = PTWindowGeometryMath.centeredFrame(
             forContentSize: CGSize(width: 800, height: 600),
@@ -370,15 +384,16 @@ final class PTCoordinateMathTests: XCTestCase {
             visibleScreenFrame: visible,
             titleBarHeight: 28
         )
-        XCTAssertGreaterThanOrEqual(centered.minX, visible.minX)
-        XCTAssertGreaterThanOrEqual(centered.minY, visible.minY)
-        XCTAssertLessThanOrEqual(centered.maxX, visible.maxX)
-        XCTAssertLessThanOrEqual(centered.maxY, visible.maxY)
-        XCTAssertEqual(centered.width, 800)
-        XCTAssertEqual(centered.height, 628)
+        #expect(centered.minX >= visible.minX)
+        #expect(centered.minY >= visible.minY)
+        #expect(centered.maxX <= visible.maxX)
+        #expect(centered.maxY <= visible.maxY)
+        #expect(centered.width == 800)
+        #expect(centered.height == 628)
     }
 
-    func testTouchInputPipelineLatencyUnder4Milliseconds() {
+    @Test
+    func touchInputPipelineLatencyUnder4Milliseconds() {
         let viewRect = CGRect(x: 0, y: 0, width: 1920, height: 1080)
         let windowFrame = CGRect(x: 0, y: 0, width: 960, height: 540)
         var coalescer = PTMouseMoveCoalescer(maxPollingRate: 240, deadZone: 0.25, initialTimestampNanoseconds: 0)
@@ -402,13 +417,14 @@ final class PTCoordinateMathTests: XCTestCase {
             }
         }
         let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds &- startNs) / 1_000_000.0
-        XCTAssertGreaterThan(resolvedCount, 900)
-        XCTAssertLessThan(elapsedMs, 4.0)
+        #expect(resolvedCount > 900)
+        #expect(elapsedMs < 4.0)
     }
 
-    func testAuxiliaryHostAndUIWindowFiltering() {
+    @Test
+    func auxiliaryHostAndUIWindowFiltering() {
         // macOS TextInputUI floating cursor window must be rejected
-        XCTAssertTrue(PTWindowGeometryMath.isAuxiliaryHostWindow(
+        #expect(PTWindowGeometryMath.isAuxiliaryHostWindow(
             className: "TUINSWindow",
             delegateClassName: "TUINSWindow",
             isPanel: false,
@@ -417,7 +433,7 @@ final class PTCoordinateMathTests: XCTestCase {
         ))
 
         // NSPanel (open/save panels, IME candidate panels) must be rejected
-        XCTAssertTrue(PTWindowGeometryMath.isAuxiliaryHostWindow(
+        #expect(PTWindowGeometryMath.isAuxiliaryHostWindow(
             className: "NSOpenPanel",
             delegateClassName: nil,
             isPanel: true,
@@ -426,7 +442,7 @@ final class PTCoordinateMathTests: XCTestCase {
         ))
 
         // Primary Mac Catalyst scene host window must be accepted
-        XCTAssertFalse(PTWindowGeometryMath.isAuxiliaryHostWindow(
+        #expect(!PTWindowGeometryMath.isAuxiliaryHostWindow(
             className: "UINSWindow",
             delegateClassName: "UINSSceneWindowController",
             isPanel: false,
@@ -435,13 +451,14 @@ final class PTCoordinateMathTests: XCTestCase {
         ))
 
         // UIKit keyboard/effects overlay windows vs normal content windows
-        XCTAssertTrue(PTWindowGeometryMath.isAuxiliaryUIWindow(className: "UITextEffectsWindow"))
-        XCTAssertTrue(PTWindowGeometryMath.isAuxiliaryUIWindow(className: "UIRemoteKeyboardWindow"))
-        XCTAssertTrue(PTWindowGeometryMath.isAuxiliaryUIWindow(className: "PTCustomInputWindow"))
-        XCTAssertFalse(PTWindowGeometryMath.isAuxiliaryUIWindow(className: "UIWindow"))
+        #expect(PTWindowGeometryMath.isAuxiliaryUIWindow(className: "UITextEffectsWindow"))
+        #expect(PTWindowGeometryMath.isAuxiliaryUIWindow(className: "UIRemoteKeyboardWindow"))
+        #expect(PTWindowGeometryMath.isAuxiliaryUIWindow(className: "PTCustomInputWindow"))
+        #expect(!PTWindowGeometryMath.isAuxiliaryUIWindow(className: "UIWindow"))
     }
 
-    func testTouchWindowOrderingAndPointTranslation() {
+    @Test
+    func touchWindowOrderingAndPointTranslation() {
         let candidates: [PTWindowGeometryMath.TouchWindowCandidate] = [
             // 0: Primary content UIWindow at level 0
             .init(
@@ -478,18 +495,19 @@ final class PTCoordinateMathTests: XCTestCase {
         ]
 
         let ordered = PTWindowGeometryMath.orderedTouchCandidateIndices(candidates)
-        XCTAssertEqual(ordered, [2, 3, 0])
+        #expect(ordered == [2, 3, 0])
 
         let translated = PTWindowGeometryMath.pointInWindow(
             scenePoint: CGPoint(x: 250, y: 420),
             windowOrigin: CGPoint(x: 50, y: 100)
         )
-        XCTAssertEqual(translated, CGPoint(x: 200, y: 320))
+        #expect(translated == CGPoint(x: 200, y: 320))
     }
 
-    func testControlModeTransitionPolicyPreservesInFlightTextInputClick() {
+    @Test
+    func controlModeTransitionPolicyPreservesInFlightTextInputClick() {
         // Initial startup mode transition does not invalidate actions
-        XCTAssertEqual(
+        #expect(
             PTControlModeTransitionPolicy.invalidation(
                 from: "off",
                 to: "arbitraryClick",
@@ -497,13 +515,12 @@ final class PTCoordinateMathTests: XCTestCase {
                 nextCursorHidden: false,
                 isInitial: true,
                 keymappingEnabled: true
-            ),
-            .none
+            ) == .none
         )
 
         // Tapping a text view triggers arbitraryClick -> textInput before leftMouseUp;
         // both modes share direct-touch FakeMouseAction so in-flight tap must complete cleanly.
-        XCTAssertEqual(
+        #expect(
             PTControlModeTransitionPolicy.invalidation(
                 from: "arbitraryClick",
                 to: "textInput",
@@ -511,10 +528,9 @@ final class PTCoordinateMathTests: XCTestCase {
                 nextCursorHidden: false,
                 isInitial: false,
                 keymappingEnabled: true
-            ),
-            .none
+            ) == .none
         )
-        XCTAssertEqual(
+        #expect(
             PTControlModeTransitionPolicy.invalidation(
                 from: "textInput",
                 to: "arbitraryClick",
@@ -522,12 +538,11 @@ final class PTCoordinateMathTests: XCTestCase {
                 nextCursorHidden: false,
                 isInitial: false,
                 keymappingEnabled: true
-            ),
-            .none
+            ) == .none
         )
 
         // Switching to editor or off must invalidate all actions even when cursor stays visible
-        XCTAssertEqual(
+        #expect(
             PTControlModeTransitionPolicy.invalidation(
                 from: "arbitraryClick",
                 to: "editor",
@@ -535,10 +550,9 @@ final class PTCoordinateMathTests: XCTestCase {
                 nextCursorHidden: false,
                 isInitial: false,
                 keymappingEnabled: true
-            ),
-            .allActions
+            ) == .allActions
         )
-        XCTAssertEqual(
+        #expect(
             PTControlModeTransitionPolicy.invalidation(
                 from: "textInput",
                 to: "off",
@@ -546,12 +560,11 @@ final class PTCoordinateMathTests: XCTestCase {
                 nextCursorHidden: false,
                 isInitial: false,
                 keymappingEnabled: true
-            ),
-            .allActions
+            ) == .allActions
         )
 
         // Switching between direct-touch mode and cameraRotate must invalidate non-button actions
-        XCTAssertEqual(
+        #expect(
             PTControlModeTransitionPolicy.invalidation(
                 from: "arbitraryClick",
                 to: "cameraRotate",
@@ -559,86 +572,106 @@ final class PTCoordinateMathTests: XCTestCase {
                 nextCursorHidden: true,
                 isInitial: false,
                 keymappingEnabled: true
-            ),
-            .nonButtonActions
+            ) == .nonButtonActions
         )
     }
 
-    func testLongPressStateMachineQuickClickHoldDragAndCancellation() {
+    @Test
+    func longPressStateMachineQuickClickHoldDragAndCancellation() {
         var sm = PTLongPressStateMachine()
-        XCTAssertFalse(sm.isActive)
+        #expect(!sm.isActive)
 
         // 1. Quick right-click: press, jitter before release, release before 650ms -> holds until timer fires
         let p0 = CGPoint(x: 120, y: 240)
         let first = sm.begin(at: p0)
-        XCTAssertFalse(first.cancelledPrevious)
-        XCTAssertTrue(sm.isActive)
-        XCTAssertTrue(sm.isPhysicalButtonDown)
-        XCTAssertFalse(sm.minHoldCompleted)
-        XCTAssertEqual(sm.anchorPoint, p0)
+        #expect(!first.cancelledPrevious)
+        #expect(sm.isActive)
+        #expect(sm.isPhysicalButtonDown)
+        #expect(!sm.minHoldCompleted)
+        #expect(sm.anchorPoint == p0)
 
         // Jitter while min hold has not elapsed must be suppressed
-        XCTAssertFalse(sm.allowMove(to: CGPoint(x: 122, y: 243)))
-        XCTAssertEqual(sm.anchorPoint, p0)
+        let move1 = sm.allowMove(to: CGPoint(x: 122, y: 243))
+        #expect(!move1)
+        #expect(sm.anchorPoint == p0)
 
         // Quick physical release before min hold does NOT release touch yet
-        XCTAssertFalse(sm.onPhysicalRelease())
-        XCTAssertTrue(sm.isActive)
-        XCTAssertFalse(sm.isPhysicalButtonDown)
-        XCTAssertFalse(sm.allowMove(to: CGPoint(x: 150, y: 260)))
+        let rel1 = sm.onPhysicalRelease()
+        #expect(!rel1)
+        #expect(sm.isActive)
+        #expect(!sm.isPhysicalButtonDown)
+        let move2 = sm.allowMove(to: CGPoint(x: 150, y: 260))
+        #expect(!move2)
 
         // Timer fires for first.generation -> now releases touch
-        XCTAssertTrue(sm.onMinimumHoldElapsed(generation: first.generation))
-        XCTAssertFalse(sm.isActive)
-        XCTAssertEqual(sm.anchorPoint, p0)
+        let elapsed1 = sm.onMinimumHoldElapsed(generation: first.generation)
+        #expect(elapsed1)
+        #expect(!sm.isActive)
+        #expect(sm.anchorPoint == p0)
 
         // Redundant release or stale generation timer must be no-op
-        XCTAssertFalse(sm.onMinimumHoldElapsed(generation: first.generation))
-        XCTAssertFalse(sm.onPhysicalRelease())
+        let elapsed1Dup = sm.onMinimumHoldElapsed(generation: first.generation)
+        #expect(!elapsed1Dup)
+        let rel1Dup = sm.onPhysicalRelease()
+        #expect(!rel1Dup)
 
         // 2. Press-and-hold >= 650ms -> keeps touch alive past 650ms, allows drag after 650ms, ends on release
         let p1 = CGPoint(x: 300, y: 400)
         let second = sm.begin(at: p1)
-        XCTAssertFalse(second.cancelledPrevious)
+        #expect(!second.cancelledPrevious)
         // Stale generation from earlier tap must be ignored
-        XCTAssertFalse(sm.onMinimumHoldElapsed(generation: first.generation))
+        let staleElapsed = sm.onMinimumHoldElapsed(generation: first.generation)
+        #expect(!staleElapsed)
         // Pre-threshold drag still suppressed
-        XCTAssertFalse(sm.allowMove(to: CGPoint(x: 302, y: 401)))
+        let preDrag = sm.allowMove(to: CGPoint(x: 302, y: 401))
+        #expect(!preDrag)
 
         // Threshold reached while physical button still held -> remains active
-        XCTAssertFalse(sm.onMinimumHoldElapsed(generation: second.generation))
-        XCTAssertTrue(sm.isActive)
-        XCTAssertTrue(sm.minHoldCompleted)
+        let elapsed2 = sm.onMinimumHoldElapsed(generation: second.generation)
+        #expect(!elapsed2)
+        #expect(sm.isActive)
+        #expect(sm.minHoldCompleted)
 
         // Post-threshold drag allowed and updates anchorPoint
         let pDrag = CGPoint(x: 340, y: 420)
-        XCTAssertTrue(sm.allowMove(to: pDrag))
-        XCTAssertEqual(sm.anchorPoint, pDrag)
+        let postDrag = sm.allowMove(to: pDrag)
+        #expect(postDrag)
+        #expect(sm.anchorPoint == pDrag)
 
         // Physical release now ends the touch
-        XCTAssertTrue(sm.onPhysicalRelease())
-        XCTAssertFalse(sm.isActive)
+        let rel2 = sm.onPhysicalRelease()
+        #expect(rel2)
+        #expect(!sm.isActive)
 
         // 3. Re-press while quick-click auto-release still pending, and early finish (left click)
         let third = sm.begin(at: CGPoint(x: 50, y: 60))
-        XCTAssertFalse(sm.onPhysicalRelease())
+        let rel3 = sm.onPhysicalRelease()
+        #expect(!rel3)
         let fourth = sm.begin(at: CGPoint(x: 80, y: 90))
-        XCTAssertTrue(fourth.cancelledPrevious)
-        XCTAssertFalse(sm.onMinimumHoldElapsed(generation: third.generation))
-        XCTAssertTrue(sm.finishEarly())
-        XCTAssertFalse(sm.isActive)
-        XCTAssertFalse(sm.finishEarly())
-        XCTAssertFalse(sm.onMinimumHoldElapsed(generation: fourth.generation))
+        #expect(fourth.cancelledPrevious)
+        let elapsed3 = sm.onMinimumHoldElapsed(generation: third.generation)
+        #expect(!elapsed3)
+        let finish1 = sm.finishEarly()
+        #expect(finish1)
+        #expect(!sm.isActive)
+        let finish2 = sm.finishEarly()
+        #expect(!finish2)
+        let elapsed4 = sm.onMinimumHoldElapsed(generation: fourth.generation)
+        #expect(!elapsed4)
 
         // 4. Invalidation tears down active long press and invalidates pending timer generation
         let fifth = sm.begin(at: CGPoint(x: 10, y: 20))
-        XCTAssertTrue(sm.invalidate())
-        XCTAssertFalse(sm.isActive)
-        XCTAssertFalse(sm.invalidate())
-        XCTAssertFalse(sm.onMinimumHoldElapsed(generation: fifth.generation))
+        let inv1 = sm.invalidate()
+        #expect(inv1)
+        #expect(!sm.isActive)
+        let inv2 = sm.invalidate()
+        #expect(!inv2)
+        let elapsed5 = sm.onMinimumHoldElapsed(generation: fifth.generation)
+        #expect(!elapsed5)
     }
 
-    func testTitlebarAwareClamping() {
+    @Test
+    func titlebarAwareClamping() {
         let laptopVisible = CGRect(x: 0, y: 25, width: 1440, height: 875)
         let titleBarHeight: CGFloat = 28
 
@@ -648,17 +681,17 @@ final class PTCoordinateMathTests: XCTestCase {
             visibleScreenFrame: laptopVisible,
             titleBarHeight: titleBarHeight
         )
-        XCTAssertLessThanOrEqual(clampedPad.width, laptopVisible.width)
-        XCTAssertLessThanOrEqual(clampedPad.height + titleBarHeight, laptopVisible.height)
-        XCTAssertEqual(clampedPad.width / clampedPad.height, 1024.0 / 1366.0, accuracy: 0.005)
+        #expect(clampedPad.width <= laptopVisible.width)
+        #expect(clampedPad.height + titleBarHeight <= laptopVisible.height)
+        #expect(abs((clampedPad.width / clampedPad.height) - (1024.0 / 1366.0)) <= 0.005)
         let centeredPad = PTWindowGeometryMath.centeredFrame(
             forContentSize: clampedPad,
             currentFrame: .zero,
             visibleScreenFrame: laptopVisible,
             titleBarHeight: titleBarHeight
         )
-        XCTAssertGreaterThanOrEqual(centeredPad.minY, laptopVisible.minY)
-        XCTAssertLessThanOrEqual(centeredPad.maxY, laptopVisible.maxY)
+        #expect(centeredPad.minY >= laptopVisible.minY)
+        #expect(centeredPad.maxY <= laptopVisible.maxY)
 
         // Fractional visible height still guarantees content + titlebar <= visible height
         let fractionalVisible = CGRect(x: 0, y: 0, width: 1440, height: 875.8)
@@ -667,8 +700,8 @@ final class PTCoordinateMathTests: XCTestCase {
             visibleScreenFrame: fractionalVisible,
             titleBarHeight: 28.0
         )
-        XCTAssertLessThanOrEqual(clampedFrac.height + 28.0, fractionalVisible.height)
-        XCTAssertEqual(clampedFrac.width / clampedFrac.height, 440.0 / 956.0, accuracy: 0.005)
+        #expect(clampedFrac.height + 28.0 <= fractionalVisible.height)
+        #expect(abs((clampedFrac.width / clampedFrac.height) - (440.0 / 956.0)) <= 0.005)
     }
 
     private struct StrictSpecExpectation {
@@ -693,18 +726,23 @@ final class PTCoordinateMathTests: XCTestCase {
         }
     }
 
-    private func verifyStrictSpecs(_ expectations: [StrictSpecExpectation], expectedScale: Double) {
+    private func verifyStrictSpecs(
+        _ expectations: [StrictSpecExpectation],
+        expectedScale: Double,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) {
         for entry in expectations {
             let spec = PTWindowGeometryMath.StrictDeviceDisplaySpec.resolve(forModel: entry.model)
-            XCTAssertEqual(spec.nativePixelWidth, entry.pxW)
-            XCTAssertEqual(spec.nativePixelHeight, entry.pxH)
-            XCTAssertEqual(spec.nativeScale, expectedScale)
-            XCTAssertEqual(spec.logicalSize(orientation: "portrait"), entry.portrait)
-            XCTAssertEqual(spec.logicalSize(orientation: "landscape"), entry.landscape)
+            #expect(spec.nativePixelWidth == entry.pxW, sourceLocation: sourceLocation)
+            #expect(spec.nativePixelHeight == entry.pxH, sourceLocation: sourceLocation)
+            #expect(spec.nativeScale == expectedScale, sourceLocation: sourceLocation)
+            #expect(spec.logicalSize(orientation: "portrait") == entry.portrait, sourceLocation: sourceLocation)
+            #expect(spec.logicalSize(orientation: "landscape") == entry.landscape, sourceLocation: sourceLocation)
         }
     }
 
-    func testStrictDeviceDisplaySpecsForIPadModels() {
+    @Test
+    func strictDeviceDisplaySpecsForIPadModels() {
         let ipadExpected: [StrictSpecExpectation] = [
             .init("iPad6,7", 2048, 2732, 1024, 1366),
             .init("iPad8,6", 2048, 2732, 1024, 1366),
@@ -714,13 +752,11 @@ final class PTCoordinateMathTests: XCTestCase {
             .init("iPad17,3", 2064, 2752, 1032, 1376)
         ]
         verifyStrictSpecs(ipadExpected, expectedScale: 2.0)
-        XCTAssertEqual(
-            PTWindowGeometryMath.StrictDeviceDisplaySpec.resolve(forModel: "UnknownDevice").model,
-            "iPad13,8"
-        )
+        #expect(PTWindowGeometryMath.StrictDeviceDisplaySpec.resolve(forModel: "UnknownDevice").model == "iPad13,8")
     }
 
-    func testStrictDeviceDisplaySpecsForIPhoneModels() {
+    @Test
+    func strictDeviceDisplaySpecsForIPhoneModels() {
         let iphoneExpected: [StrictSpecExpectation] = [
             .init("iPhone12,5", 1242, 2688, 414, 896),
             .init("iPhone14,3", 1284, 2778, 428, 926),
@@ -730,13 +766,11 @@ final class PTCoordinateMathTests: XCTestCase {
             .init("iPhone18,2", 1320, 2868, 440, 956)
         ]
         verifyStrictSpecs(iphoneExpected, expectedScale: 3.0)
-        XCTAssertEqual(
-            PTWindowGeometryMath.StrictDeviceDisplaySpec.resolve(forModel: "iPhone99,1").model,
-            "iPhone17,2"
-        )
+        #expect(PTWindowGeometryMath.StrictDeviceDisplaySpec.resolve(forModel: "iPhone99,1").model == "iPhone17,2")
     }
 
-    func testStrictViewportWindowPlansFitScreenAndNative1x() {
+    @Test
+    func strictViewportWindowPlansFitScreenAndNative1x() {
         let laptopVisible = CGRect(x: 0, y: 25, width: 1440, height: 875)
         let titleBarHeight: CGFloat = 28
 
@@ -746,10 +780,10 @@ final class PTCoordinateMathTests: XCTestCase {
             visibleScreenFrame: laptopVisible,
             titleBarHeight: titleBarHeight
         )
-        XCTAssertEqual(fitOversized.logicalSceneSize, CGSize(width: 1024, height: 1366))
-        XCTAssertEqual(fitOversized.lockedAspectRatio, CGSize(width: 1024, height: 1366))
-        XCTAssertEqual(fitOversized.windowContentSize, CGSize(width: 635, height: 847))
-        XCTAssertTrue(fitOversized.allowsUserResize)
+        #expect(fitOversized.logicalSceneSize == CGSize(width: 1024, height: 1366))
+        #expect(fitOversized.lockedAspectRatio == CGSize(width: 1024, height: 1366))
+        #expect(fitOversized.windowContentSize == CGSize(width: 635, height: 847))
+        #expect(fitOversized.allowsUserResize)
 
         let fitSmallPhone = PTWindowGeometryMath.strictViewportWindowPlan(
             logicalSceneSize: CGSize(width: 932, height: 430),
@@ -757,8 +791,8 @@ final class PTCoordinateMathTests: XCTestCase {
             visibleScreenFrame: CGRect(x: 0, y: 0, width: 1512, height: 944),
             titleBarHeight: titleBarHeight
         )
-        XCTAssertEqual(fitSmallPhone.windowContentSize, CGSize(width: 932, height: 430))
-        XCTAssertTrue(fitSmallPhone.allowsUserResize)
+        #expect(fitSmallPhone.windowContentSize == CGSize(width: 932, height: 430))
+        #expect(fitSmallPhone.allowsUserResize)
 
         let nativeOversized = PTWindowGeometryMath.strictViewportWindowPlan(
             logicalSceneSize: CGSize(width: 1024, height: 1366),
@@ -766,8 +800,8 @@ final class PTCoordinateMathTests: XCTestCase {
             visibleScreenFrame: laptopVisible,
             titleBarHeight: titleBarHeight
         )
-        XCTAssertEqual(nativeOversized.windowContentSize, CGSize(width: 635, height: 847))
-        XCTAssertFalse(nativeOversized.allowsUserResize)
+        #expect(nativeOversized.windowContentSize == CGSize(width: 635, height: 847))
+        #expect(!nativeOversized.allowsUserResize)
 
         let nativeSmall = PTWindowGeometryMath.strictViewportWindowPlan(
             logicalSceneSize: CGSize(width: 430, height: 932),
@@ -775,11 +809,12 @@ final class PTCoordinateMathTests: XCTestCase {
             visibleScreenFrame: CGRect(x: 0, y: 0, width: 2560, height: 1415),
             titleBarHeight: titleBarHeight
         )
-        XCTAssertEqual(nativeSmall.windowContentSize, CGSize(width: 430, height: 932))
-        XCTAssertFalse(nativeSmall.allowsUserResize)
+        #expect(nativeSmall.windowContentSize == CGSize(width: 430, height: 932))
+        #expect(!nativeSmall.allowsUserResize)
     }
 
-    func testStrictViewportFocusPolicyPreservesFitScreenResizeAcrossFocus() {
+    @Test
+    func strictViewportFocusPolicyPreservesFitScreenResizeAcrossFocus() {
         let screenA = CGRect(x: 0, y: 0, width: 1512, height: 982)
         let screenB = CGRect(x: 0, y: 0, width: 2560, height: 1440)
         let landscapeKey = PTStrictViewportFocusKey(
@@ -790,16 +825,16 @@ final class PTCoordinateMathTests: XCTestCase {
         let first = PTStrictViewportFocusPolicy.shouldApplyContentSizeOnFocus(
             isStrictEmulationMode: true, lastAppliedFitScreenKey: nil, currentKey: landscapeKey
         )
-        XCTAssertTrue(first.shouldApply)
-        XCTAssertEqual(first.nextAppliedFitScreenKey, landscapeKey)
+        #expect(first.shouldApply)
+        #expect(first.nextAppliedFitScreenKey == landscapeKey)
 
         let repeatFocus = PTStrictViewportFocusPolicy.shouldApplyContentSizeOnFocus(
             isStrictEmulationMode: true,
             lastAppliedFitScreenKey: first.nextAppliedFitScreenKey,
             currentKey: landscapeKey
         )
-        XCTAssertFalse(repeatFocus.shouldApply)
-        XCTAssertEqual(repeatFocus.nextAppliedFitScreenKey, landscapeKey)
+        #expect(!repeatFocus.shouldApply)
+        #expect(repeatFocus.nextAppliedFitScreenKey == landscapeKey)
 
         let portraitKey = PTStrictViewportFocusKey(
             sceneID: nil, deviceModel: "iPad13,8", scaleMode: "fitScreen",
@@ -810,8 +845,8 @@ final class PTCoordinateMathTests: XCTestCase {
             lastAppliedFitScreenKey: repeatFocus.nextAppliedFitScreenKey,
             currentKey: portraitKey
         )
-        XCTAssertTrue(rotated.shouldApply)
-        XCTAssertEqual(rotated.nextAppliedFitScreenKey, portraitKey)
+        #expect(rotated.shouldApply)
+        #expect(rotated.nextAppliedFitScreenKey == portraitKey)
 
         let movedScreenKey = PTStrictViewportFocusKey(
             sceneID: nil, deviceModel: "iPad13,8", scaleMode: "fitScreen",
@@ -822,11 +857,12 @@ final class PTCoordinateMathTests: XCTestCase {
             lastAppliedFitScreenKey: rotated.nextAppliedFitScreenKey,
             currentKey: movedScreenKey
         )
-        XCTAssertTrue(moved.shouldApply)
-        XCTAssertEqual(moved.nextAppliedFitScreenKey, movedScreenKey)
+        #expect(moved.shouldApply)
+        #expect(moved.nextAppliedFitScreenKey == movedScreenKey)
     }
 
-    func testStrictViewportFocusPolicyNative1xAndNonStrictAlwaysApply() {
+    @Test
+    func strictViewportFocusPolicyNative1xAndNonStrictAlwaysApply() {
         let screenA = CGRect(x: 0, y: 0, width: 1512, height: 982)
         let landscapeKey = PTStrictViewportFocusKey(
             sceneID: nil,
@@ -847,19 +883,20 @@ final class PTCoordinateMathTests: XCTestCase {
             lastAppliedFitScreenKey: landscapeKey,
             currentKey: native1xKey
         )
-        XCTAssertTrue(nativeApply.shouldApply)
-        XCTAssertNil(nativeApply.nextAppliedFitScreenKey)
+        #expect(nativeApply.shouldApply)
+        #expect(nativeApply.nextAppliedFitScreenKey == nil)
 
         let nonStrict = PTStrictViewportFocusPolicy.shouldApplyContentSizeOnFocus(
             isStrictEmulationMode: false,
             lastAppliedFitScreenKey: landscapeKey,
             currentKey: landscapeKey
         )
-        XCTAssertTrue(nonStrict.shouldApply)
-        XCTAssertNil(nonStrict.nextAppliedFitScreenKey)
+        #expect(nonStrict.shouldApply)
+        #expect(nonStrict.nextAppliedFitScreenKey == nil)
     }
 
-    func testHideTitleBarZeroTitleHeightAvoids32ptInflation() {
+    @Test
+    func hideTitleBarZeroTitleHeightAvoids32ptInflation() {
         let visible = CGRect(x: 0, y: 25, width: 1440, height: 875)
         let zeroTitlePlan = PTWindowGeometryMath.strictViewportWindowPlan(
             logicalSceneSize: CGSize(width: 1024, height: 1366),
@@ -867,52 +904,53 @@ final class PTCoordinateMathTests: XCTestCase {
             visibleScreenFrame: visible,
             titleBarHeight: 0
         )
-        XCTAssertEqual(zeroTitlePlan.windowContentSize.height, 875)
+        #expect(zeroTitlePlan.windowContentSize.height == 875)
         let centeredNoTitle = PTWindowGeometryMath.centeredFrame(
             forContentSize: zeroTitlePlan.windowContentSize,
             currentFrame: .zero,
             visibleScreenFrame: visible,
             titleBarHeight: 0
         )
-        XCTAssertEqual(centeredNoTitle.height, 875)
+        #expect(centeredNoTitle.height == 875)
     }
 
-    func testWindowChromeHitTestingAndCloseTerminationPolicy() {
+    @Test
+    func windowChromeHitTestingAndCloseTerminationPolicy() {
         let contentRect = CGRect(x: 0, y: 0, width: 1280, height: 720)
         // Above contentLayoutRect is title bar / chrome
-        XCTAssertTrue(PTWindowGeometryMath.isPointInTitleBar(
+        #expect(PTWindowGeometryMath.isPointInTitleBar(
             pointInWindow: CGPoint(x: 16, y: 734),
             contentLayoutRect: contentRect
         ))
         // Boundary and content area are not title bar
-        XCTAssertFalse(PTWindowGeometryMath.isPointInTitleBar(
+        #expect(!PTWindowGeometryMath.isPointInTitleBar(
             pointInWindow: CGPoint(x: 16, y: 720),
             contentLayoutRect: contentRect
         ))
-        XCTAssertFalse(PTWindowGeometryMath.isPointInTitleBar(
+        #expect(!PTWindowGeometryMath.isPointInTitleBar(
             pointInWindow: CGPoint(x: 200, y: 400),
             contentLayoutRect: contentRect
         ))
         // Non-finite or zero-height rects return false
-        XCTAssertFalse(PTWindowGeometryMath.isPointInTitleBar(
+        #expect(!PTWindowGeometryMath.isPointInTitleBar(
             pointInWindow: CGPoint(x: CGFloat.nan, y: 734),
             contentLayoutRect: contentRect
         ))
-        XCTAssertFalse(PTWindowGeometryMath.isPointInTitleBar(
+        #expect(!PTWindowGeometryMath.isPointInTitleBar(
             pointInWindow: CGPoint(x: 16, y: 10),
             contentLayoutRect: .zero
         ))
 
         // Close-to-quit policy
-        XCTAssertTrue(PTWindowGeometryMath.shouldTerminateOnWindowClose(
+        #expect(PTWindowGeometryMath.shouldTerminateOnWindowClose(
             isClosingWindowPrimary: true,
             otherVisiblePrimaryWindowCount: 0
         ))
-        XCTAssertFalse(PTWindowGeometryMath.shouldTerminateOnWindowClose(
+        #expect(!PTWindowGeometryMath.shouldTerminateOnWindowClose(
             isClosingWindowPrimary: true,
             otherVisiblePrimaryWindowCount: 1
         ))
-        XCTAssertFalse(PTWindowGeometryMath.shouldTerminateOnWindowClose(
+        #expect(!PTWindowGeometryMath.shouldTerminateOnWindowClose(
             isClosingWindowPrimary: false,
             otherVisiblePrimaryWindowCount: 0
         ))

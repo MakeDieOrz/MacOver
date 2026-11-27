@@ -92,4 +92,39 @@ struct PlayCoverUISPMTests {
         let vm = InstallVM()
         #expect(!vm.inProgress)
     }
+
+    @Test
+    @MainActor
+    func progressVMHandlesBackgroundUpdatesAndCancelsPendingDismissalOnRestart() async throws {
+        enum SampleStep: String, Sendable {
+            case start
+            case mid
+            case done
+        }
+
+        let vm = ProgressVM<SampleStep>(start: .start, ends: [.done])
+        await Task.detached {
+            vm.next(.start, 0.0, 0.2)
+            vm.updateProgress(0.45)
+        }.value
+
+        // Allow MainActor hop queued by nonisolated helpers to flush
+        for _ in 0..<20 where !vm.inProgress || vm.progress < 0.4 {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        #expect(vm.status == .start)
+        #expect(vm.inProgress)
+        #expect(abs(vm.progress - 0.45) < 0.01)
+
+        vm.next(.done, 1.0, 1.0)
+        #expect(vm.status == .done)
+        #expect(vm.progress == 1.0)
+
+        // Start a fresh operation before the 1.5s auto-dismiss fires; it must stay inProgress past 1.7s
+        try await Task.sleep(for: .milliseconds(250))
+        vm.next(.start, 0.0, 0.3)
+        try await Task.sleep(for: .milliseconds(1600))
+        #expect(vm.inProgress)
+        #expect(vm.status == .start)
+    }
 }

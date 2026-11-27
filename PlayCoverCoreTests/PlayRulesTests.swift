@@ -1,9 +1,11 @@
 import Foundation
-import XCTest
+import Testing
 @testable import PlayCover
 
-final class PlayRulesTests: XCTestCase {
-    func testPlayRulesDecodesBlocklistGreenlistAndLegacyAliases() throws {
+@Suite
+struct PlayRulesTests {
+    @Test
+    func playRulesDecodesBlocklistGreenlistAndLegacyAliases() throws {
         let modernJSON = """
         {
           "blocklist": ["/tmp/a"],
@@ -13,10 +15,10 @@ final class PlayRulesTests: XCTestCase {
         }
         """
         let modern = try JSONDecoder().decode(PlayRules.self, from: Data(modernJSON.utf8))
-        XCTAssertEqual(modern.blocklist, ["/tmp/a"])
-        XCTAssertEqual(modern.greenlist, ["/tmp/b"])
-        XCTAssertEqual(modern.allow, ["/tmp/c"])
-        XCTAssertEqual(modern.bypass, ["/tmp/d"])
+        #expect(modern.blocklist == ["/tmp/a"])
+        #expect(modern.greenlist == ["/tmp/b"])
+        #expect(modern.allow == ["/tmp/c"])
+        #expect(modern.bypass == ["/tmp/d"])
 
         let legacyJSON = """
         {
@@ -25,18 +27,19 @@ final class PlayRulesTests: XCTestCase {
         }
         """
         let legacy = try JSONDecoder().decode(PlayRules.self, from: Data(legacyJSON.utf8))
-        XCTAssertEqual(legacy.blocklist, ["/legacy/block"])
-        XCTAssertEqual(legacy.greenlist, ["/legacy/green"])
-        XCTAssertNil(legacy.allow)
-        XCTAssertNil(legacy.bypass)
+        #expect(legacy.blocklist == ["/legacy/block"])
+        #expect(legacy.greenlist == ["/legacy/green"])
+        #expect(legacy.allow == nil)
+        #expect(legacy.bypass == nil)
     }
 
-    func testRuleTemplateRenderAndBuildRules() {
+    @Test
+    func ruleTemplateRenderAndBuildRules() {
         var template = RuleTemplate(data: ["BundleID": "com.example.app"])
         template.User = "tester"
-        XCTAssertEqual(
-            template.render(template: "${Home}/Library/${BundleID}/${User}/${Unknown}"),
-            "${Home}/Library/com.example.app/tester/${Unknown}"
+        #expect(
+            template.render(template: "${Home}/Library/${BundleID}/${User}/${Unknown}") ==
+                "${Home}/Library/com.example.app/tester/${Unknown}"
         )
 
         let built = PlayRules.buildRules(
@@ -46,32 +49,34 @@ final class PlayRulesTests: XCTestCase {
             ],
             bundleID: "io.playcover.UnitTest"
         )
-        XCTAssertEqual(built.count, 2)
+        #expect(built.count == 2)
         let expectedHome = FileManager.default.homeDirectoryForCurrentUser.path
-        XCTAssertEqual(built[0], "(subpath \"\(expectedHome)/Library/Containers/io.playcover.UnitTest\")")
-        XCTAssertEqual(built[1], "(literal \"/Users/\(NSUserName())\")")
+        #expect(built[0] == "(subpath \"\(expectedHome)/Library/Containers/io.playcover.UnitTest\")")
+        #expect(built[1] == "(literal \"/Users/\(NSUserName())\")")
     }
 
-    func testRuleTemplateSinglePassDeterministicRenderAndDateDynamicMember() {
+    @Test
+    func ruleTemplateSinglePassDeterministicRenderAndDateDynamicMember() {
         let t1 = RuleTemplate(data: ["A": "${B}", "B": "expanded"])
         let t2 = RuleTemplate(data: ["B": "expanded", "A": "${B}"])
-        XCTAssertEqual(t1.render(template: "${A}"), "${B}")
-        XCTAssertEqual(t2.render(template: "${A}"), "${B}")
-        XCTAssertEqual(t1.render(template: "${A}-${B}-${Missing}"), "${B}-expanded-${Missing}")
-        XCTAssertEqual(t1.render(template: "${unclosed"), "${unclosed")
-        XCTAssertEqual(t1.render(template: "${outer ${B}}"), "${outer expanded}")
+        #expect(t1.render(template: "${A}") == "${B}")
+        #expect(t2.render(template: "${A}") == "${B}")
+        #expect(t1.render(template: "${A}-${B}-${Missing}") == "${B}-expanded-${Missing}")
+        #expect(t1.render(template: "${unclosed") == "${unclosed")
+        #expect(t1.render(template: "${outer ${B}}") == "${outer expanded}")
 
         var dateTemplate = RuleTemplate()
         let fallbackDate: Date = dateTemplate.missingDate
-        XCTAssertEqual(fallbackDate, Date(timeIntervalSince1970: 0))
+        #expect(fallbackDate == Date(timeIntervalSince1970: 0))
 
         let sampleDate = Date(timeIntervalSince1970: 1_700_000_000)
         dateTemplate.created = sampleDate
         let roundTripped: Date = dateTemplate.created
-        XCTAssertEqual(roundTripped.timeIntervalSince1970, sampleDate.timeIntervalSince1970, accuracy: 1.0)
+        #expect(abs(roundTripped.timeIntervalSince1970 - sampleDate.timeIntervalSince1970) <= 1.0)
     }
 
-    func testPlayRulesPrecedenceNullFallbackAndInvalidType() throws {
+    @Test
+    func playRulesPrecedenceNullFallbackAndInvalidType() throws {
         let mixedJSON = """
         {
           "blocklist": ["/modern/block"],
@@ -81,8 +86,8 @@ final class PlayRulesTests: XCTestCase {
         }
         """
         let mixed = try JSONDecoder().decode(PlayRules.self, from: Data(mixedJSON.utf8))
-        XCTAssertEqual(mixed.blocklist, ["/modern/block"])
-        XCTAssertEqual(mixed.greenlist, ["/modern/green"])
+        #expect(mixed.blocklist == ["/modern/block"])
+        #expect(mixed.greenlist == ["/modern/green"])
 
         let nullFallbackJSON = """
         {
@@ -93,14 +98,16 @@ final class PlayRulesTests: XCTestCase {
         }
         """
         let fallback = try JSONDecoder().decode(PlayRules.self, from: Data(nullFallbackJSON.utf8))
-        XCTAssertEqual(fallback.blocklist, ["/legacy/block"])
-        XCTAssertEqual(fallback.greenlist, ["/legacy/green"])
+        #expect(fallback.blocklist == ["/legacy/block"])
+        #expect(fallback.greenlist == ["/legacy/green"])
 
         let invalidTypeJSON = """
         {
           "blocklist": 123
         }
         """
-        XCTAssertThrowsError(try JSONDecoder().decode(PlayRules.self, from: Data(invalidTypeJSON.utf8)))
+        #expect(throws: (any Error).self) {
+            try JSONDecoder().decode(PlayRules.self, from: Data(invalidTypeJSON.utf8))
+        }
     }
 }
