@@ -9,7 +9,7 @@ import Foundation
 import SwiftUI
 
 struct KeyCoverInitialSetupView: View {
-    @EnvironmentObject var dependencies: PlayCoverDependencies
+    @Environment(PlayCoverDependencies.self) var dependencies
     @Binding var isPresented: Bool
 
     @State private var keyCoverPassword = ""
@@ -30,7 +30,7 @@ struct KeyCoverInitialSetupView: View {
         }
         .pickerStyle(RadioGroupPickerStyle())
         .padding()
-        .onChange(of: keyOption) { _ in
+        .onChange(of: keyOption) { _, _ in
             switch keyOption {
             case .selfGeneratedPassword:
                 keyCoverPassword = dependencies.keyCoverPassword.generateVerySecurePassword()
@@ -94,7 +94,7 @@ struct KeyCoverInitialSetupView: View {
                         defer { isEncrypting = false }
 
                         let succeeded = await Task.detached(priority: .userInitiated) {
-                            passwordStore.setKeyCoverPassword(newPassword)
+                            passwordStore.setKeyCoverPassword(newPassword, mode: selectedOption)
                         }.value
 
                         if succeeded {
@@ -108,7 +108,7 @@ struct KeyCoverInitialSetupView: View {
                             }
                             isPresented = false
                         } else {
-                            log.error("Failed to store KeyCover master password in Keychain.")
+                            log.error("Failed to store KeyCover password configuration.")
                         }
                     }
                 }
@@ -122,7 +122,7 @@ struct KeyCoverInitialSetupView: View {
 }
 
 struct KeyCoverUpdatePasswordView: View {
-    @EnvironmentObject var dependencies: PlayCoverDependencies
+    @Environment(PlayCoverDependencies.self) var dependencies
     @Binding var isPresented: Bool
 
     @State private var oldKeyCoverPassword = ""
@@ -151,7 +151,7 @@ struct KeyCoverUpdatePasswordView: View {
             }
             .pickerStyle(RadioGroupPickerStyle())
             .padding()
-            .onChange(of: keyOption) { _ in
+            .onChange(of: keyOption) { _, _ in
                 switch keyOption {
                 case .selfGeneratedPassword:
                     keyCoverPassword = dependencies.keyCoverPassword.generateVerySecurePassword()
@@ -213,13 +213,42 @@ struct KeyCoverUpdatePasswordView: View {
                         isWorking = true
                         defer { isWorking = false }
 
-                        let validOld = await Task.detached(priority: .userInitiated) {
-                            passwordStore.validatePassword(oldPassword)
-                        }.value
-                        if !validOld {
-                            oldKeyCoverPasswordError = true
-                            return
+                        let currentMode = preferences.keyCoverEnabled
+                        let resolvedOld: String?
+                        if currentMode == .selfGeneratedPassword {
+                            resolvedOld = await Task.detached(priority: .userInitiated) {
+                                oldPassword.isEmpty
+                                    ? passwordStore.resolveSelfGeneratedPassword(allowLegacyKeychainMigration: true)
+                                    : oldPassword
+                            }.value
+                            let requiresOld = await Task.detached(priority: .userInitiated) {
+                                passwordStore.hasLocalRecord()
+                                    || passwordStore.hasEncryptedChains()
+                            }.value
+                            if requiresOld {
+                                guard let resolvedOld, !resolvedOld.isEmpty else {
+                                    oldKeyCoverPasswordError = true
+                                    return
+                                }
+                                let validManaged = await Task.detached(priority: .userInitiated) {
+                                    passwordStore.hasLocalRecord() ? passwordStore.validatePassword(resolvedOld) : true
+                                }.value
+                                if !validManaged {
+                                    oldKeyCoverPasswordError = true
+                                    return
+                                }
+                            }
+                        } else {
+                            let validOld = await Task.detached(priority: .userInitiated) {
+                                passwordStore.validatePassword(oldPassword)
+                            }.value
+                            if !validOld {
+                                oldKeyCoverPasswordError = true
+                                return
+                            }
+                            resolvedOld = oldPassword
                         }
+
                         if newPassword.isEmpty {
                             keyCoverPasswordError = true
                             return
@@ -230,7 +259,11 @@ struct KeyCoverUpdatePasswordView: View {
                         }
 
                         let succeeded = await Task.detached(priority: .userInitiated) {
-                            passwordStore.setKeyCoverPassword(newPassword)
+                            passwordStore.setKeyCoverPassword(
+                                newPassword,
+                                mode: selectedOption,
+                                currentPassword: resolvedOld
+                            )
                         }.value
 
                         if succeeded {
@@ -244,7 +277,7 @@ struct KeyCoverUpdatePasswordView: View {
                             }
                             isPresented = false
                         } else {
-                            log.error("Failed to update KeyCover master password in Keychain.")
+                            log.error("Failed to update KeyCover password configuration.")
                         }
                     }
                 }
@@ -262,7 +295,7 @@ struct KeyCoverUpdatePasswordView: View {
 }
 
 struct KeyCoverRemovalView: View {
-    @EnvironmentObject var dependencies: PlayCoverDependencies
+    @Environment(PlayCoverDependencies.self) var dependencies
     @Binding var isPresented: Bool
 
     @State private var keyCoverPassword = ""
@@ -298,10 +331,25 @@ struct KeyCoverRemovalView: View {
                 Button("button.OK") {
                     keyCoverPasswordError = false
                     let password = keyCoverPassword
+                    let currentOption = keyOption
                     let passwordStore = dependencies.keyCoverPassword
                     Task { @MainActor in
                         isWorking = true
                         defer { isWorking = false }
+
+                        if currentOption == .selfGeneratedPassword {
+                            let removed = await Task.detached(priority: .userInitiated) {
+                                passwordStore.removeKeyCoverPassword(
+                                    currentPassword: password.isEmpty ? nil : password
+                                )
+                            }.value
+                            if removed {
+                                isPresented = false
+                            } else {
+                                keyCoverPasswordError = true
+                            }
+                            return
+                        }
 
                         let valid = await Task.detached(priority: .userInitiated) {
                             passwordStore.validatePassword(password)
@@ -311,10 +359,14 @@ struct KeyCoverRemovalView: View {
                             return
                         }
 
-                        await Task.detached(priority: .userInitiated) {
-                            passwordStore.removeKeyCoverPassword()
+                        let removed = await Task.detached(priority: .userInitiated) {
+                            passwordStore.removeKeyCoverPassword(currentPassword: password)
                         }.value
-                        isPresented = false
+                        if removed {
+                            isPresented = false
+                        } else {
+                            keyCoverPasswordError = true
+                        }
                     }
                 }
                 .keyboardShortcut(.defaultAction)

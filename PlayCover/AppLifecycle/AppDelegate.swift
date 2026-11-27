@@ -6,13 +6,20 @@
 import AppKit
 import Foundation
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let showLowPowerModeAlertKey = "ShowLowPowerModeAlert"
 
     let dependencies: PlayCoverDependencies
 
     override convenience init() {
-        self.init(dependencies: PlayCoverDependencies())
+        let defaults: UserDefaults
+        if ProcessInfo.isRunningUnitTests {
+            defaults = UserDefaults(suiteName: "app.makedie.MacOver.UnitTests.\(UUID().uuidString)") ?? .standard
+        } else {
+            defaults = .standard
+        }
+        self.init(dependencies: PlayCoverDependencies(userDefaults: defaults))
     }
 
     init(dependencies: PlayCoverDependencies) {
@@ -59,11 +66,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let launchedBefore = UserDefaults.standard.bool(forKey: "launchedBefore")
         if !launchedBefore {
             UserDefaults.standard.set(true, forKey: "launchedBefore")
-
-            // Initialize KeyCover with an automatically generated key
-            let keyCoverPassword = dependencies.keyCoverPassword.generateVerySecurePassword()
-            dependencies.keyCoverPassword.setKeyCoverPassword(keyCoverPassword)
-            dependencies.keyCoverPreferences.keyCoverEnabled = .selfGeneratedPassword
         }
     }
 
