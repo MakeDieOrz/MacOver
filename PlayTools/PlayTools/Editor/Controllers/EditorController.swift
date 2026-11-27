@@ -58,8 +58,7 @@ final class EditorController {
                 editorWindow = nil
                 previousWindow?.makeKeyAndVisible()
                 focusedControl = nil
-                Toast.showHint(title: NSLocalizedString("hint.keymapSaved",
-                                                        tableName: "Playtools", value: "Keymap Saved", comment: ""))
+                Toast.showHint(title: playToolsLocalizedString("hint.keymapSaved", value: "Keymap Saved"))
             } else {
                 previousWindow = screen.keyWindow
                 guard let win = initWindow() else { return }
@@ -67,19 +66,12 @@ final class EditorController {
                 win.makeKeyAndVisible()
                 showButtons()
                 Toast.showHint(
-                    title: NSLocalizedString(
-                        "hint.keymappingEditor.title",
-                        tableName: "Playtools",
-                        value: "Keymapping Editor",
-                        comment: ""
-                    ),
+                    title: playToolsLocalizedString("hint.keymappingEditor.title", value: "Keymapping Editor"),
                     text: [
-                        NSLocalizedString(
+                        playToolsLocalizedString(
                             "hint.keymappingEditor.content",
-                            tableName: "Playtools",
                             value: "Click a button to edit its position or key bind\n"
-                                + "Click an empty area to open input menu",
-                            comment: ""
+                                + "Click an empty area to open input menu"
                         )
                     ],
                     notification: NSNotification.Name.playtoolsCursorWillHide

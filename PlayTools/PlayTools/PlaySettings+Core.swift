@@ -116,37 +116,6 @@ public final class PTUnfairLock: Sendable {
         return settingsDir.appendingPathComponent("\(bundleIdentifier).plist")
     }
 
-    private static func resolveOEMID(for iosDeviceModel: String) -> NSString {
-        switch iosDeviceModel {
-        case "iPad6,7":
-            return "J98aAP"
-        case "iPad8,6":
-            return "J320xAP"
-        case "iPad13,8":
-            return "J522AP"
-        case "iPad14,5":
-            return "J620AP"
-        case "iPad16,6":
-            return "J720AP"
-        case "iPad17,3":
-            return "J820AP"
-        case "iPhone12,5":
-            return "D431AP"
-        case "iPhone14,3":
-            return "D64AP"
-        case "iPhone15,3":
-            return "D74AP"
-        case "iPhone16,2":
-            return "D84AP"
-        case "iPhone17,2":
-            return "D94AP"
-        case "iPhone18,2":
-            return "D94xAP"
-        default:
-            return "J522AP"
-        }
-    }
-
     convenience override init() {
         let bundleID = Bundle.main.infoDictionary?["CFBundleIdentifier"] as? String ?? ""
         self.init(
@@ -210,12 +179,8 @@ public final class PTUnfairLock: Sendable {
         self.ignoreUnityKeyboardInitializationError = decoded.ignoreUnityKeyboardInitializationError
         self.configuredInterceptInlineSyscalls = decoded.interceptInlineSyscalls
         self.configuredStrictEmulationMode = decoded.strictEmulationMode
-        self.configuredStrictViewportOrientation = PTWindowGeometryMath.normalizedStrictOrientation(
-            decoded.strictViewportOrientation
-        )
-        self.configuredStrictViewportScaleMode = PTWindowGeometryMath.normalizedStrictScaleMode(
-            decoded.strictViewportScaleMode
-        )
+        self.configuredStrictViewportOrientation = decoded.strictViewportOrientation.rawValue
+        self.configuredStrictViewportScaleMode = decoded.strictViewportScaleMode.rawValue
 
         super.init()
     }
@@ -333,7 +298,7 @@ public final class PTUnfairLock: Sendable {
 
     @objc public var oemID: NSString {
         let model = PTSafeMode.isActive ? configuredDeviceModel : coercedDeviceModel
-        return Self.resolveOEMID(for: model)
+        return StrictDeviceDisplaySpec.oemID(for: model) as NSString
     }
 
     @objc public var keymappingDisabledAt: Float {
@@ -476,6 +441,9 @@ public final class PTUnfairLock: Sendable {
     @objc public let floatingWindow: Bool
 
     private let configuredDisplayRotation: Int
+    @objc public var hasUserConfiguredDisplayRotation: Bool {
+        configuredDisplayRotation != 0
+    }
     @objc public var displayRotation: Int {
         if isStrictEmulationActive {
             return configuredStrictViewportOrientation == "portrait" ? 1 : 0
@@ -492,211 +460,6 @@ public final class PTUnfairLock: Sendable {
     @objc public let blockSleepSpamming: Bool
 
     @objc public let ignoreUnityKeyboardInitializationError: Bool
-}
-
-struct AppSettingsData: Codable, Equatable {
-    var bundleIdentifier: String = ""
-    var originalBundleName: String?
-    var originalMinimumOSVersion: String?
-
-    var keymapping = true
-    var sensitivity: Float = 50
-
-    var disableTimeout = false
-    var displayRotation = 0
-    var iosDeviceModel = "iPad13,8"
-    var windowWidth = 1920
-    var windowHeight = 1080
-    var customScaler = 2.0
-    var resolution = 1
-    var aspectRatio = 1
-    var notch = false
-    var bypass = true
-    var discordActivity = DiscordActivity()
-    var version = "3.0.0"
-    var playChain = true
-    var playChainDebugging = false
-    var inverseScreenValues = false
-    var metalHUD = false
-    var windowFixMethod = 0
-    /// Deprecated/unused legacy plist key retained for Codable schema compatibility.
-    var injectIntrospection = false
-    var rootWorkDir = true
-    var noKMOnInput = true
-    var enableScrollWheel = true
-    var rightClickLongPress = true
-    var hideTitleBar = false
-    var floatingWindow = false
-    var checkMicPermissionSync = false
-    var limitMotionUpdateFrequency = false
-    var disableBuiltinMouse = false
-    var resizableAspectRatioType = 0
-    var resizableAspectRatioWidth = 0
-    var resizableAspectRatioHeight = 0
-    var blockSleepSpamming = false
-    var ignoreUnityKeyboardInitializationError = false
-    var interceptInlineSyscalls = false
-    var enableNetworkRules = false
-    var networkBlockMock200 = true
-    var blockedURLPatterns: [String] = []
-    var networkProxyMode: String = "direct"
-    var externalProxyProtocol: String = "http"
-    var externalProxyHost: String = "127.0.0.1"
-    var externalProxyPort: Int = 8888
-    var mitmPort: Int = 0
-    var mitmRuntimePort: Int = 0
-    var enableCustomCertificates: Bool = false
-    var mitmAllHosts: Bool = true
-    var mitmHostPatterns: [String] = []
-    var mitmAllowPinningBypass: Bool = false
-    var hideProxyFromApp: Bool = true
-    var mitmCaptureBodies: Bool = true
-    var keymappingDisabledAt: Float = 0
-    var frameRateTarget: String = "adaptive"
-    var reportedIOSVersion: String = "automatic"
-    var strictEmulationMode: Bool = false
-    var strictViewportOrientation: String = "landscape"
-    var strictViewportScaleMode: String = "fitScreen"
-
-    init() {}
-
-    var effectiveStrictViewportOrientation: String {
-        PTWindowGeometryMath.normalizedStrictOrientation(strictViewportOrientation)
-    }
-
-    var effectiveStrictViewportScaleMode: String {
-        PTWindowGeometryMath.normalizedStrictScaleMode(strictViewportScaleMode)
-    }
-
-    var effectiveBypass: Bool { strictEmulationMode ? true : bypass }
-    var effectiveInterceptInlineSyscalls: Bool { strictEmulationMode ? true : interceptInlineSyscalls }
-    var effectiveRootWorkDir: Bool { strictEmulationMode ? true : rootWorkDir }
-    var effectiveMetalHUD: Bool { strictEmulationMode ? false : metalHUD }
-    var effectivePlayChainDebugging: Bool { strictEmulationMode ? false : playChainDebugging }
-    var effectiveNotch: Bool { strictEmulationMode ? false : notch }
-    var effectiveInverseScreenValues: Bool { strictEmulationMode ? false : inverseScreenValues }
-    var effectiveWindowFixMethod: Int { strictEmulationMode ? 0 : windowFixMethod }
-    var effectiveDisplayRotation: Int {
-        strictEmulationMode ? (effectiveStrictViewportOrientation == "portrait" ? 1 : 0) : displayRotation
-    }
-
-    private static func decodeDouble<K: CodingKey>(
-        from container: KeyedDecodingContainer<K>,
-        forKey key: K,
-        default defaultValue: Double
-    ) -> Double {
-        if let val = try? container.decodeIfPresent(Double.self, forKey: key) {
-            return val
-        }
-        if let intVal = try? container.decodeIfPresent(Int.self, forKey: key) {
-            return Double(intVal)
-        }
-        return defaultValue
-    }
-
-    private static func decodeFloat<K: CodingKey>(
-        from container: KeyedDecodingContainer<K>,
-        forKey key: K,
-        default defaultValue: Float
-    ) -> Float {
-        if let val = try? container.decodeIfPresent(Float.self, forKey: key) {
-            return val
-        }
-        if let dblVal = try? container.decodeIfPresent(Double.self, forKey: key) {
-            return Float(dblVal)
-        }
-        if let intVal = try? container.decodeIfPresent(Int.self, forKey: key) {
-            return Float(intVal)
-        }
-        return defaultValue
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        bundleIdentifier = (try? container.decodeIfPresent(String.self, forKey: .bundleIdentifier)) ?? ""
-        originalBundleName = (try? container.decodeIfPresent(String.self, forKey: .originalBundleName)) ?? nil
-        originalMinimumOSVersion = try? container.decodeIfPresent(String.self, forKey: .originalMinimumOSVersion)
-        keymapping = (try? container.decodeIfPresent(Bool.self, forKey: .keymapping)) ?? true
-        sensitivity = Self.decodeFloat(from: container, forKey: .sensitivity, default: 50)
-        disableTimeout = (try? container.decodeIfPresent(Bool.self, forKey: .disableTimeout)) ?? false
-        displayRotation = (try? container.decodeIfPresent(Int.self, forKey: .displayRotation)) ?? 0
-        iosDeviceModel = (try? container.decodeIfPresent(String.self, forKey: .iosDeviceModel)) ?? "iPad13,8"
-        windowWidth = (try? container.decodeIfPresent(Int.self, forKey: .windowWidth)) ?? 1920
-        windowHeight = (try? container.decodeIfPresent(Int.self, forKey: .windowHeight)) ?? 1080
-        customScaler = Self.decodeDouble(from: container, forKey: .customScaler, default: 2.0)
-        resolution = (try? container.decodeIfPresent(Int.self, forKey: .resolution)) ?? 1
-        aspectRatio = (try? container.decodeIfPresent(Int.self, forKey: .aspectRatio)) ?? 1
-        notch = (try? container.decodeIfPresent(Bool.self, forKey: .notch)) ?? false
-        bypass = (try? container.decodeIfPresent(Bool.self, forKey: .bypass)) ?? true
-        discordActivity = (try? container.decodeIfPresent(
-            DiscordActivity.self,
-            forKey: .discordActivity
-        )) ?? DiscordActivity()
-        version = (try? container.decodeIfPresent(String.self, forKey: .version)) ?? "3.0.0"
-        playChain = (try? container.decodeIfPresent(Bool.self, forKey: .playChain)) ?? true
-        playChainDebugging = (try? container.decodeIfPresent(Bool.self, forKey: .playChainDebugging)) ?? false
-        inverseScreenValues = (try? container.decodeIfPresent(Bool.self, forKey: .inverseScreenValues)) ?? false
-        metalHUD = (try? container.decodeIfPresent(Bool.self, forKey: .metalHUD)) ?? false
-        windowFixMethod = (try? container.decodeIfPresent(Int.self, forKey: .windowFixMethod)) ?? 0
-        injectIntrospection = (try? container.decodeIfPresent(Bool.self, forKey: .injectIntrospection)) ?? false
-        rootWorkDir = (try? container.decodeIfPresent(Bool.self, forKey: .rootWorkDir)) ?? true
-        noKMOnInput = (try? container.decodeIfPresent(Bool.self, forKey: .noKMOnInput)) ?? true
-        enableScrollWheel = (try? container.decodeIfPresent(Bool.self, forKey: .enableScrollWheel)) ?? true
-        rightClickLongPress = (try? container.decodeIfPresent(Bool.self, forKey: .rightClickLongPress)) ?? true
-        hideTitleBar = (try? container.decodeIfPresent(Bool.self, forKey: .hideTitleBar)) ?? false
-        floatingWindow = (try? container.decodeIfPresent(Bool.self, forKey: .floatingWindow)) ?? false
-        checkMicPermissionSync = (try? container.decodeIfPresent(Bool.self, forKey: .checkMicPermissionSync)) ?? false
-        limitMotionUpdateFrequency = (try? container.decodeIfPresent(
-            Bool.self,
-            forKey: .limitMotionUpdateFrequency
-        )) ?? false
-        disableBuiltinMouse = (try? container.decodeIfPresent(Bool.self, forKey: .disableBuiltinMouse)) ?? false
-        resizableAspectRatioType = (try? container.decodeIfPresent(Int.self, forKey: .resizableAspectRatioType)) ?? 0
-        resizableAspectRatioWidth = (try? container.decodeIfPresent(Int.self, forKey: .resizableAspectRatioWidth)) ?? 0
-        resizableAspectRatioHeight = (
-            try? container.decodeIfPresent(Int.self, forKey: .resizableAspectRatioHeight)
-        ) ?? 0
-        blockSleepSpamming = (try? container.decodeIfPresent(Bool.self, forKey: .blockSleepSpamming)) ?? false
-        ignoreUnityKeyboardInitializationError = (try? container.decodeIfPresent(
-            Bool.self,
-            forKey: .ignoreUnityKeyboardInitializationError
-        )) ?? false
-        interceptInlineSyscalls = (try? container.decodeIfPresent(
-            Bool.self,
-            forKey: .interceptInlineSyscalls
-        )) ?? false
-        enableNetworkRules = (try? container.decodeIfPresent(Bool.self, forKey: .enableNetworkRules)) ?? false
-        networkBlockMock200 = (try? container.decodeIfPresent(Bool.self, forKey: .networkBlockMock200)) ?? true
-        blockedURLPatterns = (try? container.decodeIfPresent([String].self, forKey: .blockedURLPatterns)) ?? []
-        networkProxyMode = (try? container.decodeIfPresent(String.self, forKey: .networkProxyMode)) ?? "direct"
-        externalProxyProtocol = (try? container.decodeIfPresent(String.self, forKey: .externalProxyProtocol)) ?? "http"
-        externalProxyHost = (try? container.decodeIfPresent(String.self, forKey: .externalProxyHost)) ?? "127.0.0.1"
-        externalProxyPort = (try? container.decodeIfPresent(Int.self, forKey: .externalProxyPort)) ?? 8888
-        mitmPort = (try? container.decodeIfPresent(Int.self, forKey: .mitmPort)) ?? 0
-        mitmRuntimePort = (try? container.decodeIfPresent(Int.self, forKey: .mitmRuntimePort)) ?? 0
-        enableCustomCertificates = (try? container.decodeIfPresent(
-            Bool.self,
-            forKey: .enableCustomCertificates
-        )) ?? false
-        mitmAllHosts = (try? container.decodeIfPresent(Bool.self, forKey: .mitmAllHosts)) ?? true
-        mitmHostPatterns = (try? container.decodeIfPresent([String].self, forKey: .mitmHostPatterns)) ?? []
-        mitmAllowPinningBypass = (try? container.decodeIfPresent(
-            Bool.self,
-            forKey: .mitmAllowPinningBypass
-        )) ?? false
-        hideProxyFromApp = (try? container.decodeIfPresent(Bool.self, forKey: .hideProxyFromApp)) ?? true
-        mitmCaptureBodies = (try? container.decodeIfPresent(Bool.self, forKey: .mitmCaptureBodies)) ?? true
-        keymappingDisabledAt = Self.decodeFloat(from: container, forKey: .keymappingDisabledAt, default: 0)
-        frameRateTarget = (try? container.decodeIfPresent(String.self, forKey: .frameRateTarget)) ?? "adaptive"
-        reportedIOSVersion = (try? container.decodeIfPresent(String.self, forKey: .reportedIOSVersion)) ?? "automatic"
-        strictEmulationMode = (try? container.decodeIfPresent(Bool.self, forKey: .strictEmulationMode)) ?? false
-        strictViewportOrientation = PTWindowGeometryMath.normalizedStrictOrientation(
-            try? container.decodeIfPresent(String.self, forKey: .strictViewportOrientation)
-        )
-        strictViewportScaleMode = PTWindowGeometryMath.normalizedStrictScaleMode(
-            try? container.decodeIfPresent(String.self, forKey: .strictViewportScaleMode)
-        )
-    }
 }
 
 public struct PTFrameRateRangeValues: Equatable {
@@ -947,7 +710,7 @@ public enum PTPlayChainKeyUpdatePolicy {
     }
 }
 
-public struct PTStrictViewportFocusKey: Equatable {
+public struct PTStrictViewportFocusKey: Equatable, Sendable {
     public let sceneID: ObjectIdentifier?
     public let deviceModel: String
     public let scaleMode: String

@@ -797,6 +797,7 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
                 copyPayload->_userAcceleration = payload->_userAcceleration;
                 copyPayload->_calibratedMagneticField = payload->_calibratedMagneticField;
                 copyPayload->_heading = payload->_heading;
+                copyPayload->_headingAccuracy = payload->_headingAccuracy;
                 copyPayload->_relativeAltitude = [payload->_relativeAltitude copy];
                 copyPayload->_pressure = [payload->_pressure copy];
                 CMAttitude *att = payload->_attitude;
@@ -887,7 +888,7 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
             [coder encodeBool:NO forKey:@"kCMDeviceMotionCodingKeyFusedWithVision"];
             [coder encodeBool:NO forKey:@"kCMDeviceMotionCodingKeyUsingVisionCorrections"];
             [coder encodeInteger:0 forKey:@"kCMDeviceMotionCodingKeySensorLocation"];
-            [coder encodeDouble:15.0 forKey:@"kCMDeviceMotionCodingKeyHeadingAccuracy"];
+            [coder encodeDouble:payload->_headingAccuracy forKey:@"kCMDeviceMotionCodingKeyHeadingAccuracy"];
         }
         return;
     }

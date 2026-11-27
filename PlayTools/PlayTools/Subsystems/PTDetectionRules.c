@@ -9,6 +9,7 @@
 #include "PTSFSymbols13Allowlist.h"
 
 #include <ctype.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -1107,4 +1108,446 @@ __attribute__((visibility("hidden"))) bool pt_is_cf_internal_carboncore_bridge_c
         return false;
     }
     return true;
+}
+
+__attribute__((visibility("hidden"))) bool pt_is_hidden_sysctl_name_cstr(const char *name, bool compat13_7,
+                                                                         uint32_t e_cores) {
+    if (name == NULL || name[0] == '\0') {
+        return false;
+    }
+    if (strcmp(name, "sysctl.proc_translated") == 0 || strcmp(name, "sysctl.proc_native") == 0 ||
+        strcmp(name, "sysctl.proc_cputype") == 0 || strcmp(name, "kern.iossupportversion") == 0 ||
+        strncmp(name, "kern.hibernate", 14) == 0 || strncmp(name, "kern.hv.", 8) == 0 ||
+        strncmp(name, "kern.dtrace.", 12) == 0 || strcmp(name, "kern.singleuser") == 0 ||
+        strcmp(name, "kern.safeboot") == 0 || strcmp(name, "kern.willshutdown") == 0 ||
+        strcmp(name, "kern.waketime") == 0 || strcmp(name, "kern.sleeptime") == 0 ||
+        strcmp(name, "kern.darkboot") == 0 || strcmp(name, "kern.minimalboot") == 0 ||
+        strcmp(name, "kern.aotmode") == 0 || strcmp(name, "kern.aotmodebits") == 0 ||
+        strcmp(name, "kern.lowpowerwake") == 0 || strcmp(name, "kern.bootsignature") == 0 ||
+        strcmp(name, "kern.system_version_compat") == 0 || strcmp(name, "kern.osproductversioncompat") == 0 ||
+        strcmp(name, "kern.drivercorefile") == 0 || strcmp(name, "kern.kdp_corefile") == 0 ||
+        strcmp(name, "hw.use_kernelmanagerd") == 0 || strcmp(name, "hw.features.allows_security_research") == 0 ||
+        strcmp(name, "hw.ephemeral_storage") == 0 || strcmp(name, "hw.use_recovery_securityd") == 0 ||
+        strcmp(name, "vm.swapusage") == 0 || strcmp(name, "vm.darkwake_mode") == 0 ||
+        strncmp(name, "vm.compressor.swapper.", 22) == 0 || strncmp(name, "vm.compressor_swapout", 21) == 0 ||
+        strncmp(name, "vm.compressor_swapper_", 22) == 0 || strncmp(name, "security.mac.sandbox.", 21) == 0 ||
+        strncmp(name, "security.mac.asp.", 17) == 0 || strncmp(name, "security.mac.endpointsecurity.", 30) == 0 ||
+        strncmp(name, "security.mac.qtn.", 17) == 0 ||
+        (strncmp(name, "security.mac.amfi.", 18) == 0 &&
+         strcmp(name, "security.mac.amfi.developer_mode_status") != 0)) {
+        return true;
+    }
+    if (strncmp(name, "hw.perflevel1.", 14) == 0 && e_cores == 0U) {
+        return true;
+    }
+    if (compat13_7) {
+        if (strncmp(name, "hw.optional.arm.", 16) == 0 || strcmp(name, "kern.osproductversioncompat") == 0 ||
+            strcmp(name, "hw.nperflevels") == 0 || strncmp(name, "hw.perflevel0.", 14) == 0 ||
+            strncmp(name, "hw.perflevel1.", 14) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+__attribute__((visibility("hidden"))) uint64_t pt_sanitize_osvariant_status_u64(uint64_t raw_status) {
+    return raw_status & ~0x0000000005555555ULL;
+}
+
+__attribute__((visibility("hidden"))) uint64_t pt_spoofed_l1d_cache_size_u64(uint32_t max_apple_gpu_family,
+                                                                             bool is_e_core) {
+    if (is_e_core) {
+        if (max_apple_gpu_family <= 1006U) {
+            return 32768ULL;
+        }
+        return 65536ULL;
+    }
+    if (max_apple_gpu_family <= 1003U) {
+        return 32768ULL;
+    }
+    if (max_apple_gpu_family <= 1006U) {
+        return 65536ULL;
+    }
+    return 131072ULL;
+}
+
+__attribute__((visibility("hidden"))) uint64_t pt_spoofed_l1i_cache_size_u64(uint32_t max_apple_gpu_family,
+                                                                             bool is_e_core) {
+    if (is_e_core) {
+        if (max_apple_gpu_family <= 1006U) {
+            return 65536ULL;
+        }
+        return 131072ULL;
+    }
+    if (max_apple_gpu_family <= 1003U) {
+        return 65536ULL;
+    }
+    if (max_apple_gpu_family <= 1006U) {
+        return 131072ULL;
+    }
+    return 196608ULL;
+}
+
+__attribute__((visibility("hidden"))) void pt_spoofed_l2_cache_sizes_u64(uint32_t max_apple_gpu_family,
+                                                                         const char *model, uint64_t *out_p_l2,
+                                                                         uint64_t *out_e_l2) {
+    uint64_t p_l2 = 16ULL << 20;
+    uint64_t e_l2 = 4ULL << 20;
+    if (max_apple_gpu_family <= 1003U) {
+        p_l2 = 3ULL << 20;
+        e_l2 = 0ULL;
+    } else if (max_apple_gpu_family <= 1006U) {
+        p_l2 = 8ULL << 20;
+        e_l2 = 4ULL << 20;
+    } else if (max_apple_gpu_family == 1007U || (model != NULL && strcmp(model, "iPhone14,3") == 0)) {
+        p_l2 = 12ULL << 20;
+        e_l2 = 4ULL << 20;
+    }
+    if (out_p_l2 != NULL) {
+        *out_p_l2 = p_l2;
+    }
+    if (out_e_l2 != NULL) {
+        *out_e_l2 = e_l2;
+    }
+}
+
+static void pt_replace_substr_in_buf(char *buf, size_t cap, const char *needle, const char *repl) {
+    if (buf == NULL || cap == 0 || needle == NULL || repl == NULL) {
+        return;
+    }
+    size_t nlen = strlen(needle);
+    size_t rlen = strlen(repl);
+    if (nlen == 0 || strcmp(needle, repl) == 0) {
+        return;
+    }
+    size_t pos = 0;
+    for (int guard = 0; guard < 16; guard++) {
+        char *hit = strstr(buf + pos, needle);
+        if (hit == NULL) {
+            break;
+        }
+        size_t off = (size_t)(hit - buf);
+        size_t cur_len = strlen(buf);
+        if (cur_len - nlen + rlen >= cap) {
+            break;
+        }
+        if (rlen != nlen) {
+            memmove(hit + rlen, hit + nlen, cur_len - off - nlen + 1U);
+        }
+        memcpy(hit, repl, rlen);
+        pos = off + rlen;
+    }
+}
+
+static void pt_replace_agx_gen_tokens(char *buf, size_t cap, const char *prefix_with_g, const char *prefix_no_g,
+                                      const char *gpu_gen, unsigned long target_gen, bool compat13_7) {
+    if (buf == NULL || cap == 0 || prefix_with_g == NULL || prefix_no_g == NULL || gpu_gen == NULL) {
+        return;
+    }
+    size_t plen = strlen(prefix_with_g);
+    size_t target_len = strlen(gpu_gen);
+    char repl[64];
+    int rn = snprintf(repl, sizeof(repl), "%s%s", prefix_no_g, gpu_gen);
+    if (rn <= 0 || (size_t)rn >= sizeof(repl)) {
+        return;
+    }
+    size_t rlen = (size_t)rn;
+    size_t pos = 0;
+    for (int guard = 0; guard < 16; guard++) {
+        char *hit = strstr(buf + pos, prefix_with_g);
+        if (hit == NULL) {
+            break;
+        }
+        if (hit[plen] < '0' || hit[plen] > '9') {
+            pos = (size_t)(hit - buf) + plen;
+            continue;
+        }
+        char *endp = NULL;
+        unsigned long gen = strtoul(hit + plen, &endp, 10);
+        if (endp == NULL || endp == hit + plen) {
+            pos = (size_t)(hit - buf) + plen;
+            continue;
+        }
+        if (*endp != '\0' && strchr("GPSXCDgpsxcd", *endp) != NULL) {
+            endp++;
+        }
+        size_t tok_gen_len = (size_t)(endp - (hit + plen - 1U));
+        bool mismatch = (gen != target_gen) || (compat13_7 && gen >= 13UL) || (tok_gen_len != target_len) ||
+                        (strncmp(hit + plen - 1U, gpu_gen, target_len) != 0);
+        size_t span_len = (size_t)(endp - hit);
+        size_t off = (size_t)(hit - buf);
+        if (mismatch) {
+            size_t cur_len = strlen(buf);
+            if (cur_len - span_len + rlen >= cap) {
+                break;
+            }
+            if (rlen != span_len) {
+                memmove(hit + rlen, endp, cur_len - off - span_len + 1U);
+            }
+            memcpy(hit, repl, rlen);
+            pos = off + rlen;
+        } else {
+            pos = off + span_len;
+        }
+    }
+}
+
+__attribute__((visibility("hidden"))) void pt_sanitize_io_hardware_name_cstr(char *buf, size_t cap,
+                                                                             const char *lower_soc, const char *gpu_gen,
+                                                                             const char *oem_id, const char *gpu_arch,
+                                                                             bool compat13_7) {
+    if (buf == NULL || cap == 0 || buf[0] == '\0') {
+        return;
+    }
+    const char *eff_lower_soc = (lower_soc != NULL && lower_soc[0] != '\0') ? lower_soc : "t8103";
+    char upper_soc[16] = {0};
+    for (size_t i = 0; i + 1U < sizeof(upper_soc) && eff_lower_soc[i] != '\0'; i++) {
+        char c = eff_lower_soc[i];
+        upper_soc[i] = (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
+    }
+    const char *eff_gpu_gen = (gpu_gen != NULL && gpu_gen[0] != '\0') ? gpu_gen : "G13G";
+    char gpu_short[8] = "G13";
+    if (eff_gpu_gen[0] == 'G' && eff_gpu_gen[1] >= '0' && eff_gpu_gen[1] <= '9') {
+        size_t gl = 2U;
+        while (gl + 1U < sizeof(gpu_short) && eff_gpu_gen[gl] >= '0' && eff_gpu_gen[gl] <= '9') {
+            gl++;
+        }
+        memcpy(gpu_short, eff_gpu_gen, gl);
+        gpu_short[gl] = '\0';
+    }
+    const char *isp_gen = (strcmp(upper_soc, "S8001") == 0)
+                              ? "H8"
+                              : ((strcmp(upper_soc, "T8027") == 0 || strcmp(upper_soc, "T8000") == 0)
+                                     ? "H11"
+                                     : (strcmp(upper_soc, "T8030") == 0 ? "H12" : "H13"));
+
+    static const char *const kHostSocs[] = {"S8001", "T8000", "T8010", "T8015", "T8020", "T8027", "T8100", "T8110",
+                                            "T8120", "T8130", "T8140", "T8103", "T8101", "T8102", "T810x", "T8112",
+                                            "T8122", "T8132", "T8142", "T6000", "T6001", "T6002", "T6020", "T6021",
+                                            "T6022", "T6030", "T6031", "T6032", "T6034", "T6040", "T6041", "T6042"};
+    static const char *const kHostSocsLower[] = {
+        "s8001", "t8000", "t8010", "t8015", "t8020", "t8027", "t8100", "t8110", "t8120", "t8130", "t8140",
+        "t8103", "t8101", "t8102", "t810x", "t8112", "t8122", "t8132", "t8142", "t6000", "t6001", "t6002",
+        "t6020", "t6021", "t6022", "t6030", "t6031", "t6032", "t6034", "t6040", "t6041", "t6042"};
+    for (size_t i = 0; i < sizeof(kHostSocs) / sizeof(kHostSocs[0]); i++) {
+        if (strcmp(kHostSocs[i], upper_soc) != 0) {
+            pt_replace_substr_in_buf(buf, cap, kHostSocs[i], upper_soc);
+            pt_replace_substr_in_buf(buf, cap, kHostSocsLower[i], eff_lower_soc);
+        }
+    }
+
+    unsigned long target_gen = strtoul(gpu_short + 1, NULL, 10);
+    pt_replace_agx_gen_tokens(buf, cap, "AGXAcceleratorG", "AGXAccelerator", eff_gpu_gen, target_gen, compat13_7);
+    pt_replace_agx_gen_tokens(buf, cap, "AGXMetalG", "AGXMetal", eff_gpu_gen, target_gen, compat13_7);
+    pt_replace_agx_gen_tokens(buf, cap, "AGXFirmwareKextG", "AGXFirmwareKext", eff_gpu_gen, target_gen, compat13_7);
+
+    static const char *const kGpuShorts[] = {"G13", "G14", "G15", "G16", "G17", "G18"};
+    static const char *const kIspGens[] = {"H13", "H14", "H15", "H16"};
+    if (strstr(buf, "AGXFirmwareKext") != NULL || compat13_7 || strcmp(upper_soc, "T8103") != 0) {
+        if (strstr(buf, "AGX") != NULL && strstr(buf, "AGXAccelerator") == NULL && strstr(buf, "AGXMetal") == NULL &&
+            strstr(buf, "AGXFirmwareKext") == NULL) {
+            for (size_t i = 0; i < sizeof(kGpuShorts) / sizeof(kGpuShorts[0]); i++) {
+                if (strcmp(kGpuShorts[i], gpu_short) != 0) {
+                    pt_replace_substr_in_buf(buf, cap, kGpuShorts[i], gpu_short);
+                }
+            }
+        }
+        if (strstr(buf, "CamIn") != NULL) {
+            for (size_t i = 0; i < sizeof(kIspGens) / sizeof(kIspGens[0]); i++) {
+                if (strcmp(kIspGens[i], isp_gen) != 0) {
+                    pt_replace_substr_in_buf(buf, cap, kIspGens[i], isp_gen);
+                }
+            }
+        }
+    }
+
+    static const char *const kMacBoardIDs[] = {
+        "J180", "J274", "J275", "J293", "J313", "J314", "J316", "J323", "J375", "J413", "J414", "J415", "J416",
+        "J433", "J434", "J456", "J457", "J473", "J474", "J475", "J493", "J504", "J514", "J516", "J575", "J604",
+        "J613", "J614", "J615", "J616", "J623", "J624", "J673", "J713", "J715", "J773", "J775", "j180", "j274",
+        "j275", "j293", "j313", "j314", "j316", "j323", "j375", "j413", "j414", "j415", "j416", "j433", "j434",
+        "j456", "j457", "j473", "j474", "j475", "j493", "j504", "j514", "j516", "j575", "j604", "j613", "j614",
+        "j615", "j616", "j623", "j624", "j673", "j713", "j715", "j773", "j775"};
+    const char *oem = (oem_id != NULL && oem_id[0] != '\0') ? oem_id : "J522AP";
+    char board_repl[16] = {0};
+    strlcpy(board_repl, oem, sizeof(board_repl));
+    size_t blen = strlen(board_repl);
+    if (blen > 2U && strcasecmp(board_repl + blen - 2U, "AP") == 0) {
+        board_repl[blen - 2U] = '\0';
+    }
+    char board_repl_lower[16] = {0};
+    for (size_t i = 0; i + 1U < sizeof(board_repl_lower) && board_repl[i] != '\0'; i++) {
+        char c = board_repl[i];
+        board_repl_lower[i] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+    }
+    for (size_t i = 0; i < sizeof(kMacBoardIDs) / sizeof(kMacBoardIDs[0]); i++) {
+        bool is_lower = (kMacBoardIDs[i][0] >= 'a' && kMacBoardIDs[i][0] <= 'z');
+        const char *target_board = is_lower ? board_repl_lower : board_repl;
+        if (strcasecmp(kMacBoardIDs[i], target_board) != 0 && strstr(buf, kMacBoardIDs[i]) != NULL) {
+            pt_replace_substr_in_buf(buf, cap, kMacBoardIDs[i], target_board);
+        }
+    }
+
+    const char *target_gpu_arch = (gpu_arch != NULL && gpu_arch[0] != '\0') ? gpu_arch : "applegpu_g13g";
+    size_t target_gpu_len = strlen(target_gpu_arch);
+    size_t gpu_pos = 0;
+    for (int guard = 0; guard < 16; guard++) {
+        char *hit = strstr(buf + gpu_pos, "applegpu_g");
+        if (hit == NULL) {
+            break;
+        }
+        if (hit[10] < '0' || hit[10] > '9') {
+            gpu_pos = (size_t)(hit - buf) + 10U;
+            continue;
+        }
+        char *endp = hit + 10U;
+        while (*endp >= '0' && *endp <= '9') {
+            endp++;
+        }
+        if (*endp >= 'a' && *endp <= 'z') {
+            endp++;
+        }
+        size_t span = (size_t)(endp - hit);
+        size_t off = (size_t)(hit - buf);
+        if (span != target_gpu_len || strncmp(hit, target_gpu_arch, span) != 0) {
+            size_t cur_len = strlen(buf);
+            if (cur_len - span + target_gpu_len >= cap) {
+                break;
+            }
+            if (target_gpu_len != span) {
+                memmove(hit + target_gpu_len, endp, cur_len - off - span + 1U);
+            }
+            memcpy(hit, target_gpu_arch, target_gpu_len);
+            gpu_pos = off + target_gpu_len;
+        } else {
+            gpu_pos = off + span;
+        }
+    }
+}
+
+__attribute__((visibility("hidden"))) bool pt_is_app_embedded_bundle_path_cstr(const char *path) {
+    if (path == NULL || path[0] != '/') {
+        return false;
+    }
+    return (strstr(path, ".app/Frameworks/") != NULL || strstr(path, ".app/PlugIns/") != NULL ||
+            strstr(path, ".app/Contents/Frameworks/") != NULL || strstr(path, ".app/Contents/PlugIns/") != NULL ||
+            strstr(path, ".appex/Frameworks/") != NULL);
+}
+
+__attribute__((visibility("hidden"))) bool pt_is_post13_7_framework_path_cstr(const char *path) {
+    if (path == NULL || path[0] == '\0' || pt_is_app_embedded_bundle_path_cstr(path)) {
+        return false;
+    }
+    static const char *const kPost13_7Components[] = {
+        "ExtensionKit.framework",
+        "ExtensionFoundation.framework",
+        "WidgetKit.framework",
+        "TipKit.framework",
+        "AppIntents.framework",
+        "AppTrackingTransparency.framework",
+        "UniformTypeIdentifiers.framework",
+        "Observation.framework",
+        "SwiftData.framework",
+        "ActivityKit.framework",
+        "GroupActivities.framework",
+        "NearbyInteraction.framework",
+        "Charts.framework",
+        "OSLog.framework",
+        "WeatherKit.framework",
+        "MusicKit.framework",
+        "RoomPlan.framework",
+        "WorkoutKit.framework",
+        "Translation.framework",
+        "FamilyControls.framework",
+        "ManagedSettings.framework",
+        "DeviceActivity.framework",
+        "Cinematic.framework",
+        "CoreTransferable.framework",
+        "Spatial.framework",
+        "DockKit.framework",
+        "FinanceKit.framework",
+        "JournalingSuggestions.framework",
+        "SensitiveContentAnalysis.framework",
+        "LockedCameraCapture.framework",
+        "MarketplaceKit.framework",
+        "libswift_Concurrency.dylib",
+        "libswift_StringProcessing.dylib",
+    };
+    const size_t n = sizeof(kPost13_7Components) / sizeof(kPost13_7Components[0]);
+    for (size_t i = 0; i < n; i++) {
+        if (pt_path_has_component(path, kPost13_7Components[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+__attribute__((visibility("hidden"))) bool pt_collapse_macos_framework_versions_in_place_cstr(char *work, size_t cap) {
+    if (work == NULL || cap == 0) {
+        return false;
+    }
+    bool changed = false;
+    for (int iter = 0; iter < 8; iter++) {
+        const char *fw_ver = strcasestr(work, ".framework/Versions/");
+        const char *bdl_ver = strcasestr(work, ".bundle/Versions/");
+        const char *bdl_mac = strcasestr(work, ".bundle/Contents/MacOS/");
+        const char *hit = fw_ver;
+        size_t keep_ext_len = 10U;
+        size_t skip_prefix_len = 20U;
+        if (bdl_ver != NULL && (hit == NULL || bdl_ver < hit)) {
+            hit = bdl_ver;
+            keep_ext_len = 7U;
+            skip_prefix_len = 17U;
+        }
+        if (bdl_mac != NULL && (hit == NULL || bdl_mac < hit)) {
+            hit = bdl_mac;
+            keep_ext_len = 7U;
+            skip_prefix_len = 22U;
+        }
+        if (hit == NULL) {
+            break;
+        }
+        const char *rest = NULL;
+        if (hit == bdl_mac) {
+            rest = hit + skip_prefix_len;
+        } else {
+            const char *after_versions = hit + skip_prefix_len;
+            rest = strchr(after_versions, '/');
+        }
+        if (rest == NULL) {
+            break;
+        }
+        size_t prefix_len = (size_t)(hit - work) + keep_ext_len;
+        size_t rest_len = strlen(rest);
+        if (prefix_len + rest_len >= cap) {
+            break;
+        }
+        memmove(work + prefix_len, rest, rest_len + 1U);
+        changed = true;
+    }
+    return changed;
+}
+
+__attribute__((visibility("hidden"))) bool pt_is_dirty_code_resources_key_cstr(const char *key) {
+    if (key == NULL || key[0] == '\0') {
+        return false;
+    }
+    return (strcasestr(key, "PlayTools") != NULL || strcasestr(key, "PlayCover") != NULL ||
+            strcasestr(key, "MacOver") != NULL || strcasestr(key, "AKInterface") != NULL ||
+            strcasestr(key, "SVCPatches") != NULL || strcasestr(key, "Playtools.strings") != NULL ||
+            strcasestr(key, "UserPlugins") != NULL);
+}
+
+__attribute__((visibility("hidden"))) bool pt_is_sensitive_unix_socket_token_cstr(const char *sun_path) {
+    if (sun_path == NULL || sun_path[0] == '\0') {
+        return false;
+    }
+    return (strstr(sun_path, "/var/folders/") != NULL || strstr(sun_path, "com.apple.launchd") != NULL ||
+            strstr(sun_path, "discord-ipc") != NULL || strcasestr(sun_path, "PlayCover") != NULL ||
+            strcasestr(sun_path, "PlayTools") != NULL || strcasestr(sun_path, "MacOver") != NULL ||
+            strcasestr(sun_path, "app.makedie") != NULL);
+}
+
+__attribute__((visibility("hidden"))) bool pt_is_icu_age_post_13_7_c(uint8_t major, uint8_t minor) {
+    return (major > 12U) || (major == 12U && minor > 1U);
 }

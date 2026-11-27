@@ -406,9 +406,12 @@ static void pt_notify_container_did_layout(PTCustomInputHostContainerView *conta
     uint64_t _transitionGeneration;
     uint64_t _animationToken;
     BOOL _isKeyboardVisible;
+    BOOL _isAnimatingDismiss;
     BOOL _isPostingNotifications;
     BOOL _isLayingOut;
     CGRect _lastPostedKeyboardFrame;
+    CGRect _pendingHideBeginFrame;
+    CGRect _pendingHideEndFrame;
     CGSize _lastLaidOutContainerSize;
 }
 
@@ -427,13 +430,15 @@ static void pt_notify_container_did_layout(PTCustomInputHostContainerView *conta
         _inputPinnedConstraints = [[NSMutableArray alloc] init];
         _accessoryPinnedConstraints = [[NSMutableArray alloc] init];
         _lastPostedKeyboardFrame = CGRectZero;
+        _pendingHideBeginFrame = CGRectZero;
+        _pendingHideEndFrame = CGRectZero;
         _lastLaidOutContainerSize = CGSizeZero;
     }
     return self;
 }
 
 - (BOOL)hasActivePresentation {
-    return _isKeyboardVisible || _activeResponder != nil || _hostedInputView != nil;
+    return _isKeyboardVisible || _isAnimatingDismiss || _activeResponder != nil || _hostedInputView != nil;
 }
 
 - (PTCustomInputHostContainerView *)activeContainerView {
@@ -867,6 +872,7 @@ static void pt_notify_container_did_layout(PTCustomInputHostContainerView *conta
                      endScreenFrame.size.width,
                      endScreenFrame.size.height);
 
+    _isAnimatingDismiss = NO;
     BOOL shouldAnimateShow = (!wasVisible && [UIView areAnimationsEnabled]);
     NSTimeInterval duration = shouldAnimateShow ? kPTShowAnimationDuration : 0.0;
     if (shouldAnimateShow) {
@@ -934,10 +940,13 @@ static void pt_notify_container_did_layout(PTCustomInputHostContainerView *conta
     }
 
     BOOL wasVisible = _isKeyboardVisible;
+    BOOL resumingAnimatedDismiss = (!wasVisible && _isAnimatingDismiss);
     PTCustomInputHostContainerView *container = [self activeContainerView];
-    CGRect beginScreenFrame = _lastPostedKeyboardFrame;
+    CGRect beginScreenFrame = resumingAnimatedDismiss ? _pendingHideBeginFrame : _lastPostedKeyboardFrame;
     CGRect endScreenFrame = beginScreenFrame;
-    if (CGRectGetHeight(beginScreenFrame) > 0.0) {
+    if (resumingAnimatedDismiss) {
+        endScreenFrame = _pendingHideEndFrame;
+    } else if (CGRectGetHeight(beginScreenFrame) > 0.0) {
         endScreenFrame.origin.y += beginScreenFrame.size.height;
     }
 
@@ -953,6 +962,8 @@ static void pt_notify_container_did_layout(PTCustomInputHostContainerView *conta
     NSTimeInterval duration = shouldAnimateHide ? kPTHideAnimationDuration : 0.0;
 
     if (wasVisible) {
+        _pendingHideBeginFrame = beginScreenFrame;
+        _pendingHideEndFrame = endScreenFrame;
         NSDictionary *hideInfo = [self keyboardUserInfoWithBeginFrame:beginScreenFrame
                                                             endFrame:endScreenFrame
                                                             duration:duration];
@@ -960,7 +971,12 @@ static void pt_notify_container_did_layout(PTCustomInputHostContainerView *conta
         [self postNotificationName:UIKeyboardWillChangeFrameNotification userInfo:hideInfo];
     }
 
+    BOOL emitDidHide = (wasVisible || resumingAnimatedDismiss);
+
     void (^finishDismiss)(PTCustomInputViewHost *) = ^(PTCustomInputViewHost *host) {
+        host->_isAnimatingDismiss = NO;
+        host->_pendingHideBeginFrame = CGRectZero;
+        host->_pendingHideEndFrame = CGRectZero;
         [host detachView:&host->_hostedInputView savedState:&host->_savedInputState constraints:host->_inputPinnedConstraints];
         [host detachView:&host->_hostedAccessoryView savedState:&host->_savedAccessoryState constraints:host->_accessoryPinnedConstraints];
         if (host->_overlayRootVC != nil) {
@@ -974,7 +990,7 @@ static void pt_notify_container_did_layout(PTCustomInputHostContainerView *conta
             host->_fallbackContainer.dockView.hidden = YES;
             [host->_fallbackContainer removeFromSuperview];
         }
-        if (wasVisible) {
+        if (emitDidHide) {
             NSDictionary *doneInfo = [host keyboardUserInfoWithBeginFrame:beginScreenFrame
                                                                 endFrame:endScreenFrame
                                                                 duration:duration];
@@ -984,6 +1000,7 @@ static void pt_notify_container_did_layout(PTCustomInputHostContainerView *conta
     };
 
     if (shouldAnimateHide) {
+        _isAnimatingDismiss = YES;
         CGFloat hostH = container.bounds.size.height;
         CGRect dockFrame = container.dockView.frame;
         CGRect offscreenFrame = CGRectMake(dockFrame.origin.x, hostH, dockFrame.size.width, dockFrame.size.height);

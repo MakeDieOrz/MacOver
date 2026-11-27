@@ -6,6 +6,9 @@
 #import "PSInternal.h"
 #import <QuartzCore/QuartzCore.h>
 #include <math.h>
+#include <stdatomic.h>
+
+static atomic_bool s_mtl_app_created_32f_texture = false;
 
 typedef NS_ENUM(NSUInteger, PSMTLEncoderStage) {
     PSMTLEncoderStageCompute = 0,
@@ -196,6 +199,131 @@ static NSString *pt_mtl_format_missing_header_diagnostic(NSString *source, NSStr
             caret];
 }
 
+static NSString *pt_mtl_strip_comments_and_inactive_guard_blocks(NSString *source) {
+    if (source == nil || source.length == 0U) {
+        return source;
+    }
+    NSUInteger len = source.length;
+    NSMutableString *masked = [NSMutableString stringWithCapacity:len];
+    const unichar *chars = NULL;
+    unichar *heapChars = malloc(len * sizeof(unichar));
+    if (heapChars == NULL) {
+        return source;
+    }
+    [source getCharacters:heapChars range:NSMakeRange(0, len)];
+    chars = heapChars;
+
+    // Pass 1: blank comments (//... and /*...*/) while preserving '\n' for exact line:col diagnostics
+    BOOL inLineComment = NO;
+    BOOL inBlockComment = NO;
+    BOOL inString = NO;
+    for (NSUInteger i = 0; i < len; i++) {
+        unichar c = chars[i];
+        unichar next = (i + 1U < len) ? chars[i + 1U] : 0;
+        if (inLineComment) {
+            if (c == '\n') {
+                inLineComment = NO;
+                [masked appendString:@"\n"];
+            } else {
+                [masked appendString:@" "];
+            }
+            continue;
+        }
+        if (inBlockComment) {
+            if (c == '*' && next == '/') {
+                [masked appendString:@"  "];
+                i++;
+                inBlockComment = NO;
+            } else if (c == '\n') {
+                [masked appendString:@"\n"];
+            } else {
+                [masked appendString:@" "];
+            }
+            continue;
+        }
+        if (inString) {
+            [masked appendFormat:@"%C", c];
+            if (c == '\\' && i + 1U < len) {
+                i++;
+                [masked appendFormat:@"%C", chars[i]];
+            } else if (c == '"') {
+                inString = NO;
+            }
+            continue;
+        }
+        if (c == '"') {
+            inString = YES;
+            [masked appendFormat:@"%C", c];
+        } else if (c == '/' && next == '/') {
+            inLineComment = YES;
+            [masked appendString:@"  "];
+            i++;
+        } else if (c == '/' && next == '*') {
+            inBlockComment = YES;
+            [masked appendString:@"  "];
+            i++;
+        } else {
+            [masked appendFormat:@"%C", c];
+        }
+    }
+    free(heapChars);
+
+    // Pass 2: blank lines guarded by `#if __METAL_VERSION__ >= 230` (or `> 220`) under compat13_7
+    NSArray<NSString *> *lines = [masked componentsSeparatedByString:@"\n"];
+    NSMutableArray<NSString *> *outLines = [NSMutableArray arrayWithCapacity:lines.count];
+    NSMutableArray<NSNumber *> *ifStack = [NSMutableArray array];
+    for (NSString *line in lines) {
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if ([trimmed hasPrefix:@"#if"] || [trimmed hasPrefix:@"#ifdef"] || [trimmed hasPrefix:@"#ifndef"]) {
+            BOOL inactiveGuard = NO;
+            if ([trimmed rangeOfString:@"__METAL_VERSION__"].location != NSNotFound) {
+                NSString *compact = [[trimmed componentsSeparatedByCharactersInSet:
+                    [NSCharacterSet whitespaceCharacterSet]] componentsJoinedByString:@""];
+                if ([compact containsString:@"__METAL_VERSION__>=230"] ||
+                    [compact containsString:@"__METAL_VERSION__>220"] ||
+                    [compact containsString:@"__METAL_VERSION__>=240"] ||
+                    [compact containsString:@"__METAL_VERSION__>=300"]) {
+                    inactiveGuard = YES;
+                }
+            }
+            [ifStack addObject:@(inactiveGuard)];
+            [outLines addObject:line];
+            continue;
+        }
+        if ([trimmed hasPrefix:@"#else"] && ifStack.count > 0) {
+            BOOL topInactive = ifStack.lastObject.boolValue;
+            [ifStack removeLastObject];
+            [ifStack addObject:@(!topInactive)];
+            [outLines addObject:line];
+            continue;
+        }
+        if ([trimmed hasPrefix:@"#elif"] && ifStack.count > 0) {
+            [ifStack removeLastObject];
+            [ifStack addObject:@NO];
+            [outLines addObject:line];
+            continue;
+        }
+        if ([trimmed hasPrefix:@"#endif"] && ifStack.count > 0) {
+            [ifStack removeLastObject];
+            [outLines addObject:line];
+            continue;
+        }
+        BOOL insideInactive = NO;
+        for (NSNumber *flag in ifStack) {
+            if (flag.boolValue) {
+                insideInactive = YES;
+                break;
+            }
+        }
+        if (insideInactive) {
+            [outLines addObject:[@"" stringByPaddingToLength:line.length withString:@" " startingAtIndex:0]];
+        } else {
+            [outLines addObject:line];
+        }
+    }
+    return [outLines componentsJoinedByString:@"\n"];
+}
+
 static BOOL pt_mtl_should_reject_source_for_compat13(NSString *source, id options, NSError **outError) {
     if (!pt_is_bypass_enabled() || !pt_is_compat13_7_active()) {
         return NO;
@@ -223,11 +351,13 @@ static BOOL pt_mtl_should_reject_source_for_compat13(NSString *source, id option
             }
         }
     }
+    NSString *effectiveSource = nil;
     if (!reject && source != nil && [source isKindOfClass:[NSString class]]) {
-        if ([source containsString:@"metal_simdgroup_matrix"] ||
-            [source containsString:@"simdgroup_multiply_accumulate"] ||
-            [source containsString:@"metal_raytracing"] ||
-            [source containsString:@"raytracing::intersector"]) {
+        effectiveSource = pt_mtl_strip_comments_and_inactive_guard_blocks(source);
+        if ([effectiveSource containsString:@"metal_simdgroup_matrix"] ||
+            [effectiveSource containsString:@"simdgroup_multiply_accumulate"] ||
+            [effectiveSource containsString:@"metal_raytracing"] ||
+            [effectiveSource containsString:@"raytracing::intersector"]) {
             reject = YES;
         }
     }
@@ -236,29 +366,29 @@ static BOOL pt_mtl_should_reject_source_for_compat13(NSString *source, id option
     }
     if (outError != NULL) {
         NSString *msg = @"Compilation failed:\nInvalid languageVersion";
-        if (source != nil && [source isKindOfClass:[NSString class]]) {
-            NSString *simdMsg = [source containsString:@"metal_simdgroup_matrix"]
-                ? pt_mtl_format_missing_header_diagnostic(source, @"metal_simdgroup_matrix")
+        if (effectiveSource != nil && [effectiveSource isKindOfClass:[NSString class]]) {
+            NSString *simdMsg = [effectiveSource containsString:@"metal_simdgroup_matrix"]
+                ? pt_mtl_format_missing_header_diagnostic(effectiveSource, @"metal_simdgroup_matrix")
                 : nil;
-            NSString *rtMsg = [source containsString:@"metal_raytracing"]
-                ? pt_mtl_format_missing_header_diagnostic(source, @"metal_raytracing")
+            NSString *rtMsg = [effectiveSource containsString:@"metal_raytracing"]
+                ? pt_mtl_format_missing_header_diagnostic(effectiveSource, @"metal_raytracing")
                 : nil;
             if (simdMsg != nil) {
                 msg = simdMsg;
             } else if (rtMsg != nil) {
                 msg = rtMsg;
             } else {
-                NSRange symRange = [source rangeOfString:@"simdgroup_multiply_accumulate"];
-                NSRange rtSymRange = [source rangeOfString:@"raytracing::intersector"];
+                NSRange symRange = [effectiveSource rangeOfString:@"simdgroup_multiply_accumulate"];
+                NSRange rtSymRange = [effectiveSource rangeOfString:@"raytracing::intersector"];
                 if (symRange.location != NSNotFound) {
                     NSUInteger line = 1, col = 1;
-                    pt_mtl_line_and_col_for_location(source, symRange.location, &line, &col);
+                    pt_mtl_line_and_col_for_location(effectiveSource, symRange.location, &line, &col);
                     msg = [NSString stringWithFormat:
                            @"program_source:%lu:%lu: error: use of undeclared identifier 'simdgroup_multiply_accumulate'",
                            (unsigned long)line, (unsigned long)col];
                 } else if (rtSymRange.location != NSNotFound) {
                     NSUInteger line = 1, col = 1;
-                    pt_mtl_line_and_col_for_location(source, rtSymRange.location, &line, &col);
+                    pt_mtl_line_and_col_for_location(effectiveSource, rtSymRange.location, &line, &col);
                     msg = [NSString stringWithFormat:
                            @"program_source:%lu:%lu: error: use of undeclared identifier 'raytracing'",
                            (unsigned long)line, (unsigned long)col];
@@ -299,7 +429,9 @@ static NSString *pt_mtl_rewrite_source_for_apple5_32f(NSString *source, const vo
     if (source == nil || ![source isKindOfClass:[NSString class]] ||
         !pt_is_bypass_enabled() ||
         ps_is_effective_system_or_playtools_caller(caller) ||
-        (!pt_is_compat13_7_active() && pt_get_spoofed_max_apple_gpu_family() >= 1007)) {
+        (!pt_is_compat13_7_active() && pt_get_spoofed_max_apple_gpu_family() >= 1007) ||
+        !atomic_load_explicit(&s_mtl_app_created_32f_texture, memory_order_acquire) ||
+        ![source containsString:@"<float"]) {
         return source;
     }
     static NSRegularExpression *s_constexprSamplerRegex = nil;
@@ -1340,6 +1472,7 @@ static uint64_t ps_mtl_memory_cap(void) {
         if ([descriptor respondsToSelector:pfSel]) {
             NSUInteger pf = ((NSUInteger (*)(id, SEL))objc_msgSend)(descriptor, pfSel);
             if (pf == 55U || pf == 105U || pf == 125U) {
+                atomic_store_explicit(&s_mtl_app_created_32f_texture, true, memory_order_release);
                 objc_setAssociatedObject(tex, &kPSMTLTextureIs32FKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             }
         }

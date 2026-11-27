@@ -1718,6 +1718,7 @@ static NSArray<NSString *> *pt_get_allowed_keychain_access_groups(void) {
         NSDictionary *fb = pt_get_fallback_entitlements_dict();
         if (fb != nil) {
             pt_merge_application_identifier(merged, fb[@"application-identifier"]);
+            pt_merge_entitlement_values(merged, @"keychain-access-groups", fb[@"keychain-access-groups"]);
             pt_merge_entitlement_values(merged, @"com.apple.security.application-groups", fb[@"com.apple.security.application-groups"]);
         }
         SecCodeRef selfCode = NULL;
@@ -2352,84 +2353,51 @@ int pt_mac_syscall_with_caller(const char *policy, int call, void *arg, const vo
         }
         return ret;
     }
-    if (strcmp(policy, "Sandbox") == 0 && call == 0 && arg != NULL && pt_is_valid_user_pointer(arg)) {
+    if (strcmp(policy, "Sandbox") == 0 && call == 2 && arg != NULL && pt_is_valid_user_pointer(arg)) {
         struct {
-            pid_t pid;
-            uint32_t pad0;
+            uint64_t *out_denied;
+            int64_t pid;
             const char *operation;
-            int type;
-            uint32_t pad1;
-            uintptr_t arg0;
-        } sb_req;
-        memset(&sb_req, 0, sizeof(sb_req));
-        memcpy(&sb_req, arg, sizeof(sb_req));
-        if (sb_req.pid != 0 && sb_req.pid != getpid()) {
+            uint64_t filter_type;
+            uint64_t arg0;
+            uint64_t flags;
+            uint64_t pidversion;
+            uint8_t trailing[0xA0U - 0x38U];
+        } sb_check_req;
+        _Static_assert(sizeof(sb_check_req) == 0xA0U, "Sandbox call 2 struct must match XNU 0xA0 ABI");
+        memset(&sb_check_req, 0, sizeof(sb_check_req));
+        memcpy(&sb_check_req, arg, sizeof(sb_check_req));
+        if (sb_check_req.pid != 0 && (pid_t)sb_check_req.pid != getpid()) {
             if (out_handled != NULL) {
                 *out_handled = YES;
             }
             errno = EPERM;
             return -1;
         }
-        if (pt_mac_sandbox_should_deny(sb_req.operation, sb_req.type, sb_req.arg0, caller)) {
+        int filter_type_i = (int)(uint32_t)sb_check_req.filter_type;
+        if (pt_mac_sandbox_should_deny(sb_check_req.operation, filter_type_i, (uintptr_t)sb_check_req.arg0, caller)) {
             if (out_handled != NULL) {
                 *out_handled = YES;
             }
-            return 1;
+            if (sb_check_req.out_denied != NULL && pt_is_valid_user_pointer(sb_check_req.out_denied)) {
+                *sb_check_req.out_denied = 1ULL;
+            }
+            return 0;
         }
-        if ((sb_req.type & 0x0f) == PT_SANDBOX_FILTER_PATH &&
-            sb_req.arg0 != 0 &&
-            pt_is_valid_user_pointer((const void *)sb_req.arg0)) {
+        if ((filter_type_i & 0x0f) == PT_SANDBOX_FILTER_PATH &&
+            sb_check_req.arg0 != 0 &&
+            pt_is_valid_user_pointer((const void *)(uintptr_t)sb_check_req.arg0)) {
             char vbuf[PATH_MAX];
-            const char *resolved = (const char *)sb_req.arg0;
+            const char *resolved = (const char *)(uintptr_t)sb_check_req.arg0;
             int is_sys_flag = 0;
             (void)pt_prepare_fs_path_cached_caller(
-                (const char *)sb_req.arg0, caller, vbuf, sizeof(vbuf), &resolved, &is_sys_flag);
-            if (resolved != (const char *)sb_req.arg0) {
-                sb_req.arg0 = (uintptr_t)resolved;
+                resolved, caller, vbuf, sizeof(vbuf), &resolved, &is_sys_flag);
+            if (resolved != (const char *)(uintptr_t)sb_check_req.arg0) {
+                sb_check_req.arg0 = (uint64_t)(uintptr_t)resolved;
                 if (out_handled != NULL) {
                     *out_handled = YES;
                 }
-                return pt_orig_mac_syscall(policy, call, &sb_req);
-            }
-        }
-    } else if (strcmp(policy, "Sandbox") == 0 && call == 2 && arg != NULL && pt_is_valid_user_pointer(arg)) {
-        struct {
-            audit_token_t au;
-            const char *operation;
-            int type;
-            uint32_t pad1;
-            uintptr_t arg0;
-        } sb_au_req;
-        memset(&sb_au_req, 0, sizeof(sb_au_req));
-        memcpy(&sb_au_req, arg, sizeof(sb_au_req));
-        pid_t au_pid = (pid_t)sb_au_req.au.val[5];
-        if (au_pid != 0 && au_pid != getpid()) {
-            if (out_handled != NULL) {
-                *out_handled = YES;
-            }
-            errno = EPERM;
-            return -1;
-        }
-        if (pt_mac_sandbox_should_deny(sb_au_req.operation, sb_au_req.type, sb_au_req.arg0, caller)) {
-            if (out_handled != NULL) {
-                *out_handled = YES;
-            }
-            return 1;
-        }
-        if ((sb_au_req.type & 0x0f) == PT_SANDBOX_FILTER_PATH &&
-            sb_au_req.arg0 != 0 &&
-            pt_is_valid_user_pointer((const void *)sb_au_req.arg0)) {
-            char vbuf[PATH_MAX];
-            const char *resolved = (const char *)sb_au_req.arg0;
-            int is_sys_flag = 0;
-            (void)pt_prepare_fs_path_cached_caller(
-                (const char *)sb_au_req.arg0, caller, vbuf, sizeof(vbuf), &resolved, &is_sys_flag);
-            if (resolved != (const char *)sb_au_req.arg0) {
-                sb_au_req.arg0 = (uintptr_t)resolved;
-                if (out_handled != NULL) {
-                    *out_handled = YES;
-                }
-                return pt_orig_mac_syscall(policy, call, &sb_au_req);
+                return pt_orig_mac_syscall(policy, call, &sb_check_req);
             }
         }
     } else if (strcmp(policy, "Sandbox") == 0 && call == 21 && arg != NULL && pt_is_valid_user_pointer(arg)) {

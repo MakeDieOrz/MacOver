@@ -132,7 +132,8 @@ static BOOL ps_is_hidden_desktop_font_url(NSURL *url) {
     }
     NSString *path = url.path;
     if (path.length > 0 &&
-        ([path hasPrefix:@"/Users/"] || [path hasPrefix:@"/Library/Fonts/"])) {
+        ([path hasPrefix:@"/Library/Fonts/"] ||
+         ([path hasPrefix:@"/Users/"] && [path rangeOfString:@"/Library/Fonts/"].location != NSNotFound))) {
         return YES;
     }
     NSString *stem = url.URLByDeletingPathExtension.lastPathComponent;

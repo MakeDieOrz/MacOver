@@ -173,7 +173,7 @@ public final class PTPluginContainer: @unchecked Sendable {
     }
 
     public static func defaultPlayToolsVersion() -> String {
-        (Bundle(for: PTPluginContainer.self).infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.4"
+        (Bundle(for: PTPluginContainer.self).infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.8"
     }
 
     public static func defaultUserPluginsDirectory() -> URL? {

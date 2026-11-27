@@ -65,9 +65,11 @@ extension UIApplication {
             }
         }
 
-        DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + 2, execute: {
-            Toast.showHint(title: "Rotated")
-        })
+        if !PlaySettings.shared.strictEmulationMode {
+            DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + 2, execute: {
+                Toast.showHint(title: "Rotated")
+            })
+        }
     }
 
     @objc(pm_menu_toggleDebugOverlay:)
@@ -122,9 +124,14 @@ extension UIViewController {
     func rotateView(_ sender: AnyObject, deviceOrientation: Int) {
         RotateViewController.rotate(deviceOrientation: deviceOrientation)
         RotateViewController.orientationTraverser %= RotateViewController.orientationList.count
+        guard self.presentedViewController == nil else { return }
         let viewController = RotateViewController(nibName: nil, bundle: nil)
         self.present(viewController, animated: true)
-        DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + 1, execute: {
+        DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + 1, execute: { [weak self, weak viewController] in
+            guard let self, let viewController,
+                  self.presentedViewController === viewController else {
+                return
+            }
             self.dismiss(animated: true)
         })
     }
@@ -135,23 +142,15 @@ struct CommandsList {
 }
 // have to use a customized name, in case it conflicts with the game's localization file
 let keymapping = [
-    NSLocalizedString("menu.keymapping.toggleEditor", tableName: "Playtools",
-                      value: "Open/Close Keymapping Editor", comment: ""),
-    NSLocalizedString("menu.keymapping.deleteElement", tableName: "Playtools",
-                      value: "Delete selected element", comment: ""),
-    NSLocalizedString("menu.keymapping.upsizeElement", tableName: "Playtools",
-                      value: "Upsize selected element", comment: ""),
-    NSLocalizedString("menu.keymapping.downsizeElement", tableName: "Playtools",
-                      value: "Downsize selected element", comment: ""),
-    NSLocalizedString("menu.keymapping.toggleDebug", tableName: "Playtools",
-                      value: "Toggle Debug Overlay", comment: ""),
-    NSLocalizedString("menu.keymapping.hide.pointer", tableName: "Playtools",
-                      value: "Hide Mouse Pointer", comment: ""),
-    NSLocalizedString("menu.keymapping.previousKeymap", tableName: "Playtools",
-                      value: "Previous Keymap", comment: ""),
-    NSLocalizedString("menu.keymapping.nextKeymap", tableName: "Playtools",
-                      value: "Next Keymap", comment: "")
-  ]
+    playToolsLocalizedString("menu.keymapping.toggleEditor", value: "Open/Close Keymapping Editor"),
+    playToolsLocalizedString("menu.keymapping.deleteElement", value: "Delete selected element"),
+    playToolsLocalizedString("menu.keymapping.upsizeElement", value: "Upsize selected element"),
+    playToolsLocalizedString("menu.keymapping.downsizeElement", value: "Downsize selected element"),
+    playToolsLocalizedString("menu.keymapping.toggleDebug", value: "Toggle Debug Overlay"),
+    playToolsLocalizedString("menu.keymapping.hide.pointer", value: "Hide Mouse Pointer"),
+    playToolsLocalizedString("menu.keymapping.previousKeymap", value: "Previous Keymap"),
+    playToolsLocalizedString("menu.keymapping.nextKeymap", value: "Next Keymap")
+]
 @MainActor let iconsSelctor = [
     UIImage(systemName: "pencil"),
     UIImage(systemName: "trash.fill"),
@@ -263,8 +262,8 @@ class MenuController {
         }
 
         let rotationMenu = UIMenu(
-            title: NSLocalizedString("menu.keymapping.rotateDisplay", tableName: "Playtools",
-                              value: "Rotate display area", comment: ""), image: nil,
+            title: playToolsLocalizedString("menu.keymapping.rotateDisplay", value: "Rotate display area"),
+            image: nil,
             identifier: .rotationOptionsMenu,
             options: [],
             children: rotationMenuItems
@@ -278,11 +277,13 @@ class MenuController {
             children: arrowKeyChildrenCommands + [rotationMenu]
         )
 
-        return UIMenu(title: NSLocalizedString("menu.keymapping", tableName: "Playtools",
-                                               value: "Keymapping", comment: ""), image: nil,
-                      identifier: .keymappingMenu,
-                      options: [],
-                      children: [arrowKeysGroup])
+        return UIMenu(
+            title: playToolsLocalizedString("menu.keymapping", value: "Keymapping"),
+            image: nil,
+            identifier: .keymappingMenu,
+            options: [],
+            children: [arrowKeysGroup]
+        )
     }
 }
 

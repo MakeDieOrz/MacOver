@@ -489,49 +489,7 @@ __attribute__((visibility("hidden"))) void pt_normalize_synth_sysver_stat(struct
 }
 
 static BOOL pt_collapse_macos_framework_versions_in_place(char *work, size_t cap) {
-    if (work == NULL || cap == 0) {
-        return NO;
-    }
-    BOOL changed = NO;
-    for (int iter = 0; iter < 8; iter++) {
-        const char *fw_ver = strcasestr(work, ".framework/Versions/");
-        const char *bdl_ver = strcasestr(work, ".bundle/Versions/");
-        const char *bdl_mac = strcasestr(work, ".bundle/Contents/MacOS/");
-        const char *hit = fw_ver;
-        size_t keep_ext_len = 10U;
-        size_t skip_prefix_len = 20U;
-        if (bdl_ver != NULL && (hit == NULL || bdl_ver < hit)) {
-            hit = bdl_ver;
-            keep_ext_len = 7U;
-            skip_prefix_len = 17U;
-        }
-        if (bdl_mac != NULL && (hit == NULL || bdl_mac < hit)) {
-            hit = bdl_mac;
-            keep_ext_len = 7U;
-            skip_prefix_len = 22U;
-        }
-        if (hit == NULL) {
-            break;
-        }
-        const char *rest = NULL;
-        if (hit == bdl_mac) {
-            rest = hit + skip_prefix_len;
-        } else {
-            const char *after_versions = hit + skip_prefix_len;
-            rest = strchr(after_versions, '/');
-        }
-        if (rest == NULL) {
-            break;
-        }
-        size_t prefix_len = (size_t)(hit - work) + keep_ext_len;
-        size_t rest_len = strlen(rest);
-        if (prefix_len + rest_len >= cap) {
-            break;
-        }
-        memmove(work + prefix_len, rest, rest_len + 1U);
-        changed = YES;
-    }
-    return changed;
+    return pt_collapse_macos_framework_versions_in_place_cstr(work, cap) ? YES : NO;
 }
 
 __attribute__((visibility("hidden")))

@@ -7,6 +7,7 @@
 
 import Darwin
 import Foundation
+import Synchronization
 
 struct DiscordTimestamps: Encodable {
     var start: Int?
@@ -90,7 +91,7 @@ private struct DiscordSetActivityCommand: Encodable {
     let nonce: String
 }
 
-final class DiscordIPCClient {
+final class DiscordIPCClient: Sendable {
     enum Opcode: UInt32 {
         case handshake = 0
         case frame = 1
@@ -109,9 +110,10 @@ final class DiscordIPCClient {
     private let appId: String
     private let socketPaths: [String]
     private let lock = PTUnfairLock()
+    private let ioLock = PTUnfairLock()
     private let readQueue = DispatchQueue(label: "app.makedie.PlayTools.DiscordIPC", qos: .utility)
-    private var fd: Int32 = -1
-    private var readSource: DispatchSourceRead?
+    nonisolated(unsafe) private var fd: Int32 = -1
+    nonisolated(unsafe) private var readSource: DispatchSourceRead?
 
     init(appId: String, socketPaths: [String]? = nil) {
         self.appId = appId
@@ -144,6 +146,7 @@ final class DiscordIPCClient {
             }
 
             let source = DispatchSource.makeReadSource(fileDescriptor: connectedFD, queue: readQueue)
+            let socketIOLock = self.ioLock
             source.setEventHandler { [weak self] in
                 guard let self else { return }
                 guard let frame = Self.readFrame(fd: connectedFD) else {
@@ -151,18 +154,32 @@ final class DiscordIPCClient {
                     return
                 }
                 if frame.opcode == .ping {
-                    _ = Self.writeFrame(fd: connectedFD, opcode: .pong, payload: frame.payload)
+                    socketIOLock.withLock {
+                        let activeFD = self.lock.withLock { self.fd }
+                        guard activeFD == connectedFD else { return }
+                        _ = Self.writeFrame(fd: connectedFD, opcode: .pong, payload: frame.payload)
+                    }
                 } else if frame.opcode == .close {
                     self.disconnect()
                 }
             }
             source.setCancelHandler {
-                Darwin.close(connectedFD)
+                socketIOLock.withLock {
+                    Darwin.close(connectedFD)
+                }
             }
 
-            lock.withLock {
+            let wonRace = lock.withLock { () -> Bool in
+                guard fd < 0 else { return false }
                 fd = connectedFD
                 readSource = source
+                return true
+            }
+            guard wonRace else {
+                source.setEventHandler {}
+                source.resume()
+                source.cancel()
+                return true
             }
             source.resume()
             return true
@@ -187,28 +204,35 @@ final class DiscordIPCClient {
     }
 
     func disconnect() {
-        let (activeFD, source) = lock.withLock { () -> (Int32, DispatchSourceRead?) in
-            let activeFD = fd
-            let source = readSource
-            fd = -1
-            readSource = nil
-            return (activeFD, source)
-        }
+        var sourceToCancel: DispatchSourceRead?
+        ioLock.withLock {
+            let (activeFD, source) = lock.withLock { () -> (Int32, DispatchSourceRead?) in
+                let activeFD = fd
+                let source = readSource
+                fd = -1
+                readSource = nil
+                return (activeFD, source)
+            }
+            sourceToCancel = source
 
-        if activeFD >= 0 {
-            _ = Self.writeFrame(fd: activeFD, opcode: .close, payload: Data())
+            if activeFD >= 0 {
+                _ = Self.writeFrame(fd: activeFD, opcode: .close, payload: Data(), nonBlocking: true)
+                if source == nil {
+                    Darwin.close(activeFD)
+                }
+            }
         }
-        if let source {
-            source.cancel()
-        } else if activeFD >= 0 {
-            Darwin.close(activeFD)
-        }
+        sourceToCancel?.cancel()
     }
 
     private func sendCommand(_ command: SetActivityCommand) {
-        let activeFD = lock.withLock { fd }
-        guard activeFD >= 0, let data = try? JSONEncoder().encode(command) else { return }
-        if !Self.writeFrame(fd: activeFD, opcode: .frame, payload: data) {
+        guard let data = try? JSONEncoder().encode(command) else { return }
+        let sendFailed = ioLock.withLock { () -> Bool in
+            let activeFD = lock.withLock { fd }
+            guard activeFD >= 0 else { return false }
+            return !Self.writeFrame(fd: activeFD, opcode: .frame, payload: data)
+        }
+        if sendFailed {
             disconnect()
         }
     }
@@ -312,7 +336,12 @@ final class DiscordIPCClient {
     }
 
     @discardableResult
-    static func writeFrame(fd: Int32, opcode: Opcode, payload: Data) -> Bool {
+    static func writeFrame(
+        fd: Int32,
+        opcode: Opcode,
+        payload: Data,
+        nonBlocking: Bool = false
+    ) -> Bool {
         var header = Data(capacity: 8 + payload.count)
         var opLE = opcode.rawValue.littleEndian
         var lenLE = UInt32(payload.count).littleEndian
@@ -320,11 +349,12 @@ final class DiscordIPCClient {
         withUnsafeBytes(of: &lenLE) { header.append(contentsOf: $0) }
         header.append(payload)
 
+        let sendFlags: Int32 = nonBlocking ? Int32(MSG_DONTWAIT) : 0
         return header.withUnsafeBytes { rawBuf in
             guard let base = rawBuf.bindMemory(to: UInt8.self).baseAddress else { return true }
             var sent = 0
             while sent < rawBuf.count {
-                let n = Darwin.send(fd, base.advanced(by: sent), rawBuf.count - sent, 0)
+                let n = Darwin.send(fd, base.advanced(by: sent), rawBuf.count - sent, sendFlags)
                 if n > 0 {
                     sent += n
                 } else if n < 0 && errno == EINTR {
@@ -370,12 +400,12 @@ final class DiscordIPCClient {
     }
 }
 
-final class DiscordIPC: @unchecked Sendable {
+final class DiscordIPC: Sendable {
     public static let shared = DiscordIPC()
 
-    private let stateLock = PTUnfairLock()
-    private var rpc: DiscordIPCClient?
-    private var termObserver: NSObjectProtocol?
+    private let rpcState = Mutex<DiscordIPCClient?>(nil)
+    private let observerLock = PTUnfairLock()
+    nonisolated(unsafe) private var termObserver: NSObjectProtocol?
     private static let defaultAppID = ""
 
     func initialize() {
@@ -403,34 +433,40 @@ final class DiscordIPC: @unchecked Sendable {
     }
 
     private func setActiveRPC(_ ipc: DiscordIPCClient) {
-        stateLock.withLock {
-            rpc = ipc
-            installTerminationObserverLocked()
+        rpcState.withLock { $0 = ipc }
+        observerLock.withLock {
+            guard termObserver == nil else { return }
+            termObserver = NotificationCenter.default.addObserver(
+                forName: NSNotification.Name(rawValue: "NSApplicationWillTerminateNotification"),
+                object: nil,
+                queue: nil
+            ) { [weak self] _ in
+                self?.shutdown()
+            }
         }
     }
 
     func shutdown() {
-        let activeRPC = stateLock.withLock { () -> DiscordIPCClient? in
-            let activeRPC = rpc
+        let activeRPC = rpcState.withLock { rpc -> DiscordIPCClient? in
+            let current = rpc
             rpc = nil
+            return current
+        }
+        observerLock.withLock {
             if let observer = termObserver {
                 NotificationCenter.default.removeObserver(observer)
                 termObserver = nil
             }
-            return activeRPC
         }
-        activeRPC?.clearPresence()
-        activeRPC?.disconnect()
-    }
-
-    private func installTerminationObserverLocked() {
-        guard termObserver == nil else { return }
-        termObserver = NotificationCenter.default.addObserver(
-            forName: NSNotification.Name(rawValue: "NSApplicationWillTerminateNotification"),
-            object: nil,
-            queue: nil
-        ) { [weak self] _ in
-            self?.shutdown()
+        guard let activeRPC else { return }
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .utility).async {
+            activeRPC.clearPresence()
+            activeRPC.disconnect()
+            finished.signal()
+        }
+        if finished.wait(timeout: .now() + 0.25) == .timedOut {
+            activeRPC.disconnect()
         }
     }
 

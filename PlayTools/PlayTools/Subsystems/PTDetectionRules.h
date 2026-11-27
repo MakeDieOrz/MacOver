@@ -50,6 +50,26 @@ pt_is_hidden_swift_mangled_type_name_cstr(const char *typeNameStart, size_t type
 __attribute__((visibility("hidden"))) bool pt_is_hidden_swift_qualified_token_cstr(const char *tok, size_t len,
                                                                                    bool compat13_7);
 
+__attribute__((visibility("hidden"))) bool pt_is_hidden_sysctl_name_cstr(const char *name, bool compat13_7,
+                                                                         uint32_t e_cores);
+__attribute__((visibility("hidden"))) uint64_t pt_sanitize_osvariant_status_u64(uint64_t raw_status);
+__attribute__((visibility("hidden"))) uint64_t pt_spoofed_l1d_cache_size_u64(uint32_t max_apple_gpu_family,
+                                                                             bool is_e_core);
+__attribute__((visibility("hidden"))) uint64_t pt_spoofed_l1i_cache_size_u64(uint32_t max_apple_gpu_family,
+                                                                             bool is_e_core);
+__attribute__((visibility("hidden"))) void
+pt_spoofed_l2_cache_sizes_u64(uint32_t max_apple_gpu_family, const char *model, uint64_t *out_p_l2, uint64_t *out_e_l2);
+__attribute__((visibility("hidden"))) void pt_sanitize_io_hardware_name_cstr(char *buf, size_t cap,
+                                                                             const char *lower_soc, const char *gpu_gen,
+                                                                             const char *oem_id, const char *gpu_arch,
+                                                                             bool compat13_7);
+__attribute__((visibility("hidden"))) bool pt_is_app_embedded_bundle_path_cstr(const char *path);
+__attribute__((visibility("hidden"))) bool pt_is_post13_7_framework_path_cstr(const char *path);
+__attribute__((visibility("hidden"))) bool pt_collapse_macos_framework_versions_in_place_cstr(char *work, size_t cap);
+__attribute__((visibility("hidden"))) bool pt_is_dirty_code_resources_key_cstr(const char *key);
+__attribute__((visibility("hidden"))) bool pt_is_sensitive_unix_socket_token_cstr(const char *sun_path);
+__attribute__((visibility("hidden"))) bool pt_is_icu_age_post_13_7_c(uint8_t major, uint8_t minor);
+
 #ifdef __cplusplus
 }
 #endif

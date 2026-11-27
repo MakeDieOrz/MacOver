@@ -158,128 +158,40 @@ static inline BOOL pt_sysctl_resolve_is_sys(const void *caller, int *inout_is_sy
 }
 
 static uint64_t pt_get_spoofed_l1d_cache_size(const pt_device_profile_t *profile) {
-    if (profile != NULL) {
-        if (profile->max_apple_gpu_family <= 1003) {
-            return 32768ULL;
-        }
-        if (profile->max_apple_gpu_family <= 1006) {
-            return 65536ULL;
-        }
-    }
-    return 131072ULL;
+    uint32_t gpu_family = (profile != NULL) ? (uint32_t)profile->max_apple_gpu_family : 1008U;
+    return pt_spoofed_l1d_cache_size_u64(gpu_family, false);
 }
 
 static uint64_t pt_get_spoofed_l1i_cache_size(const pt_device_profile_t *profile, BOOL is_e_core) {
-    if (is_e_core) {
-        if (profile != NULL && profile->max_apple_gpu_family <= 1006) {
-            return 65536ULL;
-        }
-        return 131072ULL;
-    }
-    if (profile != NULL) {
-        if (profile->max_apple_gpu_family <= 1003) {
-            return 65536ULL;
-        }
-        if (profile->max_apple_gpu_family <= 1006) {
-            return 131072ULL;
-        }
-    }
-    return 196608ULL;
+    uint32_t gpu_family = (profile != NULL) ? (uint32_t)profile->max_apple_gpu_family : 1008U;
+    return pt_spoofed_l1i_cache_size_u64(gpu_family, is_e_core ? true : false);
 }
 
 static uint64_t pt_get_spoofed_l1d_cache_size_for_level(const pt_device_profile_t *profile, BOOL is_e_core) {
-    if (is_e_core) {
-        if (profile != NULL && profile->max_apple_gpu_family <= 1006) {
-            return 32768ULL;
-        }
-        return 65536ULL;
-    }
-    return pt_get_spoofed_l1d_cache_size(profile);
+    uint32_t gpu_family = (profile != NULL) ? (uint32_t)profile->max_apple_gpu_family : 1008U;
+    return pt_spoofed_l1d_cache_size_u64(gpu_family, is_e_core ? true : false);
 }
 
 static void pt_get_spoofed_l2_cache_sizes(const pt_device_profile_t *profile,
                                           uint64_t *out_p_l2,
                                           uint64_t *out_e_l2) {
-    uint64_t p_l2 = 16ULL << 20;
-    uint64_t e_l2 = 4ULL << 20;
-    if (profile != NULL) {
-        if (profile->max_apple_gpu_family <= 1003) {
-            p_l2 = 3ULL << 20;
-            e_l2 = 0ULL;
-        } else if (profile->max_apple_gpu_family <= 1006) {
-            p_l2 = 8ULL << 20;
-            e_l2 = 4ULL << 20;
-        } else if (profile->max_apple_gpu_family == 1007 ||
-                   strcmp(profile->model, "iPhone14,3") == 0) {
-            p_l2 = 12ULL << 20;
-            e_l2 = 4ULL << 20;
-        }
-    }
-    if (out_p_l2 != NULL) {
-        *out_p_l2 = p_l2;
-    }
-    if (out_e_l2 != NULL) {
-        *out_e_l2 = e_l2;
-    }
+    uint32_t gpu_family = (profile != NULL) ? (uint32_t)profile->max_apple_gpu_family : 1008U;
+    const char *model = (profile != NULL) ? profile->model : NULL;
+    pt_spoofed_l2_cache_sizes_u64(gpu_family, model, out_p_l2, out_e_l2);
 }
 
 static BOOL pt_is_hidden_sysctl_name(const char *name) {
     if (name == NULL || name[0] == '\0') {
         return NO;
     }
-    if (strcmp(name, "sysctl.proc_translated") == 0 ||
-        strcmp(name, "sysctl.proc_native") == 0 ||
-        strcmp(name, "sysctl.proc_cputype") == 0 ||
-        strcmp(name, "kern.iossupportversion") == 0 ||
-        strncmp(name, "kern.hibernate", 14) == 0 ||
-        strncmp(name, "kern.hv.", 8) == 0 ||
-        strncmp(name, "kern.dtrace.", 12) == 0 ||
-        strcmp(name, "kern.singleuser") == 0 ||
-        strcmp(name, "kern.safeboot") == 0 ||
-        strcmp(name, "kern.willshutdown") == 0 ||
-        strcmp(name, "kern.waketime") == 0 ||
-        strcmp(name, "kern.sleeptime") == 0 ||
-        strcmp(name, "kern.darkboot") == 0 ||
-        strcmp(name, "kern.minimalboot") == 0 ||
-        strcmp(name, "kern.aotmode") == 0 ||
-        strcmp(name, "kern.aotmodebits") == 0 ||
-        strcmp(name, "kern.lowpowerwake") == 0 ||
-        strcmp(name, "kern.bootsignature") == 0 ||
-        strcmp(name, "kern.system_version_compat") == 0 ||
-        strcmp(name, "kern.osproductversioncompat") == 0 ||
-        strcmp(name, "kern.drivercorefile") == 0 ||
-        strcmp(name, "kern.kdp_corefile") == 0 ||
-        strcmp(name, "hw.use_kernelmanagerd") == 0 ||
-        strcmp(name, "hw.features.allows_security_research") == 0 ||
-        strcmp(name, "hw.ephemeral_storage") == 0 ||
-        strcmp(name, "hw.use_recovery_securityd") == 0 ||
-        strcmp(name, "vm.swapusage") == 0 ||
-        strcmp(name, "vm.darkwake_mode") == 0 ||
-        strncmp(name, "vm.compressor.swapper.", 22) == 0 ||
-        strncmp(name, "vm.compressor_swapout", 21) == 0 ||
-        strncmp(name, "vm.compressor_swapper_", 22) == 0 ||
-        strncmp(name, "security.mac.sandbox.", 21) == 0 ||
-        strncmp(name, "security.mac.asp.", 17) == 0 ||
-        strncmp(name, "security.mac.endpointsecurity.", 30) == 0 ||
-        strncmp(name, "security.mac.qtn.", 17) == 0 ||
-        (strncmp(name, "security.mac.amfi.", 18) == 0 &&
-         strcmp(name, "security.mac.amfi.developer_mode_status") != 0)) {
-        return YES;
-    }
-    if (strncmp(name, "hw.perflevel1.", 14) == 0 &&
-        pt_get_active_device_profile()->e_cores == 0) {
-        return YES;
-    }
-    if (pt_is_compat13_7_active()) {
-        if (strncmp(name, "hw.optional.arm.", 16) == 0 ||
-            strcmp(name, "kern.osproductversioncompat") == 0 ||
-            strcmp(name, "hw.nperflevels") == 0 ||
-            strncmp(name, "hw.perflevel0.", 14) == 0 ||
-            strncmp(name, "hw.perflevel1.", 14) == 0) {
-            return YES;
-        }
-    }
-    return NO;
+    uint32_t e_cores = (strncmp(name, "hw.perflevel1.", 14) == 0)
+        ? (uint32_t)pt_get_active_device_profile()->e_cores
+        : 1U;
+    return pt_is_hidden_sysctl_name_cstr(
+        name,
+        pt_is_compat13_7_active() ? true : false,
+        e_cores
+    ) ? YES : NO;
 }
 
 static int pt_get_spoofed_cpusubfamily(const pt_device_profile_t *profile) {
@@ -611,10 +523,7 @@ static BOOL pt_handle_sysctl_name_inner(const char *name,
             size_t rlen = sizeof(raw_status);
             (void)sysctlbyname("kern.osvariant_status", &raw_status, &rlen, NULL, 0);
             errno = saved_errno;
-            // Preserve header/version bits [32..63], fixed sentinel bits [28..31] (0xF),
-            // and every 2-bit pair's "known" bit (odd bits in [0..27]), while clearing
-            // every 2-bit pair's "value" bit (even bits in [0..27]) for consumer iOS release.
-            uint64_t consumer_ios_status = raw_status & ~0x0000000005555555ULL;
+            uint64_t consumer_ios_status = pt_sanitize_osvariant_status_u64(raw_status);
             *out_ret = pt_write_sysctl_uint64(oldp, oldlenp, (newlen > 0) ? newp : NULL, consumer_ios_status);
             return YES;
         }

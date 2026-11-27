@@ -666,10 +666,18 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
         var primaryClauses: [String] = []
         var primaryBindVals: [CFTypeRef] = []
         var hasNullPrimary = false
+        var usesDefaultAccessGroup = false
+        let defGroup = currentDefaultAccessGroup()
         for col in primaryColumns {
             if let val = normalized[col], !(val is NSNull), Self.isEncodableValue(val) {
-                primaryClauses.append("\(col) = ?")
-                primaryBindVals.append(val as CFTypeRef)
+                if (col as String) == "agrp", let defGroup, (val as? String) == defGroup {
+                    usesDefaultAccessGroup = true
+                    primaryClauses.append("(agrp = ? OR agrp IS NULL)")
+                    primaryBindVals.append(val as CFTypeRef)
+                } else {
+                    primaryClauses.append("\(col) = ?")
+                    primaryBindVals.append(val as CFTypeRef)
+                }
             } else {
                 hasNullPrimary = true
                 primaryClauses.append("\(col) IS NULL")
@@ -692,7 +700,7 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
                 return false
             }
 
-            if hasNullPrimary {
+            if hasNullPrimary || usesDefaultAccessGroup {
                 if let dupStmt = preparedStatement(for: dupCheckSQL, in: sqlite3DB) {
                     let bound = bindValues(primaryBindVals, to: dupStmt, in: sqlite3DB, context: "check duplicate")
                     let exists = bound && (sqlite3_step(dupStmt) == SQLITE_ROW)
@@ -735,15 +743,19 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
                     let rowID = sqlite3_last_insert_rowid(sqlite3DB)
                     let generatedRef = Self.makePersistentRef(tableName: tableName, rowID: rowID)
                     let refSQL = "UPDATE \(tableName) SET \(pRefKey) = ? WHERE rowid = ?"
-                    guard let refStmt = preparedStatement(for: refSQL, in: sqlite3DB),
-                          encodeData(stmt: refStmt, index: 1, value: generatedRef as CFData),
+                    guard let refStmt = preparedStatement(for: refSQL, in: sqlite3DB) else {
+                        sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
+                        finalStatus = errSecIO
+                        return false
+                    }
+                    defer { sqlite3_reset(refStmt) }
+                    guard encodeData(stmt: refStmt, index: 1, value: generatedRef as CFData),
                           sqlite3_bind_int64(refStmt, 2, rowID) == SQLITE_OK,
                           sqlite3_step(refStmt) == SQLITE_DONE else {
                         sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
                         finalStatus = errSecIO
                         return false
                     }
-                    sqlite3_reset(refStmt)
                     newDict[pRefKey] = generatedRef
                 }
                 guard sqlite3_exec(sqlite3DB, "COMMIT", nil, nil, nil) == SQLITE_OK else {
@@ -906,6 +918,7 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
 
                 for (rowID, currentPKs) in matchedRows {
                     if anyPKUpdated {
+                        let defGroup = currentDefaultAccessGroup()
                         var dupClauses: [String] = []
                         var dupVals: [CFTypeRef] = []
                         for (idx, pkCol) in pkNames.enumerated() {
@@ -916,8 +929,13 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
                                 effectiveVal = currentPKs[idx]
                             }
                             if let val = effectiveVal {
-                                dupClauses.append("\(pkCol) = ?")
-                                dupVals.append(val)
+                                if pkCol == "agrp", let defGroup, (val as? String) == defGroup {
+                                    dupClauses.append("(agrp = ? OR agrp IS NULL)")
+                                    dupVals.append(val)
+                                } else {
+                                    dupClauses.append("\(pkCol) = ?")
+                                    dupVals.append(val)
+                                }
                             } else {
                                 dupClauses.append("\(pkCol) IS NULL")
                             }

@@ -12,13 +12,7 @@ __attribute__((visibility("hidden"))) BOOL pt_is_sensitive_unix_socket_path(cons
     if (sun_path == NULL || sun_path[0] == '\0') {
         return NO;
     }
-    if (strstr(sun_path, "/var/folders/") != NULL ||
-        strstr(sun_path, "com.apple.launchd") != NULL ||
-        strstr(sun_path, "discord-ipc") != NULL ||
-        strcasestr(sun_path, "PlayCover") != NULL ||
-        strcasestr(sun_path, "PlayTools") != NULL ||
-        strcasestr(sun_path, "MacOver") != NULL ||
-        strcasestr(sun_path, "app.makedie") != NULL) {
+    if (pt_is_sensitive_unix_socket_token_cstr(sun_path)) {
         return YES;
     }
     char vout[PATH_MAX];
@@ -1470,12 +1464,30 @@ static int pt_scandir_b(const char *dirname,
     return pt_finish_scandir_results(namelist, count, dirname, -1, NULL, NULL, select_blk, compar_blk, caller, is_sys_caller);
 }
 
+extern int pt_orig_scandirat(int, const char *, struct dirent ***, int (*)(const struct dirent *),
+                             int (*)(const struct dirent **, const struct dirent **))
+    __asm("_scandirat") __attribute__((weak_import));
+extern int pt_orig_scandirat_b(int, const char *, struct dirent ***, int (^)(const struct dirent *),
+                               int (^)(const struct dirent **, const struct dirent **))
+    __asm("_scandirat_b") __attribute__((weak_import));
+extern int pt_orig_fdscandir(int, struct dirent ***, int (*)(const struct dirent *),
+                             int (*)(const struct dirent **, const struct dirent **))
+    __asm("_fdscandir") __attribute__((weak_import));
+extern int pt_orig_fdscandir_b(int, struct dirent ***, int (^)(const struct dirent *),
+                               int (^)(const struct dirent **, const struct dirent **))
+    __asm("_fdscandir_b") __attribute__((weak_import));
+
 static int pt_scandirat(int dirfd,
                         const char *dirname,
                         struct dirent ***namelist,
                         int (*select_fn)(const struct dirent *),
                         int (*compar_fn)(const struct dirent **, const struct dirent **)) {
     const void *caller = __builtin_return_address(0);
+    BOOL is_sys_early = pt_is_effective_system_or_playtools_caller(caller);
+    if (!is_sys_early && pt_is_bypass_enabled() && pt_is_compat13_7_active()) {
+        errno = ENOSYS;
+        return -1;
+    }
     if (pt_fd_is_sensitive(dirfd, caller)) {
         errno = EBADF;
         return -1;
@@ -1492,16 +1504,14 @@ static int pt_scandirat(int dirfd,
         return -1;
     }
     if (is_sys_caller < 0) {
-        is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
+        is_sys_caller = is_sys_early ? 1 : 0;
     }
     BOOL app_bypass = (is_sys_caller == 0 && pt_is_bypass_enabled());
-    int count = -1;
-    if (@available(macCatalyst 26.4, iOS 26.4, *)) {
-        count = scandirat(dirfd, dirname, namelist, app_bypass ? NULL : select_fn, app_bypass ? NULL : compar_fn);
-    } else {
+    if (&pt_orig_scandirat == NULL) {
         errno = ENOSYS;
         return -1;
     }
+    int count = pt_orig_scandirat(dirfd, dirname, namelist, app_bypass ? NULL : select_fn, app_bypass ? NULL : compar_fn);
     if (!app_bypass) {
         return count;
     }
@@ -1515,6 +1525,11 @@ static int pt_scandirat_b(int dirfd,
                           int (^select_blk)(const struct dirent *),
                           int (^compar_blk)(const struct dirent **, const struct dirent **)) {
     const void *caller = __builtin_return_address(0);
+    BOOL is_sys_early = pt_is_effective_system_or_playtools_caller(caller);
+    if (!is_sys_early && pt_is_bypass_enabled() && pt_is_compat13_7_active()) {
+        errno = ENOSYS;
+        return -1;
+    }
     if (pt_fd_is_sensitive(dirfd, caller)) {
         errno = EBADF;
         return -1;
@@ -1531,16 +1546,14 @@ static int pt_scandirat_b(int dirfd,
         return -1;
     }
     if (is_sys_caller < 0) {
-        is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
+        is_sys_caller = is_sys_early ? 1 : 0;
     }
     BOOL app_bypass = (is_sys_caller == 0 && pt_is_bypass_enabled());
-    int count = -1;
-    if (@available(macCatalyst 26.4, iOS 26.4, *)) {
-        count = scandirat_b(dirfd, dirname, namelist, app_bypass ? nil : select_blk, app_bypass ? nil : compar_blk);
-    } else {
+    if (&pt_orig_scandirat_b == NULL) {
         errno = ENOSYS;
         return -1;
     }
+    int count = pt_orig_scandirat_b(dirfd, dirname, namelist, app_bypass ? nil : select_blk, app_bypass ? nil : compar_blk);
     if (!app_bypass) {
         return count;
     }
@@ -1553,19 +1566,21 @@ static int pt_fdscandir(int dirfd,
                         int (*select_fn)(const struct dirent *),
                         int (*compar_fn)(const struct dirent **, const struct dirent **)) {
     const void *caller = __builtin_return_address(0);
+    BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
+    if (!is_sys && pt_is_bypass_enabled() && pt_is_compat13_7_active()) {
+        errno = ENOSYS;
+        return -1;
+    }
     if (pt_fd_is_sensitive(dirfd, caller)) {
         errno = EBADF;
         return -1;
     }
-    BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
     BOOL app_bypass = (!is_sys && pt_is_bypass_enabled());
-    int count = -1;
-    if (@available(macCatalyst 26.4, iOS 26.4, *)) {
-        count = fdscandir(dirfd, namelist, app_bypass ? NULL : select_fn, app_bypass ? NULL : compar_fn);
-    } else {
+    if (&pt_orig_fdscandir == NULL) {
         errno = ENOSYS;
         return -1;
     }
+    int count = pt_orig_fdscandir(dirfd, namelist, app_bypass ? NULL : select_fn, app_bypass ? NULL : compar_fn);
     if (!app_bypass) {
         return count;
     }
@@ -1577,19 +1592,21 @@ static int pt_fdscandir_b(int dirfd,
                           int (^select_blk)(const struct dirent *),
                           int (^compar_blk)(const struct dirent **, const struct dirent **)) {
     const void *caller = __builtin_return_address(0);
+    BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
+    if (!is_sys && pt_is_bypass_enabled() && pt_is_compat13_7_active()) {
+        errno = ENOSYS;
+        return -1;
+    }
     if (pt_fd_is_sensitive(dirfd, caller)) {
         errno = EBADF;
         return -1;
     }
-    BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
     BOOL app_bypass = (!is_sys && pt_is_bypass_enabled());
-    int count = -1;
-    if (@available(macCatalyst 26.4, iOS 26.4, *)) {
-        count = fdscandir_b(dirfd, namelist, app_bypass ? nil : select_blk, app_bypass ? nil : compar_blk);
-    } else {
+    if (&pt_orig_fdscandir_b == NULL) {
         errno = ENOSYS;
         return -1;
     }
+    int count = pt_orig_fdscandir_b(dirfd, namelist, app_bypass ? nil : select_blk, app_bypass ? nil : compar_blk);
     if (!app_bypass) {
         return count;
     }
@@ -1696,13 +1713,10 @@ PT_INTERPOSE(pt_readdir_r, readdir_r)
 #pragma clang diagnostic pop
 PT_INTERPOSE(pt_scandir, scandir)
 PT_INTERPOSE(pt_scandir_b, scandir_b)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunguarded-availability-new"
-PT_INTERPOSE(pt_scandirat, scandirat)
-PT_INTERPOSE(pt_scandirat_b, scandirat_b)
-PT_INTERPOSE(pt_fdscandir, fdscandir)
-PT_INTERPOSE(pt_fdscandir_b, fdscandir_b)
-#pragma clang diagnostic pop
+PT_INTERPOSE_WEAK_NAMED_FLAGS(pt_scandirat, pt_orig_scandirat, "scandirat", PT_DLSYM_FLAG_HIDE_IN_COMPAT13_7)
+PT_INTERPOSE_WEAK_NAMED_FLAGS(pt_scandirat_b, pt_orig_scandirat_b, "scandirat_b", PT_DLSYM_FLAG_HIDE_IN_COMPAT13_7)
+PT_INTERPOSE_WEAK_NAMED_FLAGS(pt_fdscandir, pt_orig_fdscandir, "fdscandir", PT_DLSYM_FLAG_HIDE_IN_COMPAT13_7)
+PT_INTERPOSE_WEAK_NAMED_FLAGS(pt_fdscandir_b, pt_orig_fdscandir_b, "fdscandir_b", PT_DLSYM_FLAG_HIDE_IN_COMPAT13_7)
 PT_INTERPOSE(pt_mkdir, mkdir)
 PT_INTERPOSE(pt_mkdirat, mkdirat)
 PT_INTERPOSE(pt_mkpath_np, mkpath_np)

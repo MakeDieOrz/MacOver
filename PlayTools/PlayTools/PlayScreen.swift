@@ -4,6 +4,7 @@
 //
 import Foundation
 import ObjectiveC.runtime
+import Synchronization
 import UIKit
 
 let screen = PlayScreen.shared
@@ -99,7 +100,7 @@ extension UIScreen {
 public final class PlayScreen: NSObject, @unchecked Sendable {
     @objc public static let shared = PlayScreen()
 
-    private final class BoundsState: @unchecked Sendable {
+    private struct BoundsState: Sendable {
         weak var cachedWindow: UIWindow?
         var lastKnownWindowBounds: CGRect = .zero
         var lastMainKnownBounds: CGRect = .zero
@@ -107,8 +108,7 @@ public final class PlayScreen: NSObject, @unchecked Sendable {
         var lastAppliedStrictFitViewportKey: PTStrictViewportFocusKey?
     }
 
-    private static let boundsLock = PTUnfairLock()
-    private static let boundsState = BoundsState()
+    private static let boundsState = Mutex(BoundsState())
 
     @MainActor
     private static func resolveActiveScreenBounds(preferredWindow: UIWindow? = nil) -> CGRect {
@@ -137,14 +137,17 @@ public final class PlayScreen: NSObject, @unchecked Sendable {
         if let fallbackSceneBounds {
             return fallbackSceneBounds
         }
+        let cached = boundsState.withLock { $0.cachedMainScreenRect }
+        if cached.width > 1, cached.height > 1 {
+            return cached
+        }
+        if mainScreenWidth > 1, mainScreenHeight > 1 {
+            return CGRect(x: 0, y: 0, width: mainScreenWidth, height: mainScreenHeight)
+        }
         if let akFrame = AKInterface.shared?.mainScreenFrame,
            akFrame.width > 1,
            akFrame.height > 1 {
             return akFrame
-        }
-        let cached = boundsLock.withLock { boundsState.cachedMainScreenRect }
-        if cached.width > 1, cached.height > 1 {
-            return cached
         }
         return CGRect(x: 0, y: 0, width: mainScreenWidth, height: mainScreenHeight)
     }
@@ -196,8 +199,8 @@ public final class PlayScreen: NSObject, @unchecked Sendable {
               Self.isValidWindowBounds(window) else {
             return
         }
-        Self.boundsLock.withLock {
-            Self.boundsState.cachedWindow = window
+        Self.boundsState.withLock {
+            $0.cachedWindow = window
         }
         let isStrict = PlaySettings.shared.strictEmulationMode
         if self.resizable || isStrict, let windowScene = window.windowScene {
@@ -223,13 +226,13 @@ public final class PlayScreen: NSObject, @unchecked Sendable {
             targetSize: targetSize,
             screenFrame: akInterface.mainScreenFrame
         )
-        let shouldApplySize = Self.boundsLock.withLock {
+        let shouldApplySize = Self.boundsState.withLock { state in
             let decision = PTStrictViewportFocusPolicy.shouldApplyContentSizeOnFocus(
                 isStrictEmulationMode: isStrict,
-                lastAppliedFitScreenKey: Self.boundsState.lastAppliedStrictFitViewportKey,
+                lastAppliedFitScreenKey: state.lastAppliedStrictFitViewportKey,
                 currentKey: currentKey
             )
-            Self.boundsState.lastAppliedStrictFitViewportKey = decision.nextAppliedFitScreenKey
+            state.lastAppliedStrictFitViewportKey = decision.nextAppliedFitScreenKey
             return decision.shouldApply
         }
         if shouldApplySize {
@@ -249,8 +252,8 @@ public final class PlayScreen: NSObject, @unchecked Sendable {
 
     private static func updateCachedScreenRect(_ rect: CGRect) {
         guard rect.width > 1, rect.height > 1 else { return }
-        boundsLock.withLock {
-            boundsState.cachedMainScreenRect = rect
+        boundsState.withLock {
+            $0.cachedMainScreenRect = rect
         }
     }
 
@@ -302,8 +305,8 @@ public final class PlayScreen: NSObject, @unchecked Sendable {
             Self.updateCachedScreenRect(b)
             return b
         }
-        let (cached, fallbackWin) = Self.boundsLock.withLock {
-            (Self.boundsState.cachedMainScreenRect, Self.boundsState.lastKnownWindowBounds)
+        let (cached, fallbackWin) = Self.boundsState.withLock {
+            ($0.cachedMainScreenRect, $0.lastKnownWindowBounds)
         }
         if cached.width > 1, cached.height > 1 {
             return cached
@@ -519,7 +522,7 @@ public final class PlayScreen: NSObject, @unchecked Sendable {
         }
         if Thread.isMainThread {
             if let winBounds = MainActor.assumeIsolated({ () -> CGRect? in
-                let cachedWin = boundsLock.withLock { boundsState.cachedWindow }
+                let cachedWin = boundsState.withLock { $0.cachedWindow }
                 if let cw = cachedWin,
                    !cw.isHidden,
                    cw.isKeyWindow,
@@ -530,7 +533,7 @@ public final class PlayScreen: NSObject, @unchecked Sendable {
                     }
                 }
                 if let resolved = PlayScreen.shared.primaryWindow {
-                    boundsLock.withLock { boundsState.cachedWindow = resolved }
+                    boundsState.withLock { $0.cachedWindow = resolved }
                     let b = resolved.bounds
                     if b.width > 1, b.height > 1 {
                         return b
@@ -538,22 +541,22 @@ public final class PlayScreen: NSObject, @unchecked Sendable {
                 }
                 return nil
             }) {
-                boundsLock.withLock {
-                    if winBounds != boundsState.lastMainKnownBounds {
-                        boundsState.lastMainKnownBounds = winBounds
-                        boundsState.lastKnownWindowBounds = winBounds
-                        boundsState.cachedMainScreenRect = winBounds
+                boundsState.withLock { state in
+                    if winBounds != state.lastMainKnownBounds {
+                        state.lastMainKnownBounds = winBounds
+                        state.lastKnownWindowBounds = winBounds
+                        state.cachedMainScreenRect = winBounds
                     }
                 }
                 return winBounds
             }
 
-            let lastMain = boundsLock.withLock { boundsState.lastMainKnownBounds }
+            let lastMain = boundsState.withLock { $0.lastMainKnownBounds }
             if lastMain.width > 1, lastMain.height > 1 {
                 return lastMain
             }
         } else {
-            let cached = boundsLock.withLock { boundsState.lastKnownWindowBounds }
+            let cached = boundsState.withLock { $0.lastKnownWindowBounds }
             if cached.width > 1, cached.height > 1 {
                 return cached
             }

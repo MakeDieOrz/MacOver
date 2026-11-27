@@ -1911,6 +1911,9 @@ static void *pt_cfbundle_filter_symbol_ptr(void *orig_ptr, CFStringRef symName) 
         return NULL;
     }
     void *routed = pt_route_dlsym_symbol_for_app(sstr);
+    if (routed == PT_DLSYM_HIDDEN_SENTINEL) {
+        return NULL;
+    }
     return (routed != NULL) ? routed : orig_ptr;
 }
 

@@ -1921,7 +1921,7 @@ static BOOL pt_icu_codepoint_post_unicode_12_1(int32_t c) {
     }
     uint8_t age[4] = {0, 0, 0, 0};
     pt_orig_u_charAge(c, age);
-    return (age[0] > 12U || (age[0] == 12U && age[1] > 1U));
+    return pt_is_icu_age_post_13_7_c(age[0], age[1]) ? YES : NO;
 }
 
 static void pt_u_charAge(int32_t c, uint8_t versionArray[4]) {
@@ -1934,7 +1934,7 @@ static void pt_u_charAge(int32_t c, uint8_t versionArray[4]) {
         pt_is_compat13_7_active() &&
         pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        if (versionArray[0] > 12U || (versionArray[0] == 12U && versionArray[1] > 1U)) {
+        if (pt_is_icu_age_post_13_7_c(versionArray[0], versionArray[1])) {
             memset(versionArray, 0, 4U);
         }
     }

@@ -1402,8 +1402,8 @@ __attribute__((visibility("hidden"))) void ps_install_coretelephony_hooks_if_loa
 static CFDictionaryRef pt_CFNetworkCopySystemProxySettings(void) {
     const void *caller = __builtin_return_address(0);
     PSNetworkRuleSnapshot *snap = [PTSafeMode isActive] ? nil : ps_get_network_snapshot();
-    if (snap != nil && snap.hideProxyFromApp && pt_is_bypass_enabled() &&
-        !ps_is_effective_system_or_playtools_caller(caller)) {
+    if (snap != nil && snap.hideProxyFromApp && snap.activeProxyDictionary.count > 0 &&
+        pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(caller)) {
         return CFDictionaryCreateCopy(kCFAllocatorDefault, (__bridge CFDictionaryRef)@{});
     }
     CFDictionaryRef orig = CFNetworkCopySystemProxySettings();
@@ -1446,8 +1446,8 @@ static CFDictionaryRef pt_CFNetworkCopySystemProxySettings(void) {
 static CFArrayRef pt_CFNetworkCopyProxiesForURL(CFURLRef url, CFDictionaryRef proxySettings) {
     const void *caller = __builtin_return_address(0);
     PSNetworkRuleSnapshot *snap = [PTSafeMode isActive] ? nil : ps_get_network_snapshot();
-    if (snap != nil && snap.hideProxyFromApp && pt_is_bypass_enabled() &&
-        !ps_is_effective_system_or_playtools_caller(caller)) {
+    if (snap != nil && snap.hideProxyFromApp && snap.activeProxyDictionary.count > 0 &&
+        pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(caller)) {
         NSArray *hidden = @[ @{ (__bridge NSString *)kCFProxyTypeKey: (__bridge NSString *)kCFProxyTypeNone } ];
         return CFArrayCreateCopy(kCFAllocatorDefault, (__bridge CFArrayRef)hidden);
     }

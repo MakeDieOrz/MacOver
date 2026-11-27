@@ -214,16 +214,11 @@ final class Toast {
         if lastUse > Float(Date.now.addingTimeInterval(-86400*14).timeIntervalSinceReferenceDate) {
             return
         }
-        Toast.showHint(title: NSLocalizedString("hint.mouseMapping.title",
-                                                tableName: "Playtools",
-                                                value: "Mouse mapping disabled", comment: ""),
-                       text: [NSLocalizedString("hint.mouseMapping.content.before",
-                                                tableName: "Playtools",
-                                                value: "Press", comment: ""),
+        Toast.showHint(title: playToolsLocalizedString("hint.mouseMapping.title", value: "Mouse mapping disabled"),
+                       text: [playToolsLocalizedString("hint.mouseMapping.content.before", value: "Press"),
                               " option ⌥ ",
-                              NSLocalizedString("hint.mouseMapping.content.after",
-                                                tableName: "Playtools",
-                                                value: "to enable mouse mapping", comment: "")],
+                              playToolsLocalizedString("hint.mouseMapping.content.after",
+                                                       value: "to enable mouse mapping")],
                        timeout: 10,
                        notification: NSNotification.Name.playtoolsCursorWillHide)
         let center = Toast.internalNotificationCenter
@@ -235,16 +230,11 @@ final class Toast {
                     MainActor.assumeIsolated {
                         observerBox.remove(from: center)
                     }
-                    Toast.showHint(title: NSLocalizedString("hint.showCursor.title",
-                                                            tableName: "Playtools",
-                                                            value: "Cursor locked", comment: ""),
-                                   text: [NSLocalizedString("hint.showCursor.content.before",
-                                                            tableName: "Playtools",
-                                                            value: "Press", comment: ""),
+                    Toast.showHint(title: playToolsLocalizedString("hint.showCursor.title", value: "Cursor locked"),
+                                   text: [playToolsLocalizedString("hint.showCursor.content.before", value: "Press"),
                                           " option ⌥ ",
-                                          NSLocalizedString("hint.showCursor.content.after",
-                                                            tableName: "Playtools",
-                                                            value: "to unlock cursor", comment: "")],
+                                          playToolsLocalizedString("hint.showCursor.content.after",
+                                                                   value: "to unlock cursor")],
                                    timeout: 10,
                                    notification: NSNotification.Name.playtoolsCursorWillShow)
                 }

@@ -729,11 +729,9 @@ extension PlayKeychain {
 
         let classType = query[kSecClass as String] as? String ?? ""
         if wantsData && !wantsAttributes && !wantsRef && !wantsPersistentRef {
-            let values = keychainDicts.compactMap { item -> Any? in
-                guard !isSecureEnclavePrivateKeyItem(item) else { return nil }
-                return item[kSecValueData]
-            }
-            guard values.count == keychainDicts.count else {
+            let exportableItems = keychainDicts.filter { !isSecureEnclavePrivateKeyItem($0) }
+            let values = exportableItems.compactMap { $0[kSecValueData] }
+            guard !values.isEmpty, values.count == exportableItems.count else {
                 return errSecItemNotFound
             }
             result.pointee = Unmanaged.passRetained(values as CFTypeRef)

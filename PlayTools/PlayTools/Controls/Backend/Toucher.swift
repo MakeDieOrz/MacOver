@@ -4,10 +4,11 @@
 //
 
 import Foundation
+import Synchronization
 import UIKit
 
 final class Toucher: Sendable {
-    private final class LogState: @unchecked Sendable {
+    private struct LogState {
         var logEnabled = false
         var logFilePath =
             NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true)[0] + "/toucher.log"
@@ -16,21 +17,20 @@ final class Toucher: Sendable {
         var termObserverInstalled = false
     }
 
-    private static let stateLock = PTUnfairLock()
-    private static let state = LogState()
+    private static let state = Mutex(LogState())
 
     // For debug only
     static var logEnabled: Bool {
-        get { stateLock.withLock { state.logEnabled } }
-        set { stateLock.withLock { state.logEnabled = newValue } }
+        get { state.withLock { $0.logEnabled } }
+        set { state.withLock { $0.logEnabled = newValue } }
     }
     static var logFilePath: String {
-        get { stateLock.withLock { state.logFilePath } }
-        set { stateLock.withLock { state.logFilePath = newValue } }
+        get { state.withLock { $0.logFilePath } }
+        set { state.withLock { $0.logFilePath = newValue } }
     }
     static var logFile: FileHandle? {
-        get { stateLock.withLock { state.logFile } }
-        set { stateLock.withLock { state.logFile = newValue } }
+        get { state.withLock { $0.logFile } }
+        set { state.withLock { $0.logFile = newValue } }
     }
 
     static func clearCachedTargets() {
@@ -92,10 +92,10 @@ final class Toucher: Sendable {
         if FileManager.default.createFile(atPath: path, contents: nil, attributes: nil) {
             let handle = FileHandle(forWritingAtPath: path)
             var shouldInstallObserver = false
-            stateLock.withLock {
-                state.logFile = handle
-                if !state.termObserverInstalled {
-                    state.termObserverInstalled = true
+            state.withLock {
+                $0.logFile = handle
+                if !$0.termObserverInstalled {
+                    $0.termObserverInstalled = true
                     shouldInstallObserver = true
                 }
             }
@@ -106,7 +106,7 @@ final class Toucher: Sendable {
                     object: nil,
                     queue: OperationQueue.main
                 ) { _ in
-                    let closing = stateLock.withLock { () -> FileHandle? in
+                    let closing = state.withLock { state -> FileHandle? in
                         let f = state.logFile
                         state.logFile = nil
                         return f
@@ -132,7 +132,7 @@ final class Toucher: Sendable {
             Toast.showHint(title: "log message is utf8 uncodable")
             return
         }
-        stateLock.withLock {
+        state.withLock { state in
             guard let file = state.logFile else {
                 return
             }

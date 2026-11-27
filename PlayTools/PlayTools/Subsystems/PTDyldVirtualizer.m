@@ -316,17 +316,11 @@ BOOL pt_is_hidden_objc_selector_name(const char *selName) {
 }
 
 __attribute__((visibility("hidden"))) BOOL pt_is_app_embedded_bundle_path(const char *path) {
-    if (path == NULL || path[0] != '/') {
-        return NO;
-    }
-    if (strstr(path, ".app/Frameworks/") != NULL ||
-        strstr(path, ".app/PlugIns/") != NULL ||
-        strstr(path, ".app/Contents/Frameworks/") != NULL ||
-        strstr(path, ".app/Contents/PlugIns/") != NULL ||
-        strstr(path, ".appex/Frameworks/") != NULL) {
+    if (pt_is_app_embedded_bundle_path_cstr(path)) {
         return YES;
     }
-    if (s_real_app_bundle_len > 0 &&
+    if (path != NULL && path[0] == '/' &&
+        s_real_app_bundle_len > 0 &&
         pt_match_prefix_modulo_private(path, s_real_app_bundle_dir, s_real_app_bundle_len) != NULL) {
         return YES;
     }
@@ -1107,21 +1101,10 @@ static const struct mach_header_64 *pt_validated_app_arm64_header_for_addr(uintp
 #endif
 }
 
-__attribute__((visibility("hidden")))
-void pt_dyld_sanitize_got_ptrs_in_vm_read_buffer(uintptr_t read_start, uint8_t *dst, size_t copied) {
-#if defined(__arm64__) || defined(__aarch64__)
-    if (dst == NULL || copied < sizeof(void *) || read_start > UINTPTR_MAX - copied || !pt_is_bypass_enabled()) {
-        return;
-    }
-    uintptr_t read_end = read_start + copied;
-    const struct mach_header_64 *mh64 = pt_validated_app_arm64_header_for_addr(read_start);
-    if (mh64 == NULL) {
-        mh64 = pt_validated_app_arm64_header_for_addr(read_end - 1U);
-    }
-    if (mh64 == NULL) {
-        return;
-    }
-
+static void pt_dyld_sanitize_got_ptrs_for_header(const struct mach_header_64 *mh64,
+                                                 uintptr_t read_start,
+                                                 uintptr_t read_end,
+                                                 uint8_t *dst) {
     const uint8_t *base = (const uint8_t *)mh64;
     size_t total = sizeof(struct mach_header_64) + (size_t)mh64->sizeofcmds;
     size_t off = sizeof(struct mach_header_64);
@@ -1177,25 +1160,100 @@ void pt_dyld_sanitize_got_ptrs_in_vm_read_buffer(uintptr_t read_start, uint8_t *
             uintptr_t s_end = s_addr + s_size;
             uintptr_t ov_start = (read_start > s_addr) ? read_start : s_addr;
             uintptr_t ov_end = (read_end < s_end) ? read_end : s_end;
-            if (ov_start >= ov_end ||
-                ov_end - ov_start < sizeof(void *) ||
-                ov_start > UINTPTR_MAX - (sizeof(void *) - 1U)) {
+            if (ov_start >= ov_end) {
                 continue;
             }
-            uintptr_t slot_addr = (ov_start + (sizeof(void *) - 1U)) & ~(sizeof(void *) - 1U);
-            while (slot_addr <= ov_end - sizeof(void *)) {
-                size_t dst_off = (size_t)(slot_addr - read_start);
-                const void *val = NULL;
-                memcpy(&val, dst + dst_off, sizeof(val));
-                const void *orig = pt_resolve_dyld_interposed_only(val);
-                if (orig != NULL) {
-                    memcpy(dst + dst_off, &orig, sizeof(orig));
+            uintptr_t slot_addr = ov_start & ~(uintptr_t)(sizeof(void *) - 1U);
+            while (slot_addr < ov_end) {
+                uintptr_t slot_end = slot_addr + sizeof(void *);
+                uintptr_t patch_start = (ov_start > slot_addr) ? ov_start : slot_addr;
+                uintptr_t patch_end = (ov_end < slot_end) ? ov_end : slot_end;
+                if (patch_start < patch_end && pt_is_valid_user_pointer((const void *)slot_addr)) {
+                    const void *live_val = NULL;
+                    memcpy(&live_val, (const void *)slot_addr, sizeof(live_val));
+                    const void *orig = pt_resolve_dyld_interposed_only(live_val);
+                    if (orig != NULL) {
+                        uint8_t orig_bytes[sizeof(orig)];
+                        memcpy(orig_bytes, &orig, sizeof(orig_bytes));
+                        size_t slot_off = (size_t)(patch_start - slot_addr);
+                        size_t dst_off = (size_t)(patch_start - read_start);
+                        size_t copy_len = (size_t)(patch_end - patch_start);
+                        memcpy(dst + dst_off, orig_bytes + slot_off, copy_len);
+                    }
                 }
-                if (ov_end - slot_addr < 2U * sizeof(void *)) {
+                if (ov_end - slot_addr <= sizeof(void *)) {
                     break;
                 }
                 slot_addr += sizeof(void *);
             }
+        }
+    }
+}
+
+__attribute__((visibility("hidden")))
+void pt_dyld_sanitize_got_ptrs_in_vm_read_buffer(uintptr_t read_start, uint8_t *dst, size_t copied) {
+#if defined(__arm64__) || defined(__aarch64__)
+    if (dst == NULL || copied == 0U || read_start > UINTPTR_MAX - copied || !pt_is_bypass_enabled()) {
+        return;
+    }
+    uintptr_t read_end = read_start + copied;
+    uint32_t img_count = _dyld_image_count();
+    for (uint32_t idx = 0; idx < img_count; idx++) {
+        const struct mach_header *mh = _dyld_get_image_header(idx);
+        if (mh == NULL) {
+            continue;
+        }
+        const struct mach_header_64 *mh64 = pt_validated_app_arm64_header_for_addr((uintptr_t)mh);
+        if (mh64 == NULL) {
+            continue;
+        }
+        uintptr_t img_lo = UINTPTR_MAX;
+        uintptr_t img_hi = 0;
+        const uint8_t *base = (const uint8_t *)mh64;
+        size_t total = sizeof(struct mach_header_64) + (size_t)mh64->sizeofcmds;
+        size_t off = sizeof(struct mach_header_64);
+        uintptr_t slide = 0;
+        BOOL has_text = NO;
+        for (uint32_t i = 0; i < mh64->ncmds && off + sizeof(struct load_command) <= total; i++) {
+            const struct load_command *lc = (const struct load_command *)(base + off);
+            if (lc->cmdsize < sizeof(struct load_command) || off + lc->cmdsize > total) {
+                break;
+            }
+            if (lc->cmd == LC_SEGMENT_64 && lc->cmdsize >= sizeof(struct segment_command_64)) {
+                const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+                if (strncmp(seg->segname, "__TEXT", 16) == 0) {
+                    slide = (uintptr_t)mh64 - (uintptr_t)seg->vmaddr;
+                    has_text = YES;
+                    break;
+                }
+            }
+            off += lc->cmdsize;
+        }
+        if (!has_text) {
+            continue;
+        }
+        off = sizeof(struct mach_header_64);
+        for (uint32_t i = 0; i < mh64->ncmds && off + sizeof(struct load_command) <= total; i++) {
+            const struct load_command *lc = (const struct load_command *)(base + off);
+            if (lc->cmdsize < sizeof(struct load_command) || off + lc->cmdsize > total) {
+                break;
+            }
+            off += lc->cmdsize;
+            if (lc->cmd != LC_SEGMENT_64 || lc->cmdsize < sizeof(struct segment_command_64)) {
+                continue;
+            }
+            const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+            uintptr_t seg_start = (uintptr_t)seg->vmaddr + slide;
+            uintptr_t seg_len = (uintptr_t)seg->vmsize;
+            if (seg_len == 0 || seg_len > UINTPTR_MAX - seg_start) {
+                continue;
+            }
+            uintptr_t seg_end = seg_start + seg_len;
+            if (seg_start < img_lo) img_lo = seg_start;
+            if (seg_end > img_hi) img_hi = seg_end;
+        }
+        if (img_lo < img_hi && read_start < img_hi && read_end > img_lo) {
+            pt_dyld_sanitize_got_ptrs_for_header(mh64, read_start, read_end, dst);
         }
     }
 #else
@@ -1903,51 +1961,10 @@ extern bool pt_orig_dyld_shared_cache_contains_path(const char *path)
 extern const void *_dyld_get_shared_cache_range(size_t *length) __attribute__((weak_import));
 
 static BOOL pt_path_is_post13_7_framework(const char *path) {
-    if (path == NULL || path[0] == '\0' || pt_is_app_embedded_bundle_path(path)) {
+    if (pt_is_app_embedded_bundle_path(path)) {
         return NO;
     }
-    static const char *const kPost13_7Components[] = {
-        "ExtensionKit.framework",
-        "ExtensionFoundation.framework",
-        "WidgetKit.framework",
-        "TipKit.framework",
-        "AppIntents.framework",
-        "AppTrackingTransparency.framework",
-        "UniformTypeIdentifiers.framework",
-        "Observation.framework",
-        "SwiftData.framework",
-        "ActivityKit.framework",
-        "GroupActivities.framework",
-        "NearbyInteraction.framework",
-        "Charts.framework",
-        "OSLog.framework",
-        "WeatherKit.framework",
-        "MusicKit.framework",
-        "RoomPlan.framework",
-        "WorkoutKit.framework",
-        "Translation.framework",
-        "FamilyControls.framework",
-        "ManagedSettings.framework",
-        "DeviceActivity.framework",
-        "Cinematic.framework",
-        "CoreTransferable.framework",
-        "Spatial.framework",
-        "DockKit.framework",
-        "FinanceKit.framework",
-        "JournalingSuggestions.framework",
-        "SensitiveContentAnalysis.framework",
-        "LockedCameraCapture.framework",
-        "MarketplaceKit.framework",
-        "libswift_Concurrency.dylib",
-        "libswift_StringProcessing.dylib",
-    };
-    const size_t n = sizeof(kPost13_7Components) / sizeof(kPost13_7Components[0]);
-    for (size_t i = 0; i < n; i++) {
-        if (pt_path_has_component(path, kPost13_7Components[i])) {
-            return YES;
-        }
-    }
-    return NO;
+    return pt_is_post13_7_framework_path_cstr(path) ? YES : NO;
 }
 
 __attribute__((visibility("hidden"))) BOOL pt_is_post13_7_hidden_framework_path(const char *path) {

@@ -21,11 +21,9 @@ class JoystickElement: Element {
     func setJoystickMode(mode: JoystickMode) {
         var displayName: String
         if mode == .FIXED {
-            displayName = NSLocalizedString("keymappingEditor.joystickMode.fixed",
-                                            tableName: "Playtools", value: "Fixed Joystick", comment: "")
+            displayName = playToolsLocalizedString("keymappingEditor.joystickMode.fixed", value: "Fixed Joystick")
         } else if mode == .FLOATING {
-            displayName = NSLocalizedString("keymappingEditor.joystickMode.floating",
-                                            tableName: "Playtools", value: "Floating Joystick", comment: "")
+            displayName = playToolsLocalizedString("keymappingEditor.joystickMode.floating", value: "Floating Joystick")
         } else {
             displayName = "Unknown"
         }

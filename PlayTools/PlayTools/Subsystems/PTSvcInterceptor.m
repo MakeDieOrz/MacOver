@@ -444,7 +444,10 @@ static void pt_svc_publish_redacted_exc_ports(mach_port_t svc_port,
                                   local->handlers,
                                   local->behaviors,
                                   local->flavors);
-    mach_msg_type_number_t copy_count = (local->count < caller_capacity) ? local->count : caller_capacity;
+    mach_msg_type_number_t effective_cap = (caller_capacity == 0U)
+        ? (mach_msg_type_number_t)EXC_TYPES_COUNT
+        : caller_capacity;
+    mach_msg_type_number_t copy_count = (local->count < effective_cap) ? local->count : effective_cap;
     if (copy_count > (mach_msg_type_number_t)EXC_TYPES_COUNT) {
         copy_count = (mach_msg_type_number_t)EXC_TYPES_COUNT;
     }
@@ -1248,10 +1251,22 @@ void pt_svc_restore_patched_bytes_in_buffer(uintptr_t read_start, uint8_t *dst, 
 
 #if defined(__arm64__) || defined(__aarch64__)
 
-static void pt_raw_arm64_svc80(int64_t x16,
-                                const uint64_t in_x[8],
-                                uint64_t out_x[2],
-                                bool *out_carry) {
+extern mach_msg_return_t mach_msg_overwrite_trap(mach_msg_header_t *msg,
+                                                 mach_msg_option_t option,
+                                                 mach_msg_size_t send_size,
+                                                 mach_msg_size_t rcv_size,
+                                                 mach_port_name_t rcv_name,
+                                                 mach_msg_timeout_t timeout,
+                                                 mach_port_name_t notify,
+                                                 mach_msg_header_t *rcv_msg,
+                                                 mach_msg_size_t rcv_limit);
+
+static void pt_raw_arm64_svc80_sp(int64_t x16,
+                                   const uint64_t in_x[8],
+                                   uint64_t sp0,
+                                   uint64_t sp1,
+                                   uint64_t out_x[2],
+                                   bool *out_carry) {
     if (x16 == SYS_exit) {
         _exit((int)in_x[0]);
     }
@@ -1264,14 +1279,19 @@ static void pt_raw_arm64_svc80(int64_t x16,
     register uint64_t r6 __asm("x6") = in_x[6];
     register uint64_t r7 __asm("x7") = in_x[7];
     register int64_t r16 __asm("x16") = x16;
+    register uint64_t r9 __asm("x9") = sp0;
+    register uint64_t r10 __asm("x10") = sp1;
     uint32_t carry = 0;
     __asm__ volatile(
+        "sub sp, sp, #16\n\t"
+        "stp %[s0], %[s1], [sp]\n\t"
         "svc #0x80\n\t"
-        "cset %w[c], cs"
+        "cset %w[c], cs\n\t"
+        "add sp, sp, #16"
         : "+r"(r0), "+r"(r1), "+r"(r2), "+r"(r3),
           "+r"(r4), "+r"(r5), "+r"(r6), "+r"(r7),
           "+r"(r16), [c] "=&r"(carry)
-        :
+        : [s0] "r"(r9), [s1] "r"(r10)
         : "cc", "memory");
     out_x[0] = r0;
     out_x[1] = r1;
@@ -1346,8 +1366,11 @@ static kern_return_t pt_svc_forward_mach_exc_64(mach_port_t dest_port,
     } pt_fwd_reply_t;
 #pragma pack(pop)
 
-    uint8_t msg_buf[6144];
-    memset(msg_buf, 0, sizeof(msg_buf));
+    union {
+        uint8_t bytes[6144];
+        pt_fwd_reply_t reply;
+    } io_buf;
+    memset(&io_buf, 0, sizeof(io_buf));
     size_t pos = 0;
 
     mach_msg_id_t req_id = 2407;
@@ -1372,7 +1395,7 @@ static kern_return_t pt_svc_forward_mach_exc_64(mach_port_t dest_port,
     hdr.msgh_remote_port = dest_port;
     hdr.msgh_local_port = reply_port;
     hdr.msgh_id = req_id;
-    memcpy(msg_buf + pos, &hdr, sizeof(hdr));
+    memcpy(io_buf.bytes + pos, &hdr, sizeof(hdr));
     pos += sizeof(hdr);
 
     if (has_identity) {
@@ -1387,52 +1410,50 @@ static kern_return_t pt_svc_forward_mach_exc_64(mach_port_t dest_port,
             .disposition = MACH_MSG_TYPE_COPY_SEND,
             .type = MACH_MSG_PORT_DESCRIPTOR
         };
-        memcpy(msg_buf + pos, &body, sizeof(body));
+        memcpy(io_buf.bytes + pos, &body, sizeof(body));
         pos += sizeof(body);
-        memcpy(msg_buf + pos, &tdesc, sizeof(tdesc));
+        memcpy(io_buf.bytes + pos, &tdesc, sizeof(tdesc));
         pos += sizeof(tdesc);
-        memcpy(msg_buf + pos, &kdesc, sizeof(kdesc));
+        memcpy(io_buf.bytes + pos, &kdesc, sizeof(kdesc));
         pos += sizeof(kdesc);
     }
 
     NDR_record_t ndr = NDR_record;
-    memcpy(msg_buf + pos, &ndr, sizeof(ndr));
+    memcpy(io_buf.bytes + pos, &ndr, sizeof(ndr));
     pos += sizeof(ndr);
-    memcpy(msg_buf + pos, &exception, sizeof(exception));
+    memcpy(io_buf.bytes + pos, &exception, sizeof(exception));
     pos += sizeof(exception);
-    memcpy(msg_buf + pos, &codeCnt, sizeof(codeCnt));
+    memcpy(io_buf.bytes + pos, &codeCnt, sizeof(codeCnt));
     pos += sizeof(codeCnt);
     if (codeCnt > 0U && code != NULL) {
         size_t cb = (size_t)codeCnt * sizeof(int64_t);
-        memcpy(msg_buf + pos, code, cb);
+        memcpy(io_buf.bytes + pos, code, cb);
         pos += cb;
     }
     if (has_state) {
         int flv = (inout_flavor != NULL) ? *inout_flavor : 0;
-        memcpy(msg_buf + pos, &flv, sizeof(flv));
+        memcpy(io_buf.bytes + pos, &flv, sizeof(flv));
         pos += sizeof(flv);
-        memcpy(msg_buf + pos, &old_stateCnt, sizeof(old_stateCnt));
+        memcpy(io_buf.bytes + pos, &old_stateCnt, sizeof(old_stateCnt));
         pos += sizeof(old_stateCnt);
         if (old_stateCnt > 0U && old_state != NULL) {
             size_t sb = (size_t)old_stateCnt * sizeof(natural_t);
-            if (pos + sb > sizeof(msg_buf)) {
+            if (pos + sb > sizeof(io_buf.bytes)) {
                 (void)mach_port_mod_refs(mach_task_self(), reply_port, MACH_PORT_RIGHT_RECEIVE, -1);
                 return MIG_ARRAY_TOO_LARGE;
             }
-            memcpy(msg_buf + pos, old_state, sb);
+            memcpy(io_buf.bytes + pos, old_state, sb);
             pos += sb;
         }
     }
 
     mach_msg_size_t send_sz = (mach_msg_size_t)pos;
-    memcpy(msg_buf + offsetof(mach_msg_header_t, msgh_size), &send_sz, sizeof(send_sz));
+    memcpy(io_buf.bytes + offsetof(mach_msg_header_t, msgh_size), &send_sz, sizeof(send_sz));
 
-    pt_fwd_reply_t rbuf;
-    memset(&rbuf, 0, sizeof(rbuf));
-    mach_msg_return_t mr = mach_msg((mach_msg_header_t *)msg_buf,
+    mach_msg_return_t mr = mach_msg((mach_msg_header_t *)io_buf.bytes,
                                     MACH_SEND_MSG | MACH_RCV_MSG,
                                     send_sz,
-                                    (mach_msg_size_t)sizeof(rbuf),
+                                    (mach_msg_size_t)sizeof(io_buf.reply),
                                     reply_port,
                                     MACH_MSG_TIMEOUT_NONE,
                                     MACH_PORT_NULL);
@@ -1440,30 +1461,31 @@ static kern_return_t pt_svc_forward_mach_exc_64(mach_port_t dest_port,
     if (mr != MACH_MSG_SUCCESS) {
         return (kern_return_t)mr;
     }
-    if ((rbuf.Head.msgh_bits & MACH_MSGH_BITS_COMPLEX) != 0) {
-        mach_msg_destroy(&rbuf.Head);
+    if ((io_buf.reply.Head.msgh_bits & MACH_MSGH_BITS_COMPLEX) != 0) {
+        mach_msg_destroy(&io_buf.reply.Head);
         return MIG_TYPE_ERROR;
     }
-    if (rbuf.Head.msgh_id != expected_reply_id || rbuf.Head.msgh_size < (mach_msg_size_t)sizeof(mig_reply_error_t)) {
-        return (rbuf.Head.msgh_id == MACH_NOTIFY_SEND_ONCE) ? MIG_SERVER_DIED : MIG_REPLY_MISMATCH;
+    if (io_buf.reply.Head.msgh_id != expected_reply_id ||
+        io_buf.reply.Head.msgh_size < (mach_msg_size_t)sizeof(mig_reply_error_t)) {
+        return (io_buf.reply.Head.msgh_id == MACH_NOTIFY_SEND_ONCE) ? MIG_SERVER_DIED : MIG_REPLY_MISMATCH;
     }
-    if (rbuf.RetCode != KERN_SUCCESS) {
-        return rbuf.RetCode;
+    if (io_buf.reply.RetCode != KERN_SUCCESS) {
+        return io_buf.reply.RetCode;
     }
     if (has_state) {
         size_t state_hdr_sz = offsetof(pt_fwd_reply_t, new_state);
-        if (rbuf.Head.msgh_size < state_hdr_sz || rbuf.new_stateCnt > 1296U ||
-            rbuf.Head.msgh_size < state_hdr_sz + (size_t)rbuf.new_stateCnt * sizeof(natural_t)) {
+        if (io_buf.reply.Head.msgh_size < state_hdr_sz || io_buf.reply.new_stateCnt > 1296U ||
+            io_buf.reply.Head.msgh_size < state_hdr_sz + (size_t)io_buf.reply.new_stateCnt * sizeof(natural_t)) {
             return MIG_TYPE_ERROR;
         }
         if (inout_flavor != NULL) {
-            *inout_flavor = rbuf.flavor;
+            *inout_flavor = io_buf.reply.flavor;
         }
         if (out_new_state != NULL && inout_new_stateCnt != NULL) {
             mach_msg_type_number_t cap = *inout_new_stateCnt;
-            mach_msg_type_number_t copy_cnt = (rbuf.new_stateCnt < cap) ? rbuf.new_stateCnt : cap;
+            mach_msg_type_number_t copy_cnt = (io_buf.reply.new_stateCnt < cap) ? io_buf.reply.new_stateCnt : cap;
             if (copy_cnt > 0U) {
-                memcpy(out_new_state, rbuf.new_state, (size_t)copy_cnt * sizeof(natural_t));
+                memcpy(out_new_state, io_buf.reply.new_state, (size_t)copy_cnt * sizeof(natural_t));
             }
             *inout_new_stateCnt = copy_cnt;
         }
@@ -1707,18 +1729,48 @@ static BOOL pt_svc_handle_exception_msg(const pt_mach_exc_req_t *req, pt_mach_ex
         return YES;
     }
 
-    pt_svc_dealloc_req_ports(req_thread, req_task);
-
     int64_t x16 = (int64_t)PT_TS_X(state)[16];
     uint64_t in_x[8];
     for (int i = 0; i < 8; i++) {
         in_x[i] = PT_TS_X(state)[i];
     }
+    uint64_t sp_args[2] = {0, 0};
+    {
+        uint64_t sp = PT_TS_SP(state);
+        if (sp != 0 && pt_is_valid_user_pointer((const void *)(uintptr_t)sp)) {
+            memcpy(&sp_args[0], (const void *)(uintptr_t)sp, sizeof(sp_args[0]));
+            if (sp <= UINT64_MAX - sizeof(uint64_t) &&
+                pt_is_valid_user_pointer((const void *)(uintptr_t)(sp + sizeof(uint64_t)))) {
+                memcpy(&sp_args[1], (const void *)(uintptr_t)(sp + sizeof(uint64_t)), sizeof(sp_args[1]));
+            }
+        }
+    }
+
+    // Preserve faulting thread identity for thread_self_trap (-27) and SYS_thread_selfid (372)
+    BOOL handled_faulting_thread_identity = NO;
+    if (x16 == -27 && MACH_PORT_VALID(req_thread)) {
+        PT_TS_X(state)[0] = (uint64_t)req_thread;
+        pt_svc_dealloc_req_ports(MACH_PORT_NULL, req_task);
+        handled_faulting_thread_identity = YES;
+    } else if (x16 == 372 && MACH_PORT_VALID(req_thread)) {
+        thread_identifier_info_data_t tinfo;
+        mach_msg_type_number_t tcnt = THREAD_IDENTIFIER_INFO_COUNT;
+        if (thread_info(req_thread, THREAD_IDENTIFIER_INFO, (thread_info_t)&tinfo, &tcnt) == KERN_SUCCESS) {
+            PT_TS_X(state)[0] = (uint64_t)tinfo.thread_id;
+            PT_TS_CPSR(state) &= ~PT_ARM64_CPSR_C;
+            handled_faulting_thread_identity = YES;
+        }
+        pt_svc_dealloc_req_ports(req_thread, req_task);
+    } else {
+        pt_svc_dealloc_req_ports(req_thread, req_task);
+    }
 
     BOOL passthrough = atomic_load_explicit(&s_svc_safe_mode_passthrough, memory_order_acquire) ||
                        !pt_is_bypass_enabled() ||
                        (x16 < 0);
-    if (passthrough) {
+    if (handled_faulting_thread_identity) {
+        // Already populated x0 (and CPSR.C if applicable) on state from req_thread.
+    } else if (passthrough) {
         BOOL intercept_mach_msg = ((x16 == -31 || x16 == -32 || x16 == -47) &&
                                    !atomic_load_explicit(&s_svc_safe_mode_passthrough, memory_order_acquire) &&
                                    pt_is_bypass_enabled() &&
@@ -1812,7 +1864,20 @@ static BOOL pt_svc_handle_exception_msg(const pt_mach_exc_req_t *req, pt_mach_ex
 
         uint64_t out_x[2] = {0, 0};
         bool carry = false;
-        pt_raw_arm64_svc80(x16, in_x, out_x, &carry);
+        if (x16 == -32) {
+            mach_msg_return_t mr_ov = mach_msg_overwrite_trap((mach_msg_header_t *)(uintptr_t)in_x[0],
+                                                              (mach_msg_option_t)in_x[1],
+                                                              (mach_msg_size_t)in_x[2],
+                                                              (mach_msg_size_t)in_x[3],
+                                                              (mach_port_name_t)in_x[4],
+                                                              (mach_msg_timeout_t)in_x[5],
+                                                              (mach_port_name_t)in_x[6],
+                                                              (mach_msg_header_t *)(uintptr_t)in_x[7],
+                                                              (mach_msg_size_t)sp_args[0]);
+            out_x[0] = (uint64_t)(int64_t)mr_ov;
+        } else {
+            pt_raw_arm64_svc80_sp(x16, in_x, sp_args[0], sp_args[1], out_x, &carry);
+        }
         PT_TS_X(state)[0] = out_x[0];
         PT_TS_X(state)[1] = out_x[1];
         if (intercept_mach_msg && (mig_sending || mig_receiving)) {
@@ -1829,7 +1894,7 @@ static BOOL pt_svc_handle_exception_msg(const pt_mach_exc_req_t *req, pt_mach_ex
                                      (kern_return_t)(int32_t)out_x[0],
                                      (const void *)pc);
         }
-        if (x16 > 0) {
+        if (x16 >= 0) {
             if (carry) {
                 PT_TS_CPSR(state) |= PT_ARM64_CPSR_C;
             } else {
@@ -1844,12 +1909,7 @@ static BOOL pt_svc_handle_exception_msg(const pt_mach_exc_req_t *req, pt_mach_ex
             for (size_t i = 0; i < 7U; i++) {
                 args[i] = (uintptr_t)in_x[i + 1U];
             }
-            uint64_t sp = PT_TS_SP(state);
-            if (sp != 0 && pt_is_valid_user_pointer((const void *)(uintptr_t)sp)) {
-                uintptr_t sp_arg7 = 0;
-                memcpy(&sp_arg7, (const void *)(uintptr_t)sp, sizeof(sp_arg7));
-                args[7] = sp_arg7;
-            }
+            args[7] = (uintptr_t)sp_args[0];
         } else {
             for (size_t i = 0; i < 8U; i++) {
                 args[i] = (uintptr_t)in_x[i];
@@ -1869,7 +1929,7 @@ static BOOL pt_svc_handle_exception_msg(const pt_mach_exc_req_t *req, pt_mach_ex
         } else {
             uint64_t out_x[2] = {0, 0};
             bool carry = false;
-            pt_raw_arm64_svc80(x16, in_x, out_x, &carry);
+            pt_raw_arm64_svc80_sp(x16, in_x, sp_args[0], sp_args[1], out_x, &carry);
             PT_TS_X(state)[0] = out_x[0];
             PT_TS_X(state)[1] = out_x[1];
             if (carry) {

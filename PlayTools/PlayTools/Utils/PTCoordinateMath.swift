@@ -6,6 +6,8 @@
 import CoreGraphics
 import Foundation
 
+private typealias SharedStrictDeviceDisplaySpec = StrictDeviceDisplaySpec
+
 public enum PTCoordinateMath {
     public static func cursorPosition(
         mousePoint: CGPoint,
@@ -361,83 +363,40 @@ public enum PTWindowGeometryMath {
             PTWindowGeometryMath.orientedSize(baseSize: baseSize, portrait: portrait)
         }
 
-        private static let table: [String: StrictDeviceDisplaySpec] = [
-            "iPad6,7": StrictDeviceDisplaySpec(
-                model: "iPad6,7", nativePixelWidth: 2048, nativePixelHeight: 2732, nativeScale: 2.0, isIPad: true
-            ),
-            "iPad8,6": StrictDeviceDisplaySpec(
-                model: "iPad8,6", nativePixelWidth: 2048, nativePixelHeight: 2732, nativeScale: 2.0, isIPad: true
-            ),
-            "iPad13,8": StrictDeviceDisplaySpec(
-                model: "iPad13,8", nativePixelWidth: 2048, nativePixelHeight: 2732, nativeScale: 2.0, isIPad: true
-            ),
-            "iPad14,5": StrictDeviceDisplaySpec(
-                model: "iPad14,5", nativePixelWidth: 2048, nativePixelHeight: 2732, nativeScale: 2.0, isIPad: true
-            ),
-            "iPad16,6": StrictDeviceDisplaySpec(
-                model: "iPad16,6", nativePixelWidth: 2064, nativePixelHeight: 2752, nativeScale: 2.0, isIPad: true
-            ),
-            "iPad17,3": StrictDeviceDisplaySpec(
-                model: "iPad17,3", nativePixelWidth: 2064, nativePixelHeight: 2752, nativeScale: 2.0, isIPad: true
-            ),
-            "iPhone12,5": StrictDeviceDisplaySpec(
-                model: "iPhone12,5", nativePixelWidth: 1242, nativePixelHeight: 2688, nativeScale: 3.0, isIPad: false
-            ),
-            "iPhone14,3": StrictDeviceDisplaySpec(
-                model: "iPhone14,3", nativePixelWidth: 1284, nativePixelHeight: 2778, nativeScale: 3.0, isIPad: false
-            ),
-            "iPhone15,3": StrictDeviceDisplaySpec(
-                model: "iPhone15,3", nativePixelWidth: 1290, nativePixelHeight: 2796, nativeScale: 3.0, isIPad: false
-            ),
-            "iPhone16,2": StrictDeviceDisplaySpec(
-                model: "iPhone16,2", nativePixelWidth: 1290, nativePixelHeight: 2796, nativeScale: 3.0, isIPad: false
-            ),
-            "iPhone17,2": StrictDeviceDisplaySpec(
-                model: "iPhone17,2", nativePixelWidth: 1320, nativePixelHeight: 2868, nativeScale: 3.0, isIPad: false
-            ),
-            "iPhone18,2": StrictDeviceDisplaySpec(
-                model: "iPhone18,2", nativePixelWidth: 1320, nativePixelHeight: 2868, nativeScale: 3.0, isIPad: false
-            )
-        ]
-
-        private static let ios13CompatibleModels: Set<String> = ["iPad6,7", "iPad8,6", "iPhone12,5"]
+        private init(shared: SharedStrictDeviceDisplaySpec) {
+            self.model = shared.model
+            self.nativePixelWidth = shared.portraitPixelWidth
+            self.nativePixelHeight = shared.portraitPixelHeight
+            self.nativeScale = shared.nativeScale
+            self.isIPad = shared.isIPad
+        }
 
         public static func normalizedReportedIOSVersion(_ raw: String?) -> String {
-            switch (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-            case "followhost", "follow_host", "host":
-                return "followHost"
-            case "compat18_3", "18.3", "ios18_3":
-                return "compat18_3"
-            case "compat13_7", "13.7", "ios13_7":
-                return "compat13_7"
-            default:
-                return "automatic"
-            }
+            ReportedIOSVersionMode(rawSetting: raw).rawValue
         }
 
         public static func effectiveModel(
             for rawModel: String,
             normalizedReportedIOSVersion: String
         ) -> String {
-            let trimmed = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
-            let base = trimmed.isEmpty ? "iPad13,8" : trimmed
-            guard normalizedReportedIOSVersion == "compat13_7", !ios13CompatibleModels.contains(base) else {
-                return base
-            }
-            return base.hasPrefix("iPhone") ? "iPhone12,5" : "iPad8,6"
+            ReportedIOSVersionMode.effectiveDeviceModel(
+                rawModel,
+                for: ReportedIOSVersionMode(rawSetting: normalizedReportedIOSVersion)
+            )
         }
 
         public static func resolve(forModel rawModel: String) -> StrictDeviceDisplaySpec {
             let trimmed = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let exact = table[trimmed] {
-                return exact
+            if let exact = SharedStrictDeviceDisplaySpec.knownProfiles[trimmed] {
+                return StrictDeviceDisplaySpec(shared: exact)
             }
-            if trimmed.hasPrefix("iPhone"), let fallbackPhone = table["iPhone17,2"] {
-                return fallbackPhone
+            if trimmed.hasPrefix("iPhone"),
+               let fallbackPhone = SharedStrictDeviceDisplaySpec.knownProfiles["iPhone17,2"] {
+                return StrictDeviceDisplaySpec(shared: fallbackPhone)
             }
-            return table["iPad13,8"] ?? StrictDeviceDisplaySpec(
-                model: "iPad13,8", nativePixelWidth: 2048, nativePixelHeight: 2732, nativeScale: 2.0, isIPad: true
-            )
+            let fallbackPad = SharedStrictDeviceDisplaySpec.knownProfiles["iPad13,8"]
+                ?? SharedStrictDeviceDisplaySpec.resolve(for: "iPad13,8")
+            return StrictDeviceDisplaySpec(shared: fallbackPad)
         }
     }
 

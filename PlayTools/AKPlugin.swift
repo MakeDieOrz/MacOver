@@ -15,20 +15,6 @@ private struct AKUncheckedSendableBox<Value>: @unchecked Sendable {
     let value: Value
 }
 
-// Add a lightweight struct so we can decode only the flag we care about
-private struct AKAppSettingsData: Codable, Sendable {
-    var hideTitleBar: Bool?
-    var floatingWindow: Bool?
-    var resolution: Int?
-    var resizableAspectRatioWidth: Int?
-    var resizableAspectRatioHeight: Int?
-    var strictEmulationMode: Bool?
-    var strictViewportOrientation: String?
-    var strictViewportScaleMode: String?
-    var iosDeviceModel: String?
-    var reportedIOSVersion: String?
-}
-
 final class AKPlugin: NSObject, Plugin, @unchecked Sendable {
     private var isApplyingProgrammaticGeometry = false
     @MainActor private var isTrackingWindowChromeClick = false
@@ -493,7 +479,9 @@ final class AKPlugin: NSObject, Plugin, @unchecked Sendable {
         let pointInWindow = event.locationInWindow
         let buttonTypes: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
         for type in buttonTypes {
-            if let button = win.standardWindowButton(type) {
+            if let button = win.standardWindowButton(type),
+               button.window === win,
+               !button.isHiddenOrHasHiddenAncestor {
                 let localPoint = button.convert(pointInWindow, from: nil)
                 if button.bounds.contains(localPoint) {
                     return true
@@ -525,6 +513,10 @@ final class AKPlugin: NSObject, Plugin, @unchecked Sendable {
                     }
                     return false
                 }
+                if left {
+                    // Clear stale chrome tracking if AppKit modal titlebar drag or button tracking consumed mouseUp.
+                    self.isTrackingWindowChromeClick = false
+                }
 
                 // Detect double-clicks on the title-bar area (respecting system preference)
                 if left && event.clickCount == 2, self.hideTitleBarSetting, let win = event.window {
@@ -551,14 +543,15 @@ final class AKPlugin: NSObject, Plugin, @unchecked Sendable {
             let eventBox = AKUncheckedSendableBox(value: event)
             let dropEvent = MainActor.assumeIsolated {
                 let event = eventBox.value
+                let wasTrackingChrome = left && self.isTrackingWindowChromeClick
+                if wasTrackingChrome {
+                    self.isTrackingWindowChromeClick = false
+                }
                 if let eventWin = event.window, !Self.isPrimaryHostWindow(eventWin) {
                     return false
                 }
                 // Always allow releases on the traffic-light buttons or title bar to pass through
-                if (left && self.isTrackingWindowChromeClick) || self.isInWindowChromeOrTrafficLights(event) {
-                    if left {
-                        self.isTrackingWindowChromeClick = false
-                    }
+                if wasTrackingChrome || self.isInWindowChromeOrTrafficLights(event) {
                     _ = consumedBox.value(event.buttonNumber, false)
                     return false
                 }
@@ -638,16 +631,10 @@ final class AKPlugin: NSObject, Plugin, @unchecked Sendable {
         guard isStrictEmulationActive, let settings = Self.akAppSettingsData else {
             return nil
         }
-        let normIOS = PTWindowGeometryMath.StrictDeviceDisplaySpec.normalizedReportedIOSVersion(
-            settings.reportedIOSVersion
+        let logical = settings.strictDeviceDisplaySpec.logicalSize(
+            orientation: settings.strictViewportOrientation
         )
-        let effModel = PTWindowGeometryMath.StrictDeviceDisplaySpec.effectiveModel(
-            for: settings.iosDeviceModel ?? "iPad13,8",
-            normalizedReportedIOSVersion: normIOS
-        )
-        let spec = PTWindowGeometryMath.StrictDeviceDisplaySpec.resolve(forModel: effModel)
-        let orientation = PTWindowGeometryMath.normalizedStrictOrientation(settings.strictViewportOrientation)
-        return spec.logicalSize(orientation: orientation)
+        return CGSize(width: logical.width, height: logical.height)
     }
 
     @MainActor
@@ -665,7 +652,7 @@ final class AKPlugin: NSObject, Plugin, @unchecked Sendable {
         let resolvedTitleHeight = titleHeight ?? Self.titleBarHeight(for: window)
         return PTWindowGeometryMath.strictViewportWindowPlan(
             logicalSceneSize: logicalSize,
-            scaleMode: Self.akAppSettingsData?.strictViewportScaleMode,
+            scaleMode: Self.akAppSettingsData?.strictViewportScaleMode.rawValue,
             visibleScreenFrame: targetFrame,
             titleBarHeight: resolvedTitleHeight
         )
@@ -758,11 +745,11 @@ final class AKPlugin: NSObject, Plugin, @unchecked Sendable {
         return settingsDir.appendingPathComponent("\(bundleIdentifier).plist")
     }
 
-    fileprivate static let akAppSettingsData: AKAppSettingsData? = {
+    fileprivate static let akAppSettingsData: AppSettingsData? = {
         let bundleIdentifier = Bundle.main.bundleIdentifier ?? ""
         let settingsURL = resolveSettingsURL(bundleIdentifier: bundleIdentifier)
         guard let data = try? Data(contentsOf: settingsURL),
-              let decoded = try? PropertyListDecoder().decode(AKAppSettingsData.self, from: data) else {
+              let decoded = try? PropertyListDecoder().decode(AppSettingsData.self, from: data) else {
             return nil
         }
         return decoded

@@ -1529,14 +1529,7 @@ static NSMutableDictionary *pt_clean_code_resources_subdict(NSDictionary *sub) {
         if ([key isKindOfClass:[NSString class]]) {
             NSString *k = (NSString *)key;
             const char *kutf = [k UTF8String];
-            if ([k localizedCaseInsensitiveContainsString:@"PlayTools"] ||
-                [k localizedCaseInsensitiveContainsString:@"PlayCover"] ||
-                [k localizedCaseInsensitiveContainsString:@"MacOver"] ||
-                [k localizedCaseInsensitiveContainsString:@"AKInterface"] ||
-                [k localizedCaseInsensitiveContainsString:@"SVCPatches"] ||
-                [k localizedCaseInsensitiveContainsString:@"Playtools.strings"] ||
-                [k localizedCaseInsensitiveContainsString:@"UserPlugins"] ||
-                (kutf != NULL && pt_is_registered_hidden_module(kutf)) ||
+            if ((kutf != NULL && (pt_is_dirty_code_resources_key_cstr(kutf) || pt_is_registered_hidden_module(kutf))) ||
                 pt_bundle_relpath_is_swift_reexport_proxy(k)) {
                 if (clean == nil) {
                     clean = [sub mutableCopy];

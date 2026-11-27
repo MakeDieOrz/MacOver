@@ -7,6 +7,16 @@ import Darwin
 import Foundation
 import UIKit
 
+func playToolsLocalizedString(_ key: String, value: String = "", comment: String = "") -> String {
+    NSLocalizedString(
+        key,
+        tableName: "Playtools",
+        bundle: Bundle(for: PlayCover.self),
+        value: value,
+        comment: comment
+    )
+}
+
 public final class PlayCover: NSObject, Sendable {
 
     static let shared = PlayCover()
@@ -29,7 +39,9 @@ public final class PlayCover: NSObject, Sendable {
         DiscordIPC.shared.initialize()
 
         let rotation = PlaySettings.shared.displayRotation
-        if rotation != 0 {
+        let shouldAutoRotate = rotation != 0 &&
+            (!PlaySettings.shared.strictEmulationMode || PlaySettings.shared.hasUserConfiguredDisplayRotation)
+        if shouldAutoRotate {
             if AKInterface.shared?.isSequoiaOrNewer == true {
                 let isPortrait = (rotation % 4 == 1 || rotation % 4 == 3)
                 let targetSize = CGSize(
