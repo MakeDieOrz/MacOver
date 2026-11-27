@@ -10,12 +10,26 @@ import CoreGraphics
 import Darwin
 import Foundation
 import ObjectiveC
+import Synchronization
 
 private struct AKUncheckedSendableBox<Value>: @unchecked Sendable {
     let value: Value
 }
 
+private struct AKTerminationHookState: Sendable {
+    var hookedNSApplicationReply = false
+    var hookedDelegateClasses: Set<ObjectIdentifier> = []
+}
+
 final class AKPlugin: NSObject, Plugin, @unchecked Sendable {
+    private static let terminationWatchdog = PTTerminationWatchdogController {
+        Darwin._exit(0)
+    }
+    private static let willBeginTerminationNotification = Notification.Name(
+        "PTApplicationWillBeginTerminationNotification"
+    )
+    private static let terminationHookState = Mutex(AKTerminationHookState())
+
     private var isApplyingProgrammaticGeometry = false
     @MainActor private var isTrackingWindowChromeClick = false
     private var geometryObservers: [NSObjectProtocol] = []
@@ -115,20 +129,42 @@ final class AKPlugin: NSObject, Plugin, @unchecked Sendable {
     required override init() {
         super.init()
         Self.onMainSync {
+            Self.installTerminationWatchdogHooksIfNeeded()
             if let window = self.activeWindow {
                 self.configureWindow(window)
                 NSWindow.allowsAutomaticWindowTabbing = true
             }
         }
 
+        let center = NotificationCenter.default
+        let appLifecycleNames: [Notification.Name] = [
+            NSApplication.willFinishLaunchingNotification,
+            NSApplication.didFinishLaunchingNotification
+        ]
+        for name in appLifecycleNames {
+            center.addObserver(forName: name, object: nil, queue: .main) { _ in
+                MainActor.assumeIsolated {
+                    Self.installTerminationWatchdogHooksIfNeeded()
+                }
+            }
+        }
+        center.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Self.terminationWatchdog.cancel()
+        }
+
         // Apply the same appearance rules to any subsequent windows that may be created
-        NotificationCenter.default.addObserver(
+        center.addObserver(
             forName: NSWindow.didBecomeKeyNotification,
             object: nil,
             queue: .main) { [weak self] notif in
                 guard let self else { return }
                 let winBox = AKUncheckedSendableBox(value: notif.object as? NSWindow)
                 MainActor.assumeIsolated {
+                    Self.installTerminationWatchdogHooksIfNeeded()
                     guard let win = winBox.value,
                           Self.isPrimaryHostWindow(win) else { return }
                     self.configureWindow(win)
@@ -358,9 +394,76 @@ final class AKPlugin: NSObject, Plugin, @unchecked Sendable {
         }
     }
 
+    @MainActor
+    private static func installTerminationWatchdogHooksIfNeeded() {
+        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else {
+            return
+        }
+        installReplyToTerminateHookIfNeeded()
+        installDelegateShouldTerminateHookIfNeeded()
+    }
+
+    @MainActor
+    private static func installReplyToTerminateHookIfNeeded() {
+        let shouldHook = terminationHookState.withLock { state -> Bool in
+            guard !state.hookedNSApplicationReply else { return false }
+            state.hookedNSApplicationReply = true
+            return true
+        }
+        guard shouldHook else { return }
+
+        let sel = NSSelectorFromString("replyToApplicationShouldTerminate:")
+        guard let method = class_getInstanceMethod(NSApplication.self, sel) else { return }
+        typealias ReplyFn = @convention(c) (AnyObject, Selector, ObjCBool) -> Void
+        let original = unsafeBitCast(method_getImplementation(method), to: ReplyFn.self)
+        let block: @convention(block) (AnyObject, ObjCBool) -> Void = { receiver, shouldTerminate in
+            if !shouldTerminate.boolValue {
+                AKPlugin.terminationWatchdog.cancel()
+            }
+            original(receiver, sel, shouldTerminate)
+        }
+        method_setImplementation(method, imp_implementationWithBlock(block))
+    }
+
+    @MainActor
+    private static func installDelegateShouldTerminateHookIfNeeded() {
+        guard let delegate = NSApplication.shared.delegate,
+              let delegateClass = object_getClass(delegate) else {
+            return
+        }
+        let classID = ObjectIdentifier(delegateClass)
+        let shouldHook = terminationHookState.withLock { state -> Bool in
+            state.hookedDelegateClasses.insert(classID).inserted
+        }
+        guard shouldHook else { return }
+
+        let sel = NSSelectorFromString("applicationShouldTerminate:")
+        guard let method = class_getInstanceMethod(delegateClass, sel) else { return }
+        typealias ShouldTerminateFn = @convention(c) (AnyObject, Selector, NSApplication) -> UInt
+        let original = unsafeBitCast(method_getImplementation(method), to: ShouldTerminateFn.self)
+        let block: @convention(block) (AnyObject, NSApplication) -> UInt = { receiver, sender in
+            let rawReply = original(receiver, sel, sender)
+            if rawReply == NSApplication.TerminateReply.terminateCancel.rawValue {
+                AKPlugin.terminationWatchdog.cancel()
+            } else {
+                NotificationCenter.default.post(name: AKPlugin.willBeginTerminationNotification, object: sender)
+                _ = AKPlugin.terminationWatchdog.arm()
+            }
+            return rawReply
+        }
+        method_setImplementation(method, imp_implementationWithBlock(block))
+    }
+
     func terminateApplication() {
         DispatchQueue.main.async {
             MainActor.assumeIsolated {
+                Self.installTerminationWatchdogHooksIfNeeded()
+                NotificationCenter.default.post(
+                    name: Self.willBeginTerminationNotification,
+                    object: NSApplication.shared
+                )
+                let token = Self.terminationWatchdog.arm()
+                defer { Self.terminationWatchdog.cancel(token: token) }
                 NSApplication.shared.terminate(nil)
             }
         }

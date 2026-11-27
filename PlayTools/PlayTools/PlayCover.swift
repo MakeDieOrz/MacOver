@@ -22,11 +22,14 @@ public final class PlayCover: NSObject, Sendable {
     static let shared = PlayCover()
     @MainActor var menuController: MenuController?
     @MainActor private var isTerminatingFromWindowClose = false
+    private let windowCloseWatchdog = PTTerminationWatchdogController {
+        Darwin._exit(0)
+    }
 
     @objc static public func launch() {
         _ = PTSafeMode.shared.ensureEvaluatedForCurrentProcess()
 
-        if PlaySettings.shared.rootWorkDir {
+        if PlaySettings.shared.rootWorkDir && FileManager.default.currentDirectoryPath != "/" {
             // Change the working directory to / just like iOS
             FileManager.default.changeCurrentDirectoryPath("/")
         }
@@ -36,7 +39,9 @@ public final class PlayCover: NSObject, Sendable {
         UserPluginLoader.initialize()
         PlayScreen.shared.initialize()
         PlayInput.shared.initialize()
-        DiscordIPC.shared.initialize()
+        if PlaySettings.shared.discordActivity.enable {
+            DiscordIPC.shared.initialize()
+        }
 
         let rotation = PlaySettings.shared.displayRotation
         let shouldAutoRotate = rotation != 0 &&
@@ -80,7 +85,27 @@ public final class PlayCover: NSObject, Sendable {
     }
 
     static public func quitWhenClose() {
-        NotificationCenter.default.addObserver(
+        let center = NotificationCenter.default
+        center.addObserver(
+            forName: NSNotification.Name(rawValue: "PTApplicationWillBeginTerminationNotification"),
+            object: nil,
+            queue: OperationQueue.main
+        ) { _ in
+            PTSafeMode.shared.markGracefulTermination()
+        }
+
+        center.addObserver(
+            forName: NSNotification.Name(rawValue: "NSApplicationDidBecomeActiveNotification"),
+            object: nil,
+            queue: OperationQueue.main
+        ) { _ in
+            shared.windowCloseWatchdog.cancel()
+            MainActor.assumeIsolated {
+                shared.isTerminatingFromWindowClose = false
+            }
+        }
+
+        center.addObserver(
             forName: NSNotification.Name(rawValue: "NSApplicationWillTerminateNotification"),
             object: nil,
             queue: OperationQueue.main
@@ -91,7 +116,7 @@ public final class PlayCover: NSObject, Sendable {
             }
         }
 
-        NotificationCenter.default.addObserver(
+        center.addObserver(
             forName: NSNotification.Name(rawValue: "NSWindowWillCloseNotification"),
             object: nil,
             queue: OperationQueue.main
@@ -99,6 +124,7 @@ public final class PlayCover: NSObject, Sendable {
             nonisolated(unsafe) let closedObject = notif.object
             MainActor.assumeIsolated {
                 guard !shared.isTerminatingFromWindowClose else { return }
+                guard PlaySettings.shared.currentQuitOnWindowClose() else { return }
                 let shouldQuit: Bool
                 if let closedNSObject = closedObject as? NSObject {
                     if let decide = AKInterface.shared?.shouldTerminateOnWindowClose {
@@ -112,6 +138,7 @@ public final class PlayCover: NSObject, Sendable {
                 if shouldQuit {
                     shared.isTerminatingFromWindowClose = true
                     PTSafeMode.shared.markGracefulTermination()
+                    shared.windowCloseWatchdog.arm(timeoutSeconds: 2.5)
 
                     // Do NOT manually post UIScene / UIApplication lifecycle notifications synchronously inside
                     // NSWindowWillCloseNotification: AppKit fires it mid-[UIScene _invalidate], and forging
@@ -123,11 +150,8 @@ public final class PlayCover: NSObject, Sendable {
                         }
                     } else {
                         DispatchQueue.main.async {
-                            Darwin.exit(0)
+                            Darwin._exit(0)
                         }
-                    }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                        Darwin.exit(0)
                     }
                 }
             }

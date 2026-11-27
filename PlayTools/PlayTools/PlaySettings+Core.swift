@@ -171,6 +171,7 @@ public final class PTUnfairLock: Sendable {
         self.rightClickLongPress = decoded.rightClickLongPress
         self.hideTitleBar = decoded.hideTitleBar
         self.floatingWindow = decoded.floatingWindow
+        self.quitOnWindowClose = decoded.quitOnWindowClose
         self.configuredDisplayRotation = decoded.displayRotation
         self.checkMicPermissionSync = decoded.checkMicPermissionSync
         self.limitMotionUpdateFrequency = decoded.limitMotionUpdateFrequency
@@ -439,6 +440,16 @@ public final class PTUnfairLock: Sendable {
     @objc public let hideTitleBar: Bool
 
     @objc public let floatingWindow: Bool
+
+    @objc public let quitOnWindowClose: Bool
+
+    @objc public func currentQuitOnWindowClose() -> Bool {
+        if let data = try? Data(contentsOf: settingsUrl),
+           let parsed = try? PropertyListDecoder().decode(AppSettingsData.self, from: data) {
+            return parsed.quitOnWindowClose
+        }
+        return quitOnWindowClose
+    }
 
     private let configuredDisplayRotation: Int
     @objc public var hasUserConfiguredDisplayRotation: Bool {

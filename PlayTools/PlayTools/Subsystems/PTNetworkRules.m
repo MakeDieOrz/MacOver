@@ -28,6 +28,130 @@ static time_t s_certs_last_mtime = 0;
 static long s_certs_last_mtimensec = 0;
 static BOOL s_certs_last_exists = NO;
 
+static NSString *ps_lowercase_cstr_nsstring(const char *str, size_t len) {
+    if (str == NULL || len == 0) return @"";
+    char stackBuf[256];
+    char *heapBuf = NULL;
+    char *buf = stackBuf;
+    if (len >= sizeof(stackBuf)) {
+        heapBuf = (char *)malloc(len + 1U);
+        if (heapBuf == NULL) {
+            return [[NSString stringWithUTF8String:str] lowercaseString] ?: @"";
+        }
+        buf = heapBuf;
+    }
+    for (size_t i = 0; i < len; i++) {
+        buf[i] = (char)tolower((unsigned char)str[i]);
+    }
+    buf[len] = '\0';
+    NSString *result = [NSString stringWithUTF8String:buf] ?: @"";
+    if (heapBuf != NULL) {
+        free(heapBuf);
+    }
+    return result;
+}
+
+static void ps_build_indexed_host_action_tables(
+    NSArray<NSString *> *rules,
+    NSArray<NSNumber *> *actions,
+    NSDictionary<NSString *, NSNumber *> * __autoreleasing *outExact,
+    NSDictionary<NSString *, NSNumber *> * __autoreleasing *outSuffix,
+    NSArray<NSString *> * __autoreleasing *outWildcards,
+    NSArray<NSNumber *> * __autoreleasing *outWildcardPacked) {
+    NSMutableDictionary<NSString *, NSNumber *> *exact = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSNumber *> *suffix = [NSMutableDictionary dictionary];
+    NSMutableArray<NSString *> *wildcards = [NSMutableArray array];
+    NSMutableArray<NSNumber *> *wildcardPacked = [NSMutableArray array];
+
+    for (NSUInteger i = 0; i < rules.count; i++) {
+        NSString *rule = rules[i];
+        if (rule.length == 0) continue;
+        NSInteger rawAct = (i < actions.count) ? [actions[i] integerValue] : PSNetRuleActionDefault;
+        uint64_t packed = (((uint64_t)i) << 4) | ((uint64_t)rawAct & 0xFULL);
+        NSString *lower = [rule lowercaseString];
+        if ([lower hasPrefix:@"="]) {
+            NSString *exactKey = [lower substringFromIndex:1];
+            if (exactKey.length > 0 && exact[exactKey] == nil) {
+                exact[exactKey] = @(packed);
+            }
+        } else if ([lower containsString:@"*"]) {
+            [wildcards addObject:lower];
+            [wildcardPacked addObject:@(packed)];
+        } else {
+            NSString *suffixKey = [lower hasPrefix:@"."] ? [lower substringFromIndex:1] : lower;
+            if (suffixKey.length > 0 && suffix[suffixKey] == nil) {
+                suffix[suffixKey] = @(packed);
+            }
+        }
+    }
+    *outExact = [exact copy];
+    *outSuffix = [suffix copy];
+    *outWildcards = [wildcards copy];
+    *outWildcardPacked = [wildcardPacked copy];
+}
+
+static void ps_build_indexed_host_sets(
+    NSArray<NSString *> *rules,
+    NSSet<NSString *> * __autoreleasing *outExact,
+    NSSet<NSString *> * __autoreleasing *outSuffix,
+    NSArray<NSString *> * __autoreleasing *outWildcards) {
+    NSMutableSet<NSString *> *exact = [NSMutableSet set];
+    NSMutableSet<NSString *> *suffix = [NSMutableSet set];
+    NSMutableArray<NSString *> *wildcards = [NSMutableArray array];
+
+    for (NSString *rule in rules) {
+        if (rule.length == 0) continue;
+        NSString *lower = [rule lowercaseString];
+        if ([lower hasPrefix:@"="]) {
+            NSString *exactKey = [lower substringFromIndex:1];
+            if (exactKey.length > 0) {
+                [exact addObject:exactKey];
+            }
+        } else if ([lower containsString:@"*"]) {
+            [wildcards addObject:lower];
+        } else {
+            NSString *suffixKey = [lower hasPrefix:@"."] ? [lower substringFromIndex:1] : lower;
+            if (suffixKey.length > 0) {
+                [suffix addObject:suffixKey];
+            }
+        }
+    }
+    *outExact = [exact copy];
+    *outSuffix = [suffix copy];
+    *outWildcards = [wildcards copy];
+}
+
+static void ps_split_url_action_rules(
+    NSArray<NSString *> *rules,
+    NSArray<NSNumber *> *actions,
+    NSArray<NSString *> * __autoreleasing *outLiterals,
+    NSArray<NSNumber *> * __autoreleasing *outLiteralPacked,
+    NSArray<NSString *> * __autoreleasing *outWildcards,
+    NSArray<NSNumber *> * __autoreleasing *outWildcardPacked) {
+    NSMutableArray<NSString *> *literals = [NSMutableArray array];
+    NSMutableArray<NSNumber *> *literalPacked = [NSMutableArray array];
+    NSMutableArray<NSString *> *wildcards = [NSMutableArray array];
+    NSMutableArray<NSNumber *> *wildcardPacked = [NSMutableArray array];
+
+    for (NSUInteger i = 0; i < rules.count; i++) {
+        NSString *rule = rules[i];
+        if (rule.length == 0) continue;
+        NSInteger rawAct = (actions != nil && i < actions.count) ? [actions[i] integerValue] : PSNetRuleActionDefault;
+        uint64_t packed = (((uint64_t)i) << 4) | ((uint64_t)rawAct & 0xFULL);
+        if ([rule containsString:@"*"]) {
+            [wildcards addObject:rule];
+            [wildcardPacked addObject:@(packed)];
+        } else {
+            [literals addObject:rule];
+            [literalPacked addObject:@(packed)];
+        }
+    }
+    *outLiterals = [literals copy];
+    *outLiteralPacked = [literalPacked copy];
+    *outWildcards = [wildcards copy];
+    *outWildcardPacked = [wildcardPacked copy];
+}
+
 static NSString *ps_extract_host_pattern_from_allow_url_rule(NSString *rule, BOOL *outHostless) {
     if (rule.length == 0 || [rule hasPrefix:@"/"] || [rule hasPrefix:@"*/"] || [rule hasPrefix:@"?"]) {
         *outHostless = YES;
@@ -1025,6 +1149,61 @@ __attribute__((visibility("hidden"))) PSNetworkRuleSnapshot *ps_get_network_snap
         next.dnsExemptHostPatterns = [dnsExemptHosts copy];
         next.dnsExemptHostRegexes = [dnsExemptRegexes copy];
 
+        NSDictionary<NSString *, NSNumber *> *exactIdx = nil;
+        NSDictionary<NSString *, NSNumber *> *suffixIdx = nil;
+        NSArray<NSString *> *wildHosts = nil;
+        NSArray<NSNumber *> *wildPacked = nil;
+        ps_build_indexed_host_action_tables(
+            next.hostRules, next.hostRuleActions, &exactIdx, &suffixIdx, &wildHosts, &wildPacked);
+        next.exactHostRuleIndex = exactIdx;
+        next.suffixHostRuleIndex = suffixIdx;
+        next.wildcardHostRules = wildHosts;
+        next.wildcardHostRulePacked = wildPacked;
+
+        NSSet<NSString *> *allowExact = nil;
+        NSSet<NSString *> *allowSuffix = nil;
+        NSArray<NSString *> *allowWild = nil;
+        ps_build_indexed_host_sets(next.allowHostRules, &allowExact, &allowSuffix, &allowWild);
+        next.allowExactHosts = allowExact;
+        next.allowSuffixHosts = allowSuffix;
+        next.allowWildcardHosts = allowWild;
+
+        NSSet<NSString *> *dnsExact = nil;
+        NSSet<NSString *> *dnsSuffix = nil;
+        NSArray<NSString *> *dnsWild = nil;
+        ps_build_indexed_host_sets(next.dnsExemptHostPatterns, &dnsExact, &dnsSuffix, &dnsWild);
+        next.dnsExemptExactHosts = dnsExact;
+        next.dnsExemptSuffixHosts = dnsSuffix;
+        next.dnsExemptWildcardHosts = dnsWild;
+
+        NSSet<NSString *> *mitmExact = nil;
+        NSSet<NSString *> *mitmSuffix = nil;
+        NSArray<NSString *> *mitmWild = nil;
+        ps_build_indexed_host_sets(next.mitmHostRules, &mitmExact, &mitmSuffix, &mitmWild);
+        next.mitmExactHosts = mitmExact;
+        next.mitmSuffixHosts = mitmSuffix;
+        next.mitmWildcardHosts = mitmWild;
+
+        NSArray<NSString *> *litURLs = nil;
+        NSArray<NSNumber *> *litURLPacked = nil;
+        NSArray<NSString *> *wildURLs = nil;
+        NSArray<NSNumber *> *wildURLPacked = nil;
+        ps_split_url_action_rules(
+            next.urlRules, next.urlRuleActions, &litURLs, &litURLPacked, &wildURLs, &wildURLPacked);
+        next.literalUrlRules = litURLs;
+        next.literalUrlRulePacked = litURLPacked;
+        next.wildcardUrlRules = wildURLs;
+        next.wildcardUrlRulePacked = wildURLPacked;
+
+        NSArray<NSString *> *allowLitURLs = nil;
+        NSArray<NSNumber *> *unusedAllowLitPacked = nil;
+        NSArray<NSString *> *allowWildURLs = nil;
+        NSArray<NSNumber *> *unusedAllowWildPacked = nil;
+        ps_split_url_action_rules(
+            next.allowUrlRules, nil, &allowLitURLs, &unusedAllowLitPacked, &allowWildURLs, &unusedAllowWildPacked);
+        next.allowLiteralUrlRules = allowLitURLs;
+        next.allowWildcardUrlRules = allowWildURLs;
+
         os_unfair_lock_lock(&s_net_rule_lock);
         s_net_last_mtime = st.st_mtimespec.tv_sec;
         s_net_last_mtimensec = st.st_mtimespec.tv_nsec;
@@ -1065,7 +1244,12 @@ __attribute__((visibility("hidden"))) PSNetworkRuleSnapshot *ps_get_network_rule
 }
 
 
-static BOOL ps_match_single_host_rule(const char *host, size_t hostLen, const char *rule);
+static BOOL ps_matches_host_sets(
+    const char *host,
+    NSString *lowerHost,
+    NSSet<NSString *> *exactSet,
+    NSSet<NSString *> *suffixSet,
+    NSArray<NSString *> *wildcardArray);
 
 static NSString *ps_extract_trust_hostname(SecTrustRef trust) {
     if (trust == NULL) return nil;
@@ -1119,12 +1303,10 @@ __attribute__((visibility("hidden"))) BOOL ps_host_matches_mitm_scope(NSString *
     const char *hostCStr = [host UTF8String];
     if (hostCStr == NULL) return NO;
     size_t hostLen = strlen(hostCStr);
-    for (NSString *rule in snap.mitmHostRules) {
-        if (ps_match_single_host_rule(hostCStr, hostLen, [rule UTF8String])) {
-            return YES;
-        }
-    }
-    return NO;
+    if (hostLen == 0) return NO;
+    NSString *lowerHost = ps_lowercase_cstr_nsstring(hostCStr, hostLen);
+    return ps_matches_host_sets(
+        hostCStr, lowerHost, snap.mitmExactHosts, snap.mitmSuffixHosts, snap.mitmWildcardHosts);
 }
 
 __attribute__((visibility("hidden"))) BOOL ps_should_apply_custom_ca_for_trust(SecTrustRef trust, PSNetworkRuleSnapshot *snap) {
@@ -1187,37 +1369,112 @@ __attribute__((visibility("hidden"))) BOOL ps_evaluate_trust_with_custom_anchors
 }
 
 
-static BOOL ps_match_single_host_rule(const char *host, size_t hostLen, const char *rule) {
-    if (host == NULL || rule == NULL || hostLen == 0) return NO;
-    size_t ruleLen = strlen(rule);
-    if (ruleLen == 0) return NO;
-    if (rule[0] == '=') {
-        const char *exact = rule + 1;
-        size_t exactLen = ruleLen - 1;
-        return (exactLen > 0 && hostLen == exactLen && strncasecmp(host, exact, exactLen) == 0);
-    }
-    if (rule[0] == '.') {
-        const char *base = rule + 1;
-        size_t baseLen = ruleLen - 1;
-        if (hostLen == baseLen && strncasecmp(host, base, baseLen) == 0) {
-            return YES;
-        }
-        if (hostLen > ruleLen && strncasecmp(host + hostLen - ruleLen, rule, ruleLen) == 0) {
-            return YES;
-        }
+static BOOL ps_matches_host_sets(
+    const char *host,
+    NSString *lowerHost,
+    NSSet<NSString *> *exactSet,
+    NSSet<NSString *> *suffixSet,
+    NSArray<NSString *> *wildcardArray) {
+    if (exactSet.count == 0 && suffixSet.count == 0 && wildcardArray.count == 0) {
         return NO;
     }
-    if (strchr(rule, '*') != NULL) {
-        return (fnmatch(rule, host, FNM_CASEFOLD) == 0);
-    }
-    if (hostLen == ruleLen && strncasecmp(host, rule, ruleLen) == 0) {
+    if (exactSet.count > 0 && [exactSet containsObject:lowerHost]) {
         return YES;
     }
-    if (hostLen > ruleLen && host[hostLen - ruleLen - 1] == '.' &&
-        strncasecmp(host + hostLen - ruleLen, rule, ruleLen) == 0) {
-        return YES;
+    if (suffixSet.count > 0 && lowerHost.length > 0) {
+        NSString *candidate = lowerHost;
+        NSUInteger searchStart = 0;
+        NSUInteger totalLen = lowerHost.length;
+        while (candidate.length > 0) {
+            if ([suffixSet containsObject:candidate]) {
+                return YES;
+            }
+            NSRange dot = [lowerHost rangeOfString:@"."
+                                           options:0
+                                             range:NSMakeRange(searchStart, totalLen - searchStart)];
+            if (dot.location == NSNotFound) break;
+            searchStart = dot.location + 1;
+            if (searchStart >= totalLen) break;
+            candidate = [lowerHost substringFromIndex:searchStart];
+        }
+    }
+    for (NSString *rule in wildcardArray) {
+        if (fnmatch([rule UTF8String], host, FNM_CASEFOLD) == 0) {
+            return YES;
+        }
     }
     return NO;
+}
+
+static BOOL ps_lookup_host_action_index(
+    const char *host,
+    NSString *lowerHost,
+    PSNetworkRuleSnapshot *snap,
+    PSNetRuleAction *outAction) {
+    NSDictionary<NSString *, NSNumber *> *exactDict = snap.exactHostRuleIndex;
+    NSDictionary<NSString *, NSNumber *> *suffixDict = snap.suffixHostRuleIndex;
+    NSArray<NSString *> *wildcards = snap.wildcardHostRules;
+    NSArray<NSNumber *> *wildcardPacked = snap.wildcardHostRulePacked;
+    if (exactDict.count == 0 && suffixDict.count == 0 && wildcards.count == 0) {
+        return NO;
+    }
+
+    BOOL found = NO;
+    NSUInteger bestIdx = NSUIntegerMax;
+    PSNetRuleAction bestAct = PSNetRuleActionDefault;
+
+    if (exactDict.count > 0) {
+        NSNumber *packed = exactDict[lowerHost];
+        if (packed != nil) {
+            uint64_t val = [packed unsignedLongLongValue];
+            bestIdx = (NSUInteger)(val >> 4);
+            bestAct = (PSNetRuleAction)(val & 0xFULL);
+            found = YES;
+        }
+    }
+
+    if (suffixDict.count > 0 && lowerHost.length > 0) {
+        NSString *candidate = lowerHost;
+        NSUInteger searchStart = 0;
+        NSUInteger totalLen = lowerHost.length;
+        while (candidate.length > 0) {
+            NSNumber *packed = suffixDict[candidate];
+            if (packed != nil) {
+                uint64_t val = [packed unsignedLongLongValue];
+                NSUInteger idx = (NSUInteger)(val >> 4);
+                if (!found || idx < bestIdx) {
+                    bestIdx = idx;
+                    bestAct = (PSNetRuleAction)(val & 0xFULL);
+                    found = YES;
+                }
+            }
+            NSRange dot = [lowerHost rangeOfString:@"."
+                                           options:0
+                                             range:NSMakeRange(searchStart, totalLen - searchStart)];
+            if (dot.location == NSNotFound) break;
+            searchStart = dot.location + 1;
+            if (searchStart >= totalLen) break;
+            candidate = [lowerHost substringFromIndex:searchStart];
+        }
+    }
+
+    for (NSUInteger i = 0; i < wildcards.count; i++) {
+        uint64_t val = [wildcardPacked[i] unsignedLongLongValue];
+        NSUInteger wIdx = (NSUInteger)(val >> 4);
+        if (found && wIdx >= bestIdx) {
+            break;
+        }
+        if (fnmatch([wildcards[i] UTF8String], host, FNM_CASEFOLD) == 0) {
+            bestAct = (PSNetRuleAction)(val & 0xFULL);
+            found = YES;
+            break;
+        }
+    }
+
+    if (found && outAction != NULL) {
+        *outAction = bestAct;
+    }
+    return found;
 }
 
 __attribute__((visibility("hidden")))
@@ -1227,27 +1484,19 @@ int ps_should_block_host_cstr(const char *hostname) {
         PSNetworkRuleSnapshot *snap = ps_get_network_rules();
         if (snap == nil || !snap.enabled || snap.hostRules.count == 0 || snap.hasHostlessAllowRule) return 0;
         size_t hostLen = strlen(hostname);
+        NSString *lowerHost = ps_lowercase_cstr_nsstring(hostname, hostLen);
 
-        BOOL matchesBlockedHost = NO;
-        for (NSString *rule in snap.hostRules) {
-            if (ps_match_single_host_rule(hostname, hostLen, [rule UTF8String])) {
-                matchesBlockedHost = YES;
-                break;
-            }
-        }
-        if (!matchesBlockedHost) {
+        if (!ps_lookup_host_action_index(hostname, lowerHost, snap, NULL)) {
             return 0;
         }
 
-        for (NSString *allowRule in snap.allowHostRules) {
-            if (ps_match_single_host_rule(hostname, hostLen, [allowRule UTF8String])) {
-                return 0;
-            }
+        if (ps_matches_host_sets(
+                hostname, lowerHost, snap.allowExactHosts, snap.allowSuffixHosts, snap.allowWildcardHosts)) {
+            return 0;
         }
-        for (NSString *exemptPat in snap.dnsExemptHostPatterns) {
-            if (ps_match_single_host_rule(hostname, hostLen, [exemptPat UTF8String])) {
-                return 0;
-            }
+        if (ps_matches_host_sets(
+                hostname, lowerHost, snap.dnsExemptExactHosts, snap.dnsExemptSuffixHosts, snap.dnsExemptWildcardHosts)) {
+            return 0;
         }
         if (snap.dnsExemptHostRegexes.count > 0) {
             NSString *hostStr = [NSString stringWithUTF8String:hostname];
@@ -1271,13 +1520,10 @@ int ps_should_block_host_cstr(const char *hostname) {
     }
 }
 
-static BOOL ps_resolve_mock200(PSNetworkRuleSnapshot *snap, NSArray<NSNumber *> *actions, NSUInteger idx) {
-    PSNetRuleAction act = (idx < actions.count)
-        ? (PSNetRuleAction)[actions[idx] integerValue]
-        : PSNetRuleActionDefault;
+static BOOL ps_resolve_action_flag(PSNetRuleAction act, BOOL defaultMock200) {
     if (act == PSNetRuleActionForceMock200) return YES;
     if (act == PSNetRuleActionForceFail) return NO;
-    return snap.mock200;
+    return defaultMock200;
 }
 
 __attribute__((visibility("hidden"))) BOOL ps_should_block_url(NSURL *url, BOOL *outMock200) {
@@ -1289,93 +1535,125 @@ __attribute__((visibility("hidden"))) BOOL ps_should_block_url(NSURL *url, BOOL 
             *outMock200 = snap.mock200;
         }
         NSString *host = url.host;
-        if (host.length > 0 && snap.allowHostRules.count > 0) {
-            const char *hostCStr = [host UTF8String];
-            size_t hostLen = strlen(hostCStr);
-            for (NSString *rule in snap.allowHostRules) {
-                if (ps_match_single_host_rule(hostCStr, hostLen, [rule UTF8String])) {
+        const char *hostCStr = (host.length > 0) ? [host UTF8String] : NULL;
+        size_t hostLen = (hostCStr != NULL) ? strlen(hostCStr) : 0;
+        NSString *lowerHost = (hostLen > 0) ? ps_lowercase_cstr_nsstring(hostCStr, hostLen) : nil;
+
+        if (lowerHost != nil &&
+            ps_matches_host_sets(
+                hostCStr, lowerHost, snap.allowExactHosts, snap.allowSuffixHosts, snap.allowWildcardHosts)) {
+            return NO;
+        }
+
+        NSString *absStr = nil;
+        if (snap.allowRegexRules.count > 0 || snap.regexRules.count > 0) {
+            absStr = url.absoluteString ?: @"";
+        }
+        if (snap.allowRegexRules.count > 0 && absStr.length > 0) {
+            NSRange fullRange = NSMakeRange(0, absStr.length);
+            for (NSRegularExpression *re in snap.allowRegexRules) {
+                if ([re firstMatchInString:absStr options:0 range:fullRange] != nil) {
                     return NO;
                 }
             }
         }
-        if (snap.allowRegexRules.count > 0) {
-            NSString *absStr = url.absoluteString ?: @"";
-            if (absStr.length > 0) {
-                NSRange fullRange = NSMakeRange(0, absStr.length);
-                for (NSRegularExpression *re in snap.allowRegexRules) {
-                    if ([re firstMatchInString:absStr options:0 range:fullRange] != nil) {
-                        return NO;
-                    }
+
+        BOOL hasUrlRules = (snap.allowLiteralUrlRules.count > 0 ||
+                            snap.allowWildcardUrlRules.count > 0 ||
+                            snap.literalUrlRules.count > 0 ||
+                            snap.wildcardUrlRules.count > 0);
+        NSString *fullURL = nil;
+        NSString *path = nil;
+        if (hasUrlRules) {
+            NSString *rawAbs = absStr ?: (url.absoluteString ?: @"");
+            fullURL = [rawAbs lowercaseString] ?: @"";
+            path = [url.path lowercaseString] ?: @"";
+        }
+
+        if (snap.allowLiteralUrlRules.count > 0) {
+            for (NSString *rule in snap.allowLiteralUrlRules) {
+                if ([fullURL containsString:rule] || (path.length > 0 && [path containsString:rule])) {
+                    return NO;
                 }
             }
         }
-        if (snap.allowUrlRules.count > 0) {
-            NSString *fullURL = [url.absoluteString lowercaseString] ?: @"";
-            NSString *path = [url.path lowercaseString] ?: @"";
-            for (NSString *rule in snap.allowUrlRules) {
-                if ([rule containsString:@"*"]) {
-                    const char *rCStr = [rule UTF8String];
-                    if (fnmatch(rCStr, [fullURL UTF8String], FNM_CASEFOLD) == 0 ||
-                        (path.length > 0 && fnmatch(rCStr, [path UTF8String], FNM_CASEFOLD) == 0)) {
-                        return NO;
-                    }
-                } else {
-                    if ([fullURL containsString:rule] || (path.length > 0 && [path containsString:rule])) {
-                        return NO;
-                    }
+        if (snap.allowWildcardUrlRules.count > 0) {
+            const char *fullCStr = [fullURL UTF8String];
+            const char *pathCStr = (path.length > 0) ? [path UTF8String] : NULL;
+            for (NSString *rule in snap.allowWildcardUrlRules) {
+                const char *rCStr = [rule UTF8String];
+                if ((fullCStr != NULL && fnmatch(rCStr, fullCStr, FNM_CASEFOLD) == 0) ||
+                    (pathCStr != NULL && fnmatch(rCStr, pathCStr, FNM_CASEFOLD) == 0)) {
+                    return NO;
                 }
             }
         }
-        if (host.length > 0 && snap.hostRules.count > 0) {
-            const char *hostCStr = [host UTF8String];
-            size_t hostLen = strlen(hostCStr);
-            for (NSUInteger i = 0; i < snap.hostRules.count; i++) {
-                NSString *rule = snap.hostRules[i];
-                if (ps_match_single_host_rule(hostCStr, hostLen, [rule UTF8String])) {
+
+        PSNetRuleAction matchedHostAction = PSNetRuleActionDefault;
+        if (lowerHost != nil &&
+            ps_lookup_host_action_index(hostCStr, lowerHost, snap, &matchedHostAction)) {
+            if (outMock200 != NULL) {
+                *outMock200 = ps_resolve_action_flag(matchedHostAction, snap.mock200);
+            }
+            return YES;
+        }
+
+        if (snap.regexRules.count > 0 && absStr.length > 0) {
+            NSRange fullRange = NSMakeRange(0, absStr.length);
+            for (NSUInteger i = 0; i < snap.regexRules.count; i++) {
+                NSRegularExpression *re = snap.regexRules[i];
+                if ([re firstMatchInString:absStr options:0 range:fullRange] != nil) {
                     if (outMock200 != NULL) {
-                        *outMock200 = ps_resolve_mock200(snap, snap.hostRuleActions, i);
+                        NSInteger act = (i < snap.regexRuleActions.count)
+                            ? [snap.regexRuleActions[i] integerValue]
+                            : PSNetRuleActionDefault;
+                        *outMock200 = ps_resolve_action_flag((PSNetRuleAction)act, snap.mock200);
                     }
                     return YES;
                 }
             }
         }
-        if (snap.regexRules.count > 0) {
-            NSString *absStr = url.absoluteString ?: @"";
-            if (absStr.length > 0) {
-                NSRange fullRange = NSMakeRange(0, absStr.length);
-                for (NSUInteger i = 0; i < snap.regexRules.count; i++) {
-                    NSRegularExpression *re = snap.regexRules[i];
-                    if ([re firstMatchInString:absStr options:0 range:fullRange] != nil) {
-                        if (outMock200 != NULL) {
-                            *outMock200 = ps_resolve_mock200(snap, snap.regexRuleActions, i);
-                        }
-                        return YES;
+
+        if (snap.literalUrlRules.count > 0 || snap.wildcardUrlRules.count > 0) {
+            BOOL matchedURL = NO;
+            NSUInteger bestIdx = NSUIntegerMax;
+            PSNetRuleAction bestAct = PSNetRuleActionDefault;
+
+            for (NSUInteger i = 0; i < snap.literalUrlRules.count; i++) {
+                NSString *rule = snap.literalUrlRules[i];
+                if ([fullURL containsString:rule] || (path.length > 0 && [path containsString:rule])) {
+                    uint64_t val = [snap.literalUrlRulePacked[i] unsignedLongLongValue];
+                    bestIdx = (NSUInteger)(val >> 4);
+                    bestAct = (PSNetRuleAction)(val & 0xFULL);
+                    matchedURL = YES;
+                    break;
+                }
+            }
+
+            if (snap.wildcardUrlRules.count > 0) {
+                const char *fullCStr = [fullURL UTF8String];
+                const char *pathCStr = (path.length > 0) ? [path UTF8String] : NULL;
+                for (NSUInteger i = 0; i < snap.wildcardUrlRules.count; i++) {
+                    uint64_t val = [snap.wildcardUrlRulePacked[i] unsignedLongLongValue];
+                    NSUInteger wIdx = (NSUInteger)(val >> 4);
+                    if (matchedURL && wIdx >= bestIdx) {
+                        break;
+                    }
+                    const char *rCStr = [snap.wildcardUrlRules[i] UTF8String];
+                    if ((fullCStr != NULL && fnmatch(rCStr, fullCStr, FNM_CASEFOLD) == 0) ||
+                        (pathCStr != NULL && fnmatch(rCStr, pathCStr, FNM_CASEFOLD) == 0)) {
+                        bestAct = (PSNetRuleAction)(val & 0xFULL);
+                        matchedURL = YES;
+                        break;
                     }
                 }
             }
-        }
-        if (snap.urlRules.count > 0) {
-            NSString *fullURL = [url.absoluteString lowercaseString] ?: @"";
-            NSString *path = [url.path lowercaseString] ?: @"";
-            for (NSUInteger i = 0; i < snap.urlRules.count; i++) {
-                NSString *rule = snap.urlRules[i];
-                if ([rule containsString:@"*"]) {
-                    const char *rCStr = [rule UTF8String];
-                    if (fnmatch(rCStr, [fullURL UTF8String], FNM_CASEFOLD) == 0 ||
-                        (path.length > 0 && fnmatch(rCStr, [path UTF8String], FNM_CASEFOLD) == 0)) {
-                        if (outMock200 != NULL) {
-                            *outMock200 = ps_resolve_mock200(snap, snap.urlRuleActions, i);
-                        }
-                        return YES;
-                    }
-                } else {
-                    if ([fullURL containsString:rule] || (path.length > 0 && [path containsString:rule])) {
-                        if (outMock200 != NULL) {
-                            *outMock200 = ps_resolve_mock200(snap, snap.urlRuleActions, i);
-                        }
-                        return YES;
-                    }
+
+            if (matchedURL) {
+                if (outMock200 != NULL) {
+                    *outMock200 = ps_resolve_action_flag(bestAct, snap.mock200);
                 }
+                return YES;
             }
         }
         return NO;

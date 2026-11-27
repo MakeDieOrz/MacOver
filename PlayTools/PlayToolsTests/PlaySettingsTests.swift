@@ -134,6 +134,17 @@ final class PlaySettingsTests {
 
         let loaded = PlaySettings(settingsURL: settingsURL, bundleIdentifier: "com.example.test")
         #expect((loaded.oemID as String) == "D84AP")
+        #expect(!loaded.quitOnWindowClose)
+        #expect(!loaded.currentQuitOnWindowClose())
+
+        var updated = initial
+        updated.quitOnWindowClose = true
+        let updatedData = try encoder.encode(updated)
+        try updatedData.write(to: settingsURL)
+        #expect(loaded.currentQuitOnWindowClose())
+        let reloaded = PlaySettings(settingsURL: settingsURL, bundleIdentifier: "com.example.test")
+        #expect(reloaded.quitOnWindowClose)
+        try customData.write(to: settingsURL)
 
         loaded.keymappingDisabledAt = 42.5
         let persistedData = try Data(contentsOf: settingsURL)

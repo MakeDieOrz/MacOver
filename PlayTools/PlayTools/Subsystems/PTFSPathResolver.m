@@ -11,6 +11,30 @@ static os_unfair_lock s_image_path_lock = OS_UNFAIR_LOCK_INIT;
 static CFMutableDictionaryRef s_image_path_ptr_cache = NULL;
 static CFMutableDictionaryRef s_image_path_str_cache = NULL;
 
+#define PT_FW_REDIRECT_CACHE_SLOTS 128U
+#define PT_FW_REDIRECT_MAX_LEN 256U
+
+typedef struct {
+    uint64_t hash;
+    uint16_t key_len;
+    uint16_t val_len;
+    BOOL valid;
+    char key[PT_FW_REDIRECT_MAX_LEN];
+    char val[PT_FW_REDIRECT_MAX_LEN];
+} pt_fw_redirect_cache_entry_t;
+
+static os_unfair_lock s_fw_redirect_lock = OS_UNFAIR_LOCK_INIT;
+static pt_fw_redirect_cache_entry_t s_fw_redirect_cache[PT_FW_REDIRECT_CACHE_SLOTS];
+
+static uint64_t pt_fnv1a_cstr(const char *s, size_t len) {
+    uint64_t h = 14695981039346656037ULL;
+    for (size_t i = 0; i < len; i++) {
+        h ^= (uint64_t)(unsigned char)s[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
 static void pt_maybe_init_test_group_root_locked(void) {
     if (s_real_group_containers_root_len > 0) {
         return;
@@ -1280,6 +1304,18 @@ static pt_fs_path_disposition_t pt_prepare_fs_path_abs_cached_caller(const char 
         }
     }
 
+    if (!was_normalized &&
+        s_real_data_container_len > 0 &&
+        strncmp(norm, s_real_data_container_dir, s_real_data_container_len) == 0 &&
+        (norm[s_real_data_container_len] == '/' || norm[s_real_data_container_len] == '\0') &&
+        pt_is_nonsensitive_app_or_tmp_path(norm,
+                                           s_real_app_bundle_dir,
+                                           s_real_app_bundle_len,
+                                           s_real_data_container_dir,
+                                           s_real_data_container_len)) {
+        return PT_FS_PATH_NORMAL;
+    }
+
     if (norm[0] == '/' &&
         (strncasecmp(norm, "/var/", 5) == 0 || strncasecmp(norm, "/private/var/", 13) == 0)) {
         const char *mapped = pt_try_map_clean_virtual_container_path(norm, vbuf, vbuf_size);
@@ -1348,9 +1384,30 @@ static pt_fs_path_disposition_t pt_prepare_fs_path_abs_cached_caller(const char 
         BOOL is_pfw = (!is_fw && strncmp(norm + 16, "PrivateFrameworks/", 18) == 0);
         if (is_fw || is_pfw) {
             size_t nlen = strlen(norm);
+            if (vbuf != NULL && vbuf_size > 0 && nlen < PT_FW_REDIRECT_MAX_LEN) {
+                uint64_t h = pt_fnv1a_cstr(norm, nlen);
+                size_t slot = (size_t)(h & (PT_FW_REDIRECT_CACHE_SLOTS - 1U));
+                os_unfair_lock_lock(&s_fw_redirect_lock);
+                pt_fw_redirect_cache_entry_t *entry = &s_fw_redirect_cache[slot];
+                if (entry->valid &&
+                    entry->hash == h &&
+                    entry->key_len == (uint16_t)nlen &&
+                    memcmp(entry->key, norm, nlen) == 0) {
+                    uint16_t val_len = entry->val_len;
+                    if (val_len > 0 && (size_t)val_len < vbuf_size) {
+                        memcpy(vbuf, entry->val, (size_t)val_len + 1U);
+                        *out_path = vbuf;
+                    }
+                    os_unfair_lock_unlock(&s_fw_redirect_lock);
+                    return PT_FS_PATH_NORMAL;
+                }
+                os_unfair_lock_unlock(&s_fw_redirect_lock);
+            }
+
             static const char kFwInfoSuffix[] = ".framework/Info.plist";
             static const size_t kFwInfoSuffixLen = sizeof(kFwInfoSuffix) - 1;
             BOOL handled_info = NO;
+            BOOL matched_redirect = NO;
             if (nlen > kFwInfoSuffixLen &&
                 norm[nlen - 1] == 't' &&
                 memcmp(norm + nlen - kFwInfoSuffixLen, kFwInfoSuffix, kFwInfoSuffixLen) == 0 &&
@@ -1365,12 +1422,14 @@ static pt_fs_path_disposition_t pt_prepare_fs_path_abs_cached_caller(const char 
                 if (n > 0 && (size_t)n < vbuf_size && access(vbuf, F_OK) == 0) {
                     *out_path = vbuf;
                     handled_info = YES;
+                    matched_redirect = YES;
                 } else {
                     n = snprintf(vbuf, vbuf_size, "/System/iOSSupport%.*s/Resources/Info.plist",
                                  (int)fw_dir_len, norm);
                     if (n > 0 && (size_t)n < vbuf_size && access(vbuf, F_OK) == 0) {
                         *out_path = vbuf;
                         handled_info = YES;
+                        matched_redirect = YES;
                     }
                 }
             }
@@ -1378,6 +1437,28 @@ static pt_fs_path_disposition_t pt_prepare_fs_path_abs_cached_caller(const char 
                 int n = snprintf(vbuf, vbuf_size, "/System/iOSSupport%s", norm);
                 if (n > 0 && (size_t)n < vbuf_size && access(vbuf, F_OK) == 0) {
                     *out_path = vbuf;
+                    matched_redirect = YES;
+                }
+            }
+
+            if (vbuf != NULL && vbuf_size > 0 && nlen < PT_FW_REDIRECT_MAX_LEN) {
+                size_t redir_len = matched_redirect ? strlen(vbuf) : 0U;
+                if (!matched_redirect || redir_len < PT_FW_REDIRECT_MAX_LEN) {
+                    uint64_t h = pt_fnv1a_cstr(norm, nlen);
+                    size_t slot = (size_t)(h & (PT_FW_REDIRECT_CACHE_SLOTS - 1U));
+                    os_unfair_lock_lock(&s_fw_redirect_lock);
+                    pt_fw_redirect_cache_entry_t *entry = &s_fw_redirect_cache[slot];
+                    entry->hash = h;
+                    entry->key_len = (uint16_t)nlen;
+                    memcpy(entry->key, norm, nlen + 1U);
+                    entry->val_len = (uint16_t)redir_len;
+                    if (matched_redirect) {
+                        memcpy(entry->val, vbuf, redir_len + 1U);
+                    } else {
+                        entry->val[0] = '\0';
+                    }
+                    entry->valid = YES;
+                    os_unfair_lock_unlock(&s_fw_redirect_lock);
                 }
             }
         }

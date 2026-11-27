@@ -173,15 +173,34 @@ public final class PTPluginContainer: @unchecked Sendable {
     }
 
     public static func defaultPlayToolsVersion() -> String {
-        (Bundle(for: PTPluginContainer.self).infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.8"
+        (Bundle(for: PTPluginContainer.self).infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.9"
     }
 
     public static func defaultUserPluginsDirectory() -> URL? {
         Bundle.main.privateFrameworksURL?.appendingPathComponent(defaultUserPluginsDirectoryName, isDirectory: true)
     }
 
+    private static func directoryHasEntries(at directory: URL) -> Bool {
+        guard let dir = opendir(directory.path) else {
+            return false
+        }
+        defer { closedir(dir) }
+        while let ent = readdir(dir) {
+            let nameIsDot = ent.pointee.d_name.0 == CChar(bitPattern: UInt8(ascii: "."))
+                && (ent.pointee.d_name.1 == 0
+                    || (ent.pointee.d_name.1 == CChar(bitPattern: UInt8(ascii: ".")) && ent.pointee.d_name.2 == 0))
+            if !nameIsDot {
+                return true
+            }
+        }
+        return false
+    }
+
     public func initialize() {
-        let dir = Self.defaultUserPluginsDirectory()
+        guard let dir = Self.defaultUserPluginsDirectory(), Self.directoryHasEntries(at: dir) else {
+            lock.withLock { _loadRecords = [] }
+            return
+        }
         let bundleID = Bundle.main.bundleIdentifier ?? ""
         _ = loadPlugins(
             in: dir,

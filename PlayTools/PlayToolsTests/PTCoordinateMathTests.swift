@@ -1,4 +1,6 @@
 import CoreGraphics
+import Foundation
+import Synchronization
 import Testing
 
 @Suite
@@ -954,5 +956,71 @@ struct PTCoordinateMathTests {
             isClosingWindowPrimary: false,
             otherVisiblePrimaryWindowCount: 0
         ))
+        #expect(!PTWindowGeometryMath.shouldTerminateOnWindowClose(
+            quitOnWindowCloseEnabled: false,
+            isClosingWindowPrimary: true,
+            otherVisiblePrimaryWindowCount: 0
+        ))
+        #expect(PTWindowGeometryMath.shouldTerminateOnWindowClose(
+            quitOnWindowCloseEnabled: true,
+            isClosingWindowPrimary: true,
+            otherVisiblePrimaryWindowCount: 0
+        ))
+        #expect(!PTWindowGeometryMath.shouldTerminateOnWindowClose(
+            quitOnWindowCloseEnabled: true,
+            isClosingWindowPrimary: true,
+            otherVisiblePrimaryWindowCount: 1
+        ))
+    }
+
+    @Test
+    func terminationWatchdogFiresOffMainQueueAndRespectsCancelOrRearm() {
+        let queue = DispatchQueue(label: "test.watchdog.queue", qos: .userInitiated)
+
+        // 1. Armed watchdog fires off main thread when not cancelled
+        let firedOffMain = Mutex<(count: Int, isMainThread: Bool)>((0, true))
+        let group = DispatchGroup()
+        group.enter()
+        let watchdog = PTTerminationWatchdogController(queue: queue) {
+            firedOffMain.withLock { state in
+                state.count += 1
+                state.isMainThread = Thread.isMainThread
+            }
+            group.leave()
+        }
+        #expect(!watchdog.isArmed)
+        _ = watchdog.arm(timeoutSeconds: 0.05)
+        #expect(watchdog.isArmed)
+        #expect(group.wait(timeout: .now() + 2.0) == .success)
+        let firstOutcome = firedOffMain.withLock { $0 }
+        #expect(firstOutcome.count == 1)
+        #expect(!firstOutcome.isMainThread)
+        #expect(!watchdog.isArmed)
+
+        // 2. Cancelled watchdog does not fire
+        let cancelCount = Mutex(0)
+        let cancelWatchdog = PTTerminationWatchdogController(queue: queue) {
+            cancelCount.withLock { $0 += 1 }
+        }
+        let token = cancelWatchdog.arm(timeoutSeconds: 0.05)
+        #expect(cancelWatchdog.isArmed)
+        cancelWatchdog.cancel(token: token)
+        #expect(!cancelWatchdog.isArmed)
+        Thread.sleep(forTimeInterval: 0.12)
+        #expect(cancelCount.withLock { $0 } == 0)
+
+        // 3. Re-arming cancels previous token so callback fires once
+        let rearmCount = Mutex(0)
+        let rearmGroup = DispatchGroup()
+        rearmGroup.enter()
+        let rearmWatchdog = PTTerminationWatchdogController(queue: queue) {
+            rearmCount.withLock { $0 += 1 }
+            rearmGroup.leave()
+        }
+        _ = rearmWatchdog.arm(timeoutSeconds: 0.04)
+        _ = rearmWatchdog.arm(timeoutSeconds: 0.08)
+        #expect(rearmGroup.wait(timeout: .now() + 2.0) == .success)
+        Thread.sleep(forTimeInterval: 0.08)
+        #expect(rearmCount.withLock { $0 } == 1)
     }
 }

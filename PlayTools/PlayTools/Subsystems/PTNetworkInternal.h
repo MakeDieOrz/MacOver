@@ -46,6 +46,26 @@ __attribute__((visibility("hidden")))
 @property (nonatomic, copy) NSString *proxyHost;
 @property (nonatomic, assign) NSInteger proxyPort;
 @property (nonatomic, assign) BOOL proxyIsSOCKS5;
+// Pre-indexed host & URL lookup structures built at rule-load time
+@property (nonatomic, strong) NSDictionary<NSString *, NSNumber *> *exactHostRuleIndex;
+@property (nonatomic, strong) NSDictionary<NSString *, NSNumber *> *suffixHostRuleIndex;
+@property (nonatomic, strong) NSArray<NSString *> *wildcardHostRules;
+@property (nonatomic, strong) NSArray<NSNumber *> *wildcardHostRulePacked;
+@property (nonatomic, strong) NSSet<NSString *> *allowExactHosts;
+@property (nonatomic, strong) NSSet<NSString *> *allowSuffixHosts;
+@property (nonatomic, strong) NSArray<NSString *> *allowWildcardHosts;
+@property (nonatomic, strong) NSSet<NSString *> *dnsExemptExactHosts;
+@property (nonatomic, strong) NSSet<NSString *> *dnsExemptSuffixHosts;
+@property (nonatomic, strong) NSArray<NSString *> *dnsExemptWildcardHosts;
+@property (nonatomic, strong) NSSet<NSString *> *mitmExactHosts;
+@property (nonatomic, strong) NSSet<NSString *> *mitmSuffixHosts;
+@property (nonatomic, strong) NSArray<NSString *> *mitmWildcardHosts;
+@property (nonatomic, strong) NSArray<NSString *> *allowLiteralUrlRules;
+@property (nonatomic, strong) NSArray<NSString *> *allowWildcardUrlRules;
+@property (nonatomic, strong) NSArray<NSString *> *literalUrlRules;
+@property (nonatomic, strong) NSArray<NSNumber *> *literalUrlRulePacked;
+@property (nonatomic, strong) NSArray<NSString *> *wildcardUrlRules;
+@property (nonatomic, strong) NSArray<NSNumber *> *wildcardUrlRulePacked;
 @end
 
 #ifdef __cplusplus

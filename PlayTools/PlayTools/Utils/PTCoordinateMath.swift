@@ -5,6 +5,7 @@
 
 import CoreGraphics
 import Foundation
+import Synchronization
 
 private typealias SharedStrictDeviceDisplaySpec = StrictDeviceDisplaySpec
 
@@ -544,6 +545,17 @@ public enum PTWindowGeometryMath {
         isClosingWindowPrimary && otherVisiblePrimaryWindowCount == 0
     }
 
+    public static func shouldTerminateOnWindowClose(
+        quitOnWindowCloseEnabled: Bool,
+        isClosingWindowPrimary: Bool,
+        otherVisiblePrimaryWindowCount: Int
+    ) -> Bool {
+        quitOnWindowCloseEnabled && shouldTerminateOnWindowClose(
+            isClosingWindowPrimary: isClosingWindowPrimary,
+            otherVisiblePrimaryWindowCount: otherVisiblePrimaryWindowCount
+        )
+    }
+
     public struct TouchWindowCandidate {
         public let isHidden: Bool
         public let alpha: CGFloat
@@ -712,5 +724,87 @@ public struct PTLongPressStateMachine {
 
     public mutating func invalidate() -> Bool {
         finishEarly()
+    }
+}
+
+private final class PTDispatchWorkItemBox: @unchecked Sendable {
+    let item: DispatchWorkItem
+
+    init(_ item: DispatchWorkItem) {
+        self.item = item
+    }
+}
+
+/// Off-main-thread termination watchdog that guarantees Catalyst apps with lingering
+/// UIKit background tasks do not remain stalled in `TerminatingWaitingForBackgroundTasks`.
+public final class PTTerminationWatchdogController: @unchecked Sendable {
+    public static let defaultTimeoutSeconds: TimeInterval = 2.0
+
+    private struct State: Sendable {
+        var generation: UInt64 = 0
+        var pendingWorkItem: PTDispatchWorkItemBox?
+    }
+
+    private let state = Mutex(State())
+    private let queue: DispatchQueue
+    private let onTimeout: @Sendable () -> Void
+
+    public init(
+        queue: DispatchQueue = DispatchQueue.global(qos: .userInitiated),
+        onTimeout: @escaping @Sendable () -> Void
+    ) {
+        self.queue = queue
+        self.onTimeout = onTimeout
+    }
+
+    public var isArmed: Bool {
+        state.withLock { $0.pendingWorkItem != nil }
+    }
+
+    @discardableResult
+    public func arm(timeoutSeconds: TimeInterval = defaultTimeoutSeconds) -> UInt64 {
+        let clampedDelay = (timeoutSeconds.isFinite && timeoutSeconds > 0) ? timeoutSeconds : 0.01
+        let (token, previous) = state.withLock { current -> (UInt64, PTDispatchWorkItemBox?) in
+            let prev = current.pendingWorkItem
+            current.generation &+= 1
+            current.pendingWorkItem = nil
+            return (current.generation, prev)
+        }
+        previous?.item.cancel()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            let shouldTrigger = self.state.withLock { current -> Bool in
+                guard current.generation == token else { return false }
+                current.pendingWorkItem = nil
+                return true
+            }
+            if shouldTrigger {
+                self.onTimeout()
+            }
+        }
+        let boxed = PTDispatchWorkItemBox(workItem)
+        let shouldSchedule = state.withLock { current -> Bool in
+            guard current.generation == token else { return false }
+            current.pendingWorkItem = boxed
+            return true
+        }
+        if shouldSchedule {
+            queue.asyncAfter(deadline: .now() + clampedDelay, execute: workItem)
+        }
+        return token
+    }
+
+    public func cancel(token: UInt64? = nil) {
+        let pending = state.withLock { current -> PTDispatchWorkItemBox? in
+            if let token, current.generation != token {
+                return nil
+            }
+            let prev = current.pendingWorkItem
+            current.pendingWorkItem = nil
+            current.generation &+= 1
+            return prev
+        }
+        pending?.item.cancel()
     }
 }
