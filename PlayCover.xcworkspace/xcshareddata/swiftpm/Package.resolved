@@ -1,33 +1,6 @@
 {
-  "originHash" : "a426a3358cea2e2bb3f33a297d2fe5820af0fa735c3899b833dd41f067b6fa71",
+  "originHash" : "f6109d5e02586719672efa0e430c00a004c5a0009cdf0dcaa940d3139b81b3d7",
   "pins" : [
-    {
-      "identity" : "cachedasyncimage",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/bullinnyc/CachedAsyncImage",
-      "state" : {
-        "revision" : "cb253e111528c082381af54b67dab7a15eefde16",
-        "version" : "2.6.0"
-      }
-    },
-    {
-      "identity" : "datacache",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/huynguyencong/DataCache",
-      "state" : {
-        "revision" : "cdef39b1f7f539ff722e7954746b2876ef12178c",
-        "version" : "1.7.0"
-      }
-    },
-    {
-      "identity" : "download-manager",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/shapedbyiris/download-manager.git",
-      "state" : {
-        "revision" : "1f6c3ebbc361311e5abae53947ac5ade7542a575",
-        "version" : "0.1.0"
-      }
-    },
     {
       "identity" : "sparkle",
       "kind" : "remoteSourceControl",
@@ -35,15 +8,6 @@
       "state" : {
         "revision" : "ab7d71291238df6e0492143b120c9b696a35f603",
         "version" : "2.10.1"
-      }
-    },
-    {
-      "identity" : "swiftsoup",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/scinfu/SwiftSoup",
-      "state" : {
-        "revision" : "dee225a3da7b68d34936abc4dc8f34f2264db647",
-        "version" : "2.9.6"
       }
     },
     {

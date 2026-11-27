@@ -3,8 +3,8 @@
 //  PlayCover
 //
 
+import AppKit
 import Foundation
-import SwiftSoup
 
 public class IPA {
     public let url: URL
@@ -96,7 +96,58 @@ public class IPA {
         case store(SourceAppsData)
     }
 
-    private func checkMacOSCompatibility(appID: Int) async -> Bool {
+    static func htmlIndicatesMacOSCompatibility(_ htmlString: String) -> Bool {
+        let className = "information-list__item__definition__item__definition"
+        let tagPattern = #"<([A-Za-z][A-Za-z0-9]*)\b[^>]*\bclass\s*=\s*"# +
+            #"(?:"[^"]*\b\#(className)\b[^"]*"|'[^']*\b\#(className)\b[^']*')[^>]*>"#
+        guard let definitionTagPattern = try? Regex(tagPattern).ignoresCase() else {
+            return false
+        }
+        for match in htmlString.matches(of: definitionTagPattern) {
+            guard let tagSub = match.output[1].substring else { continue }
+            let tagName = String(tagSub)
+            let contentStart = match.range.upperBound
+            var depth = 1
+            var cursor = contentStart
+            let tail = htmlString[contentStart...]
+            while cursor < htmlString.endIndex, depth > 0 {
+                guard let lt = tail[cursor...].firstIndex(of: "<") else {
+                    break
+                }
+                let afterLT = htmlString[lt...]
+                if afterLT.starts(with: "</") {
+                    if let closeMatch = afterLT.prefixMatch(of: /<\/([A-Za-z][A-Za-z0-9]*)\s*>/),
+                       closeMatch.output.1.caseInsensitiveCompare(tagName) == .orderedSame {
+                        depth -= 1
+                        if depth == 0 {
+                            let inner = String(htmlString[contentStart..<lt])
+                            let plainText = inner
+                                .replacing(/<[^>]+>/, with: " ")
+                                .replacingOccurrences(of: "&amp;", with: "&")
+                                .replacingOccurrences(of: "&nbsp;", with: " ")
+                            if plainText.contains("macOS") {
+                                return true
+                            }
+                            break
+                        }
+                        cursor = closeMatch.range.upperBound
+                        continue
+                    }
+                } else if !afterLT.starts(with: "<!"),
+                          let openMatch = afterLT.prefixMatch(of: /<([A-Za-z][A-Za-z0-9]*)\b[^>]*>/),
+                          !afterLT[..<openMatch.range.upperBound].hasSuffix("/>"),
+                          openMatch.output.1.caseInsensitiveCompare(tagName) == .orderedSame {
+                    depth += 1
+                    cursor = openMatch.range.upperBound
+                    continue
+                }
+                cursor = htmlString.index(after: lt)
+            }
+        }
+        return false
+    }
+
+    private static func checkMacOSCompatibility(appID: Int) async -> Bool {
         let urlString = "https://apps.apple.com/us/app/id\(appID)"
         guard let url = URL(string: urlString) else {
             return false
@@ -111,19 +162,10 @@ public class IPA {
             guard let htmlString = String(data: data, encoding: .utf8) else {
                 return false
             }
-            let document = try SwiftSoup.parse(htmlString)
-            let elements = try document.getElementsByClass("information-list__item__definition__item__definition")
-            for element in elements {
-                let text = try element.text()
-                if text.contains("macOS") {
-                    return true
-                }
-            }
+            return htmlIndicatesMacOSCompatibility(htmlString)
         } catch {
             return false
         }
-
-        return false
     }
 
     @MainActor
@@ -146,7 +188,7 @@ public class IPA {
             let stringArray = appLookup.components(separatedBy: CharacterSet.decimalDigits.inverted)
             appID = Int(stringArray.last ?? "0") ?? 0
         }
-        let supportMacOS: Bool = await checkMacOSCompatibility(appID: appID)
+        let supportMacOS: Bool = await Self.checkMacOSCompatibility(appID: appID)
         let prefs = installPreferences ?? InstallPreferences()
         let showAlert = prefs.showAppStorePopup
         if showAlert && supportMacOS {
@@ -176,9 +218,7 @@ public class IPA {
                     guard let urlApp = URL(string: "itms-apps://apps.apple.com/app/id\(appID)") else {
                         return true
                     }
-                    await MainActor.run {
-                        NSWorkspace.shared.open(urlApp)
-                    }
+                    _ = NSWorkspace.shared.open(urlApp)
                 }
                 return true
             default:

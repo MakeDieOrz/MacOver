@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import PlayCoverCore
 import SwiftUI
 
@@ -78,13 +79,14 @@ public struct PlayCoverAlertRequest: Identifiable {
 }
 
 @MainActor
-public final class AlertPresenter: ObservableObject {
-    @Published public var activeRequest: PlayCoverAlertRequest?
-    public var testHandler: ((PlayCoverAlertRequest) -> PlayCoverAlertResponse)?
-    private let bypassUnitTestAutoResolve: Bool
+@Observable
+public final class AlertPresenter {
+    public var activeRequest: PlayCoverAlertRequest?
+    @ObservationIgnored public var testHandler: ((PlayCoverAlertRequest) -> PlayCoverAlertResponse)?
+    @ObservationIgnored private let bypassUnitTestAutoResolve: Bool
 
-    private var queuedRequests: [PlayCoverAlertRequest] = []
-    private var continuations: [UUID: CheckedContinuation<PlayCoverAlertResponse, Never>] = [:]
+    @ObservationIgnored private var queuedRequests: [PlayCoverAlertRequest] = []
+    @ObservationIgnored private var continuations: [UUID: CheckedContinuation<PlayCoverAlertResponse, Never>] = [:]
 
     nonisolated public init(bypassUnitTestAutoResolve: Bool = false) {
         self.bypassUnitTestAutoResolve = bypassUnitTestAutoResolve

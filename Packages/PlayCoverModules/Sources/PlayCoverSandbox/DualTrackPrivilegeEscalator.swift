@@ -2,6 +2,7 @@ import Foundation
 import PlayCoverCore
 import Security
 import ServiceManagement
+import Synchronization
 
 public enum DualTrackPrivilegeEscalator {
     public static let helperMachServiceName = "app.makedie.MacOver.Helper"
@@ -199,16 +200,14 @@ public enum DualTrackPrivilegeEscalator {
             let connection = NSXPCConnection(machServiceName: helperMachServiceName, options: .privileged)
             connection.remoteObjectInterface = NSXPCInterface(with: PlayCoverHelperProtocol.self)
 
-            let lock = NSLock()
-            var resumed = false
+            let resumed = Mutex(false)
             func finish(_ result: Result<Void, Error>) {
-                lock.lock()
-                guard !resumed else {
-                    lock.unlock()
-                    return
+                let shouldResume = resumed.withLock { didResume -> Bool in
+                    guard !didResume else { return false }
+                    didResume = true
+                    return true
                 }
-                resumed = true
-                lock.unlock()
+                guard shouldResume else { return }
                 connection.invalidate()
                 continuation.resume(with: result)
             }

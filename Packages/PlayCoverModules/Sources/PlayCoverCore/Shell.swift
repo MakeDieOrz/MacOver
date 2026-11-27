@@ -6,7 +6,7 @@
 import AppKit
 import Foundation
 
-public class Shell: ObservableObject {
+public class Shell {
     public init() {}
 
     @discardableResult

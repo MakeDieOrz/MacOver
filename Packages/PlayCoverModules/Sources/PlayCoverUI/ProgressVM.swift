@@ -6,17 +6,19 @@
 //
 
 import Foundation
+import Observation
 
+@Observable
 open class ProgressVM<
     Steps: RawRepresentable & Equatable & Sendable
->: ObservableObject, @unchecked Sendable where Steps.RawValue == String {
-    @Published public var progress = 0.0
-    @Published public var inProgress = false
-    @Published public var status: Steps
+>: @unchecked Sendable where Steps.RawValue == String {
+    public var progress = 0.0
+    public var inProgress = false
+    public var status: Steps
 
-    private let starting: Steps
-    private let ends: [Steps]
-    private var endDismissTask: Task<Void, Never>?
+    @ObservationIgnored private let starting: Steps
+    @ObservationIgnored private let ends: [Steps]
+    @ObservationIgnored private var endDismissTask: Task<Void, Never>?
 
     /// - Parameters:
     ///     - start: The initial starting value

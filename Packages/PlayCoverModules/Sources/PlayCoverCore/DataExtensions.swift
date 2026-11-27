@@ -27,7 +27,7 @@ public extension String {
 
 public extension Data {
     func extract<T>(_ type: T.Type, offset: Int = 0,
-                    swap: ((UnsafeMutablePointer<T>, NXByteOrder) -> Void)? = nil) throws -> T {
+                    swap: ((inout T) -> Void)? = nil) throws -> T {
         let size = MemoryLayout<T>.size
         guard size >= 0,
               offset >= startIndex,
@@ -38,7 +38,7 @@ public extension Data {
         return withUnsafeTemporaryAllocation(byteCount: size, alignment: MemoryLayout<T>.alignment) { rawBuf in
             _ = copyBytes(to: rawBuf, from: offset..<(offset + size))
             var result = rawBuf.load(as: T.self)
-            swap?(&result, NXHostByteOrder())
+            swap?(&result)
             return result
         }
     }

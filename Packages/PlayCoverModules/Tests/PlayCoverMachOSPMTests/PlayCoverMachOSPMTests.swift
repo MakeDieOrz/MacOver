@@ -708,4 +708,109 @@ struct PlayCoverMachOSPMTests {
             #expect(try readUInt32LE(from: execURL, at: off) == InlineSyscallPatcher.svcInstruction)
         }
     }
+
+    @Test
+    func machOByteSwapHelpersAreExactInvolutions() {
+        var fatHdr = fat_header(magic: 0x1234_5678, nfat_arch: 0x0102_0304)
+        let origFatHdr = fatHdr
+        MachOByteSwap.swapFatHeader(&fatHdr)
+        #expect(fatHdr.magic == origFatHdr.magic.byteSwapped)
+        #expect(fatHdr.nfat_arch == origFatHdr.nfat_arch.byteSwapped)
+        MachOByteSwap.swapFatHeader(&fatHdr)
+        #expect(fatHdr.magic == origFatHdr.magic && fatHdr.nfat_arch == origFatHdr.nfat_arch)
+
+        var fatArch = fat_arch(cputype: 1, cpusubtype: 2, offset: 3, size: 4, align: 5)
+        let origFatArch = fatArch
+        MachOByteSwap.swapFatArch(&fatArch)
+        #expect(fatArch.offset == UInt32(3).byteSwapped && fatArch.size == UInt32(4).byteSwapped)
+        MachOByteSwap.swapFatArch(&fatArch)
+        #expect(fatArch.cputype == origFatArch.cputype && fatArch.align == origFatArch.align)
+
+        var fatArch64 = fat_arch_64(cputype: 1, cpusubtype: 2, offset: 3, size: 4, align: 5, reserved: 6)
+        MachOByteSwap.swapFatArch64(&fatArch64)
+        #expect(fatArch64.reserved == UInt32(6).byteSwapped && fatArch64.size == UInt64(4).byteSwapped)
+        MachOByteSwap.swapFatArch64(&fatArch64)
+        #expect(fatArch64.reserved == 6 && fatArch64.size == 4)
+
+        var mh64 = mach_header_64(magic: MH_MAGIC_64, cputype: CPU_TYPE_ARM64, cpusubtype: 0,
+                                  filetype: UInt32(MH_EXECUTE), ncmds: 7, sizeofcmds: 256, flags: 9, reserved: 11)
+        MachOByteSwap.swapMachHeader64(&mh64)
+        #expect(mh64.magic == MH_CIGAM_64 && mh64.ncmds == UInt32(7).byteSwapped)
+        MachOByteSwap.swapMachHeader64(&mh64)
+        #expect(mh64.magic == MH_MAGIC_64 && mh64.ncmds == 7 && mh64.reserved == 11)
+
+        var lc = load_command(cmd: UInt32(LC_LOAD_DYLIB), cmdsize: 32)
+        MachOByteSwap.swapLoadCommand(&lc)
+        #expect(lc.cmd == UInt32(LC_LOAD_DYLIB).byteSwapped && lc.cmdsize == UInt32(32).byteSwapped)
+        MachOByteSwap.swapLoadCommand(&lc)
+        #expect(lc.cmd == UInt32(LC_LOAD_DYLIB) && lc.cmdsize == 32)
+
+        var seg64 = segment_command_64(
+            cmd: UInt32(LC_SEGMENT_64), cmdsize: 72, segname: appendFixed16String("__TEXT"),
+            vmaddr: 0x1000, vmsize: 0x2000, fileoff: 0x100, filesize: 0x200,
+            maxprot: 5, initprot: 3, nsects: 1, flags: 2
+        )
+        MachOByteSwap.swapSegmentCommand64(&seg64)
+        #expect(seg64.vmaddr == UInt64(0x1000).byteSwapped && seg64.nsects == UInt32(1).byteSwapped)
+        MachOByteSwap.swapSegmentCommand64(&seg64)
+        #expect(seg64.vmaddr == 0x1000 && seg64.nsects == 1 && seg64.flags == 2)
+
+        var sect64 = section_64(
+            sectname: appendFixed16String("__text"), segname: appendFixed16String("__TEXT"),
+            addr: 0x10, size: 0x20, offset: 0x30, align: 4, reloff: 5, nreloc: 6, flags: 7,
+            reserved1: 8, reserved2: 9, reserved3: 10
+        )
+        MachOByteSwap.swapSection64(&sect64)
+        #expect(sect64.addr == UInt64(0x10).byteSwapped && sect64.reserved3 == UInt32(10).byteSwapped)
+        MachOByteSwap.swapSection64(&sect64)
+        #expect(sect64.addr == 0x10 && sect64.reserved3 == 10)
+
+        var link = linkedit_data_command(cmd: UInt32(LC_CODE_SIGNATURE), cmdsize: 16, dataoff: 0x400, datasize: 0x80)
+        MachOByteSwap.swapLinkeditDataCommand(&link)
+        #expect(link.dataoff == UInt32(0x400).byteSwapped)
+        MachOByteSwap.swapLinkeditDataCommand(&link)
+        #expect(link.dataoff == 0x400 && link.datasize == 0x80)
+
+        var sym = symtab_command(cmd: UInt32(LC_SYMTAB), cmdsize: 24, symoff: 1, nsyms: 2, stroff: 3, strsize: 4)
+        MachOByteSwap.swapSymtabCommand(&sym)
+        #expect(sym.nsyms == UInt32(2).byteSwapped)
+        MachOByteSwap.swapSymtabCommand(&sym)
+        #expect(sym.nsyms == 2 && sym.strsize == 4)
+
+        var dyld = dyld_info_command(
+            cmd: UInt32(LC_DYLD_INFO_ONLY), cmdsize: 48, rebase_off: 1, rebase_size: 2,
+            bind_off: 3, bind_size: 4, weak_bind_off: 5, weak_bind_size: 6,
+            lazy_bind_off: 7, lazy_bind_size: 8, export_off: 9, export_size: 10
+        )
+        MachOByteSwap.swapDyldInfoCommand(&dyld)
+        #expect(dyld.export_size == UInt32(10).byteSwapped)
+        MachOByteSwap.swapDyldInfoCommand(&dyld)
+        #expect(dyld.export_size == 10 && dyld.rebase_off == 1)
+
+        var dylib = dylib_command(
+            cmd: UInt32(LC_LOAD_DYLIB), cmdsize: 32,
+            dylib: dylib(name: lc_str(offset: 24), timestamp: 1, current_version: 2, compatibility_version: 3)
+        )
+        MachOByteSwap.swapDylibCommand(&dylib)
+        #expect(dylib.dylib.name.offset == UInt32(24).byteSwapped)
+        MachOByteSwap.swapDylibCommand(&dylib)
+        #expect(dylib.dylib.name.offset == 24 && dylib.dylib.compatibility_version == 3)
+
+        var build = build_version_command(
+            cmd: UInt32(LC_BUILD_VERSION), cmdsize: 24, platform: UInt32(PLATFORM_MACCATALYST),
+            minos: 0x000F_0000, sdk: 0x000F_0000, ntools: 0
+        )
+        MachOByteSwap.swapBuildVersionCommand(&build)
+        #expect(build.platform == UInt32(PLATFORM_MACCATALYST).byteSwapped)
+        MachOByteSwap.swapBuildVersionCommand(&build)
+        #expect(build.platform == UInt32(PLATFORM_MACCATALYST))
+
+        var enc = encryption_info_command_64(
+            cmd: UInt32(LC_ENCRYPTION_INFO_64), cmdsize: 24, cryptoff: 1, cryptsize: 2, cryptid: 3, pad: 4
+        )
+        MachOByteSwap.swapEncryptionCommand64(&enc)
+        #expect(enc.cryptid == UInt32(3).byteSwapped && enc.pad == UInt32(4).byteSwapped)
+        MachOByteSwap.swapEncryptionCommand64(&enc)
+        #expect(enc.cryptid == 3 && enc.pad == 4)
+    }
 }

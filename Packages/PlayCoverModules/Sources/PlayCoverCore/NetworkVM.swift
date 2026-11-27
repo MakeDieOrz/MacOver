@@ -6,14 +6,49 @@
 //
 
 import Foundation
-import SystemConfiguration
+import Network
+import Synchronization
 
 public class NetworkVM {
+    private final class PathMonitorBox: @unchecked Sendable {
+        static let shared = PathMonitorBox()
+
+        private let queue = DispatchQueue(label: "app.makedie.MacOver.NetworkVM.monitor", qos: .utility)
+        private let monitor = NWPathMonitor()
+        private let status = Mutex<NWPath.Status?>(nil)
+        private let initialSignal = DispatchSemaphore(value: 0)
+        private let didSignal = Mutex<Bool>(false)
+
+        private init() {
+            monitor.pathUpdateHandler = { [weak self] path in
+                guard let self else { return }
+                self.status.withLock { $0 = path.status }
+                let shouldSignal = self.didSignal.withLock { signaled -> Bool in
+                    guard !signaled else { return false }
+                    signaled = true
+                    return true
+                }
+                if shouldSignal {
+                    self.initialSignal.signal()
+                }
+            }
+            monitor.start(queue: queue)
+        }
+
+        func isConnected() -> Bool {
+            if let current = status.withLock({ $0 }) {
+                return current == .satisfied
+            }
+            _ = initialSignal.wait(timeout: .now() + .milliseconds(150))
+            if let updated = status.withLock({ $0 }) {
+                return updated == .satisfied
+            }
+            return monitor.currentPath.status == .satisfied
+        }
+    }
+
     public static func isConnectedToNetwork() -> Bool {
-        guard let flags = getFlags() else { return false }
-        let isReachable = flags.contains(.reachable)
-        let needsConnection = flags.contains(.connectionRequired)
-        let result = (isReachable && !needsConnection)
+        let result = PathMonitorBox.shared.isConnected()
 
         if !result && !PlayCoverDiagnostics.hasActiveToast(ofType: .network) {
             PlayCoverDiagnostics.showToast(
@@ -23,39 +58,6 @@ public class NetworkVM {
         }
 
         return result
-    }
-
-    public static func getFlags() -> SCNetworkReachabilityFlags? {
-        guard let reachability = ipv4Reachability() ?? ipv6Reachability() else { return nil }
-        var flags = SCNetworkReachabilityFlags()
-        if !SCNetworkReachabilityGetFlags(reachability, &flags) {
-            return nil
-        }
-        return flags
-    }
-
-    public static func ipv4Reachability() -> SCNetworkReachability? {
-        var zeroAddress = sockaddr_in()
-        zeroAddress.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        zeroAddress.sin_family = sa_family_t(AF_INET)
-
-        return withUnsafePointer(to: &zeroAddress, {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                SCNetworkReachabilityCreateWithAddress(nil, $0)
-            }
-        })
-    }
-
-    public static func ipv6Reachability() -> SCNetworkReachability? {
-        var zeroAddress = sockaddr_in6()
-        zeroAddress.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
-        zeroAddress.sin6_family = sa_family_t(AF_INET6)
-
-        return withUnsafePointer(to: &zeroAddress, {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                SCNetworkReachabilityCreateWithAddress(nil, $0)
-            }
-        })
     }
 
     public static func isURLAccessible(url: URL, popup: Bool = false) async -> (URL?, Bool) {

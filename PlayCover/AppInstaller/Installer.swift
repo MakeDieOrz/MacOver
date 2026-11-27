@@ -7,6 +7,7 @@
 
 import Darwin
 import Foundation
+import Synchronization
 
 class Installer {
     static let installGenerationInfoKey = "PCInstallGeneration"
@@ -109,7 +110,7 @@ class Installer {
         ipaUrl: URL,
         export: Bool,
         dependencies: PlayCoverDependencies? = nil,
-        returnCompletion: @escaping (URL?) -> Void
+        returnCompletion: @escaping @Sendable (URL?) -> Void
     ) {
         let installVM = dependencies?.installVM ?? InstallVM()
         let installPreferences = dependencies?.installPreferences ?? InstallPreferences()
@@ -421,8 +422,7 @@ class Installer {
             return validMachOs
         }
 
-        var resolved: [URL] = []
-        let serialQueue = DispatchQueue(label: "baseAppUrlResolver")
+        let resolved = Mutex<[URL]>([])
 
         baseApp.url.enumerateContents { url, attributes in
             guard attributes.isRegularFile == true, let fileSize = attributes.fileSize, fileSize > 4 else {
@@ -447,19 +447,17 @@ class Installer {
                 return
             }
 
-            serialQueue.sync {
-                switch Array(data) {
-                case [202, 254, 186, 190], [190, 186, 254, 202],
-                     [202, 254, 186, 191], [191, 186, 254, 202],
-                     [207, 250, 237, 254], [254, 237, 250, 207]:
-                    resolved.append(url)
-                default:
-                    return
-                }
+            switch Array(data) {
+            case [202, 254, 186, 190], [190, 186, 254, 202],
+                 [202, 254, 186, 191], [191, 186, 254, 202],
+                 [207, 250, 237, 254], [254, 237, 250, 207]:
+                resolved.withLock { $0.append(url) }
+            default:
+                return
             }
         }
 
-        return resolved
+        return resolved.withLock { $0 }
     }
 
     /// Wrapper for codesign, applies the given entitlements to the application and all of its contents

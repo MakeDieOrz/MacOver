@@ -8,7 +8,7 @@ import PlayCoverCore
 import SwiftUI
 import UserNotifications
 
-public class NotifyService: NSObject, UNUserNotificationCenterDelegate {
+public final class NotifyService: NSObject, UNUserNotificationCenterDelegate, Sendable {
 
     public override init() {
         super.init()

@@ -14,7 +14,7 @@ BIN_PATH="${OUT_DIR}/test_compat104_fixes"
 
 echo "==> Compiling pure-C unit tests with ASan + UBSan..."
 xcrun clang \
-  -std=gnu11 \
+  -std=gnu23 \
   -Wall -Wextra -Werror \
   -g -O1 \
   -fsanitize=address,undefined \

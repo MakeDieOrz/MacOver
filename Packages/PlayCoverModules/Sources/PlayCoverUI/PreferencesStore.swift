@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import PlayCoverCore
 
 public enum KeyCoverStatus: String, Codable, Hashable, Sendable {
@@ -7,22 +8,23 @@ public enum KeyCoverStatus: String, Codable, Hashable, Sendable {
     case userProvidedPassword
 }
 
-public final class KeyCoverPreferences: NSObject, ObservableObject {
+@Observable
+public final class KeyCoverPreferences: @unchecked Sendable {
     private enum Keys {
         static let keyCoverEnabled = "keyCoverEnabled"
         static let promptAtLaunch = "promptForKeyCoverPasswordAtLaunch"
     }
 
-    private let userDefaults: UserDefaults
+    @ObservationIgnored private let userDefaults: UserDefaults
 
-    @Published public var keyCoverEnabled: KeyCoverStatus {
+    public var keyCoverEnabled: KeyCoverStatus {
         didSet {
             guard oldValue != keyCoverEnabled else { return }
             userDefaults.set(keyCoverEnabled.rawValue, forKey: Keys.keyCoverEnabled)
         }
     }
 
-    @Published public var promptForKeyCoverPasswordAtLaunch: Bool {
+    public var promptForKeyCoverPasswordAtLaunch: Bool {
         didSet {
             guard oldValue != promptForKeyCoverPasswordAtLaunch else { return }
             userDefaults.set(promptForKeyCoverPasswordAtLaunch, forKey: Keys.promptAtLaunch)
@@ -42,11 +44,11 @@ public final class KeyCoverPreferences: NSObject, ObservableObject {
         } else {
             self.promptForKeyCoverPasswordAtLaunch = true
         }
-        super.init()
     }
 }
 
-public final class InstallPreferences: NSObject, ObservableObject {
+@Observable
+public final class InstallPreferences: @unchecked Sendable {
     private enum Keys {
         static let alwaysInstallPlayTools = "AlwaysInstallPlayTools"
         static let defaultAppType = "DefaultAppType"
@@ -54,30 +56,30 @@ public final class InstallPreferences: NSObject, ObservableObject {
         static let showAppStorePopup = "ShowAppStorePopup"
     }
 
-    private let userDefaults: UserDefaults
+    @ObservationIgnored private let userDefaults: UserDefaults
 
-    @Published public var alwaysInstallPlayTools: Bool {
+    public var alwaysInstallPlayTools: Bool {
         didSet {
             guard oldValue != alwaysInstallPlayTools else { return }
             userDefaults.set(alwaysInstallPlayTools, forKey: Keys.alwaysInstallPlayTools)
         }
     }
 
-    @Published public var defaultAppType: LSApplicationCategoryType {
+    public var defaultAppType: LSApplicationCategoryType {
         didSet {
             guard oldValue != defaultAppType else { return }
             userDefaults.set(defaultAppType.rawValue, forKey: Keys.defaultAppType)
         }
     }
 
-    @Published public var showInstallPopup: Bool {
+    public var showInstallPopup: Bool {
         didSet {
             guard oldValue != showInstallPopup else { return }
             userDefaults.set(showInstallPopup, forKey: Keys.showInstallPopup)
         }
     }
 
-    @Published public var showAppStorePopup: Bool {
+    public var showAppStorePopup: Bool {
         didSet {
             guard oldValue != showAppStorePopup else { return }
             userDefaults.set(showAppStorePopup, forKey: Keys.showAppStorePopup)
@@ -101,11 +103,11 @@ public final class InstallPreferences: NSObject, ObservableObject {
         self.showAppStorePopup = userDefaults.object(forKey: Keys.showAppStorePopup) != nil
             ? userDefaults.bool(forKey: Keys.showAppStorePopup)
             : true
-        super.init()
     }
 }
 
-public final class UninstallPreferences: NSObject, ObservableObject {
+@Observable
+public final class UninstallPreferences: @unchecked Sendable {
     private enum Keys {
         static let clearAppData = "ClearAppDataUninstall"
         static let removeAppKeymap = "RemoveAppKeymapUninstall"
@@ -116,51 +118,51 @@ public final class UninstallPreferences: NSObject, ObservableObject {
         static let showUninstallPopup = "ShowUninstallPopup"
     }
 
-    private let userDefaults: UserDefaults
+    @ObservationIgnored private let userDefaults: UserDefaults
 
-    @Published public var clearAppData: Bool {
+    public var clearAppData: Bool {
         didSet {
             guard oldValue != clearAppData else { return }
             userDefaults.set(clearAppData, forKey: Keys.clearAppData)
         }
     }
 
-    @Published public var removeAppKeymap: Bool {
+    public var removeAppKeymap: Bool {
         didSet {
             guard oldValue != removeAppKeymap else { return }
             userDefaults.set(removeAppKeymap, forKey: Keys.removeAppKeymap)
         }
     }
 
-    @Published public var removeAppSettings: Bool {
+    public var removeAppSettings: Bool {
         didSet {
             guard oldValue != removeAppSettings else { return }
             userDefaults.set(removeAppSettings, forKey: Keys.removeAppSettings)
         }
     }
 
-    @Published public var removeAppNetworkRules: Bool {
+    public var removeAppNetworkRules: Bool {
         didSet {
             guard oldValue != removeAppNetworkRules else { return }
             userDefaults.set(removeAppNetworkRules, forKey: Keys.removeAppNetworkRules)
         }
     }
 
-    @Published public var removeAppEntitlements: Bool {
+    public var removeAppEntitlements: Bool {
         didSet {
             guard oldValue != removeAppEntitlements else { return }
             userDefaults.set(removeAppEntitlements, forKey: Keys.removeAppEntitlements)
         }
     }
 
-    @Published public var removePlayChain: Bool {
+    public var removePlayChain: Bool {
         didSet {
             guard oldValue != removePlayChain else { return }
             userDefaults.set(removePlayChain, forKey: Keys.removePlayChain)
         }
     }
 
-    @Published public var showUninstallPopup: Bool {
+    public var showUninstallPopup: Bool {
         didSet {
             guard oldValue != showUninstallPopup else { return }
             userDefaults.set(showUninstallPopup, forKey: Keys.showUninstallPopup)
@@ -190,6 +192,5 @@ public final class UninstallPreferences: NSObject, ObservableObject {
         self.showUninstallPopup = userDefaults.object(forKey: Keys.showUninstallPopup) != nil
             ? userDefaults.bool(forKey: Keys.showUninstallPopup)
             : true
-        super.init()
     }
 }

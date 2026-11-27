@@ -445,12 +445,16 @@ final class MachoTests: XCTestCase {
 
         var loadedPaths: [String] = []
         _ = try Macho.iterateLoadCommands(binary: binary) { offset, shouldSwap in
-            let lc = try binary.extract(load_command.self, offset: offset, swap: shouldSwap ? swap_load_command : nil)
+            let lc = try binary.extract(
+                load_command.self,
+                offset: offset,
+                swap: shouldSwap ? { MachOByteSwap.swapLoadCommand(&$0) } : nil
+            )
             if lc.cmd == UInt32(LC_LOAD_DYLIB) {
                 let dylibCmd = try binary.extract(
                     dylib_command.self,
                     offset: offset,
-                    swap: shouldSwap ? swap_dylib_command : nil
+                    swap: shouldSwap ? { MachOByteSwap.swapDylibCommand(&$0) } : nil
                 )
                 loadedPaths.append(String(
                     data: binary,
@@ -541,14 +545,14 @@ final class MachoTests: XCTestCase {
             case UInt32(LC_SEGMENT_64):
                 var seg = try data.extract(segment_command_64.self, offset: cursor)
                 let nsects = seg.nsects
-                swap_segment_command_64(&seg, NX_BigEndian)
+                MachOByteSwap.swapSegmentCommand64(&seg)
                 withUnsafeBytes(of: &seg) {
                     data.replaceSubrange(cursor..<(cursor + MemoryLayout<segment_command_64>.size), with: $0)
                 }
                 var sectCursor = cursor + MemoryLayout<segment_command_64>.size
                 for _ in 0..<nsects {
                     var sect = try data.extract(section_64.self, offset: sectCursor)
-                    swap_section_64(&sect, 1, NX_BigEndian)
+                    MachOByteSwap.swapSection64(&sect)
                     withUnsafeBytes(of: &sect) {
                         data.replaceSubrange(sectCursor..<(sectCursor + MemoryLayout<section_64>.size), with: $0)
                     }
@@ -556,19 +560,19 @@ final class MachoTests: XCTestCase {
                 }
             case UInt32(LC_BUILD_VERSION):
                 var bv = try data.extract(build_version_command.self, offset: cursor)
-                swap_build_version_command(&bv, NX_BigEndian)
+                MachOByteSwap.swapBuildVersionCommand(&bv)
                 withUnsafeBytes(of: &bv) {
                     data.replaceSubrange(cursor..<(cursor + MemoryLayout<build_version_command>.size), with: $0)
                 }
             case UInt32(LC_LOAD_DYLIB), LC_LOAD_WEAK_DYLIB, UInt32(LC_REEXPORT_DYLIB), UInt32(LC_LOAD_UPWARD_DYLIB):
                 var dylibCmd = try data.extract(dylib_command.self, offset: cursor)
-                swap_dylib_command(&dylibCmd, NX_BigEndian)
+                MachOByteSwap.swapDylibCommand(&dylibCmd)
                 withUnsafeBytes(of: &dylibCmd) {
                     data.replaceSubrange(cursor..<(cursor + MemoryLayout<dylib_command>.size), with: $0)
                 }
             default:
                 var rawLC = lc
-                swap_load_command(&rawLC, NX_BigEndian)
+                MachOByteSwap.swapLoadCommand(&rawLC)
                 withUnsafeBytes(of: &rawLC) {
                     data.replaceSubrange(cursor..<(cursor + MemoryLayout<load_command>.size), with: $0)
                 }
@@ -576,7 +580,7 @@ final class MachoTests: XCTestCase {
             cursor += cmdSize
         }
 
-        swap_mach_header_64(&header, NX_BigEndian)
+        MachOByteSwap.swapMachHeader64(&header)
         withUnsafeBytes(of: &header) { data.replaceSubrange(0..<headerSize, with: $0) }
         return data
     }
@@ -747,12 +751,16 @@ final class MachoTests: XCTestCase {
         let patchedData = try Data(contentsOf: dupURL)
         var paths: [String] = []
         _ = try Macho.iterateLoadCommands(binary: patchedData) { offset, shouldSwap in
-            let lc = try patchedData.extract(load_command.self, offset: offset, swap: shouldSwap ? swap_load_command : nil)
+            let lc = try patchedData.extract(
+                load_command.self,
+                offset: offset,
+                swap: shouldSwap ? { MachOByteSwap.swapLoadCommand(&$0) } : nil
+            )
             if lc.cmd == UInt32(LC_LOAD_DYLIB) {
                 let dylibCmd = try patchedData.extract(
                     dylib_command.self,
                     offset: offset,
-                    swap: shouldSwap ? swap_dylib_command : nil
+                    swap: shouldSwap ? { MachOByteSwap.swapDylibCommand(&$0) } : nil
                 )
                 paths.append(String(
                     data: patchedData,
@@ -963,13 +971,17 @@ final class MachoTests: XCTestCase {
         var remainingCmds: [UInt32] = []
         var remainingDylibs: [String] = []
         _ = try Macho.iterateLoadCommands(binary: patched) { offset, shouldSwap in
-            let lc = try patched.extract(load_command.self, offset: offset, swap: shouldSwap ? swap_load_command : nil)
+            let lc = try patched.extract(
+                load_command.self,
+                offset: offset,
+                swap: shouldSwap ? { MachOByteSwap.swapLoadCommand(&$0) } : nil
+            )
             remainingCmds.append(lc.cmd)
             if lc.cmd == UInt32(LC_LOAD_DYLIB) {
                 let dylibCmd = try patched.extract(
                     dylib_command.self,
                     offset: offset,
-                    swap: shouldSwap ? swap_dylib_command : nil
+                    swap: shouldSwap ? { MachOByteSwap.swapDylibCommand(&$0) } : nil
                 )
                 remainingDylibs.append(String(
                     data: patched,

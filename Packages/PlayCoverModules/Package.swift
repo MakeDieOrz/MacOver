@@ -1,6 +1,11 @@
 // swift-tools-version: 6.2
 import PackageDescription
 
+let approachableConcurrencySettings: [SwiftSetting] = [
+    .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
+    .enableUpcomingFeature("InferIsolatedConformances")
+]
+
 let package = Package(
     name: "PlayCoverModules",
     platforms: [
@@ -17,47 +22,58 @@ let package = Package(
     targets: [
         .target(
             name: "PlayCoverCore",
-            dependencies: []
+            dependencies: [],
+            swiftSettings: approachableConcurrencySettings
         ),
         .target(
             name: "PlayCoverMachO",
-            dependencies: ["PlayCoverCore"]
+            dependencies: ["PlayCoverCore"],
+            swiftSettings: approachableConcurrencySettings
         ),
         .target(
             name: "PlayCoverKeymapping",
-            dependencies: ["PlayCoverCore"]
+            dependencies: ["PlayCoverCore"],
+            swiftSettings: approachableConcurrencySettings
         ),
         .target(
             name: "PlayCoverNetwork",
-            dependencies: ["PlayCoverCore"]
+            dependencies: ["PlayCoverCore"],
+            swiftSettings: approachableConcurrencySettings
         ),
         .target(
             name: "PlayCoverSandbox",
-            dependencies: ["PlayCoverCore"]
+            dependencies: ["PlayCoverCore"],
+            swiftSettings: approachableConcurrencySettings
         ),
         .target(
             name: "PlayCoverUI",
-            dependencies: ["PlayCoverCore"]
+            dependencies: ["PlayCoverCore"],
+            swiftSettings: approachableConcurrencySettings
         ),
         .testTarget(
             name: "PlayCoverCoreSPMTests",
-            dependencies: ["PlayCoverCore"]
+            dependencies: ["PlayCoverCore"],
+            swiftSettings: approachableConcurrencySettings
         ),
         .testTarget(
             name: "PlayCoverMachOSPMTests",
-            dependencies: ["PlayCoverMachO", "PlayCoverCore"]
+            dependencies: ["PlayCoverMachO", "PlayCoverCore"],
+            swiftSettings: approachableConcurrencySettings
         ),
         .testTarget(
             name: "PlayCoverNetworkSPMTests",
-            dependencies: ["PlayCoverNetwork", "PlayCoverCore"]
+            dependencies: ["PlayCoverNetwork", "PlayCoverCore"],
+            swiftSettings: approachableConcurrencySettings
         ),
         .testTarget(
             name: "PlayCoverSandboxSPMTests",
-            dependencies: ["PlayCoverSandbox", "PlayCoverCore"]
+            dependencies: ["PlayCoverSandbox", "PlayCoverCore"],
+            swiftSettings: approachableConcurrencySettings
         ),
         .testTarget(
             name: "PlayCoverUISPMTests",
-            dependencies: ["PlayCoverUI", "PlayCoverCore"]
+            dependencies: ["PlayCoverUI", "PlayCoverCore"],
+            swiftSettings: approachableConcurrencySettings
         )
     ],
     swiftLanguageModes: [.v6]

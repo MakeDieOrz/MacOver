@@ -138,10 +138,6 @@ python3 Tests/RuntimeHarness/run_runtime_harness.py \
 使用している主なライブラリ：
 
 - [PTFakeTouch](https://github.com/Ret70/PTFakeTouch)
-- [DownloadManager](https://github.com/shapedbyiris/download-manager)
-- [DataCache](https://github.com/huynguyencong/DataCache)
-- [SwiftUI CachedAsyncImage](https://github.com/bullinnyc/CachedAsyncImage)
 - [Yams](https://github.com/jpsim/Yams)
-- [SwiftSoup](https://github.com/scinfu/SwiftSoup)
 - [Sparkle](https://github.com/sparkle-project/Sparkle)
 - [inject](https://github.com/paradiseduo/inject) *（初期の Mach-O 注入設計の参考。MacOver では独自の `PlayCoverMachO` を使用）*

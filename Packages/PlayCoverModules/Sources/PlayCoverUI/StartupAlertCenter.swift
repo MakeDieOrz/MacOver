@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 
 public enum StartupAlertItem: Identifiable, Equatable, Sendable {
     case lowPowerMode
@@ -18,9 +19,10 @@ public enum StartupAlertItem: Identifiable, Equatable, Sendable {
 }
 
 @MainActor
-public final class StartupAlertCenter: ObservableObject {
-    @Published public var activeAlert: StartupAlertItem?
-    private var queue: [StartupAlertItem] = []
+@Observable
+public final class StartupAlertCenter {
+    public var activeAlert: StartupAlertItem?
+    @ObservationIgnored private var queue: [StartupAlertItem] = []
 
     nonisolated public init() {}
 

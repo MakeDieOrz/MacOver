@@ -145,7 +145,7 @@ public class Macho {
             let fatSwap = (fatMagic == FAT_CIGAM || fatMagic == FAT_CIGAM_64)
             let isFat64 = (fatMagic == FAT_MAGIC_64 || fatMagic == FAT_CIGAM_64)
             if fatSwap {
-                swap_fat_header(&fatHeader, NXHostByteOrder())
+                MachOByteSwap.swapFatHeader(&fatHeader)
             }
             let archOffset = MemoryLayout.size(ofValue: fatHeader)
             let archSize = isFat64 ? MemoryLayout<fat_arch_64>.size : MemoryLayout<fat_arch>.size
@@ -175,7 +175,7 @@ public class Macho {
                 if isFat64 {
                     var arch64 = try fatData.extract(fat_arch_64.self, offset: cursorOffset)
                     if fatSwap {
-                        swap_fat_arch_64(&arch64, 1, NXHostByteOrder())
+                        MachOByteSwap.swapFatArch64(&arch64)
                     }
                     if arch64.cputype == CPU_TYPE_ARM64 {
                         sliceOffset = arch64.offset
@@ -186,7 +186,7 @@ public class Macho {
                 } else {
                     var arch = try fatData.extract(fat_arch.self, offset: cursorOffset)
                     if fatSwap {
-                        swap_fat_arch(&arch, 1, NXHostByteOrder())
+                        MachOByteSwap.swapFatArch(&arch)
                     }
                     if arch.cputype == CPU_TYPE_ARM64 {
                         sliceOffset = UInt64(arch.offset)
@@ -222,7 +222,7 @@ public class Macho {
 
         var mh = try machHeaderData.extract(mach_header_64.self)
         if mh.magic == MH_CIGAM_64 {
-            swap_mach_header_64(&mh, NXHostByteOrder())
+            MachOByteSwap.swapMachHeader64(&mh)
         } else if mh.magic != MH_MAGIC_64 {
             throw PlayCoverError.appCorrupted
         }
@@ -276,7 +276,7 @@ public class Macho {
         _ = try iterateLoadCommands(binary: binary) { offset, shouldSwap in
             let lc = try binary.extract(load_command.self,
                                     offset: offset,
-                                    swap: shouldSwap ? swap_load_command : nil)
+                                    swap: shouldSwap ? { MachOByteSwap.swapLoadCommand(&$0) } : nil)
             if lc.cmd == UInt32(LC_SEGMENT_64) {
                 let segSize = MemoryLayout<segment_command_64>.size
                 guard offset + segSize <= offset + Int(lc.cmdsize),
@@ -285,14 +285,14 @@ public class Macho {
                 }
                 let seg = try binary.extract(segment_command_64.self,
                                          offset: offset,
-                                         swap: shouldSwap ? swap_segment_command_64 : nil)
+                                         swap: shouldSwap ? { MachOByteSwap.swapSegmentCommand64(&$0) } : nil)
                 let sectSize = MemoryLayout<section_64>.size
                 var sectOffset = offset + segSize
                 for _ in 0..<seg.nsects {
                     guard sectOffset + sectSize <= offset + Int(lc.cmdsize) else { break }
                     var sect = try binary.extract(section_64.self, offset: sectOffset)
                     if shouldSwap {
-                        swap_section_64(&sect, 1, NXHostByteOrder())
+                        MachOByteSwap.swapSection64(&sect)
                     }
                     let sectType = Int32(bitPattern: sect.flags) & SECTION_TYPE
                     if sect.size > 0 &&
@@ -317,7 +317,7 @@ public class Macho {
                 if Int(lc.cmdsize) >= MemoryLayout<linkedit_data_command>.size {
                     let le = try binary.extract(linkedit_data_command.self,
                                             offset: offset,
-                                            swap: shouldSwap ? swap_linkedit_data_command : nil)
+                                            swap: shouldSwap ? { MachOByteSwap.swapLinkeditDataCommand(&$0) } : nil)
                     if le.datasize > 0 && Int(le.dataoff) > headerSize {
                         earliest = min(earliest, Int(le.dataoff))
                     }
@@ -326,7 +326,7 @@ public class Macho {
                 if Int(lc.cmdsize) >= MemoryLayout<symtab_command>.size {
                     let sym = try binary.extract(symtab_command.self,
                                              offset: offset,
-                                             swap: shouldSwap ? swap_symtab_command : nil)
+                                             swap: shouldSwap ? { MachOByteSwap.swapSymtabCommand(&$0) } : nil)
                     if sym.nsyms > 0 && Int(sym.symoff) > headerSize {
                         earliest = min(earliest, Int(sym.symoff))
                     }
@@ -338,7 +338,7 @@ public class Macho {
                 if Int(lc.cmdsize) >= MemoryLayout<dyld_info_command>.size {
                     let info = try binary.extract(dyld_info_command.self,
                                               offset: offset,
-                                              swap: shouldSwap ? swap_dyld_info_command : nil)
+                                              swap: shouldSwap ? { MachOByteSwap.swapDyldInfoCommand(&$0) } : nil)
                     for (off, size) in [
                         (info.rebase_off, info.rebase_size),
                         (info.bind_off, info.bind_size),
@@ -705,7 +705,7 @@ public class Macho {
 
         if fatMagic == FAT_MAGIC || fatMagic == FAT_CIGAM {
             if shouldSwap {
-                swap_fat_header(&header, NXHostByteOrder())
+                MachOByteSwap.swapFatHeader(&header)
             }
             let archSize = MemoryLayout<fat_arch>.size
             let (tableBytes, tableOverflow) = UInt64(header.nfat_arch)
@@ -718,7 +718,7 @@ public class Macho {
             for _ in 0..<header.nfat_arch {
                 var arch = try binary.extract(fat_arch.self, offset: offset)
                 if shouldSwap {
-                    swap_fat_arch(&arch, 1, NXHostByteOrder())
+                    MachOByteSwap.swapFatArch(&arch)
                 }
                 if arch.cputype == CPU_TYPE_ARM64 {
                     let sliceOffset = UInt64(arch.offset)
@@ -735,7 +735,7 @@ public class Macho {
             throw PlayCoverError.failedToStripBinary
         } else if fatMagic == FAT_MAGIC_64 || fatMagic == FAT_CIGAM_64 {
             if shouldSwap {
-                swap_fat_header(&header, NXHostByteOrder())
+                MachOByteSwap.swapFatHeader(&header)
             }
             let archSize = MemoryLayout<fat_arch_64>.size
             let (tableBytes, tableOverflow) = UInt64(header.nfat_arch)
@@ -748,7 +748,7 @@ public class Macho {
             for _ in 0..<header.nfat_arch {
                 var arch = try binary.extract(fat_arch_64.self, offset: offset)
                 if shouldSwap {
-                    swap_fat_arch_64(&arch, 1, NXHostByteOrder())
+                    MachOByteSwap.swapFatArch64(&arch)
                 }
                 if arch.cputype == CPU_TYPE_ARM64 {
                     let sliceOffset = arch.offset
@@ -843,14 +843,16 @@ public class Macho {
         _ = try iterateLoadCommands(binary: ctx.headerWindow) { offset, shouldSwap in
             let loadCommand = try ctx.headerWindow.extract(load_command.self,
                                                        offset: offset,
-                                                       swap: shouldSwap ? swap_load_command : nil)
+                                                       swap: shouldSwap ? { MachOByteSwap.swapLoadCommand(&$0) } : nil)
             if [LC_LOAD_WEAK_DYLIB, UInt32(LC_LOAD_DYLIB)].contains(loadCommand.cmd) {
                 guard Int(loadCommand.cmdsize) >= MemoryLayout<dylib_command>.size else {
                     throw PlayCoverError.appCorrupted
                 }
-                let dylibCommand = try ctx.headerWindow.extract(dylib_command.self,
-                                                          offset: offset,
-                                                          swap: shouldSwap ? swap_dylib_command : nil)
+                let dylibCommand = try ctx.headerWindow.extract(
+                    dylib_command.self,
+                    offset: offset,
+                    swap: shouldSwap ? { MachOByteSwap.swapDylibCommand(&$0) } : nil
+                )
                 let name = String(data: ctx.headerWindow,
                                   offset: offset,
                                   commandSize: Int(dylibCommand.cmdsize),
@@ -897,14 +899,14 @@ public class Macho {
         var header = try ctx.headerWindow.extract(mach_header_64.self)
         let shouldSwap = (header.magic == MH_CIGAM_64)
         if shouldSwap {
-            swap_mach_header_64(&header, NXHostByteOrder())
+            MachOByteSwap.swapMachHeader64(&header)
         }
 
         var alreadyExists = false
         let commandsEnd = try iterateLoadCommands(binary: ctx.headerWindow) { offset, swapCmd in
             let lc = try ctx.headerWindow.extract(load_command.self,
                                               offset: offset,
-                                              swap: swapCmd ? swap_load_command : nil)
+                                              swap: swapCmd ? { MachOByteSwap.swapLoadCommand(&$0) } : nil)
             if [
                 UInt32(LC_REEXPORT_DYLIB),
                 UInt32(LC_LOAD_UPWARD_DYLIB),
@@ -916,7 +918,7 @@ public class Macho {
                 }
                 let dylibCmd = try ctx.headerWindow.extract(dylib_command.self,
                                                         offset: offset,
-                                                        swap: swapCmd ? swap_dylib_command : nil)
+                                                        swap: swapCmd ? { MachOByteSwap.swapDylibCommand(&$0) } : nil)
                 let curPath = String(data: ctx.headerWindow,
                                      offset: offset,
                                      commandSize: Int(dylibCmd.cmdsize),
@@ -965,7 +967,7 @@ public class Macho {
         )
         var command = dylib_command(cmd: cmdType, cmdsize: UInt32(cmdSize), dylib: dylibInfo)
         if shouldSwap {
-            swap_dylib_command(&command, NX_BigEndian)
+            MachOByteSwap.swapDylibCommand(&command)
         }
         var cmdData = Data(bytes: &command, count: fixedSize)
         cmdData.append(strData)
@@ -976,7 +978,7 @@ public class Macho {
         header.ncmds += 1
         header.sizeofcmds += UInt32(cmdSize)
         if shouldSwap {
-            swap_mach_header_64(&header, NX_BigEndian)
+            MachOByteSwap.swapMachHeader64(&header)
         }
         let headerData = Data(bytes: &header, count: headerSize)
         ctx.headerWindow.replaceSubrange(0..<headerSize, with: headerData)
@@ -996,7 +998,7 @@ public class Macho {
             var header = try ctx.headerWindow.extract(mach_header_64.self)
             let shouldSwap = (header.magic == MH_CIGAM_64)
             if shouldSwap {
-                swap_mach_header_64(&header, NXHostByteOrder())
+                MachOByteSwap.swapMachHeader64(&header)
             }
 
             var matchStart: Int?
@@ -1004,7 +1006,7 @@ public class Macho {
             _ = try iterateLoadCommands(binary: ctx.headerWindow) { offset, swapCmd in
                 let lc = try ctx.headerWindow.extract(load_command.self,
                                                   offset: offset,
-                                                  swap: swapCmd ? swap_load_command : nil)
+                                                  swap: swapCmd ? { MachOByteSwap.swapLoadCommand(&$0) } : nil)
                 if [
                     UInt32(LC_REEXPORT_DYLIB),
                     UInt32(LC_LOAD_UPWARD_DYLIB),
@@ -1014,9 +1016,11 @@ public class Macho {
                     guard Int(lc.cmdsize) >= MemoryLayout<dylib_command>.size else {
                         throw PlayCoverError.appCorrupted
                     }
-                    let dylibCmd = try ctx.headerWindow.extract(dylib_command.self,
-                                                            offset: offset,
-                                                            swap: swapCmd ? swap_dylib_command : nil)
+                    let dylibCmd = try ctx.headerWindow.extract(
+                        dylib_command.self,
+                        offset: offset,
+                        swap: swapCmd ? { MachOByteSwap.swapDylibCommand(&$0) } : nil
+                    )
                     let curPath = String(data: ctx.headerWindow,
                                          offset: offset,
                                          commandSize: Int(dylibCmd.cmdsize),
@@ -1046,7 +1050,7 @@ public class Macho {
             header.ncmds -= 1
             header.sizeofcmds -= UInt32(matchSize)
             if shouldSwap {
-                swap_mach_header_64(&header, NX_BigEndian)
+                MachOByteSwap.swapMachHeader64(&header)
             }
             ctx.headerWindow.replaceSubrange(0..<headerSize, with: Data(bytes: &header, count: headerSize))
             removedAny = true
@@ -1075,7 +1079,7 @@ public class Macho {
         try replaceLastCommand(&binary, satisfy: { commandData, shouldSwap in
             let loadCommand = try commandData.extract(load_command.self,
                                                   offset: commandData.startIndex,
-                                                  swap: shouldSwap ? swap_load_command : nil)
+                                                  swap: shouldSwap ? { MachOByteSwap.swapLoadCommand(&$0) } : nil)
             if ![LC_LOAD_WEAK_DYLIB,
                  UInt32(LC_LOAD_DYLIB),
                  UInt32(LC_REEXPORT_DYLIB),
@@ -1085,7 +1089,7 @@ public class Macho {
             }
             let dylibCommand = try commandData.extract(dylib_command.self,
                                                    offset: commandData.startIndex,
-                                                   swap: shouldSwap ? swap_dylib_command : nil)
+                                                   swap: shouldSwap ? { MachOByteSwap.swapDylibCommand(&$0) } : nil)
             if String(data: commandData,
                       offset: commandData.startIndex,
                       commandSize: Int(dylibCommand.cmdsize),
@@ -1115,7 +1119,7 @@ public class Macho {
                 return nil
             }
             if shouldSwap {
-                swap_dylib_command(&command, NX_BigEndian)
+                MachOByteSwap.swapDylibCommand(&command)
             }
             var commandData = Data(bytes: &command, count: dylibCommandFixedSize)
             commandData.append(stringData)
@@ -1137,7 +1141,7 @@ public class Macho {
         var header = try binary.extract(mach_header_64.self)
         let headerSwapped = (header.magic == MH_CIGAM_64)
         if headerSwapped {
-            swap_mach_header_64(&header, NXHostByteOrder())
+            MachOByteSwap.swapMachHeader64(&header)
         }
 
         let commandsEnd = headerSize + Int(header.sizeofcmds)
@@ -1153,7 +1157,7 @@ public class Macho {
         _ = try iterateLoadCommands(binary: binary) { offset, needSwap in
             let loadCommand = try binary.extract(load_command.self,
                                                  offset: offset,
-                                                 swap: needSwap ? swap_load_command : nil)
+                                                 swap: needSwap ? { MachOByteSwap.swapLoadCommand(&$0) } : nil)
             let isVersionCmd = [UInt32(LC_VERSION_MIN_IPHONEOS),
                                 UInt32(LC_VERSION_MIN_MACOSX),
                                 UInt32(LC_BUILD_VERSION)].contains(loadCommand.cmd)
@@ -1176,7 +1180,7 @@ public class Macho {
                                                        sdk: 0x000e0000,
                                                        ntools: 0)
         if headerSwapped {
-            swap_build_version_command(&macCatalystCommand, NX_BigEndian)
+            MachOByteSwap.swapBuildVersionCommand(&macCatalystCommand)
         }
         filteredCommands.append(Data(bytes: &macCatalystCommand, count: MemoryLayout<build_version_command>.size))
         keptCount += 1
@@ -1207,7 +1211,7 @@ public class Macho {
         header.ncmds = keptCount
         header.sizeofcmds = UInt32(filteredCommands.count)
         if headerSwapped {
-            swap_mach_header_64(&header, NX_BigEndian)
+            MachOByteSwap.swapMachHeader64(&header)
         }
         binary.replaceSubrange(0 ..< headerSize, with: Data(bytes: &header, count: headerSize))
     }
@@ -1229,7 +1233,7 @@ public class Macho {
         var header = try binary.extract(mach_header_64.self)
         let headerSwapped = (header.magic == MH_CIGAM_64)
         if headerSwapped {
-            swap_mach_header_64(&header, NXHostByteOrder())
+            MachOByteSwap.swapMachHeader64(&header)
         }
         var shouldSwap = headerSwapped
 
@@ -1240,7 +1244,7 @@ public class Macho {
         let movedCommandsEnd = try iterateLoadCommands(binary: binary) { offset, needSwap in
             let loadCommand = try binary.extract(load_command.self,
                                              offset: offset,
-                                             swap: needSwap ? swap_load_command : nil)
+                                             swap: needSwap ? { MachOByteSwap.swapLoadCommand(&$0) } : nil)
             if try isTargetCommand(binary[offset ..< offset + Int(loadCommand.cmdsize)], needSwap) {
                 oldCommandStart = offset
                 oldCommandSize = loadCommand.cmdsize
@@ -1298,7 +1302,7 @@ public class Macho {
         header.sizeofcmds -= oldCommandSize
         header.sizeofcmds += newCommandSize
         if headerSwapped {
-            swap_mach_header_64(&header, NX_BigEndian)
+            MachOByteSwap.swapMachHeader64(&header)
         }
         let newHeaderData = Data(bytes: &header, count: headerSize)
         binary.replaceSubrange(0..<headerSize, with: newHeaderData)
@@ -1340,7 +1344,7 @@ public class Macho {
         var offset = headerSize
         let shouldSwap = header.magic == MH_CIGAM_64
         if shouldSwap {
-            swap_mach_header_64(&header, NXHostByteOrder())
+            MachOByteSwap.swapMachHeader64(&header)
         }
 
         let allCommandsEnd = headerSize + Int(header.sizeofcmds)
@@ -1355,7 +1359,7 @@ public class Macho {
             }
             let loadCommand = try binary.extract(load_command.self,
                                              offset: offset,
-                                             swap: shouldSwap ? swap_load_command : nil)
+                                             swap: shouldSwap ? { MachOByteSwap.swapLoadCommand(&$0) } : nil)
             let cmdSize = Int(loadCommand.cmdsize)
             let commandEnd = offset + cmdSize
             if cmdSize < MemoryLayout<load_command>.size ||
@@ -1384,14 +1388,16 @@ public class Macho {
         _ = try iterateLoadCommands(binary: binary) { offset, shouldSwap in
             let loadCommand = try binary.extract(load_command.self,
                                              offset: offset,
-                                             swap: shouldSwap ? swap_load_command : nil)
+                                             swap: shouldSwap ? { MachOByteSwap.swapLoadCommand(&$0) } : nil)
             if loadCommand.cmd == UInt32(LC_ENCRYPTION_INFO_64) {
                 guard Int(loadCommand.cmdsize) >= MemoryLayout<encryption_info_command_64>.size else {
                     throw PlayCoverError.appCorrupted
                 }
-                let infoCommand = try binary.extract(encryption_info_command_64.self,
-                                                 offset: offset,
-                                                 swap: shouldSwap ? swap_encryption_command_64 : nil)
+                let infoCommand = try binary.extract(
+                    encryption_info_command_64.self,
+                    offset: offset,
+                    swap: shouldSwap ? { MachOByteSwap.swapEncryptionCommand64(&$0) } : nil
+                )
                 result = infoCommand.cryptid != 0
                 return true
             }
@@ -1407,14 +1413,16 @@ public class Macho {
         _ = try iterateLoadCommands(binary: binary) { offset, shouldSwap in
             let loadCommand = try binary.extract(load_command.self,
                                              offset: offset,
-                                             swap: shouldSwap ? swap_load_command : nil)
+                                             swap: shouldSwap ? { MachOByteSwap.swapLoadCommand(&$0) } : nil)
             if loadCommand.cmd == UInt32(LC_BUILD_VERSION) {
                 guard Int(loadCommand.cmdsize) >= MemoryLayout<build_version_command>.size else {
                     throw PlayCoverError.appCorrupted
                 }
-                let versionCommand = try binary.extract(build_version_command.self,
-                                                    offset: offset,
-                                                    swap: shouldSwap ? swap_build_version_command : nil)
+                let versionCommand = try binary.extract(
+                    build_version_command.self,
+                    offset: offset,
+                    swap: shouldSwap ? { MachOByteSwap.swapBuildVersionCommand(&$0) } : nil
+                )
                 sawBuildVersion = true
                 if versionCommand.platform != PLATFORM_MACCATALYST {
                     allCatalyst = false
@@ -1436,14 +1444,14 @@ public class Macho {
         _ = try iterateLoadCommands(binary: binary) { offset, shouldSwap in
             let loadCommand = try binary.extract(load_command.self,
                                              offset: offset,
-                                             swap: shouldSwap ? swap_load_command : nil)
+                                             swap: shouldSwap ? { MachOByteSwap.swapLoadCommand(&$0) } : nil)
             if loadCommand.cmd == UInt32(LC_LOAD_DYLIB) {
                 guard Int(loadCommand.cmdsize) >= MemoryLayout<dylib_command>.size else {
                     throw PlayCoverError.appCorrupted
                 }
                 let dylibCommand = try binary.extract(dylib_command.self,
                                                   offset: offset,
-                                                  swap: shouldSwap ? swap_dylib_command : nil)
+                                                  swap: shouldSwap ? { MachOByteSwap.swapDylibCommand(&$0) } : nil)
                 let dylibName = String(data: binary,
                                        offset: offset,
                                        commandSize: Int(dylibCommand.cmdsize),
@@ -1455,9 +1463,11 @@ public class Macho {
                 guard Int(loadCommand.cmdsize) >= MemoryLayout<build_version_command>.size else {
                     throw PlayCoverError.appCorrupted
                 }
-                let versionCommand = try binary.extract(build_version_command.self,
-                                                    offset: offset,
-                                                    swap: shouldSwap ? swap_build_version_command : nil)
+                let versionCommand = try binary.extract(
+                    build_version_command.self,
+                    offset: offset,
+                    swap: shouldSwap ? { MachOByteSwap.swapBuildVersionCommand(&$0) } : nil
+                )
                 isCatalyst = versionCommand.platform == PLATFORM_MACCATALYST
             }
             return false

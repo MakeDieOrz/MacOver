@@ -138,10 +138,6 @@ python3 Tests/RuntimeHarness/run_runtime_harness.py \
 使用到的开源库：
 
 - [PTFakeTouch](https://github.com/Ret70/PTFakeTouch)
-- [DownloadManager](https://github.com/shapedbyiris/download-manager)
-- [DataCache](https://github.com/huynguyencong/DataCache)
-- [SwiftUI CachedAsyncImage](https://github.com/bullinnyc/CachedAsyncImage)
 - [Yams](https://github.com/jpsim/Yams)
-- [SwiftSoup](https://github.com/scinfu/SwiftSoup)
 - [Sparkle](https://github.com/sparkle-project/Sparkle)
 - [inject](https://github.com/paradiseduo/inject) *（早期 Mach-O 注入方案参考；MacOver 已改用自研 `PlayCoverMachO`）*

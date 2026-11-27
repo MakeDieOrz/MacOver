@@ -6,27 +6,128 @@
 //
 
 import Foundation
-import DownloadManager
+import Synchronization
 
-/// DownloaderManager can be configured through this struct, default values are as the same as below
-/// `public struct DownloadManagerConfig {`
-///    `public var maximumRetries = 3`
-///    `public var exponentialBackoffMultiplier = 10`
-///    `public var usesNotificationCenter = false`
-///    `public var showsLocalNotifications = false`
-///    `public var logVerbosity: LogVerbosity = .none
-/// `}`
-///  Use `downloader.configuration = DownloadManagerConfig()` in
-///  `DownloadApp` class before `downloader.addDownload` to apply
-///  More details: https://github.com/shapedbyiris/download-manager/blob/master/README.md
+final class NativeDownloadManager: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    static let shared = NativeDownloadManager()
 
-class DownloadApp {
+    private struct ActiveDownload: @unchecked Sendable {
+        let task: URLSessionDownloadTask
+        let destinationDirectory: URL
+        let onProgress: @Sendable (CGFloat) -> Void
+        let onCompletion: @Sendable (Error?, URL?) -> Void
+    }
+
+    private let activeDownloads = Mutex<[Int: ActiveDownload]>([:])
+    private lazy var session: URLSession = {
+        let configuration = URLSessionConfiguration.default
+        return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+    }()
+
+    private override init() {
+        super.init()
+    }
+
+    func addDownload(
+        url: URL,
+        destinationURL: URL,
+        onProgress: @escaping @Sendable (CGFloat) -> Void,
+        onCompletion: @escaping @Sendable (Error?, URL?) -> Void
+    ) {
+        let task = session.downloadTask(with: url)
+        let entry = ActiveDownload(
+            task: task,
+            destinationDirectory: destinationURL,
+            onProgress: onProgress,
+            onCompletion: onCompletion
+        )
+        activeDownloads.withLock { $0[task.taskIdentifier] = entry }
+        task.resume()
+    }
+
+    func cancelAllDownloads() {
+        let tasks = activeDownloads.withLock { state -> [URLSessionDownloadTask] in
+            let current = state.values.map(\.task)
+            state.removeAll()
+            return current
+        }
+        for task in tasks {
+            task.cancel()
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didWriteData bytesWritten: Int64,
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64
+    ) {
+        guard totalBytesExpectedToWrite > 0 else { return }
+        let entry = activeDownloads.withLock { $0[downloadTask.taskIdentifier] }
+        guard let entry else { return }
+        let progress = CGFloat(totalBytesWritten) / CGFloat(totalBytesExpectedToWrite)
+        entry.onProgress(progress)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didFinishDownloadingTo location: URL
+    ) {
+        // Atomically claim and remove the entry before returning, since URLSession removes `location` on return.
+        let entry = activeDownloads.withLock { $0.removeValue(forKey: downloadTask.taskIdentifier) }
+        guard let entry else { return }
+
+        do {
+            let fileManager = FileManager.default
+            try fileManager.createDirectory(
+                at: entry.destinationDirectory,
+                withIntermediateDirectories: true
+            )
+            let suggested = downloadTask.response?.suggestedFilename
+            let fallbackName = downloadTask.originalRequest?.url?.lastPathComponent
+            let fileName: String
+            if let suggested, !suggested.isEmpty {
+                fileName = suggested
+            } else if let fallbackName, !fallbackName.isEmpty {
+                fileName = fallbackName
+            } else {
+                fileName = "download.ipa"
+            }
+            let targetURL = entry.destinationDirectory.appendingPathComponent(fileName)
+            if fileManager.fileExists(atPath: targetURL.path) {
+                try fileManager.removeItem(at: targetURL)
+            }
+            try fileManager.moveItem(at: location, to: targetURL)
+            entry.onCompletion(nil, targetURL)
+        } catch {
+            entry.onCompletion(error, nil)
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        let entry = activeDownloads.withLock { $0.removeValue(forKey: task.taskIdentifier) }
+        guard let entry, let error else { return }
+        if (error as NSError).domain == NSURLErrorDomain,
+           (error as NSError).code == NSURLErrorCancelled {
+            return
+        }
+        entry.onCompletion(error, nil)
+    }
+}
+
+final class DownloadApp: @unchecked Sendable {
     let url: URL?
     let app: SourceAppsData?
     let warning: String?
     private weak var dependencies: PlayCoverDependencies?
 
-    private var activeDownloadDir: URL?
+    private let activeDownloadDirLock = Mutex<URL?>(nil)
 
     init(
         url: URL?,
@@ -44,14 +145,24 @@ class DownloadApp {
 
     let downloadVM: DownloadVM
     let installVM: InstallVM
-    let downloader = DownloadManager.shared
+    let downloader = NativeDownloadManager.shared
 
     private func cleanupDownloadDir(_ dir: URL? = nil) {
-        let target = dir ?? activeDownloadDir
+        let target: URL? = if let dir {
+            dir
+        } else {
+            activeDownloadDirLock.withLock {
+                let current = $0
+                $0 = nil
+                return current
+            }
+        }
         if let target {
             FileManager.default.delete(at: target)
-            if target == activeDownloadDir {
-                activeDownloadDir = nil
+            activeDownloadDirLock.withLock {
+                if $0 == target {
+                    $0 = nil
+                }
             }
         }
     }
@@ -150,7 +261,7 @@ class DownloadApp {
                                                  in: .userDomainMask,
                                                  appropriateFor: FileManager.default.temporaryDirectory,
                                                  create: true)
-            activeDownloadDir = tmpDir
+            activeDownloadDirLock.withLock { $0 = tmpDir }
 
             if let tmpDir = tmpDir {
                 downloader.addDownload(url: finalURL,
@@ -196,7 +307,7 @@ class DownloadApp {
         }
     }
 
-    private func verifyChecksum(checksum: String?, file: URL?, completion: @escaping (Bool) -> Void) {
+    private func verifyChecksum(checksum: String?, file: URL?, completion: @escaping @Sendable (Bool) -> Void) {
         Task.detached(priority: .userInitiated) {
             if let originalSum = checksum, !originalSum.isEmpty, let fileURL = file {
                 if let sha256 = fileURL.sha256, originalSum != sha256 {
@@ -209,7 +320,7 @@ class DownloadApp {
         }
     }
 
-    private func checksumAlert(originalSum: String, givenSum: String, completion: @escaping (Bool) -> Void) {
+    private func checksumAlert(originalSum: String, givenSum: String, completion: @escaping @Sendable (Bool) -> Void) {
         let presenter = dependencies?.alertPresenter ?? AlertPresenter()
         Task { @MainActor in
             let response = await presenter.present(

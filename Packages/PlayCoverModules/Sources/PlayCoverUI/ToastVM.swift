@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Observation
 import Synchronization
 
 public enum ToastType: Hashable, Sendable {
@@ -26,11 +27,12 @@ public struct ToastInfo: Identifiable, Hashable, Sendable {
     }
 }
 
-public final class ToastVM: ObservableObject, @unchecked Sendable {
-    @Published public var toasts: [ToastInfo] = []
-    @Published public var isShown: Bool = true
+@Observable
+public final class ToastVM: @unchecked Sendable {
+    public var toasts: [ToastInfo] = []
+    public var isShown: Bool = true
 
-    private let activeTypesByID = Mutex<[UUID: ToastType]>([:])
+    @ObservationIgnored private let activeTypesByID = Mutex<[UUID: ToastType]>([:])
 
     public init() {}
 

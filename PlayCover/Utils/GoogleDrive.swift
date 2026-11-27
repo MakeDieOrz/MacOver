@@ -6,11 +6,10 @@
 //
 
 import Foundation
-import SwiftSoup
+import Synchronization
 
 final class RedirectHandler: NSObject, URLSessionTaskDelegate {
-    private let lock = NSLock()
-    private var redirectedGoogleDriveURL: URL?
+    private let redirectedGoogleDriveURL = Mutex<URL?>(nil)
 
     static func resolveDirectDownloadURL(
         for url: URL,
@@ -66,21 +65,80 @@ final class RedirectHandler: NSObject, URLSessionTaskDelegate {
     }
 
     static func extractDownloadLink(from htmlContent: String) -> URL? {
-        do {
-            let doc = try SwiftSoup.parse(htmlContent)
-            guard let form = try doc.select("form#download-form").first() else {
-                return nil
-            }
-            let action = try form.attr("action")
-            guard !action.isEmpty else { return nil }
-            let id = try form.select("input[name=id]").attr("value")
-            let confirm = try form.select("input[name=confirm]").attr("value")
-            let uuid = try form.select("input[name=uuid]").attr("value")
-            let directDownloadLink = "\(action)?id=\(id)&confirm=\(confirm)&uuid=\(uuid)"
-            return URL(string: directDownloadLink)
-        } catch {
+        guard let formRange = findDownloadFormRange(in: htmlContent) else {
             return nil
         }
+        let openingFormTag = String(htmlContent[formRange.openingTag])
+        guard let actionRaw = htmlAttributeValue(named: "action", inTag: openingFormTag),
+              !actionRaw.isEmpty else {
+            return nil
+        }
+        let action = decodeHTMLEntities(actionRaw)
+        let formBody = htmlContent[formRange.body]
+
+        var inputs: [String: String] = [:]
+        let inputPattern = /<(?i:input)\b[^>]*>/
+        for match in formBody.matches(of: inputPattern) {
+            let tag = String(match.output)
+            guard let name = htmlAttributeValue(named: "name", inTag: tag) else {
+                continue
+            }
+            let normalizedName = decodeHTMLEntities(name).lowercased()
+            if normalizedName == "id" || normalizedName == "confirm" || normalizedName == "uuid" {
+                let value = htmlAttributeValue(named: "value", inTag: tag).map(decodeHTMLEntities) ?? ""
+                inputs[normalizedName] = value
+            }
+        }
+
+        let id = inputs["id"] ?? ""
+        let confirm = inputs["confirm"] ?? ""
+        let uuid = inputs["uuid"] ?? ""
+        return URL(string: "\(action)?id=\(id)&confirm=\(confirm)&uuid=\(uuid)")
+    }
+
+    private static func findDownloadFormRange(
+        in html: String
+    ) -> (openingTag: Range<String.Index>, body: Range<String.Index>)? {
+        let formStartPattern = /<(?i:form)\b[^>]*>/
+        for match in html.matches(of: formStartPattern) {
+            let tag = String(match.output)
+            guard let idValue = htmlAttributeValue(named: "id", inTag: tag),
+                  decodeHTMLEntities(idValue) == "download-form" else {
+                continue
+            }
+            let bodyStart = match.range.upperBound
+            let tail = html[bodyStart...]
+            let bodyEnd = tail.firstMatch(of: /<\/(?i:form)\s*>/)?.range.lowerBound ?? html.endIndex
+            return (match.range, bodyStart..<bodyEnd)
+        }
+        return nil
+    }
+
+    private static func htmlAttributeValue(named name: String, inTag tag: String) -> String? {
+        let attrPattern = /([A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/
+        for match in tag.matches(of: attrPattern)
+        where match.output.1.caseInsensitiveCompare(name) == .orderedSame {
+            if let doubleQuoted = match.output.2 {
+                return String(doubleQuoted)
+            }
+            if let singleQuoted = match.output.3 {
+                return String(singleQuoted)
+            }
+            if let unquoted = match.output.4 {
+                return String(unquoted)
+            }
+        }
+        return nil
+    }
+
+    private static func decodeHTMLEntities(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&#38;", with: "&")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&#39;", with: "'")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
     }
 
     private static func scrapeDownloadLink(
@@ -105,9 +163,7 @@ final class RedirectHandler: NSObject, URLSessionTaskDelegate {
     }
 
     private func takeRedirectedGoogleDriveURL() -> URL? {
-        lock.lock()
-        defer { lock.unlock() }
-        return redirectedGoogleDriveURL
+        redirectedGoogleDriveURL.withLock { $0 }
     }
 
     func urlSession(
@@ -119,9 +175,7 @@ final class RedirectHandler: NSObject, URLSessionTaskDelegate {
     ) {
         if let redirectURL = request.url,
            let converted = Self.convertGoogleDriveLink(redirectURL.absoluteString) {
-            lock.lock()
-            redirectedGoogleDriveURL = converted
-            lock.unlock()
+            redirectedGoogleDriveURL.withLock { $0 = converted }
         }
         completionHandler(nil)
     }

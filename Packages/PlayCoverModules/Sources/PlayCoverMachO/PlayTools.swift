@@ -532,12 +532,12 @@ public class PlayTools {
     public static func installedInExec(atURL url: URL) throws -> Bool {
         let binary = try Macho.readHeaderSlice(at: url)
         var result = false
-        try _ = Macho.iterateLoadCommands(binary: binary) { offset, shouldSwap in
+        _ = try Macho.iterateLoadCommands(binary: binary) { offset, shouldSwap in
             let loadCommand = try binary.extract(load_command.self, offset: offset,
-                                                 swap: shouldSwap ? swap_load_command : nil)
+                                                 swap: shouldSwap ? { MachOByteSwap.swapLoadCommand(&$0) } : nil)
             if loadCommand.cmd == UInt32(LC_LOAD_DYLIB) {
                 let dylibCommand = try binary.extract(dylib_command.self, offset: offset,
-                                                      swap: shouldSwap ? swap_dylib_command : nil)
+                                                      swap: shouldSwap ? { MachOByteSwap.swapDylibCommand(&$0) } : nil)
 
                 let dylibName = String(data: binary,
                                        offset: offset,

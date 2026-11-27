@@ -7,15 +7,18 @@
 
 import AppKit
 import Foundation
+import Observation
 import PlayCoverCore
 
-public final class ModifierKeyObserver: ObservableObject {
-    @Published public var isOptionKeyPressed = false
-    @Published public var isCommandKeyPressed = false
-    @Published public var isControlKeyPressed = false
-    @Published public var isShiftKeyPressed = false
+@MainActor
+@Observable
+public final class ModifierKeyObserver {
+    public var isOptionKeyPressed = false
+    public var isCommandKeyPressed = false
+    public var isControlKeyPressed = false
+    public var isShiftKeyPressed = false
 
-    private var eventMonitor: Any?
+    @ObservationIgnored private var eventMonitor: Any?
 
     public init() {
         guard !ProcessInfo.isRunningUnitTests else { return }
@@ -41,7 +44,7 @@ public final class ModifierKeyObserver: ObservableObject {
         if isShiftKeyPressed != shift { isShiftKeyPressed = shift }
     }
 
-    deinit {
+    isolated deinit {
         if let eventMonitor = eventMonitor {
             NSEvent.removeMonitor(eventMonitor)
         }

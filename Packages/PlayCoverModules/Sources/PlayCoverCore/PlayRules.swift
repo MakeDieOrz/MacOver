@@ -7,7 +7,7 @@
 
 import Foundation
 
-public struct PlayRules: Decodable {
+public struct PlayRules: Decodable, Sendable {
     public var blocklist: [String]?
     public var greenlist: [String]?
     public var allow: [String]?
@@ -60,7 +60,7 @@ public struct PlayRules: Decodable {
 }
 
 @dynamicMemberLookup
-public struct RuleTemplate {
+public struct RuleTemplate: Sendable {
     private var data: [String: String]
 
     public init(data: [String: String] = [:]) {

@@ -138,10 +138,6 @@ Built on top of the [PlayCover](https://github.com/PlayCover/PlayCover) communit
 Libraries used:
 
 - [PTFakeTouch](https://github.com/Ret70/PTFakeTouch)
-- [DownloadManager](https://github.com/shapedbyiris/download-manager)
-- [DataCache](https://github.com/huynguyencong/DataCache)
-- [SwiftUI CachedAsyncImage](https://github.com/bullinnyc/CachedAsyncImage)
 - [Yams](https://github.com/jpsim/Yams)
-- [SwiftSoup](https://github.com/scinfu/SwiftSoup)
 - [Sparkle](https://github.com/sparkle-project/Sparkle)
 - [inject](https://github.com/paradiseduo/inject) *(early Mach-O injection reference; MacOver uses its own `PlayCoverMachO` implementation)*

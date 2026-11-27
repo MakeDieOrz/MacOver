@@ -6,12 +6,12 @@ import Foundation
     func manageTCCPermissions(for bundleID: String, reset: Bool, completion: @escaping (NSError?) -> Void)
 }
 
-public enum PrivilegeEscalationTrack: Equatable {
+public enum PrivilegeEscalationTrack: Equatable, Sendable {
     case xpcHelper
     case appleScriptGUI
 }
 
-public struct PrivilegePreFlightStatus: Equatable {
+public struct PrivilegePreFlightStatus: Equatable, Sendable {
     public let sipDisabled: Bool
     public let nvramWritable: Bool
     public let amfiDisabledInNVRAM: Bool

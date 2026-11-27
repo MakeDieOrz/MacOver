@@ -3,12 +3,14 @@
 //  PlayCover
 //
 
-import Combine
 import Foundation
+import Observation
 
-public class AppIntegrity: ObservableObject {
+@MainActor
+@Observable
+public final class AppIntegrity {
 
-    @Published public var integrityOff: Bool = !AppIntegrity.insideAppsFolder
+    public var integrityOff: Bool = !AppIntegrity.insideAppsFolder
 
     public init() {}
 

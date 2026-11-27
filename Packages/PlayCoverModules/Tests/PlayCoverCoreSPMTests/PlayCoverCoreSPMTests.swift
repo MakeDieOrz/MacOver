@@ -315,4 +315,23 @@ struct PlayCoverCoreSPMTests {
         #expect(PlayCoverRestartField.allCases.contains(.strictViewportOrientation))
         #expect(PlayCoverRestartField.allCases.contains(.strictViewportScaleMode))
     }
+
+    @Test
+    func networkVMConnectivityCheckIsThreadSafeAndFast() async {
+        let initial = NetworkVM.isConnectedToNetwork()
+        let results = await withTaskGroup(of: Bool.self, returning: [Bool].self) { group in
+            for _ in 0..<8 {
+                group.addTask {
+                    NetworkVM.isConnectedToNetwork()
+                }
+            }
+            var collected: [Bool] = []
+            for await value in group {
+                collected.append(value)
+            }
+            return collected
+        }
+        #expect(results.count == 8)
+        #expect(results.allSatisfy { $0 == initial })
+    }
 }
