@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import Synchronization
 import XCTest
 
 final class PlaySettingsTests: XCTestCase {
@@ -664,8 +665,7 @@ final class PlaySettingsTests: XCTestCase {
         XCTAssertEqual(bindRC, 0)
         XCTAssertEqual(Darwin.listen(serverFD, 2), 0)
 
-        let lock = NSLock()
-        var receivedFrames: [(opcode: DiscordIPCClient.Opcode, json: [String: Any])] = []
+        let receivedFrames = Mutex<[(opcode: DiscordIPCClient.Opcode, jsonData: Data)]>([])
         let pongReceived = DispatchSemaphore(value: 0)
         let serverDone = expectation(description: "Mock Discord IPC server completes exchange")
 
@@ -681,39 +681,27 @@ final class PlaySettingsTests: XCTestCase {
                 _ = Darwin.setsockopt(connFD, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 
                 guard let hs = DiscordIPCClient.readFrame(fd: connFD) else { continue }
-                let hsObj = (try? JSONSerialization.jsonObject(with: hs.payload) as? [String: Any]) ?? [:]
-                lock.lock()
-                receivedFrames.append((hs.opcode, hsObj))
-                lock.unlock()
+                receivedFrames.withLock { $0.append((hs.opcode, hs.payload)) }
 
                 let readyData = Data(#"{"evt":"READY","cmd":"DISPATCH"}"#.utf8)
                 XCTAssertTrue(DiscordIPCClient.writeFrame(fd: connFD, opcode: .frame, payload: readyData))
 
                 // Read SET_ACTIVITY frame
                 if let f1 = DiscordIPCClient.readFrame(fd: connFD) {
-                    let obj = (try? JSONSerialization.jsonObject(with: f1.payload) as? [String: Any]) ?? [:]
-                    lock.lock()
-                    receivedFrames.append((f1.opcode, obj))
-                    lock.unlock()
+                    receivedFrames.withLock { $0.append((f1.opcode, f1.payload)) }
                 }
 
                 // Send PING and expect PONG back
                 let pingData = Data(#"{"ping":1}"#.utf8)
                 XCTAssertTrue(DiscordIPCClient.writeFrame(fd: connFD, opcode: .ping, payload: pingData))
                 if let pong = DiscordIPCClient.readFrame(fd: connFD) {
-                    let obj = (try? JSONSerialization.jsonObject(with: pong.payload) as? [String: Any]) ?? [:]
-                    lock.lock()
-                    receivedFrames.append((pong.opcode, obj))
-                    lock.unlock()
+                    receivedFrames.withLock { $0.append((pong.opcode, pong.payload)) }
                 }
                 pongReceived.signal()
 
                 // Read clearPresence SET_ACTIVITY frame and CLOSE frame
                 while let next = DiscordIPCClient.readFrame(fd: connFD) {
-                    let obj = (try? JSONSerialization.jsonObject(with: next.payload) as? [String: Any]) ?? [:]
-                    lock.lock()
-                    receivedFrames.append((next.opcode, obj))
-                    lock.unlock()
+                    receivedFrames.withLock { $0.append((next.opcode, next.payload)) }
                     if next.opcode == .close {
                         break
                     }
@@ -739,9 +727,12 @@ final class PlaySettingsTests: XCTestCase {
 
         wait(for: [serverDone], timeout: 5.0)
 
-        lock.lock()
-        let frames = receivedFrames
-        lock.unlock()
+        let frames: [(opcode: DiscordIPCClient.Opcode, json: [String: Any])] = receivedFrames.withLock { entries in
+            entries.map { entry in
+                let obj = (try? JSONSerialization.jsonObject(with: entry.jsonData) as? [String: Any]) ?? [:]
+                return (entry.opcode, obj)
+            }
+        }
 
         XCTAssertGreaterThanOrEqual(frames.count, 5)
         XCTAssertEqual(frames[0].opcode, .handshake)

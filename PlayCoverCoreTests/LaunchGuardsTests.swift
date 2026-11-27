@@ -8,6 +8,7 @@ final class LaunchGuardsTests: XCTestCase {
         XCTAssertTrue(ProcessInfo.isRunningUnitTests)
     }
 
+    @MainActor
     func testGuardedServicesAndAppDelegateExecuteSafelyInUnitTests() {
         let deps = PlayCoverDependencies(loadInitialData: false)
         let beforeCount = deps.log.logdata.count

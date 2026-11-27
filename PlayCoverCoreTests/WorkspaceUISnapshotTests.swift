@@ -52,8 +52,8 @@ final class WorkspaceUISnapshotTests: XCTestCase {
     private var savedLayoutRaw: String?
     private var savedLegacyList: Any?
 
-    override func setUpWithError() throws {
-        try super.setUpWithError()
+    override func setUp() async throws {
+        try await super.setUp()
         savedLayoutRaw = UserDefaults.standard.string(forKey: "AppLibraryLayoutMode")
         savedLegacyList = UserDefaults.standard.object(forKey: "AppLibraryView")
         let dir = FileManager.default.temporaryDirectory
@@ -65,7 +65,7 @@ final class WorkspaceUISnapshotTests: XCTestCase {
         isolatedDefaults = defaults
     }
 
-    override func tearDownWithError() throws {
+    override func tearDown() async throws {
         restoreUserDefaults()
         for bundleID in createdBundleIDs {
             let settingsURL = AppSettings.appSettingsDir
@@ -78,7 +78,7 @@ final class WorkspaceUISnapshotTests: XCTestCase {
         tempDir = nil
         isolatedDefaults?.removePersistentDomain(forName: Self.suiteName)
         isolatedDefaults = nil
-        try super.tearDownWithError()
+        try await super.tearDown()
     }
 
     func testCaptureRealMacOS26UIScreenshots() throws {
@@ -139,9 +139,9 @@ final class WorkspaceUISnapshotTests: XCTestCase {
         context.deps.installVM.inProgress = true
         context.deps.installVM.next(.playtools, 0.52, 0.72)
         let activityView = ActivityCenterView()
-            .environmentObject(context.deps.installVM)
-            .environmentObject(context.deps.downloadVM)
-            .environmentObject(context.deps)
+            .environment(context.deps.installVM)
+            .environment(context.deps.downloadVM)
+            .environment(context.deps)
         captureWindow(
             activityView,
             spec: CaptureSpec(
@@ -173,15 +173,15 @@ final class WorkspaceUISnapshotTests: XCTestCase {
     private func withDependencies<Content: View>(_ content: Content, context: DemoContext) -> some View {
         let deps = context.deps
         return content
-            .environmentObject(deps).environmentObject(deps.installVM)
-            .environmentObject(deps.downloadVM).environmentObject(deps.appsVM)
-            .environmentObject(deps.storeVM).environmentObject(deps.toastVM)
-            .environmentObject(deps.appIntegrity).environmentObject(deps.alertPresenter)
-            .environmentObject(deps.startupAlerts).environmentObject(deps.keyCoverObservable)
-            .environmentObject(deps.keyCoverPreferences).environmentObject(deps.installPreferences)
-            .environmentObject(deps.uninstallPreferences).environmentObject(deps.urlObservable)
-            .environmentObject(deps.modifierKeyObserver).environmentObject(deps.mitmCoordinator)
-            .environmentObject(context.navState)
+            .environment(deps).environment(deps.installVM)
+            .environment(deps.downloadVM).environment(deps.appsVM)
+            .environment(deps.storeVM).environment(deps.toastVM)
+            .environment(deps.appIntegrity).environment(deps.alertPresenter)
+            .environment(deps.startupAlerts).environment(deps.keyCoverObservable)
+            .environment(deps.keyCoverPreferences).environment(deps.installPreferences)
+            .environment(deps.uninstallPreferences).environment(deps.urlObservable)
+            .environment(deps.modifierKeyObserver).environment(deps.mitmCoordinator)
+            .environment(context.navState)
     }
 
     private func captureWindow<Content: View>(_ rootView: Content, spec: CaptureSpec) {

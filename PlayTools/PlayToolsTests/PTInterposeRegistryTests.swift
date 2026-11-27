@@ -1,11 +1,15 @@
 import Foundation
+import Synchronization
 import XCTest
 
-private var ptRegistryDynamicCounter: Int32 = 0
+private let ptRegistryDynamicCounter = Mutex<Int32>(0)
 
 private func ptRegistryDynamicResolver() -> UnsafeMutableRawPointer? {
-    ptRegistryDynamicCounter += 1
-    return UnsafeMutableRawPointer(bitPattern: 0x1_0000_2000 + Int(ptRegistryDynamicCounter) * 0x10)
+    let next = ptRegistryDynamicCounter.withLock { count -> Int32 in
+        count += 1
+        return count
+    }
+    return UnsafeMutableRawPointer(bitPattern: 0x1_0000_2000 + Int(next) * 0x10)
 }
 
 final class PTInterposeRegistryTests: XCTestCase {
@@ -18,7 +22,7 @@ final class PTInterposeRegistryTests: XCTestCase {
         }
         let resolverRaw = unsafeBitCast(resolverFn, to: UnsafeRawPointer.self)
 
-        ptRegistryDynamicCounter = 0
+        ptRegistryDynamicCounter.withLock { $0 = 0 }
 
         "open".withCString { symOpen in
             "weak_present".withCString { symWeakPresent in

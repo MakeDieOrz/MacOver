@@ -876,4 +876,45 @@ final class PTCoordinateMathTests: XCTestCase {
         )
         XCTAssertEqual(centeredNoTitle.height, 875)
     }
+
+    func testWindowChromeHitTestingAndCloseTerminationPolicy() {
+        let contentRect = CGRect(x: 0, y: 0, width: 1280, height: 720)
+        // Above contentLayoutRect is title bar / chrome
+        XCTAssertTrue(PTWindowGeometryMath.isPointInTitleBar(
+            pointInWindow: CGPoint(x: 16, y: 734),
+            contentLayoutRect: contentRect
+        ))
+        // Boundary and content area are not title bar
+        XCTAssertFalse(PTWindowGeometryMath.isPointInTitleBar(
+            pointInWindow: CGPoint(x: 16, y: 720),
+            contentLayoutRect: contentRect
+        ))
+        XCTAssertFalse(PTWindowGeometryMath.isPointInTitleBar(
+            pointInWindow: CGPoint(x: 200, y: 400),
+            contentLayoutRect: contentRect
+        ))
+        // Non-finite or zero-height rects return false
+        XCTAssertFalse(PTWindowGeometryMath.isPointInTitleBar(
+            pointInWindow: CGPoint(x: CGFloat.nan, y: 734),
+            contentLayoutRect: contentRect
+        ))
+        XCTAssertFalse(PTWindowGeometryMath.isPointInTitleBar(
+            pointInWindow: CGPoint(x: 16, y: 10),
+            contentLayoutRect: .zero
+        ))
+
+        // Close-to-quit policy
+        XCTAssertTrue(PTWindowGeometryMath.shouldTerminateOnWindowClose(
+            isClosingWindowPrimary: true,
+            otherVisiblePrimaryWindowCount: 0
+        ))
+        XCTAssertFalse(PTWindowGeometryMath.shouldTerminateOnWindowClose(
+            isClosingWindowPrimary: true,
+            otherVisiblePrimaryWindowCount: 1
+        ))
+        XCTAssertFalse(PTWindowGeometryMath.shouldTerminateOnWindowClose(
+            isClosingWindowPrimary: false,
+            otherVisiblePrimaryWindowCount: 0
+        ))
+    }
 }

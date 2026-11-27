@@ -1,7 +1,8 @@
-import Combine
 import Darwin
 import Foundation
+import Observation
 import PlayCoverCore
+import Synchronization
 import XCTest
 @testable import PlayCover
 
@@ -137,7 +138,7 @@ final class ArchitectureAndHostTests: XCTestCase {
         XCTAssertFalse(vm.inProgress)
     }
 
-    func testPreferencesStoresUseUserDefaultsAndEmitObjectWillChange() {
+    func testPreferencesStoresUseUserDefaultsAndEmitObservationChanges() {
         let suiteName = "app.makedie.ArchitecturePreferencesTests.\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suiteName) else {
             XCTFail("Failed to allocate isolated UserDefaults suite")
@@ -151,20 +152,36 @@ final class ArchitectureAndHostTests: XCTestCase {
         let installPrefs = InstallPreferences(userDefaults: defaults)
         let uninstallPrefs = UninstallPreferences(userDefaults: defaults)
 
-        var changes = 0
-        var cancellables = Set<AnyCancellable>()
-        keyCoverPrefs.objectWillChange.sink { _ in changes += 1 }.store(in: &cancellables)
-        installPrefs.objectWillChange.sink { _ in changes += 1 }.store(in: &cancellables)
-        uninstallPrefs.objectWillChange.sink { _ in changes += 1 }.store(in: &cancellables)
+        let changes = Mutex(0)
+        func observe(_ read: () -> Void, mutate: () -> Void) {
+            withObservationTracking {
+                read()
+            } onChange: {
+                changes.withLock { $0 += 1 }
+            }
+            mutate()
+        }
 
-        keyCoverPrefs.keyCoverEnabled = .userProvidedPassword
-        keyCoverPrefs.promptForKeyCoverPasswordAtLaunch = false
-        installPrefs.alwaysInstallPlayTools = false
-        installPrefs.defaultAppType = .games
-        uninstallPrefs.clearAppData = true
-        uninstallPrefs.showUninstallPopup = false
+        observe({ _ = keyCoverPrefs.keyCoverEnabled }, mutate: {
+            keyCoverPrefs.keyCoverEnabled = .userProvidedPassword
+        })
+        observe({ _ = keyCoverPrefs.promptForKeyCoverPasswordAtLaunch }, mutate: {
+            keyCoverPrefs.promptForKeyCoverPasswordAtLaunch = false
+        })
+        observe({ _ = installPrefs.alwaysInstallPlayTools }, mutate: {
+            installPrefs.alwaysInstallPlayTools = false
+        })
+        observe({ _ = installPrefs.defaultAppType }, mutate: {
+            installPrefs.defaultAppType = .games
+        })
+        observe({ _ = uninstallPrefs.clearAppData }, mutate: {
+            uninstallPrefs.clearAppData = true
+        })
+        observe({ _ = uninstallPrefs.showUninstallPopup }, mutate: {
+            uninstallPrefs.showUninstallPopup = false
+        })
 
-        XCTAssertEqual(changes, 6)
+        XCTAssertEqual(changes.withLock { $0 }, 6)
 
         let reloadedKeyCover = KeyCoverPreferences(userDefaults: defaults)
         let reloadedInstall = InstallPreferences(userDefaults: defaults)
@@ -178,22 +195,39 @@ final class ArchitectureAndHostTests: XCTestCase {
         XCTAssertFalse(reloadedUninstall.showUninstallPopup)
     }
 
-    func testModifierKeyObserverAvoidsDuplicateObjectWillChangeEmissions() {
+    @MainActor
+    func testModifierKeyObserverAvoidsDuplicateObservationEmissions() {
         let observer = ModifierKeyObserver()
-        var emissions = 0
-        let cancellable = observer.objectWillChange.sink { _ in
-            emissions += 1
+        let optionChanges = Mutex(0)
+        let commandChanges = Mutex(0)
+
+        withObservationTracking {
+            _ = observer.isOptionKeyPressed
+        } onChange: {
+            optionChanges.withLock { $0 += 1 }
+        }
+        withObservationTracking {
+            _ = observer.isCommandKeyPressed
+        } onChange: {
+            commandChanges.withLock { $0 += 1 }
         }
 
         observer.applyModifierFlags([.option, .command])
-        XCTAssertEqual(emissions, 2)
+        XCTAssertEqual(optionChanges.withLock { $0 }, 1)
+        XCTAssertEqual(commandChanges.withLock { $0 }, 1)
         XCTAssertTrue(observer.isOptionKeyPressed)
         XCTAssertTrue(observer.isCommandKeyPressed)
 
-        // Applying identical modifier flags must emit zero redundant notifications
+        // Applying identical modifier flags must trigger zero redundant observations
+        let duplicateEmissions = Mutex(0)
+        withObservationTracking {
+            _ = observer.isOptionKeyPressed
+            _ = observer.isCommandKeyPressed
+        } onChange: {
+            duplicateEmissions.withLock { $0 += 1 }
+        }
         observer.applyModifierFlags([.option, .command])
-        XCTAssertEqual(emissions, 2)
-        cancellable.cancel()
+        XCTAssertEqual(duplicateEmissions.withLock { $0 }, 0)
     }
 
     func testGoogleDriveLinkConversionAndFormExtraction() {
@@ -219,6 +253,65 @@ final class ArchitectureAndHostTests: XCTestCase {
             "https://drive.usercontent.google.com/download?id=1AbCdEfGhIjK&confirm=t&uuid=xyz-999"
         )
         XCTAssertNil(RedirectHandler.extractDownloadLink(from: "<html><body>No form</body></html>"))
+
+        let reorderedHTML = """
+        <form action="https://other.invalid/submit" id="other-form"></form>
+        <FORM action='https://drive.usercontent.google.com/download&amp;extra=1' id='download-form'>
+          <INPUT value=abc-123 name=id type=hidden>
+          <input value="confirm-val" name="confirm">
+          <input name='uuid' value='u-42'>
+        </FORM>
+        """
+        XCTAssertEqual(
+            RedirectHandler.extractDownloadLink(from: reorderedHTML)?.absoluteString,
+            "https://drive.usercontent.google.com/download&extra=1?id=abc-123&confirm=confirm-val&uuid=u-42"
+        )
+    }
+
+    func testAppStoreMacOSCompatibilityHTMLParsing() {
+        let macCompatibleHTML = """
+        <div class="information-list__item">
+          <dd class="information-list__item__definition__item__definition">
+            <span>Requires macOS 11.0 or later and a Mac with Apple M1 chip or later.</span>
+          </dd>
+        </div>
+        """
+        XCTAssertTrue(IPA.htmlIndicatesMacOSCompatibility(macCompatibleHTML))
+
+        let iOSOnlyHTML = """
+        <div class="information-list__item">
+          <dd class="information-list__item__definition__item__definition">
+            <span>Requires iOS 16.0 or later.</span>
+          </dd>
+        </div>
+        <p class="unrelated">macOS</p>
+        """
+        XCTAssertFalse(IPA.htmlIndicatesMacOSCompatibility(iOSOnlyHTML))
+    }
+
+    func testStringCatalogCompiledLocalizationsAndLookups() throws {
+        let hostBundle = Bundle(for: PlayCoverDependencies.self)
+        let localizations = Set(hostBundle.localizations)
+        for expected in ["en", "zh-Hans", "ja", "pt-BR", "ar", "uk"] {
+            XCTAssertTrue(localizations.contains(expected), "Missing localization: \(expected)")
+        }
+
+        let keys = [
+            "playapp.add",
+            "sidebar.appLibrary",
+            "ipaLibrary.noNetworkConnection.toast"
+        ]
+        for key in keys {
+            let localized = hostBundle.localizedString(forKey: key, value: nil, table: nil)
+            XCTAssertFalse(localized.isEmpty)
+            XCTAssertNotEqual(localized, key, "Localization lookup returned raw key for \(key)")
+        }
+
+        let zhBundleURL = try XCTUnwrap(hostBundle.url(forResource: "zh-Hans", withExtension: "lproj"))
+        let zhBundle = try XCTUnwrap(Bundle(url: zhBundleURL))
+        let zhAdd = zhBundle.localizedString(forKey: "playapp.add", value: nil, table: nil)
+        XCTAssertNotEqual(zhAdd, "playapp.add")
+        XCTAssertEqual(zhAdd, "添加应用")
     }
 
     func testKeyCoverUnlockPromptContinuationWakeupAndCancellation() async throws {
@@ -567,17 +660,25 @@ final class ArchitectureAndHostTests: XCTestCase {
         let settingsURL = dir.appendingPathComponent("settings.plist")
         let appSettings = AppSettings(settingsUrl: settingsURL, info: info, debounceInterval: 0.2)
 
-        var notifications = 0
-        let token = appSettings.objectWillChange.sink { _ in
-            notifications += 1
+        let notifications = Mutex(0)
+        let token = appSettings.addChangeObserver {
+            notifications.withLock { $0 += 1 }
         }
-        defer { token.cancel() }
+        defer { appSettings.removeChangeObserver(token) }
+
+        let trackedSettingsChanges = Mutex(0)
+        withObservationTracking {
+            _ = appSettings.settings
+        } onChange: {
+            trackedSettingsChanges.withLock { $0 += 1 }
+        }
 
         appSettings.settings.customScaler = 1.5
         appSettings.update { $0.frameRateTargetMode = .fixed60 }
         appSettings.openWithLLDB = true
         appSettings.reset()
-        XCTAssertGreaterThanOrEqual(notifications, 4)
+        XCTAssertGreaterThanOrEqual(notifications.withLock { $0 }, 4)
+        XCTAssertEqual(trackedSettingsChanges.withLock { $0 }, 1)
 
         for preset in PlayAppSettingsPreset.allCases {
             var candidate = AppSettingsData()
@@ -1544,5 +1645,359 @@ final class ArchitectureAndHostTests: XCTestCase {
             ),
             "com.example.game"
         )
+    }
+
+    func testLocalDataCacheRoundTripAndCleanup() throws {
+        let dir = try XCTUnwrap(tempDir)
+        let cache = LocalDataCache(name: "TestCache", cacheDirectory: dir.appendingPathComponent("cache"))
+        let sampleData = Data("hello-macover".utf8)
+        cache.write(data: sampleData, forKey: "k-data")
+        XCTAssertTrue(cache.hasData(forKey: "k-data"))
+        XCTAssertEqual(cache.readData(forKey: "k-data"), sampleData)
+
+        cache.write(string: "cached-version", forKey: "k-string")
+        XCTAssertEqual(cache.readString(forKey: "k-string"), "cached-version")
+
+        struct Payload: Codable, Equatable {
+            let name: String
+            let count: Int
+        }
+        let payload = Payload(name: "sample", count: 7)
+        try cache.write(codable: payload, forKey: "k-codable")
+        XCTAssertEqual(try cache.readCodable(forKey: "k-codable"), payload)
+
+        cache.clean(byKey: "k-data")
+        XCTAssertFalse(cache.hasData(forKey: "k-data"))
+        XCTAssertEqual(cache.readString(forKey: "k-string"), "cached-version")
+
+        cache.cleanAll()
+        XCTAssertFalse(cache.hasData(forKey: "k-string"))
+    }
+
+    func testNativeDownloadManagerDownloadsLocalFile() throws {
+        let dir = try XCTUnwrap(tempDir)
+        let sourceURL = dir.appendingPathComponent("sample.ipa")
+        let payload = Data("mock-ipa-payload".utf8)
+        try payload.write(to: sourceURL)
+
+        let destinationDir = dir.appendingPathComponent("downloads", isDirectory: true)
+        let completionExpectation = expectation(description: "NativeDownloadManager completes local download")
+        let downloadedBox = LockedResultBox()
+
+        NativeDownloadManager.shared.addDownload(
+            url: sourceURL,
+            destinationURL: destinationDir,
+            onProgress: { _ in },
+            onCompletion: { error, fileURL in
+                downloadedBox.set(error: error, url: fileURL)
+                completionExpectation.fulfill()
+            }
+        )
+
+        wait(for: [completionExpectation], timeout: 5.0)
+        let (error, downloadedURL) = downloadedBox.get()
+        XCTAssertNil(error)
+        let resolvedURL = try XCTUnwrap(downloadedURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: resolvedURL.path))
+        XCTAssertEqual(try Data(contentsOf: resolvedURL), payload)
+    }
+
+    func testKeyCoverLocalStorageVerifierAndLegacyMigration() async throws {
+        let dir = try XCTUnwrap(tempDir)
+        let sampleDBBytes = Data("mock-playchain-sqlite-payload".utf8)
+
+        // 1. User-provided password: stores salted PBKDF2 verifier (0600, no plaintext), encrypts/validates/removes cleanly
+        do {
+            let storeDir = dir.appendingPathComponent("kc-user-store", isDirectory: true)
+            let chainDir = dir.appendingPathComponent("kc-user-chains", isDirectory: true)
+            try FileManager.default.createDirectory(at: chainDir, withIntermediateDirectories: true)
+
+            let dbURL = chainDir.appendingPathComponent("com.example.user.db")
+            try sampleDBBytes.write(to: dbURL)
+
+            let suiteName = "KeyCoverUserTests.\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+            defer { defaults.removePersistentDomain(forName: suiteName) }
+
+            let keychainReadCount = Mutex(0)
+            let keychainDeleteCount = Mutex(0)
+
+            let preferences = KeyCoverPreferences(userDefaults: defaults)
+            let observable = KeyCoverObservable(preferences: preferences)
+            let passwordStore = KeyCoverPassword(
+                preferences: preferences,
+                observable: observable,
+                storeDirectory: storeDir,
+                playChainDirectory: chainDir,
+                legacyKeychainReader: {
+                    keychainReadCount.withLock { $0 += 1 }
+                    return nil
+                },
+                legacyKeychainDeleter: {
+                    keychainDeleteCount.withLock { $0 += 1 }
+                }
+            )
+            let keyCover = KeyCover(
+                preferences: preferences,
+                passwordStore: passwordStore,
+                observable: observable,
+                playChainDirectory: chainDir
+            )
+            passwordStore.attachKeyCover(keyCover)
+            observable.attachKeyCover(keyCover)
+
+            XCTAssertTrue(passwordStore.setKeyCoverPassword("secret-pass-1", mode: .userProvidedPassword))
+            preferences.keyCoverEnabled = .userProvidedPassword
+
+            let recordURL = storeDir.appendingPathComponent("keycover.json")
+            XCTAssertTrue(FileManager.default.fileExists(atPath: recordURL.path))
+            let attrs = try FileManager.default.attributesOfItem(atPath: recordURL.path)
+            let posixMode = (attrs[.posixPermissions] as? NSNumber)?.intValue
+            XCTAssertEqual(posixMode, 0o600)
+
+            let storedText = try String(contentsOf: recordURL, encoding: .utf8)
+            XCTAssertFalse(storedText.contains("secret-pass-1"))
+            XCTAssertTrue(storedText.contains("passwordVerifier"))
+
+            let chain = KeyCoverKey(appBundleID: "com.example.user", playChainDirectory: chainDir)
+            XCTAssertTrue(chain.chainEncryptionStatus)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: dbURL.path))
+
+            XCTAssertFalse(passwordStore.validatePassword("wrong-pass"))
+            XCTAssertTrue(passwordStore.validatePassword("secret-pass-1"))
+            XCTAssertEqual(keychainReadCount.withLock { $0 }, 0)
+
+            XCTAssertTrue(
+                passwordStore.setKeyCoverPassword(
+                    "secret-pass-2",
+                    mode: .userProvidedPassword,
+                    currentPassword: "secret-pass-1"
+                )
+            )
+            XCTAssertFalse(passwordStore.validatePassword("secret-pass-1"))
+            XCTAssertTrue(passwordStore.validatePassword("secret-pass-2"))
+
+            XCTAssertTrue(passwordStore.removeKeyCoverPassword(currentPassword: "secret-pass-2"))
+            XCTAssertEqual(preferences.keyCoverEnabled, .disabled)
+            XCTAssertFalse(chain.chainEncryptionStatus)
+            XCTAssertEqual(try Data(contentsOf: dbURL), sampleDBBytes)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: recordURL.path))
+            XCTAssertEqual(keychainReadCount.withLock { $0 }, 0)
+        }
+
+        // 2. Self-generated password: KeyCover.init loads purely from 0600 local store with 0 Keychain reads
+        do {
+            let storeDir = dir.appendingPathComponent("kc-managed-store", isDirectory: true)
+            let chainDir = dir.appendingPathComponent("kc-managed-chains", isDirectory: true)
+            try FileManager.default.createDirectory(at: chainDir, withIntermediateDirectories: true)
+
+            let dbURL = chainDir.appendingPathComponent("com.example.managed.db")
+            try sampleDBBytes.write(to: dbURL)
+
+            let suiteName = "KeyCoverManagedTests.\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+            defer { defaults.removePersistentDomain(forName: suiteName) }
+
+            let keychainReadCount = Mutex(0)
+            let preferences = KeyCoverPreferences(userDefaults: defaults)
+            let observable = KeyCoverObservable(preferences: preferences)
+            let passwordStore = KeyCoverPassword(
+                preferences: preferences,
+                observable: observable,
+                storeDirectory: storeDir,
+                playChainDirectory: chainDir,
+                legacyKeychainReader: {
+                    keychainReadCount.withLock { $0 += 1 }
+                    return nil
+                },
+                legacyKeychainDeleter: {}
+            )
+            let keyCover = KeyCover(
+                preferences: preferences,
+                passwordStore: passwordStore,
+                observable: observable,
+                playChainDirectory: chainDir
+            )
+            passwordStore.attachKeyCover(keyCover)
+
+            let generated = passwordStore.generateVerySecurePassword()
+            XCTAssertTrue(passwordStore.setKeyCoverPassword(generated, mode: .selfGeneratedPassword))
+            preferences.keyCoverEnabled = .selfGeneratedPassword
+
+            let recordURL = storeDir.appendingPathComponent("keycover.json")
+            let attrs = try FileManager.default.attributesOfItem(atPath: recordURL.path)
+            XCTAssertEqual((attrs[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+
+            let reloadedStore = KeyCoverPassword(
+                preferences: preferences,
+                storeDirectory: storeDir,
+                playChainDirectory: chainDir,
+                legacyKeychainReader: {
+                    keychainReadCount.withLock { $0 += 1 }
+                    return nil
+                },
+                legacyKeychainDeleter: {}
+            )
+            let reloadedKeyCover = KeyCover(
+                preferences: preferences,
+                passwordStore: reloadedStore,
+                playChainDirectory: chainDir
+            )
+            XCTAssertEqual(reloadedKeyCover.keyCoverPlainTextKey, generated)
+            XCTAssertEqual(keychainReadCount.withLock { $0 }, 0)
+
+            XCTAssertTrue(reloadedStore.removeKeyCoverPassword())
+            XCTAssertEqual(preferences.keyCoverEnabled, .disabled)
+            XCTAssertEqual(try Data(contentsOf: dbURL), sampleDBBytes)
+        }
+
+        // 3A. Legacy upgrade (selfGeneratedPassword + no local file + no .keyCover): auto-disables with 0 Keychain reads
+        do {
+            let storeDir = dir.appendingPathComponent("kc-legacy-a-store", isDirectory: true)
+            let chainDir = dir.appendingPathComponent("kc-legacy-a-chains", isDirectory: true)
+            try FileManager.default.createDirectory(at: chainDir, withIntermediateDirectories: true)
+
+            let suiteName = "KeyCoverLegacyA.\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+            defer { defaults.removePersistentDomain(forName: suiteName) }
+
+            let keychainReadCount = Mutex(0)
+            let keychainDeleteCount = Mutex(0)
+            let preferences = KeyCoverPreferences(userDefaults: defaults)
+            preferences.keyCoverEnabled = .selfGeneratedPassword
+
+            let passwordStore = KeyCoverPassword(
+                preferences: preferences,
+                storeDirectory: storeDir,
+                playChainDirectory: chainDir,
+                legacyKeychainReader: {
+                    keychainReadCount.withLock { $0 += 1 }
+                    return "legacy-key-unused"
+                },
+                legacyKeychainDeleter: {
+                    keychainDeleteCount.withLock { $0 += 1 }
+                }
+            )
+            _ = KeyCover(
+                preferences: preferences,
+                passwordStore: passwordStore,
+                playChainDirectory: chainDir
+            )
+
+            XCTAssertEqual(preferences.keyCoverEnabled, .disabled)
+            XCTAssertEqual(keychainReadCount.withLock { $0 }, 0)
+            XCTAssertEqual(keychainDeleteCount.withLock { $0 }, 1)
+        }
+
+        // 3B. Legacy upgrade (selfGeneratedPassword + encrypted .keyCover): lazy one-time read on unlock, then local
+        do {
+            let storeDir = dir.appendingPathComponent("kc-legacy-b-store", isDirectory: true)
+            let chainDir = dir.appendingPathComponent("kc-legacy-b-chains", isDirectory: true)
+            try FileManager.default.createDirectory(at: chainDir, withIntermediateDirectories: true)
+
+            let dbURL = chainDir.appendingPathComponent("com.example.legacy.db")
+            try sampleDBBytes.write(to: dbURL)
+            let chain = KeyCoverKey(appBundleID: "com.example.legacy", playChainDirectory: chainDir)
+            try chain.encryptKeyDB(plainTextKey: "legacy-managed-secret")
+
+            let suiteName = "KeyCoverLegacyB.\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+            defer { defaults.removePersistentDomain(forName: suiteName) }
+
+            let keychainReadCount = Mutex(0)
+            let keychainDeleteCount = Mutex(0)
+            let preferences = KeyCoverPreferences(userDefaults: defaults)
+            preferences.keyCoverEnabled = .selfGeneratedPassword
+
+            let passwordStore = KeyCoverPassword(
+                preferences: preferences,
+                storeDirectory: storeDir,
+                playChainDirectory: chainDir,
+                legacyKeychainReader: {
+                    keychainReadCount.withLock { $0 += 1 }
+                    return "legacy-managed-secret"
+                },
+                legacyKeychainDeleter: {
+                    keychainDeleteCount.withLock { $0 += 1 }
+                }
+            )
+            let keyCover = KeyCover(
+                preferences: preferences,
+                passwordStore: passwordStore,
+                playChainDirectory: chainDir
+            )
+            passwordStore.attachKeyCover(keyCover)
+
+            // Startup never reads Keychain eagerly
+            XCTAssertEqual(keychainReadCount.withLock { $0 }, 0)
+            XCTAssertEqual(preferences.keyCoverEnabled, .selfGeneratedPassword)
+
+            try await keyCover.unlockChain(chain)
+            XCTAssertEqual(keychainReadCount.withLock { $0 }, 1)
+            XCTAssertEqual(keychainDeleteCount.withLock { $0 }, 1)
+            XCTAssertFalse(chain.chainEncryptionStatus)
+            XCTAssertEqual(try Data(contentsOf: dbURL), sampleDBBytes)
+
+            // Subsequent startup reads purely from local 0600 store with 0 new Keychain reads
+            let secondKeyCover = KeyCover(
+                preferences: preferences,
+                passwordStore: passwordStore,
+                playChainDirectory: chainDir
+            )
+            XCTAssertEqual(secondKeyCover.keyCoverPlainTextKey, "legacy-managed-secret")
+            XCTAssertEqual(keychainReadCount.withLock { $0 }, 1)
+        }
+
+        // 3C. Legacy upgrade (userProvidedPassword + encrypted .keyCover): trial decrypt migrates with 0 Keychain reads
+        do {
+            let storeDir = dir.appendingPathComponent("kc-legacy-c-store", isDirectory: true)
+            let chainDir = dir.appendingPathComponent("kc-legacy-c-chains", isDirectory: true)
+            try FileManager.default.createDirectory(at: chainDir, withIntermediateDirectories: true)
+
+            let dbURL = chainDir.appendingPathComponent("com.example.legacyuser.db")
+            try sampleDBBytes.write(to: dbURL)
+            let chain = KeyCoverKey(appBundleID: "com.example.legacyuser", playChainDirectory: chainDir)
+            try chain.encryptKeyDB(plainTextKey: "legacy-user-secret")
+
+            let suiteName = "KeyCoverLegacyC.\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+            defer { defaults.removePersistentDomain(forName: suiteName) }
+
+            let keychainReadCount = Mutex(0)
+            let keychainDeleteCount = Mutex(0)
+            let preferences = KeyCoverPreferences(userDefaults: defaults)
+            preferences.keyCoverEnabled = .userProvidedPassword
+
+            let passwordStore = KeyCoverPassword(
+                preferences: preferences,
+                storeDirectory: storeDir,
+                playChainDirectory: chainDir,
+                legacyKeychainReader: {
+                    keychainReadCount.withLock { $0 += 1 }
+                    return "legacy-user-secret"
+                },
+                legacyKeychainDeleter: {
+                    keychainDeleteCount.withLock { $0 += 1 }
+                }
+            )
+
+            XCTAssertFalse(passwordStore.validatePassword("wrong-legacy-secret"))
+            XCTAssertTrue(passwordStore.validatePassword("legacy-user-secret"))
+            XCTAssertEqual(keychainReadCount.withLock { $0 }, 0)
+            XCTAssertEqual(keychainDeleteCount.withLock { $0 }, 1)
+            XCTAssertTrue(passwordStore.hasLocalRecord())
+        }
+    }
+}
+
+private final class LockedResultBox: Sendable {
+    private let state = Mutex<(error: Error?, url: URL?)>((nil, nil))
+
+    func set(error: Error?, url: URL?) {
+        state.withLock { $0 = (error, url) }
+    }
+
+    func get() -> (Error?, URL?) {
+        state.withLock { ($0.error, $0.url) }
     }
 }

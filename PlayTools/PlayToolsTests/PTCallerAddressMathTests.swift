@@ -1,3 +1,4 @@
+import Synchronization
 import XCTest
 
 final class PTCallerAddressMathTests: XCTestCase {
@@ -405,13 +406,14 @@ final class PTCallerAddressMathTests: XCTestCase {
         XCTAssertTrue(pt_is_in_internal_scope())
 
         let exp = expectation(description: "thread-local scope isolated")
-        var otherThreadSawScope = true
+        let otherThreadSawScope = Mutex(true)
         DispatchQueue.global().async {
-            otherThreadSawScope = pt_is_in_internal_scope()
+            let saw = pt_is_in_internal_scope()
+            otherThreadSawScope.withLock { $0 = saw }
             exp.fulfill()
         }
         wait(for: [exp], timeout: 2.0)
-        XCTAssertFalse(otherThreadSawScope)
+        XCTAssertFalse(otherThreadSawScope.withLock { $0 })
 
         pt_leave_internal_scope()
         XCTAssertTrue(pt_is_in_internal_scope())

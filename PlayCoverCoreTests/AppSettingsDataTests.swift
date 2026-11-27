@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import PlayCoverCore
+import Synchronization
 import XCTest
 @testable import PlayCover
 
@@ -302,19 +303,18 @@ final class AppSettingsDataTests: XCTestCase {
         let info = AppInfo(contentsOf: infoURL)
         let settingsURL = root.appendingPathComponent("settings.plist")
 
-        let recordLock = NSLock()
-        var recorded: [Bool] = []
+        let recorded = Mutex<[Bool]>([])
         let appSettings = AppSettings(
             settingsUrl: settingsURL,
             info: info,
             debounceInterval: 0.2,
             metalHUDExecutor: { _, enabled in
-                if recorded.isEmpty {
+                if recorded.withLock({ $0.isEmpty }) {
                     Thread.sleep(forTimeInterval: 0.03)
                 }
-                recordLock.lock()
-                recorded.append(enabled)
-                recordLock.unlock()
+                recorded.withLock {
+                    $0.append(enabled)
+                }
             }
         )
 
@@ -328,15 +328,13 @@ final class AppSettingsDataTests: XCTestCase {
             bundleID: bundleID,
             enabled: appSettings.settings.effectiveMetalHUD,
             executor: { _, enabled in
-                recordLock.lock()
-                recorded.append(enabled)
-                recordLock.unlock()
+                recorded.withLock {
+                    $0.append(enabled)
+                }
             }
         )
 
-        recordLock.lock()
-        let finalValue = recorded.last
-        recordLock.unlock()
+        let finalValue = recorded.withLock { $0.last }
         XCTAssertEqual(finalValue, false)
     }
 }
