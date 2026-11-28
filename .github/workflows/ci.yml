@@ -21,10 +21,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  ci:
-    name: Lint, Static Analysis, Tests & Runtime Harness (xcode-27 / macOS 27)
+  lint-and-analysis:
+    name: Lint, SwiftPM, Pure-C & Static Analysis
     runs-on: xcode-27
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -41,6 +41,17 @@ jobs:
           DYLD_FRAMEWORK_PATH="${TOOL_LIB}" swiftlint lint --strict
           (cd PlayTools && DYLD_FRAMEWORK_PATH="${TOOL_LIB}" swiftlint lint --strict)
 
+      - name: Run pure-C unit tests (ASan/UBSan)
+        run: ./ci/run_unit_tests_c.sh
+
+      - name: Cache PlayCoverModules SwiftPM build
+        uses: actions/cache@v5
+        with:
+          path: Packages/PlayCoverModules/.build
+          key: spm-modules-xcode27-${{ hashFiles('Packages/PlayCoverModules/Package.swift', 'Packages/PlayCoverModules/Sources/**/*.swift', 'Packages/PlayCoverModules/Tests/**/*.swift') }}
+          restore-keys: |
+            spm-modules-xcode27-
+
       - name: Run PlayCoverModules SwiftPM tests
         run: swift test --package-path Packages/PlayCoverModules
 
@@ -48,6 +59,22 @@ jobs:
         run: |
           chmod +x ci/run_static_analysis.sh
           ./ci/run_static_analysis.sh --check-format --derived-data "${RUNNER_TEMP}/dd-analyze"
+
+  xcode-tests:
+    name: PlayCoverTests & PlayToolsTests
+    runs-on: xcode-27
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Cache Xcode SPM source packages
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/spm-packages
+          key: xcode-spm-xcode27-${{ hashFiles('**/Package.resolved') }}
+          restore-keys: |
+            xcode-spm-xcode27-
 
       - name: Run PlayCoverTests suite
         run: |
@@ -57,13 +84,28 @@ jobs:
             -configuration Debug \
             -destination 'platform=macOS,arch=arm64' \
             -derivedDataPath "${RUNNER_TEMP}/dd-tests" \
+            -clonedSourcePackagesDirPath "${RUNNER_TEMP}/spm-packages" \
+            COMPILER_INDEX_STORE_ENABLE=NO \
             CODE_SIGN_IDENTITY=- \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             test
 
-      - name: Run pure-C unit tests (ASan/UBSan)
-        run: ./ci/run_unit_tests_c.sh
+  release-and-harness:
+    name: Release Build, Incremental Check & Runtime Harness
+    runs-on: xcode-27
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Cache Xcode SPM source packages
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/spm-packages
+          key: xcode-spm-xcode27-${{ hashFiles('**/Package.resolved') }}
+          restore-keys: |
+            xcode-spm-xcode27-
 
       - name: Build PlayCover Release & verify incremental no-op
         run: |
@@ -72,10 +114,14 @@ jobs:
             -scheme PlayCover \
             -configuration Release \
             -derivedDataPath "${RUNNER_TEMP}/dd-release" \
+            -clonedSourcePackagesDirPath "${RUNNER_TEMP}/spm-packages" \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            DEBUG_INFORMATION_FORMAT=dwarf \
             CODE_SIGN_IDENTITY=- \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            clean build
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            build
 
           PLAYTOOLS_BIN="${RUNNER_TEMP}/dd-release/Build/Products/Release/MacOver.app/Contents/Frameworks/PlayTools.framework/Versions/A/PlayTools"
           python3 - "${PLAYTOOLS_BIN}" <<'PY'
@@ -94,26 +140,48 @@ jobs:
           print(f"Verified {segname},__interpose size={hex(size)} ({size // 16} entries)")
           PY
 
-          PLAYCOVER_BIN="${RUNNER_TEMP}/dd-release/Build/Products/Release/MacOver.app/Contents/MacOS/MacOver"
-          HELPER_BIN="${RUNNER_TEMP}/dd-release/Build/Products/Release/MacOver.app/Contents/Library/HelperTools/PlayCoverHelper"
-          HELPER_PLIST="${RUNNER_TEMP}/dd-release/Build/Products/Release/MacOver.app/Contents/Library/LaunchDaemons/app.makedie.MacOver.Helper.plist"
-          AKINTERFACE_BIN="${RUNNER_TEMP}/dd-release/Build/Products/Release/MacOver.app/Contents/Frameworks/PlayTools.framework/Versions/A/PlugIns/AKInterface.bundle/Contents/MacOS/AKInterface"
+          APP_DIR="${RUNNER_TEMP}/dd-release/Build/Products/Release/MacOver.app"
+          PLAYCOVER_BIN="${APP_DIR}/Contents/MacOS/MacOver"
+          MCP_CLI_BIN="${APP_DIR}/Contents/MacOS/macover-mcp"
+          COVER_BRIDGE_BIN="${APP_DIR}/Contents/Resources/BuiltInPlugins/CoverUseBridge/CoverUseBridge.dylib"
+          COVER_BRIDGE_MANIFEST="${APP_DIR}/Contents/Resources/BuiltInPlugins/CoverUseBridge/PluginManifest.json"
+          AGENT_PLUGIN_JSON="${APP_DIR}/Contents/Resources/AgentPlugin/macover-cover-use/plugin.json"
+          AGENT_MCP_CONFIG="${APP_DIR}/Contents/Resources/AgentPlugin/macover-cover-use/mcp_config.json"
+          HELPER_BIN="${APP_DIR}/Contents/Library/HelperTools/PlayCoverHelper"
+          HELPER_PLIST="${APP_DIR}/Contents/Library/LaunchDaemons/app.makedie.MacOver.Helper.plist"
+          AKINTERFACE_BIN="${APP_DIR}/Contents/Frameworks/PlayTools.framework/Versions/A/PlugIns/AKInterface.bundle/Contents/MacOS/AKInterface"
+          test -x "${PLAYCOVER_BIN}"
+          test -x "${MCP_CLI_BIN}"
+          test -f "${COVER_BRIDGE_BIN}"
+          test -f "${COVER_BRIDGE_MANIFEST}"
+          test -f "${AGENT_PLUGIN_JSON}"
+          test -f "${AGENT_MCP_CONFIG}"
           test -x "${HELPER_BIN}"
           test -x "${AKINTERFACE_BIN}"
           plutil -lint "${HELPER_PLIST}"
-          xcrun vtool -show-build "${PLAYCOVER_BIN}" | grep -q "minos 26.0"
-          xcrun vtool -show-build "${HELPER_BIN}" | grep -q "minos 26.0"
-          xcrun vtool -show-build "${PLAYTOOLS_BIN}" | grep -q "minos 26.0"
-          xcrun vtool -show-build "${AKINTERFACE_BIN}" | grep -q "minos 26.0"
+          python3 -m json.tool "${COVER_BRIDGE_MANIFEST}" >/dev/null
+          python3 -m json.tool "${AGENT_PLUGIN_JSON}" >/dev/null
+          python3 -m json.tool "${AGENT_MCP_CONFIG}" >/dev/null
+          otool -s __TEXT __info_plist "${MCP_CLI_BIN}" | grep -F "Contents of (__TEXT,__info_plist)" >/dev/null
+          xcrun vtool -show-build "${PLAYCOVER_BIN}" | grep -F "minos 26.0" >/dev/null
+          xcrun vtool -show-build "${MCP_CLI_BIN}" | grep -F "minos 26.0" >/dev/null
+          xcrun vtool -show-build "${COVER_BRIDGE_BIN}" | grep -F "minos 26.0" >/dev/null
+          xcrun vtool -show-build "${HELPER_BIN}" | grep -F "minos 26.0" >/dev/null
+          xcrun vtool -show-build "${PLAYTOOLS_BIN}" | grep -F "minos 26.0" >/dev/null
+          xcrun vtool -show-build "${AKINTERFACE_BIN}" | grep -F "minos 26.0" >/dev/null
 
           INCR_LOG=$(xcodebuild \
             -workspace PlayCover.xcworkspace \
             -scheme PlayCover \
             -configuration Release \
             -derivedDataPath "${RUNNER_TEMP}/dd-release" \
+            -clonedSourcePackagesDirPath "${RUNNER_TEMP}/spm-packages" \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            DEBUG_INFORMATION_FORMAT=dwarf \
             CODE_SIGN_IDENTITY=- \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
+            PROVISIONING_PROFILE_SPECIFIER="" \
             build 2>&1)
           echo "${INCR_LOG}" | tail -n 15
           test "$(echo "${INCR_LOG}" | grep -c "PhaseScriptExecution" || true)" -eq 0
@@ -124,4 +192,5 @@ jobs:
           chmod +x Tests/RuntimeHarness/run_runtime_harness.py
           python3 Tests/RuntimeHarness/run_runtime_harness.py \
             --playtools-framework "${RUNNER_TEMP}/dd-release/Build/Products/Release/MacOver.app/Contents/Frameworks/PlayTools.framework" \
+            --cover-use-bridge "${RUNNER_TEMP}/dd-release/Build/Products/Release/MacOver.app/Contents/Resources/BuiltInPlugins/CoverUseBridge/CoverUseBridge.dylib" \
             --verbose

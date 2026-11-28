@@ -47,6 +47,8 @@ private final class SnapshotFixture {
     private static let suiteName = "app.makedie.MacOverCoreTests.WorkspaceUISnapshots"
 
     private let tempDir: URL
+    private let settingsDir: URL
+    private var createdApps: [PlayApp] = []
     private var createdBundleIDs: [String] = []
     private let isolatedDefaults: UserDefaults?
     private let savedLayoutRaw: String?
@@ -57,20 +59,28 @@ private final class SnapshotFixture {
         savedLegacyList = UserDefaults.standard.object(forKey: "AppLibraryView")
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("MacOverWorkspaceUISnapshots-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let settings = dir.appendingPathComponent("AppSettings", isDirectory: true)
+        try FileManager.default.createDirectory(at: settings, withIntermediateDirectories: true)
         tempDir = dir
+        settingsDir = settings
         let defaults = UserDefaults(suiteName: Self.suiteName)
         defaults?.removePersistentDomain(forName: Self.suiteName)
         isolatedDefaults = defaults
     }
 
     func cleanup() {
+        for app in createdApps {
+            app.settings.discardPendingWrites()
+        }
+        createdApps.removeAll()
         restoreUserDefaults()
         for bundleID in createdBundleIDs {
             let settingsURL = AppSettings.appSettingsDir
                 .appendingPathComponent(bundleID).appendingPathExtension("plist")
             try? FileManager.default.removeItem(at: settingsURL)
             try? FileManager.default.removeItem(at: Keymapping.keymappingDir.appendingPathComponent(bundleID))
+            CFPreferencesSetAppValue("MetalForceHudEnabled" as CFString, nil, bundleID as CFString)
+            CFPreferencesAppSynchronize(bundleID as CFString)
         }
         createdBundleIDs.removeAll()
         try? FileManager.default.removeItem(at: tempDir)
@@ -86,8 +96,14 @@ private final class SnapshotFixture {
         deps.toastVM.isShown = false
         let apps = try SnapshotSupport.demoSpecs().map { spec in
             createdBundleIDs.append(spec.bundleID)
-            return try SnapshotSupport.makeDemoApp(spec: spec, in: tempDir, deps: deps)
+            return try SnapshotSupport.makeDemoApp(
+                spec: spec,
+                in: tempDir,
+                settingsDir: settingsDir,
+                deps: deps
+            )
         }
+        createdApps = apps
         SnapshotSupport.configureDemoApps(apps)
         deps.appsVM.updatingApps = false
         deps.appsVM.apps = apps
@@ -124,7 +140,7 @@ struct WorkspaceUISnapshotTests {
         let fixture = try SnapshotFixture()
         defer { fixture.cleanup() }
         let context = try fixture.makeDemoContext()
-        defer { context.apps.forEach { $0.settings.flush() } }
+        defer { context.apps.forEach { $0.settings.discardPendingWrites() } }
         captureLibraryScreens(context: context)
         captureConfigScreens(context: context)
         captureAuxiliaryScreens(context: context)
@@ -135,14 +151,16 @@ struct WorkspaceUISnapshotTests {
         let fixture = try SnapshotFixture()
         defer { fixture.cleanup() }
         let context = try fixture.makeDemoContext()
-        defer { context.apps.forEach { $0.settings.flush() } }
+        defer { context.apps.forEach { $0.settings.discardPendingWrites() } }
         context.navState.libraryLayout = .grid
         context.navState.showInspector = true
         let panes: [(ConfigPane, PlayApp, String)] = [
             (.overview, context.starlight, "Overview"),
             (.display, context.aether, "Display"),
             (.device, context.retro, "Device"),
-            (.network, context.starlight, "Network")
+            (.network, context.starlight, "Network"),
+            (.plugins, context.starlight, "Plugins"),
+            (.info, context.starlight, "Info")
         ]
         for (pane, app, label) in panes {
             context.navState.configTargetID = app.id
@@ -155,11 +173,14 @@ struct WorkspaceUISnapshotTests {
                 size: NSSize(width: 1024, height: 677),
                 appearance: .aqua,
                 toolbarStyle: .unified,
-                delay: 0.8
+                delay: 0.35
             )
             let result = captureWindow(rootView, spec: spec)
-            #expect(result.windowWidth <= 1024.5)
-            #expect(result.width == Int((1024.0 * max(1.0, result.backingScale)).rounded()))
+            #expect(result.windowWidth <= 1024.5, "pane=\(pane.rawValue) windowWidth=\(result.windowWidth)")
+            #expect(
+                result.width == Int((1024.0 * max(1.0, result.backingScale)).rounded()),
+                "pane=\(pane.rawValue) width=\(result.width) scale=\(result.backingScale)"
+            )
         }
     }
 
@@ -169,11 +190,11 @@ struct WorkspaceUISnapshotTests {
         context.navState.showInspector = true
         context.navState.libraryLayout = .grid
         context.navState.selectedAppID = context.starlight.id
-        captureMainWindow("01_library_grid_light", "PlayCover — 应用库", .aqua, context, delay: 0.9)
-        captureMainWindow("02_library_grid_dark", "PlayCover — 应用库", .darkAqua, context, delay: 0.7)
+        captureMainWindow("01_library_grid_light", "PlayCover — 应用库", .aqua, context, delay: 0.35)
+        captureMainWindow("02_library_grid_dark", "PlayCover — 应用库", .darkAqua, context, delay: 0.35)
         context.navState.libraryLayout = .table
         context.navState.selectedAppID = context.aether.id
-        captureMainWindow("03_library_table_light", "PlayCover — 应用库", .aqua, context, delay: 0.8)
+        captureMainWindow("03_library_table_light", "PlayCover — 应用库", .aqua, context, delay: 0.35)
     }
 
     private func captureConfigScreens(context: DemoContext) {
@@ -187,12 +208,14 @@ struct WorkspaceUISnapshotTests {
             ConfigTarget(name: "06_config_device_legacy_warning", windowTitle: "Retro Runner — 机型与系统",
                          app: context.retro, pane: .device),
             ConfigTarget(name: "07_config_network_rules", windowTitle: "Starlight Odyssey — 网络规则",
-                         app: context.starlight, pane: .network)
+                         app: context.starlight, pane: .network),
+            ConfigTarget(name: "07b_config_plugins_running_lock", windowTitle: "Starlight Odyssey — 插件与安全",
+                         app: context.starlight, pane: .plugins)
         ]
         for target in configs {
             context.navState.configTargetID = target.app.id
             context.navState.activeConfigPane = target.pane
-            captureMainWindow(target.name, target.windowTitle, .aqua, context, delay: 0.8)
+            captureMainWindow(target.name, target.windowTitle, .aqua, context, delay: 0.35)
         }
     }
 
@@ -201,7 +224,7 @@ struct WorkspaceUISnapshotTests {
             SigningGuideView(isSigningSetupShown: .constant(true)),
             spec: CaptureSpec(
                 name: "08_signing_guide_sheet", windowTitle: "签名与钥匙串模式",
-                size: NSSize(width: 640, height: 540), appearance: .aqua, toolbarStyle: .unified, delay: 0.9
+                size: NSSize(width: 640, height: 540), appearance: .aqua, toolbarStyle: .unified, delay: 0.25
             )
         )
         context.deps.downloadVM.storeAppData = SourceAppsData(
@@ -220,7 +243,7 @@ struct WorkspaceUISnapshotTests {
             activityView,
             spec: CaptureSpec(
                 name: "09_activity_center_popover", windowTitle: "活动中心",
-                size: NSSize(width: 380, height: 320), appearance: .aqua, toolbarStyle: .unified, delay: 0.6
+                size: NSSize(width: 380, height: 320), appearance: .aqua, toolbarStyle: .unified, delay: 0.25
             )
         )
         let settingsRoot = PlayCoverSettingsView(updaterViewModel: context.updaterVM)
@@ -228,7 +251,31 @@ struct WorkspaceUISnapshotTests {
             withDependencies(settingsRoot, context: context),
             spec: CaptureSpec(
                 name: "10_settings_window", windowTitle: "MacOver 设置",
-                size: NSSize(width: 680, height: 420), appearance: .aqua, toolbarStyle: .preference, delay: 0.7
+                size: NSSize(width: 680, height: 420), appearance: .aqua, toolbarStyle: .preference, delay: 0.25
+            )
+        )
+        captureWindow(
+            withDependencies(MCPSettingsView(), context: context),
+            spec: CaptureSpec(
+                name: "11_settings_mcp", windowTitle: "MacOver — MCP",
+                size: NSSize(width: 680, height: 500), appearance: .aqua, toolbarStyle: .preference, delay: 0.25
+            )
+        )
+        captureWindow(
+            withDependencies(
+                MITMTrafficMonitorView(bundleID: context.starlight.info.bundleIdentifier),
+                context: context
+            ),
+            spec: CaptureSpec(
+                name: "12_mitm_traffic_monitor", windowTitle: "Starlight Odyssey — MITM",
+                size: NSSize(width: 840, height: 520), appearance: .aqua, toolbarStyle: .unified, delay: 0.25
+            )
+        )
+        captureWindow(
+            withDependencies(UpdateSettings(updaterViewModel: context.updaterVM), context: context),
+            spec: CaptureSpec(
+                name: "13_settings_updates", windowTitle: "MacOver — Updates",
+                size: NSSize(width: 520, height: 240), appearance: .aqua, toolbarStyle: .preference, delay: 0.2
             )
         )
     }
@@ -255,6 +302,7 @@ struct WorkspaceUISnapshotTests {
             .environment(deps.keyCoverPreferences).environment(deps.installPreferences)
             .environment(deps.uninstallPreferences).environment(deps.urlObservable)
             .environment(deps.modifierKeyObserver).environment(deps.mitmCoordinator)
+            .environment(deps.mcpCoordinator).environment(deps.mcpPreferences)
             .environment(context.navState)
     }
 
@@ -355,9 +403,7 @@ private enum SnapshotSupport {
         window.setContentSize(spec.size)
         window.orderBack(nil)
         defer { window.close() }
-        RunLoop.main.run(until: Date().addingTimeInterval(spec.delay))
-        window.layoutIfNeeded()
-        window.displayIfNeeded()
+        pumpLayoutUntilSettled(window: window, expectedSize: spec.size, maxWait: spec.delay)
         guard let captureTarget = window.contentView?.superview ?? window.contentView,
               let bitmap = captureTarget.bitmapImageRepForCachingDisplay(in: captureTarget.bounds) else {
             return CaptureResult(
@@ -414,7 +460,44 @@ private enum SnapshotSupport {
         return colors.count
     }
 
-    static func makeDemoApp(spec: DemoAppSpec, in dir: URL, deps: PlayCoverDependencies) throws -> PlayApp {
+    @MainActor
+    private static func pumpLayoutUntilSettled(
+        window: NSWindow,
+        expectedSize: NSSize,
+        maxWait: TimeInterval
+    ) {
+        let deadline = Date().addingTimeInterval(max(0.15, maxWait))
+        let minimumSettle = Date().addingTimeInterval(min(0.12, maxWait))
+        var stablePasses = 0
+        while Date() < deadline {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.015))
+            window.layoutIfNeeded()
+            window.displayIfNeeded()
+            let contentView = window.contentView
+            let sizeMatches = abs((contentView?.bounds.width ?? 0) - expectedSize.width) <= 1.0
+                && abs((contentView?.bounds.height ?? 0) - expectedSize.height) <= 1.0
+            let settled = sizeMatches
+                && (contentView?.needsLayout == false)
+                && (contentView?.needsDisplay == false)
+            if settled && Date() >= minimumSettle {
+                stablePasses += 1
+                if stablePasses >= 2 {
+                    break
+                }
+            } else {
+                stablePasses = 0
+            }
+        }
+        window.layoutIfNeeded()
+        window.displayIfNeeded()
+    }
+
+    static func makeDemoApp(
+        spec: DemoAppSpec,
+        in dir: URL,
+        settingsDir: URL,
+        deps: PlayCoverDependencies
+    ) throws -> PlayApp {
         let appURL = dir.appendingPathComponent("\(spec.slug).app", isDirectory: true)
         try FileManager.default.createDirectory(at: appURL, withIntermediateDirectories: true)
         let infoPlist: [String: Any] = [
@@ -426,7 +509,14 @@ private enum SnapshotSupport {
         try plistData.write(to: appURL.appendingPathComponent("Info.plist"))
         let iconData = try makeAppIconPNG(symbol: spec.symbol, startColor: spec.startColor, endColor: spec.endColor)
         try iconData.write(to: appURL.appendingPathComponent("AppIcon.png"))
-        return PlayApp(appUrl: appURL, dependencies: deps)
+        let info = AppInfo(contentsOf: appURL.appendingPathComponent("Info.plist"))
+        let isolatedSettings = AppSettings(
+            settingsUrl: settingsDir.appendingPathComponent("\(spec.bundleID).plist"),
+            info: info,
+            debounceInterval: 0.5,
+            metalHUDExecutor: { _, _ in }
+        )
+        return PlayApp(appUrl: appURL, info: info, dependencies: deps, settings: isolatedSettings)
     }
 
     private static func makeAppIconPNG(symbol: String, startColor: NSColor, endColor: NSColor) throws -> Data {

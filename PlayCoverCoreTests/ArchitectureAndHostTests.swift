@@ -295,6 +295,7 @@ struct ArchitectureAndHostTests {
     }
 
     @Test
+    @MainActor
     func stringCatalogCompiledLocalizationsAndLookups() throws {
         let hostBundle = Bundle(for: PlayCoverDependencies.self)
         let localizations = Set(hostBundle.localizations)
@@ -305,8 +306,17 @@ struct ArchitectureAndHostTests {
         let keys = [
             "playapp.add",
             "sidebar.appLibrary",
-            "ipaLibrary.noNetworkConnection.toast"
-        ]
+            "ipaLibrary.noNetworkConnection.toast",
+            "config.runningLock.title",
+            "config.runningLock.pluginsNote",
+            "config.runningLock.infoNote",
+            "config.runningLock.advancedNote",
+            "keycover.error.saveFailed",
+            "menubar.mainWindow",
+            "preferences.updates.unsignedDisabledNote",
+            "settings.mcp.exportPluginMissing",
+            "signing.wizard.nvramProtectedNote"
+        ] + PlayCoverRestartField.allCases.map(\.localizedKey)
         for key in keys {
             let localized = hostBundle.localizedString(forKey: key, value: nil, table: nil)
             #expect(!localized.isEmpty)
@@ -409,8 +419,28 @@ struct ArchitectureAndHostTests {
         #expect(!HelperSecurityValidator.validateBundleIdentifier(".leading.dot"))
 
         #expect(
-            HelperSecurityValidator.validateContainerPath("/Users/alice/Library/Containers/app.makedie.MacOver/Data") ==
+            HelperSecurityValidator.validateContainerPath("/Users/alice/Library/Containers/com.example.demoapp/Data") ==
+                "/Users/alice/Library/Containers/com.example.demoapp/Data"
+        )
+        #expect(
+            HelperSecurityValidator.validateContainerPath(
                 "/Users/alice/Library/Containers/app.makedie.MacOver/Data"
+            ) == nil
+        )
+        #expect(
+            HelperSecurityValidator.validateContainerPath(
+                "/Users/alice/Library/Containers/com.apple.Safari/Data"
+            ) == nil
+        )
+        #expect(
+            HelperSecurityValidator.validateContainerPath(
+                "/Users/alice/Library/Containers/io.playcover.PlayCover/Data"
+            ) == nil
+        )
+        #expect(
+            HelperSecurityValidator.validateContainerPath(
+                "/Users/alice/Library/Containers/.v1/Data"
+            ) == nil
         )
         #expect(HelperSecurityValidator.validateContainerPath("/System/Library") == nil)
         #expect(HelperSecurityValidator.validateContainerPath("/etc/passwd") == nil)
@@ -749,6 +779,9 @@ struct ArchitectureAndHostTests {
         #expect(appSettings.settings.iosDeviceModel == "iPhone18,2")
         #expect(appSettings.settings.effectiveIOSDeviceModel == "iPhone12,5")
         appSettings.update { $0.reportedIOSVersionMode = .compat18_3 }
+        #expect(appSettings.settings.iosDeviceModel == "iPhone18,2")
+        #expect(appSettings.settings.effectiveIOSDeviceModel == "iPhone17,2")
+        appSettings.update { $0.reportedIOSVersionMode = .automatic }
         #expect(appSettings.settings.iosDeviceModel == "iPhone18,2")
         #expect(appSettings.settings.effectiveIOSDeviceModel == "iPhone18,2")
 
@@ -2090,14 +2123,40 @@ struct ArchitectureAndHostTests {
     }
 
     @Test
+    @MainActor
     func xcstringsFilesHaveValidEnglishAndNoEmptyTranslations() throws {
         let repoRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
+        let hostCatalogURL = repoRoot.appendingPathComponent("PlayCover/Localizable.xcstrings")
         let catalogURLs = [
-            repoRoot.appendingPathComponent("PlayCover/Localizable.xcstrings"),
+            hostCatalogURL,
             repoRoot.appendingPathComponent("PlayTools/PlayTools/Playtools.xcstrings")
         ]
+        let formatPattern = #"%(?:(\d+)\$)?[-+# 0]*\*?(?:\d+|\*)?"#
+            + #"(?:\.(?:\d+|\*))?(?:hh|h|ll|l|j|z|t|q|L)?([@dDiIuUxXoOeEfFgGaAcCsSpPn%])"#
+        let formatRegex = try NSRegularExpression(pattern: formatPattern)
+
+        func normalizedFormatSpecifiers(in text: String) -> [Int: String] {
+            let nsText = text as NSString
+            let matches = formatRegex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
+            var result: [Int: String] = [:]
+            var nextIndex = 1
+            for match in matches {
+                let conv = nsText.substring(with: match.range(at: 2))
+                if conv == "%" { continue }
+                let idx: Int
+                if match.range(at: 1).location != NSNotFound,
+                   let explicit = Int(nsText.substring(with: match.range(at: 1))) {
+                    idx = explicit
+                } else {
+                    idx = nextIndex
+                    nextIndex += 1
+                }
+                result[idx] = conv
+            }
+            return result
+        }
 
         for catalogURL in catalogURLs {
             let data = try Data(contentsOf: catalogURL)
@@ -2112,15 +2171,285 @@ struct ArchitectureAndHostTests {
                 let enUnit = try #require(enLoc["stringUnit"] as? [String: Any])
                 let enVal = try #require(enUnit["value"] as? String)
                 #expect(!enVal.isEmpty, "Empty en string for \(key)")
+                let enSpecs = normalizedFormatSpecifiers(in: enVal)
 
                 for (lang, rawLang) in locs {
                     if let langObj = rawLang as? [String: Any],
                        let unit = langObj["stringUnit"] as? [String: Any],
                        let val = unit["value"] as? String {
-                        #expect(!val.isEmpty, "Empty translation for \(key) [\(lang)] in \(catalogURL.lastPathComponent)")
+                        #expect(
+                            !val.isEmpty,
+                            "Empty translation for \(key) [\(lang)] in \(catalogURL.lastPathComponent)"
+                        )
+                        #expect(
+                            !val.contains("@%"),
+                            "Reversed @% format specifier for \(key) [\(lang)] in \(catalogURL.lastPathComponent)"
+                        )
+                        let langSpecs = normalizedFormatSpecifiers(in: val)
+                        let fileName = catalogURL.lastPathComponent
+                        let mismatchMessage =
+                            "Format specifier mismatch for \(key) [\(lang)] in \(fileName): "
+                            + "expected \(enSpecs), got \(langSpecs)"
+                        #expect(langSpecs == enSpecs, Comment(rawValue: mismatchMessage))
                     }
                 }
             }
+
+            if catalogURL == hostCatalogURL {
+                let requiredEnumKeys = PlayCoverRestartField.allCases.map(\.localizedKey)
+                    + ConfigPane.allCases.map(\.titleKey)
+                    + PlayAppSettingsPreset.allCases.flatMap { [$0.titleKey, $0.subtitleKey] }
+                    + [AppLaunchStage.verifying, .unlocking, .opening].map(\.localizationKey)
+                    + [
+                        "config.runningLock.title",
+                        "config.runningLock.pluginsNote",
+                        "config.runningLock.infoNote",
+                        "config.runningLock.advancedNote",
+                        "keycover.error.saveFailed",
+                        "menubar.mainWindow",
+                        "preferences.updates.unsignedDisabledNote",
+                        "settings.mcp.exportPluginMissing",
+                        "signing.wizard.nvramProtectedNote"
+                    ]
+                for requiredKey in requiredEnumKeys {
+                    let entry = strings[requiredKey] as? [String: Any]
+                    let locs = entry?["localizations"] as? [String: Any]
+                    let enLoc = locs?["en"] as? [String: Any]
+                    let enUnit = enLoc?["stringUnit"] as? [String: Any]
+                    let enVal = enUnit?["value"] as? String
+                    #expect(
+                        enVal?.isEmpty == false,
+                        "Missing required localization key \(requiredKey) in Localizable.xcstrings"
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    func hostProjectAndReleaseWorkflowsEnforceEmbeddedBinariesAndSigningFlags() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+
+        let pbxproj = try String(
+            contentsOf: repoRoot.appendingPathComponent("PlayCover.xcodeproj/project.pbxproj"),
+            encoding: .utf8
+        )
+        let bridgeInputPath = "$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/"
+            + "BuiltInPlugins/CoverUseBridge/CoverUseBridge.dylib"
+        #expect(pbxproj.contains("$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Library/HelperTools/PlayCoverHelper"))
+        #expect(pbxproj.contains("$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/MacOS/macover-mcp"))
+        #expect(pbxproj.contains(bridgeInputPath))
+
+        let mcpConfigMarker = "PRODUCT_BUNDLE_IDENTIFIER = app.makedie.MacOver.MCP;"
+        let mcpConfigCount = pbxproj.components(separatedBy: mcpConfigMarker).count - 1
+        #expect(mcpConfigCount == 3, "Expected Debug/Release/Nightly configs for macover-mcp")
+        for chunk in pbxproj.components(separatedBy: mcpConfigMarker).dropLast() {
+            let recentWindow = String(chunk.suffix(320))
+            #expect(recentWindow.contains("CREATE_INFOPLIST_SECTION_IN_BINARY = YES;"))
+            #expect(recentWindow.contains("GENERATE_INFOPLIST_FILE = YES;"))
+        }
+
+        let helperConfigMarker = "PRODUCT_BUNDLE_IDENTIFIER = app.makedie.MacOver.Helper;"
+        let helperConfigCount = pbxproj.components(separatedBy: helperConfigMarker).count - 1
+        #expect(helperConfigCount == 3, "Expected Debug/Release/Nightly configs for PlayCoverHelper")
+        for chunk in pbxproj.components(separatedBy: helperConfigMarker).dropLast() {
+            let recentWindow = String(chunk.suffix(360))
+            #expect(recentWindow.contains("LD_RUNPATH_SEARCH_PATHS = /usr/lib/swift;"))
+        }
+
+        for workflowName in ["1.build_release.yml", "2.nightly_release.yml"] {
+            let workflow = try String(
+                contentsOf: repoRoot.appendingPathComponent(".github/workflows/\(workflowName)"),
+                encoding: .utf8
+            )
+            #expect(workflow.contains("CODE_SIGNING_ALLOWED=NO"), "\(workflowName) missing CODE_SIGNING_ALLOWED=NO")
+            #expect(
+                workflow.contains("PROVISIONING_PROFILE_SPECIFIER=\"\""),
+                "\(workflowName) missing PROVISIONING_PROFILE_SPECIFIER=\"\""
+            )
+            #expect(workflow.contains("test -x \"${HELPER_BIN}\""), "\(workflowName) missing PlayCoverHelper assertion")
+            #expect(workflow.contains("test -x \"${MCP_CLI_BIN}\""), "\(workflowName) missing macover-mcp assertion")
+            #expect(
+                workflow.contains("test -f \"${COVER_BRIDGE_BIN}\""),
+                "\(workflowName) missing CoverUseBridge assertion"
+            )
+            #expect(workflow.contains("PluginManifest.json"), "\(workflowName) missing PluginManifest.json assertion")
+            #expect(
+                workflow.contains("AgentPlugin/macover-cover-use/plugin.json"),
+                "\(workflowName) missing plugin.json assertion"
+            )
+            #expect(!workflow.contains("if [ -f \"${APP}/Contents/Library/HelperTools/PlayCoverHelper\" ]"))
+            #expect(!workflow.contains("if [ -f \"${APP}/Contents/MacOS/macover-mcp\" ]"))
+            let legacyBridgeGuard = "if [ -f \"${APP}/Contents/Resources/BuiltInPlugins/"
+                + "CoverUseBridge/CoverUseBridge.dylib\" ]"
+            #expect(!workflow.contains(legacyBridgeGuard))
+            #expect(!workflow.contains("] && codesign"), "\(workflowName) must use if/then instead of && under set -e")
+        }
+
+        let staticAnalysisScript = try String(
+            contentsOf: repoRoot.appendingPathComponent("ci/run_static_analysis.sh"),
+            encoding: .utf8
+        )
+        #expect(staticAnalysisScript.contains("pwd -P"))
+        #expect(staticAnalysisScript.contains("Path(sys.argv[2]).resolve()"))
+    }
+
+    @Test
+    @MainActor
+    func sparkleUpdaterRequiresConfiguredPublicEDKey() {
+        #expect(!UpdaterViewModel.hasConfiguredPublicEDKey(in: nil))
+        #expect(!UpdaterViewModel.hasConfiguredPublicEDKey(in: [:]))
+        #expect(!UpdaterViewModel.hasConfiguredPublicEDKey(in: ["SUPublicEDKey": ""]))
+        #expect(!UpdaterViewModel.hasConfiguredPublicEDKey(in: ["SUPublicEDKey": "   \n"]))
+        #expect(UpdaterViewModel.hasConfiguredPublicEDKey(in: ["SUPublicEDKey": "abc123validkey=="]))
+
+        let updater = UpdaterViewModel(startUpdater: true)
+        #expect(!updater.isUpdateVerificationConfigured)
+        #expect(!updater.canCheckForUpdates)
+        #expect(!updater.automaticallyCheckForUpdates)
+        updater.automaticallyCheckForUpdates = true
+        #expect(!updater.automaticallyCheckForUpdates)
+    }
+
+    @Test
+    func signingGuideParsesCustomSIPCSRUtilStatusAccurately() throws {
+        let customAppleInternalOnly = """
+        System Integrity Protection status: enabled (Custom Configuration).
+
+        Configuration:
+            Apple Internal: disabled
+            Kext Signing: enabled
+            Filesystem Protections: enabled
+            Debugging Restrictions: enabled
+            DTrace Restrictions: enabled
+            NVRAM Protections: enabled
+            BaseSystem Verification: enabled
+        """
+        let parsedAppleInternalOnly = SigningGuideView.parseCSRUtilStatus(customAppleInternalOnly)
+        #expect(!parsedAppleInternalOnly.sipDisabled)
+        #expect(!parsedAppleInternalOnly.nvramWritable)
+
+        let customNVRAMOnly = """
+        System Integrity Protection status: enabled (Custom Configuration).
+            Filesystem Protections: enabled
+            Debugging Restrictions: enabled
+            NVRAM Protections: disabled
+        """
+        let parsedNVRAMOnly = SigningGuideView.parseCSRUtilStatus(customNVRAMOnly)
+        #expect(!parsedNVRAMOnly.sipDisabled)
+        #expect(parsedNVRAMOnly.nvramWritable)
+
+        let customFSAndDebug = """
+        System Integrity Protection status: enabled (Custom Configuration).
+            Filesystem Protections: disabled
+            Debugging Restrictions: disabled
+            NVRAM Protections: enabled
+        """
+        let parsedFSAndDebug = SigningGuideView.parseCSRUtilStatus(customFSAndDebug)
+        #expect(parsedFSAndDebug.sipDisabled)
+        #expect(!parsedFSAndDebug.nvramWritable)
+
+        let globalDisabled = "System Integrity Protection status: disabled."
+        let parsedGlobal = SigningGuideView.parseCSRUtilStatus(globalDisabled)
+        #expect(parsedGlobal.sipDisabled)
+        #expect(parsedGlobal.nvramWritable)
+
+        let copyCommand = SigningGuideView.buildSafeAMFICopyCommand()
+        #expect(copyCommand.contains("nvram boot-args"))
+        #expect(copyCommand.contains("amfi_get_out_of_my_way=0x1"))
+        #expect(copyCommand.contains("amfi_get_out_of_my_way=[^[:space:]]*"))
+        #expect(copyCommand.contains("ipc_control_port_options=[^[:space:]]*"))
+
+        func runSimulatedAMFICommand(existingBootArgs: String?) throws -> String {
+            let process = Process()
+            let pipe = Pipe()
+            defer {
+                try? pipe.fileHandleForReading.close()
+                try? pipe.fileHandleForWriting.close()
+            }
+            process.executableURL = URL(fileURLWithPath: "/bin/sh")
+            let nvramStub = existingBootArgs == nil
+                ? "nvram() { return 1; }; "
+                : "nvram() { printf '%s\\n' \"$TEST_NVRAM_OUT\"; }; "
+            let script = nvramStub
+                + "sudo() { if [ \"$1\" = \"nvram\" ]; then printf '%s' \"$2\"; fi; return 0; }; "
+                + "reboot() { return 0; }; "
+                + copyCommand
+            process.arguments = ["-c", script]
+            var env = ProcessInfo.processInfo.environment
+            if let existingBootArgs {
+                env["TEST_NVRAM_OUT"] = existingBootArgs
+            }
+            process.environment = env
+            process.standardOutput = pipe
+            process.standardError = pipe
+            try process.run()
+            try? pipe.fileHandleForWriting.close()
+            let data = try pipe.fileHandleForReading.readToEnd() ?? Data()
+            process.waitUntilExit()
+            #expect(process.terminationStatus == 0)
+            return String(decoding: data, as: UTF8.self)
+        }
+
+        #expect(
+            try runSimulatedAMFICommand(existingBootArgs: nil)
+                == "boot-args=amfi_get_out_of_my_way=0x1 ipc_control_port_options=0"
+        )
+        #expect(
+            try runSimulatedAMFICommand(
+                existingBootArgs: "boot-args\tamfi_get_out_of_my_way=0x1 ipc_control_port_options=0"
+            ) == "boot-args=amfi_get_out_of_my_way=0x1 ipc_control_port_options=0"
+        )
+        #expect(
+            try runSimulatedAMFICommand(
+                existingBootArgs: "boot-args\t-v amfi_get_out_of_my_way=1 keepsyms=1 ipc_control_port_options=0x2"
+            ) == "boot-args=-v keepsyms=1 amfi_get_out_of_my_way=0x1 ipc_control_port_options=0"
+        )
+        #expect(
+            try runSimulatedAMFICommand(
+                existingBootArgs: "boot-args\tmy_amfi_get_out_of_my_way=1 -v"
+            ) == "boot-args=my_amfi_get_out_of_my_way=1 -v amfi_get_out_of_my_way=0x1 ipc_control_port_options=0"
+        )
+    }
+
+    @Test
+    func clearPlayChainResidualArtifactsRemovesSidecarsAndBackupsWithoutTouchingSiblings() throws {
+        let dir = tempDir.appendingPathComponent("PlayChainCleanup-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        let targetFiles = [
+            "com.example.game.db",
+            "com.example.game.db-wal",
+            "com.example.game.db-shm",
+            "com.example.game.db-journal",
+            "com.example.game.keyCover",
+            "com.example.game.v1.bak",
+            "com.example.game.db.v2.bak"
+        ]
+        let siblingFiles = [
+            "com.example.game.extra.db",
+            "com.example.game2.db",
+            "com.example.other.v1.bak",
+            "com.example.game.vn.db.v1.bak",
+            "com.example.game.vip.v2.bak",
+            "com.example.game.v.bak",
+            "com.example.game.db.v.bak"
+        ]
+        for name in targetFiles + siblingFiles {
+            try Data("test".utf8).write(to: dir.appendingPathComponent(name))
+        }
+
+        ConfigInfoPane.removeResidualPlayChainArtifacts(for: "com.example.game", in: dir)
+
+        for name in targetFiles {
+            let path = dir.appendingPathComponent(name).path
+            #expect(!FileManager.default.fileExists(atPath: path), "Should delete \(name)")
+        }
+        for name in siblingFiles {
+            let path = dir.appendingPathComponent(name).path
+            #expect(FileManager.default.fileExists(atPath: path), "Should keep \(name)")
         }
     }
 }

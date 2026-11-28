@@ -21,6 +21,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Cache Xcode SPM source packages
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/spm-packages
+          key: xcode-spm-xcode27-${{ hashFiles('**/Package.resolved') }}
+          restore-keys: |
+            xcode-spm-xcode27-
+
       - name: Set build number
         shell: bash
         run: |
@@ -34,10 +42,15 @@ jobs:
             -scheme PlayCover \
             -configuration Nightly \
             -derivedDataPath "${RUNNER_TEMP}/dd-nightly" \
+            -clonedSourcePackagesDirPath "${RUNNER_TEMP}/spm-packages" \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            DEBUG_INFORMATION_FORMAT=dwarf \
             CODE_SIGN_IDENTITY="-" \
             CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_STYLE=Manual \
-            clean build
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            build
 
       - name: Ad-hoc sign & verify MacOver.app
         shell: bash
@@ -52,20 +65,61 @@ jobs:
           ditto "${RUNNER_TEMP}/dd-nightly/Build/Products/Nightly/MacOver.app" "${APP}"
           xattr -cr "${APP}"
 
+          PLAYCOVER_BIN="${APP}/Contents/MacOS/MacOver"
+          PLAYTOOLS_BIN="${FW}/PlayTools.framework/Versions/A/PlayTools"
+          AKINTERFACE_BIN="${FW}/PlayTools.framework/Versions/A/PlugIns/AKInterface.bundle/Contents/MacOS/AKInterface"
+          HELPER_BIN="${APP}/Contents/Library/HelperTools/PlayCoverHelper"
+          HELPER_PLIST="${APP}/Contents/Library/LaunchDaemons/app.makedie.MacOver.Helper.plist"
+          MCP_CLI_BIN="${APP}/Contents/MacOS/macover-mcp"
+          COVER_BRIDGE_BIN="${APP}/Contents/Resources/BuiltInPlugins/CoverUseBridge/CoverUseBridge.dylib"
+          COVER_BRIDGE_MANIFEST="${APP}/Contents/Resources/BuiltInPlugins/CoverUseBridge/PluginManifest.json"
+          AGENT_PLUGIN_JSON="${APP}/Contents/Resources/AgentPlugin/macover-cover-use/plugin.json"
+          AGENT_MCP_CONFIG="${APP}/Contents/Resources/AgentPlugin/macover-cover-use/mcp_config.json"
+
+          test -x "${PLAYCOVER_BIN}"
+          test -f "${PLAYTOOLS_BIN}"
+          test -x "${AKINTERFACE_BIN}"
+          test -x "${HELPER_BIN}"
+          test -x "${MCP_CLI_BIN}"
+          test -f "${COVER_BRIDGE_BIN}"
+          test -f "${COVER_BRIDGE_MANIFEST}"
+          test -f "${AGENT_PLUGIN_JSON}"
+          test -f "${AGENT_MCP_CONFIG}"
+          plutil -lint "${HELPER_PLIST}"
+          python3 -m json.tool "${COVER_BRIDGE_MANIFEST}" >/dev/null
+          python3 -m json.tool "${AGENT_PLUGIN_JSON}" >/dev/null
+          python3 -m json.tool "${AGENT_MCP_CONFIG}" >/dev/null
+          otool -s __TEXT __info_plist "${MCP_CLI_BIN}" | grep -F "Contents of (__TEXT,__info_plist)" >/dev/null
+          xcrun vtool -show-build "${PLAYCOVER_BIN}" | grep -F "minos 26.0" >/dev/null
+          xcrun vtool -show-build "${MCP_CLI_BIN}" | grep -F "minos 26.0" >/dev/null
+          xcrun vtool -show-build "${COVER_BRIDGE_BIN}" | grep -F "minos 26.0" >/dev/null
+          xcrun vtool -show-build "${HELPER_BIN}" | grep -F "minos 26.0" >/dev/null
+          xcrun vtool -show-build "${PLAYTOOLS_BIN}" | grep -F "minos 26.0" >/dev/null
+          xcrun vtool -show-build "${AKINTERFACE_BIN}" | grep -F "minos 26.0" >/dev/null
+
           codesign --force --sign - "${FW}/PlayTools.framework/PlugIns/AKInterface.bundle"
           codesign --force --sign - "${FW}/PlayTools.framework"
 
           if [ -d "${FW}/Sparkle.framework" ]; then
-            [ -e "${FW}/Sparkle.framework/Versions/B/Autoupdate" ] && codesign --force --sign - "${FW}/Sparkle.framework/Versions/B/Autoupdate"
-            [ -d "${FW}/Sparkle.framework/Versions/B/Updater.app" ] && codesign --force --sign - "${FW}/Sparkle.framework/Versions/B/Updater.app"
-            [ -d "${FW}/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc" ] && codesign --force --sign - "${FW}/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc"
-            [ -d "${FW}/Sparkle.framework/Versions/B/XPCServices/Installer.xpc" ] && codesign --force --sign - "${FW}/Sparkle.framework/Versions/B/XPCServices/Installer.xpc"
+            if [ -e "${FW}/Sparkle.framework/Versions/B/Autoupdate" ]; then
+              codesign --force --sign - "${FW}/Sparkle.framework/Versions/B/Autoupdate"
+            fi
+            if [ -d "${FW}/Sparkle.framework/Versions/B/Updater.app" ]; then
+              codesign --force --sign - "${FW}/Sparkle.framework/Versions/B/Updater.app"
+            fi
+            if [ -d "${FW}/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc" ]; then
+              codesign --force --sign - "${FW}/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc"
+            fi
+            if [ -d "${FW}/Sparkle.framework/Versions/B/XPCServices/Installer.xpc" ]; then
+              codesign --force --sign - "${FW}/Sparkle.framework/Versions/B/XPCServices/Installer.xpc"
+            fi
             codesign --force --sign - "${FW}/Sparkle.framework"
           fi
 
-          if [ -f "${APP}/Contents/Library/HelperTools/PlayCoverHelper" ]; then
-            codesign --force --sign - "${APP}/Contents/Library/HelperTools/PlayCoverHelper"
-          fi
+          codesign --force --sign - "${HELPER_BIN}"
+          codesign --force --sign - "${MCP_CLI_BIN}"
+          codesign --force --sign - "${COVER_BRIDGE_BIN}"
+          codesign -dv "${MCP_CLI_BIN}" 2>&1 | grep -F "Identifier=app.makedie.MacOver.MCP" >/dev/null
 
           codesign --force --sign - --entitlements PlayCover/PlayCoverRelease.entitlements "${APP}"
           codesign --verify --deep --strict --verbose=2 "${APP}"

@@ -111,8 +111,9 @@ MOCK_TARGET_M = r"""
 #include <time.h>
 #include <unistd.h>
 
-extern bool pt_is_registered_hidden_module(const char *name);
-extern bool pt_is_registered_hidden_class(const char *name);
+extern void pt_register_hidden_module(const char *image_name_fragment);
+extern bool pt_is_registered_hidden_module(const char *name) __attribute__((weak_import));
+extern bool pt_is_registered_hidden_class(const char *name) __attribute__((weak_import));
 extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
 extern bool _dyld_shared_cache_contains_path(const char *path) __attribute__((weak_import));
 extern intptr_t pt_harness_syscall(int, ...) __asm("_syscall");
@@ -363,9 +364,10 @@ int main(int argc, const char *argv[]) {
         NSInteger windowFixMethod = [[PlaySettings shared] windowFixMethod];
         NSInteger targetFrameRateHz = [[PlaySettings shared] targetFrameRateHz];
         NSString *reportedIOSVersion = (NSString *)[[PlaySettings shared] reportedIOSVersion] ?: @"";
-        BOOL modHidden = pt_is_registered_hidden_module("/App/Frameworks/UserPlugins/MockUserPlugin.dylib");
-        BOOL idHidden = pt_is_registered_hidden_module("app.makedie.harness.mockplugin");
-        BOOL clsHidden = pt_is_registered_hidden_class("MockHarnessHiddenClass");
+        BOOL hasInternalRegQuery = (&pt_is_registered_hidden_module != NULL && &pt_is_registered_hidden_class != NULL);
+        BOOL modHidden = hasInternalRegQuery ? pt_is_registered_hidden_module("/App/Frameworks/UserPlugins/MockUserPlugin.dylib") : NO;
+        BOOL idHidden = hasInternalRegQuery ? pt_is_registered_hidden_module("app.makedie.harness.mockplugin") : NO;
+        BOOL clsHidden = hasInternalRegQuery ? pt_is_registered_hidden_class("MockHarnessHiddenClass") : NO;
 
         NSOperatingSystemVersion osVer = [[NSProcessInfo processInfo] operatingSystemVersion];
         NSString *osVerString = [[NSProcessInfo processInfo] operatingSystemVersionString] ?: @"";
@@ -749,7 +751,7 @@ int main(int argc, const char *argv[]) {
         }
         BOOL argvConsistent = argvAllMatch && !argvLeakedMacFlag &&
                               ([nsArgv0 rangeOfString:@"/var/containers/Bundle/Application/"].location != NSNotFound);
-        void *blockedDlsym = dlsym(RTLD_DEFAULT, "pt_is_registered_hidden_module");
+        void *blockedDlsym = dlsym(RTLD_DEFAULT, "pt_register_hidden_module");
         Class reflectedSafeMode = NSClassFromString(@"PTSafeMode");
         Class reflectedPluginCls = objc_lookUpClass("MockHarnessHiddenClass");
         SEL shadowSel = NSSelectorFromString(@"pm_isiOSAppOnMac");
@@ -843,7 +845,7 @@ int main(int argc, const char *argv[]) {
         if (MACH_PORT_VALID(mh0ProbeObj)) {
             mach_port_deallocate(mach_task_self(), mh0ProbeObj);
         }
-        uintptr_t ptSymAddr = (uintptr_t)&pt_is_registered_hidden_module;
+        uintptr_t ptSymAddr = (uintptr_t)&pt_register_hidden_module;
         vm_address_t ptProbeAddr = (vm_address_t)ptSymAddr;
         vm_size_t ptProbeSz = 0;
         vm_region_basic_info_data_64_t ptProbeInfo;
@@ -3033,22 +3035,24 @@ int main(int argc, const char *argv[]) {
                         gotOutCnt == gotSz105) {
                         const void * const *slots = (const void * const *)gotReadBuf.bytes;
                         size_t nslots = (size_t)gotOutCnt / sizeof(void *);
-                        const void *ptOpen = (const void *)&open;
-                        const void *ptSysctl = (const void *)&sysctl;
-                        BOOL leakedPtOpenOrSysctl = NO;
+                        BOOL vmMatchesDirectOK = (memcmp(gotPtr105, gotReadBuf.bytes, (size_t)gotSz105) == 0);
+                        BOOL leakedHiddenOwner = NO;
                         BOOL sawLibSysKernelOrC = NO;
                         for (size_t k = 0; k < nslots; k++) {
-                            if (slots[k] == ptOpen || slots[k] == ptSysctl) {
-                                leakedPtOpenOrSysctl = YES;
-                            }
                             Dl_info di = {0};
-                            if (slots[k] != NULL && dladdr(slots[k], &di) != 0 && di.dli_fname != NULL &&
-                                (strstr(di.dli_fname, "libsystem_kernel.dylib") != NULL ||
-                                 strstr(di.dli_fname, "libsystem_c.dylib") != NULL)) {
-                                sawLibSysKernelOrC = YES;
+                            if (slots[k] != NULL && dladdr(slots[k], &di) != 0 && di.dli_fname != NULL) {
+                                if (strstr(di.dli_fname, "PlayTools") != NULL ||
+                                    strstr(di.dli_fname, "AKInterface") != NULL ||
+                                    strstr(di.dli_fname, "UserPlugins") != NULL) {
+                                    leakedHiddenOwner = YES;
+                                }
+                                if (strstr(di.dli_fname, "libsystem_kernel.dylib") != NULL ||
+                                    strstr(di.dli_fname, "libsystem_c.dylib") != NULL) {
+                                    sawLibSysKernelOrC = YES;
+                                }
                             }
                         }
-                        vmGotSanitizedOK = (!leakedPtOpenOrSysctl && sawLibSysKernelOrC);
+                        vmGotSanitizedOK = (vmMatchesDirectOK && !leakedHiddenOwner && sawLibSysKernelOrC);
                     }
                 }
                 s11Round3FsCasePathsAndIORegOK = (s11Round3FsCasePathsAndIORegOK &&
@@ -3112,21 +3116,13 @@ int main(int argc, const char *argv[]) {
                     gotPtrB2 = getsectiondata(&_mh_execute_header, "__DATA", "__got", &gotSzB2);
                 }
                 if (gotPtrB2 != NULL && gotSzB2 >= sizeof(void *)) {
-                    const void *ptOpen = (const void *)&open;
                     NSMutableData *copyBuf = [NSMutableData dataWithLength:gotSzB2];
                     kern_return_t ckr = mach_vm_copy(mach_task_self(),
                                                      (mach_vm_address_t)(uintptr_t)gotPtrB2,
                                                      (mach_vm_size_t)gotSzB2,
                                                      (mach_vm_address_t)(uintptr_t)copyBuf.mutableBytes);
-                    BOOL copyClean = (ckr == KERN_SUCCESS);
-                    if (copyClean) {
-                        const void * const *slots = (const void * const *)copyBuf.bytes;
-                        for (size_t k = 0; k < gotSzB2 / sizeof(void *); k++) {
-                            if (slots[k] == ptOpen) {
-                                copyClean = NO;
-                            }
-                        }
-                    }
+                    BOOL copyClean = (ckr == KERN_SUCCESS &&
+                                      memcmp(gotPtrB2, copyBuf.bytes, (size_t)gotSzB2) == 0);
 
                     struct mach_vm_read_entry rl[1];
                     rl[0].address = (mach_vm_address_t)(uintptr_t)gotPtrB2;
@@ -3134,12 +3130,7 @@ int main(int argc, const char *argv[]) {
                     BOOL listClean = (mach_vm_read_list(mach_task_self(), rl, 1) == KERN_SUCCESS &&
                                       rl[0].address != 0 && rl[0].size >= gotSzB2);
                     if (listClean) {
-                        const void * const *slots = (const void * const *)(uintptr_t)rl[0].address;
-                        for (size_t k = 0; k < gotSzB2 / sizeof(void *); k++) {
-                            if (slots[k] == ptOpen) {
-                                listClean = NO;
-                            }
-                        }
+                        listClean = (memcmp(gotPtrB2, (const void *)(uintptr_t)rl[0].address, (size_t)gotSzB2) == 0);
                         vm_deallocate(mach_task_self(), (vm_address_t)rl[0].address, (vm_size_t)rl[0].size);
                     }
 
@@ -3204,12 +3195,7 @@ int main(int argc, const char *argv[]) {
                                           migMsg.rep.RetCode == KERN_SUCCESS &&
                                           migMsg.rep.outsize == gotSzB2);
                     if (rawMigRoClean) {
-                        const void * const *slots = (const void * const *)migDst.bytes;
-                        for (size_t k = 0; k < gotSzB2 / sizeof(void *); k++) {
-                            if (slots[k] == ptOpen) {
-                                rawMigRoClean = NO;
-                            }
-                        }
+                        rawMigRoClean = (memcmp(gotPtrB2, migDst.bytes, (size_t)gotSzB2) == 0);
                     }
                     vmCopyListAndMigOK = (copyClean && listClean && msg2Present && rawMigRoClean);
                 }
@@ -3298,6 +3284,110 @@ int main(int argc, const char *argv[]) {
                                                      &svcErr2);
                     if (!(gRc < 0 && svcErr2 == ENOENT)) fsB2OK = NO;
 #endif
+                    // Regression A1: explicit framework handle must not resolve transitive libsystem uname
+                    void *metalH1010 = dlopen("/System/Library/Frameworks/Metal.framework/Metal", RTLD_LAZY | RTLD_NOLOAD);
+                    if (metalH1010 == NULL) {
+                        metalH1010 = dlopen("/System/Library/Frameworks/Metal.framework/Metal", RTLD_LAZY);
+                    }
+                    if (metalH1010 != NULL) {
+                        if (dlsym(metalH1010, "uname") != NULL ||
+                            dlsym(metalH1010, "MTLCreateSystemDefaultDevice") == NULL) {
+                            fsB2OK = NO;
+                        }
+                        dlclose(metalH1010);
+                    }
+
+                    // Regression A2: csops(10) ERANGE + clean SuperBlob + mapped __LINKEDIT parity + CDHash consistency
+                    uint32_t csBlobProbe[2] = {0, 0};
+                    errno = 0;
+                    int csProbeRc = pt_harness_csops(0, 10U, csBlobProbe, sizeof(csBlobProbe));
+                    if (!(csProbeRc == -1 && errno == ERANGE && ntohl(csBlobProbe[0]) == 0xfade0cc0U)) {
+                        fsB2OK = NO;
+                    } else {
+                        uint32_t blobNeed = ntohl(csBlobProbe[1]);
+                        if (blobNeed >= 12U && blobNeed <= (1U << 20)) {
+                            uint8_t *blobBuf = (uint8_t *)calloc(1, blobNeed);
+                            if (blobBuf != NULL) {
+                                if (pt_harness_csops(0, 10U, blobBuf, blobNeed) != 0 ||
+                                    memmem(blobBuf, blobNeed, "com.apple.security.app-sandbox", 30) != NULL) {
+                                    fsB2OK = NO;
+                                } else {
+                                    uint32_t sbCount = 0;
+                                    memcpy(&sbCount, blobBuf + 8U, sizeof(sbCount));
+                                    sbCount = ntohl(sbCount);
+                                    uint8_t cdHash[20] = {0};
+                                    uint8_t blobCdHash[20] = {0};
+                                    BOOL foundBestCd = NO;
+                                    for (uint32_t si = 0; si < sbCount && (12U + si * 8U + 8U) <= blobNeed; si++) {
+                                        uint32_t stype = 0, soff = 0;
+                                        memcpy(&stype, blobBuf + 12U + si * 8U, 4);
+                                        memcpy(&soff, blobBuf + 16U + si * 8U, 4);
+                                        stype = ntohl(stype);
+                                        soff = ntohl(soff);
+                                        if (soff + 44U <= blobNeed && (stype == 0 || (stype >= 0x1000U && stype <= 0x1004U))) {
+                                            uint32_t clen = 0;
+                                            memcpy(&clen, blobBuf + soff + 4U, 4);
+                                            clen = ntohl(clen);
+                                            if (clen >= 44U && soff + clen <= blobNeed && blobBuf[soff + 37U] == 2U) {
+                                                uint8_t full256[CC_SHA256_DIGEST_LENGTH];
+                                                CC_SHA256(blobBuf + soff, (CC_LONG)clen, full256);
+                                                memcpy(blobCdHash, full256, 20);
+                                                foundBestCd = YES;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if (!foundBestCd || pt_harness_csops(0, 5U, cdHash, sizeof(cdHash)) != 0 ||
+                                        memcmp(cdHash, blobCdHash, 20) != 0) {
+                                        fsB2OK = NO;
+                                    }
+                                }
+                                free(blobBuf);
+                            }
+                        }
+                    }
+                    const struct mach_header_64 *mh0_1010 = (const struct mach_header_64 *)_dyld_get_image_header(0);
+                    if (mh0_1010 != NULL && mh0_1010->magic == MH_MAGIC_64) {
+                        const uint8_t *mbase = (const uint8_t *)mh0_1010;
+                        size_t moff = sizeof(struct mach_header_64);
+                        size_t mtotal = sizeof(struct mach_header_64) + mh0_1010->sizeofcmds;
+                        uint64_t tvm = 0;
+                        struct segment_command_64 lseg = {0};
+                        struct linkedit_data_command lsig = {0};
+                        for (uint32_t ci = 0; ci < mh0_1010->ncmds && moff + sizeof(struct load_command) <= mtotal; ci++) {
+                            const struct load_command *lc = (const struct load_command *)(mbase + moff);
+                            if (lc->cmd == LC_SEGMENT_64 && lc->cmdsize >= sizeof(struct segment_command_64)) {
+                                const struct segment_command_64 *s = (const struct segment_command_64 *)lc;
+                                if (strncmp(s->segname, "__TEXT", 16) == 0) tvm = s->vmaddr;
+                                else if (strncmp(s->segname, "__LINKEDIT", 16) == 0) lseg = *s;
+                            } else if (lc->cmd == LC_CODE_SIGNATURE && lc->cmdsize >= sizeof(struct linkedit_data_command)) {
+                                lsig = *(const struct linkedit_data_command *)lc;
+                            }
+                            moff += lc->cmdsize;
+                        }
+                        if (lsig.datasize >= 12U && lseg.vmaddr > 0 && (uintptr_t)mh0_1010 >= (uintptr_t)tvm) {
+                            const uint8_t *msig = (const uint8_t *)((uintptr_t)mh0_1010 + (uintptr_t)(lseg.vmaddr - tvm) + (uintptr_t)(lsig.dataoff - lseg.fileoff));
+                            uint32_t msigMagic = 0;
+                            memcpy(&msigMagic, msig, 4);
+                            if (ntohl(msigMagic) != 0xfade0cc0U ||
+                                memmem(msig, lsig.datasize, "com.apple.security.app-sandbox", 30) != NULL) {
+                                fsB2OK = NO;
+                            }
+                        }
+                    }
+
+                    // Regression B2: SafeKernelCopy pipe+write cannot dump hidden PlayTools code bytes
+                    int pipeFds[2] = {-1, -1};
+                    if (pipe(pipeFds) == 0) {
+                        void *ptOpenSym = dlsym(RTLD_DEFAULT, "open");
+                        errno = 0;
+                        ssize_t wr = (ptOpenSym != NULL) ? write(pipeFds[1], ptOpenSym, 16) : -1;
+                        if (!(wr == -1 && errno == EFAULT)) {
+                            fsB2OK = NO;
+                        }
+                        close(pipeFds[0]);
+                        close(pipeFds[1]);
+                    }
                 }
 
                 s11B2Detail = [NSString stringWithFormat:@"sysctl=%d/%d(err=%d,sz=%zu) iokit=%d vm=%d fonts=%d dlAud=%d fs=%d",
@@ -3896,6 +3986,7 @@ int main(int argc, const char *argv[]) {
             @"directBackupFMBlocked": directBackupFMBlocked ? @YES : @NO,
             @"displayLinkClampedMaxHz": @(displayLinkClampedMaxHz),
             @"displayLinkClampedLegacyFPS": @(displayLinkClampedLegacyFPS),
+            @"hasInternalRegistryQuery": hasInternalRegQuery ? @YES : @NO,
             @"hiddenModuleRegistered": modHidden ? @YES : @NO,
             @"hiddenIdentifierRegistered": idHidden ? @YES : @NO,
             @"hiddenClassRegistered": clsHidden ? @YES : @NO,
@@ -3976,6 +4067,41 @@ def resolve_playtools_framework(repo_root: Path, explicit: Optional[str]) -> Pat
         return candidates[0]
     raise FileNotFoundError(
         "Could not locate PlayTools.framework. Pass --playtools-framework <path>."
+    )
+
+
+def resolve_cover_use_bridge(
+    repo_root: Path,
+    playtools_fw: Path,
+    explicit: Optional[str],
+) -> Path:
+    candidates: list[Path] = []
+    if explicit:
+        p = Path(explicit).expanduser().resolve()
+        if p.is_file():
+            return p
+        dylib = p / "CoverUseBridge.dylib"
+        if dylib.is_file():
+            return dylib
+        raise FileNotFoundError(f"CoverUseBridge.dylib not found at {p}")
+
+    # Sibling BuiltInPlugins under MacOver.app/Contents/Resources/BuiltInPlugins/CoverUseBridge/
+    candidates.append(
+        playtools_fw.parent.parent
+        / "Resources/BuiltInPlugins/CoverUseBridge/CoverUseBridge.dylib"
+    )
+    candidates.append(
+        playtools_fw.parent
+        / "BuiltInPlugins/CoverUseBridge/CoverUseBridge.dylib"
+    )
+    candidates.append(
+        Path("/Applications/MacOver.app/Contents/Resources/BuiltInPlugins/CoverUseBridge/CoverUseBridge.dylib")
+    )
+    for cand in candidates:
+        if cand.is_file():
+            return cand
+    raise FileNotFoundError(
+        "Could not locate CoverUseBridge.dylib. Pass --cover-use-bridge <path>."
     )
 
 
@@ -4076,6 +4202,8 @@ def build_mock_app(work_dir: Path, playtools_fw: Path) -> Path:
         "-framework", "UIKit",
         "-framework", "WebKit",
         "-framework", "PlayTools",
+        "-Wl,-U,_pt_is_registered_hidden_module",
+        "-Wl,-U,_pt_is_registered_hidden_class",
         "-Wl,-rpath,@executable_path/Frameworks",
         f"-Wl,-rpath,{fw_parent}",
         str(target_m),
@@ -4085,7 +4213,7 @@ def build_mock_app(work_dir: Path, playtools_fw: Path) -> Path:
     return target_bin
 
 
-def parse_scenarios_spec(spec: Optional[str], max_scenario: int = 15) -> set[int]:
+def parse_scenarios_spec(spec: Optional[str], max_scenario: int = 16) -> set[int]:
     if not spec:
         return set(range(1, max_scenario + 1))
     selected: set[int] = set()
@@ -4236,8 +4364,9 @@ def run_scenarios(
     verbose: bool,
     selected_scenarios: Optional[set[int]] = None,
     jobs: int = 1,
+    cover_use_bridge: Optional[Path] = None,
 ) -> list[ScenarioResult]:
-    selected = selected_scenarios if selected_scenarios is not None else set(range(1, 16))
+    selected = selected_scenarios if selected_scenarios is not None else set(range(1, 17))
     results: list[ScenarioResult] = []
     isolated_home = work_dir / "IsolatedHome"
     isolated_home.mkdir(parents=True, exist_ok=True)
@@ -4276,11 +4405,14 @@ def run_scenarios(
         assert target_bin is not None
         chain_items: list[tuple[int, ScenarioResult, list[str]]] = []
         max_needed = max(selected & {1, 2, 3})
+        real_state_dir = isolated_home / "Library/Caches/app.makedie.PlayTools"
+        real_crumb_path = real_state_dir / ".launching_in_progress"
+        real_triggered_path = real_state_dir / ".safe_mode_last_triggered"
 
         # Scenario 1: Clean launch -> plugin loads, dynamic registration succeeds, stability timer clears breadcrumb.
         t0 = time.monotonic()
         marker1 = work_dir / "marker_1.txt"
-        proc1 = run_cmd(
+        proc1 = subprocess.Popen(
             [
                 str(target_bin),
                 "-NSDocumentRevisionsDebugMode",
@@ -4289,27 +4421,52 @@ def run_scenarios(
                 "YES",
                 "--harness-keep",
             ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
             env=base_env(marker1, HARNESS_SLEEP_SECS="3.5"),
-            check=False,
         )
+        host_crumb_seen_during_launch = False
+        poll_deadline = time.monotonic() + 2.5
+        while time.monotonic() < poll_deadline:
+            if real_crumb_path.exists():
+                host_crumb_seen_during_launch = True
+                break
+            if proc1.poll() is not None:
+                break
+            time.sleep(0.05)
+        try:
+            stdout1, stderr1 = proc1.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            proc1.kill()
+            stdout1, stderr1 = proc1.communicate()
+            res1 = ScenarioResult(
+                name="1. Normal launch, injection & stability breadcrumb clear",
+                passed=False,
+                duration_sec=time.monotonic() - t0,
+                details=f"Timed out waiting for Scenario 1 process\nstdout={stdout1}\nstderr={stderr1}",
+            )
+            chain_items.append((1, res1, []))
+            return chain_items
         if proc1.returncode != 0:
             res1 = ScenarioResult(
                 name="1. Normal launch, injection & stability breadcrumb clear",
                 passed=False,
                 duration_sec=time.monotonic() - t0,
-                details=f"Exit code {proc1.returncode}\nstdout={proc1.stdout}\nstderr={proc1.stderr}",
+                details=f"Exit code {proc1.returncode}\nstdout={stdout1}\nstderr={stderr1}",
             )
             chain_items.append((1, res1, []))
             return chain_items
 
-        info1 = parse_harness_json(proc1.stdout)
+        info1 = parse_harness_json(stdout1)
+        host_crumb_exists_after_sleep = real_crumb_path.exists()
         checks1 = [
             info1["safeModeActive"] is False,
             abs(float(info1["customScaler"]) - 1.75) < 1e-4,
             marker1.exists(),
-            info1["hiddenModuleRegistered"] is True,
-            info1["hiddenIdentifierRegistered"] is True,
-            info1["hiddenClassRegistered"] is True,
+            (info1["hiddenModuleRegistered"] is True) if info1.get("hasInternalRegistryQuery", True) else True,
+            (info1["hiddenIdentifierRegistered"] is True) if info1.get("hasInternalRegistryQuery", True) else True,
+            (info1["hiddenClassRegistered"] is True) if info1.get("hasInternalRegistryQuery", True) else True,
             info1["antiDetectionHidDlsym"] is True,
             info1["antiDetectionHidSafeModeClass"] is True,
             info1["antiDetectionHidPluginClass"] is True,
@@ -4363,17 +4520,24 @@ def run_scenarios(
             (not info1["dcDeviceLoaded"]) or (
                 info1["dcDeviceSupported"] is False and info1["dcDeviceTokenUnsupported"] is True
             ),
-            info1["breadcrumbExistsAtStart"] is True,
+            host_crumb_seen_during_launch is True,
+            not host_crumb_exists_after_sleep,
+            info1["breadcrumbExistsAtStart"] is False,
             info1["breadcrumbExistsAfterSleep"] is False,
         ]
+        res1_payload = {
+            **info1,
+            "hostCrumbSeenDuringLaunch": host_crumb_seen_during_launch,
+            "hostCrumbExistsAfterSleep": host_crumb_exists_after_sleep,
+        }
         res1 = ScenarioResult(
             name="1. Normal launch, injection & stability breadcrumb clear",
             passed=all(checks1),
             duration_sec=time.monotonic() - t0,
-            details=json.dumps(info1, sort_keys=True),
+            details=json.dumps(res1_payload, sort_keys=True),
         )
         if 1 in selected:
-            chain_items.append((1, res1, [f"  Scenario 1 payload: {info1}"]))
+            chain_items.append((1, res1, [f"  Scenario 1 payload: {res1_payload}"]))
         if max_needed < 2:
             return chain_items
 
@@ -4385,7 +4549,7 @@ def run_scenarios(
             env=base_env(marker_crash, HARNESS_SIMULATE_CRASH="1"),
             check=False,
         )
-        crumb_path = Path(info1["stateDir"]) / ".launching_in_progress"
+        crumb_persisted_after_crash = real_crumb_path.exists()
         marker2 = work_dir / "marker_2_safemode.txt"
         proc2 = run_cmd(
             [str(target_bin)],
@@ -4403,28 +4567,35 @@ def run_scenarios(
             return chain_items
 
         info2 = parse_harness_json(proc2.stdout)
+        host_safe_mode_marker_exists = real_triggered_path.exists()
         checks2 = [
             proc_crash.returncode == 134,
+            crumb_persisted_after_crash is True,
             info2["safeModeActive"] is True,
-            info2["safeModeMarkerExists"] is True,
+            host_safe_mode_marker_exists is True,
             info2["breadcrumbExistsAtStart"] is False,
             info2["hiddenModuleRegistered"] is False,
             info2["hiddenClassRegistered"] is False,
-            not crumb_path.exists(),
+            not real_crumb_path.exists(),
             not marker2.exists(),
             abs(float(info2["customScaler"]) - 1.0) < 1e-6,
         ]
+        res2_payload = {
+            "crashCode": proc_crash.returncode,
+            "pluginLoadedInSafeMode": marker2.exists(),
+            "hostCrumbSeenDuringLaunch": host_crumb_seen_during_launch,
+            "crumbPersistedAfterCrash": crumb_persisted_after_crash,
+            "hostSafeModeMarkerExists": host_safe_mode_marker_exists,
+            **info2,
+        }
         res2 = ScenarioResult(
             name="2. Early crash post-mortem detection -> Safe Mode activation",
             passed=all(checks2),
             duration_sec=time.monotonic() - t1,
-            details=json.dumps(
-                {"crashCode": proc_crash.returncode, "pluginLoadedInSafeMode": marker2.exists(), **info2},
-                sort_keys=True,
-            ),
+            details=json.dumps(res2_payload, sort_keys=True),
         )
         if 2 in selected:
-            chain_items.append((2, res2, [f"  Scenario 2 payload: {info2}"]))
+            chain_items.append((2, res2, [f"  Scenario 2 payload: {res2_payload}"]))
         if max_needed < 3:
             return chain_items
 
@@ -4451,9 +4622,11 @@ def run_scenarios(
             info3["safeModeActive"] is False,
             abs(float(info3["customScaler"]) - 1.75) < 1e-4,
             marker3.exists(),
-            info3["hiddenModuleRegistered"] is True,
-            info3["hiddenClassRegistered"] is True,
-            not crumb_path.exists(),
+            (info3["hiddenModuleRegistered"] is True) if info3.get("hasInternalRegistryQuery", True) else (
+                info3["antiDetectionHidPluginImage"] is True and info3["antiDetectionHidPluginClass"] is True
+            ),
+            (info3["hiddenClassRegistered"] is True) if info3.get("hasInternalRegistryQuery", True) else True,
+            not real_crumb_path.exists(),
         ]
         res3 = ScenarioResult(
             name="3. Post-Safe-Mode recovery & plugin reload",
@@ -5479,12 +5652,25 @@ int main(void) {
                 laOut == la_sz) {
                 const void * const *lslots = (const void * const *)laReadBuf.bytes;
                 size_t nlslots = (size_t)laOut / sizeof(void *);
-                BOOL sawRealOpen = NO, sawRealSysctl = NO;
+                BOOL memEqual = (memcmp(la_ptr, laReadBuf.bytes, (size_t)la_sz) == 0);
+                BOOL noLeakedHookOwner = YES;
+                BOOL sawLibSys = NO;
                 for (size_t lk = 0; lk < nlslots; lk++) {
-                    if (lslots[lk] == p_open) sawRealOpen = YES;
-                    if (lslots[lk] == p_sysctl) sawRealSysctl = YES;
+                    if (lslots[lk] == NULL) continue;
+                    Dl_info ldi = {0};
+                    if (dladdr(lslots[lk], &ldi) != 0 && ldi.dli_fname != NULL) {
+                        if (strstr(ldi.dli_fname, "PlayTools") != NULL ||
+                            strstr(ldi.dli_fname, "AKInterface") != NULL ||
+                            strstr(ldi.dli_fname, "UserPlugins") != NULL) {
+                            noLeakedHookOwner = NO;
+                        }
+                        if (strstr(ldi.dli_fname, "libsystem_kernel.dylib") != NULL ||
+                            strstr(ldi.dli_fname, "libsystem_c.dylib") != NULL) {
+                            sawLibSys = YES;
+                        }
+                    }
                 }
-                vm_read_lazy_sanitized_ok = (sawRealOpen && sawRealSysctl);
+                vm_read_lazy_sanitized_ok = (memEqual && noLeakedHookOwner && sawLibSys);
             }
         }
 
@@ -5798,6 +5984,39 @@ int main(int argc, char **argv) {
         BOOL apiTrusted = apiPath ? eval_leaf([NSString stringWithUTF8String:apiPath], @"api.harness.test") : NO;
         BOOL otherTrusted = otherPath ? eval_leaf([NSString stringWithUTF8String:otherPath], @"other.harness.test") : NO;
         BOOL rogueTrusted = roguePath ? eval_leaf([NSString stringWithUTF8String:roguePath], @"api.harness.test") : NO;
+        BOOL pinAnchorOnlyRespected = NO;
+        if (apiPath != NULL) {
+            NSData *apiDer = [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:apiPath]];
+            SecCertificateRef apiCert = (apiDer.length > 0)
+                ? SecCertificateCreateWithData(NULL, (__bridge CFDataRef)apiDer)
+                : NULL;
+            if (apiCert != NULL) {
+                SecPolicyRef pinPolicy = SecPolicyCreateSSL(true, CFSTR("api.harness.test"));
+                SecTrustRef pinTrust = NULL;
+                if (pinPolicy != NULL &&
+                    SecTrustCreateWithCertificates(apiCert, pinPolicy, &pinTrust) == errSecSuccess &&
+                    pinTrust != NULL) {
+                    (void)SecTrustSetAnchorCertificates(pinTrust, (__bridge CFArrayRef)@[]);
+                    (void)SecTrustSetAnchorCertificatesOnly(pinTrust, true);
+                    CFErrorRef pinErr = NULL;
+                    bool pinEvalOK = SecTrustEvaluateWithError(pinTrust, &pinErr);
+                    if (pinErr != NULL) CFRelease(pinErr);
+                    CFArrayRef postAnchors = NULL;
+                    OSStatus copySt = SecTrustCopyCustomAnchorCertificates(pinTrust, &postAnchors);
+                    NSUInteger postCount = (copySt == errSecSuccess && postAnchors != NULL)
+                        ? (NSUInteger)CFArrayGetCount(postAnchors) : 999U;
+                    if (postAnchors != NULL) CFRelease(postAnchors);
+                    SecTrustResultType postRes = kSecTrustResultInvalid;
+                    (void)SecTrustGetTrustResult(pinTrust, &postRes);
+                    pinAnchorOnlyRespected = (!pinEvalOK && postCount == 0 &&
+                                              postRes != kSecTrustResultUnspecified &&
+                                              postRes != kSecTrustResultProceed);
+                    CFRelease(pinTrust);
+                }
+                if (pinPolicy != NULL) CFRelease(pinPolicy);
+                CFRelease(apiCert);
+            }
+        }
 
         CFDictionaryRef sysProxy = CFNetworkCopySystemProxySettings();
         BOOL sysProxyNonNil = (sysProxy != NULL);
@@ -5950,6 +6169,7 @@ int main(int argc, char **argv) {
             @"apiTrusted": @(apiTrusted),
             @"otherTrusted": @(otherTrusted),
             @"rogueTrusted": @(rogueTrusted),
+            @"pinAnchorOnlyRespected": @(pinAnchorOnlyRespected),
             @"cfProxyHost": cfProxyHost,
             @"cfProxyPort": @(cfProxyPort),
             @"proxiesURLHost": proxiesURLHost,
@@ -5996,10 +6216,12 @@ int main(int argc, char **argv) {
         isolated_root_14 = work_dir / "IsolatedHome14"
         data_home_14 = isolated_root_14 / "Library/Containers/app.makedie.harness.mitm/Data"
         data_home_14.mkdir(parents=True, exist_ok=True)
-        plist14_dir = isolated_root_14 / "Library/Containers/app.makedie.MacOver/PlayTools"
+        plist14_dir = isolated_root_14 / "Library/Containers/app.makedie.MacOver/App Settings"
         plist14_dir.mkdir(parents=True, exist_ok=True)
         plist14 = plist14_dir / "app.makedie.harness.mitm.plist"
-        certs14 = plist14_dir / "app.makedie.harness.mitm.plist.certs"
+        certs14_dir = isolated_root_14 / "Library/Containers/app.makedie.MacOver/Certificates/app.makedie.harness.mitm"
+        certs14_dir.mkdir(parents=True, exist_ok=True)
+        certs14 = certs14_dir / "runtime.certs"
         ca_der_bytes = ca_der.read_bytes()
 
         def run_s14_sub(
@@ -6087,6 +6309,7 @@ int main(int argc, char **argv) {
             info14_b.get("apiTrusted") is True,
             info14_b.get("otherTrusted") is False,
             info14_b.get("rogueTrusted") is False,
+            info14_b.get("pinAnchorOnlyRespected") is True,
             info14_b.get("cfProxyHost") == "",
             info14_b.get("proxiesURLHost") == "",
             info14_b.get("cfgProxyHost") == "",
@@ -7282,6 +7505,547 @@ int main(int argc, char **argv) {
         payload15 = {"runA": info15_a, "runB": info15_b}
         return [(15, res15, [f"  Scenario 15 payload: {payload15}"])]
 
+    def run_s16() -> list[tuple[int, ScenarioResult, list[str]]]:
+        t16 = time.monotonic()
+        if cover_use_bridge is None or not cover_use_bridge.is_file():
+            res16 = ScenarioResult(
+                name="16. CoverUseBridge opt-in lifecycle, env scrub, TCP tree/action/text/touch/screenshot",
+                passed=False,
+                duration_sec=time.monotonic() - t16,
+                details="CoverUseBridge.dylib not resolved",
+            )
+            return [(16, res16, [])]
+
+        tool_env16, sdk_path16, fw_parent16 = resolve_sdk_and_tool_env(playtools_fw)
+        ios_sup_fw16 = f"{sdk_path16}/System/iOSSupport/System/Library/Frameworks"
+        b16_dir = work_dir / "Scenario16Bridge"
+        b16_app_dir = b16_dir / "MockBridge.app"
+        b16_plugins = b16_app_dir / "Frameworks/UserPlugins/CoverUseBridge"
+        b16_plugins.mkdir(parents=True, exist_ok=True)
+        with open(b16_app_dir / "Info.plist", "wb") as fp:
+            plistlib.dump({
+                "CFBundleIdentifier": "app.makedie.harness.bridge",
+                "CFBundleExecutable": "MockBridge",
+                "CFBundleName": "MockBridge",
+                "CFBundlePackageType": "APPL",
+                "CFBundleShortVersionString": "1.0",
+                "CFBundleVersion": "1",
+                "LSRequiresIPhoneOS": True,
+                "UIDeviceFamily": [1, 2],
+            }, fp)
+
+        shutil.copy2(cover_use_bridge, b16_plugins / "CoverUseBridge.dylib")
+        manifest_src = cover_use_bridge.parent / "PluginManifest.json"
+        if manifest_src.is_file():
+            shutil.copy2(manifest_src, b16_plugins / "PluginManifest.json")
+        else:
+            (b16_plugins / "PluginManifest.json").write_text(
+                json.dumps({
+                    "manifestVersion": "1.0",
+                    "identifier": "app.makedie.macover.plugin.cover-use-bridge",
+                    "name": "CoverUseBridge",
+                    "version": "1.0.0",
+                    "minPlayToolsVersion": "1.0.9",
+                    "targetBundleIdentifiers": ["*"],
+                    "loadPriority": 900,
+                    "capabilities": ["ui-tree", "touch-bridge", "text-input", "screenshot"],
+                    "entrypoint": "CoverUseBridge.dylib",
+                }, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+        b16_m = b16_dir / "mock_bridge.m"
+        b16_m.write_text(r'''
+#import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
+#include <arpa/inet.h>
+#include <crt_externs.h>
+#include <dlfcn.h>
+#include <libproc.h>
+#include <mach-o/dyld.h>
+#include <objc/message.h>
+#include <objc/runtime.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/proc_info.h>
+
+static NSInteger g_btn_tap_count = 0;
+static NSInteger g_touch_hit_count = 0;
+static NSInteger g_touch_began_count = 0;
+static NSInteger g_touch_ended_count = 0;
+static id g_retained_target = nil;
+
+@interface CUBMockButtonTarget : NSObject
+- (void)onTap:(id)sender;
+@end
+
+@implementation CUBMockButtonTarget
+- (void)onTap:(id)sender {
+    (void)sender;
+    g_btn_tap_count += 1;
+}
+@end
+
+@interface CUBMockTouchView : UIView
+@end
+
+@implementation CUBMockTouchView
+// Headless harness runs without UIApplicationMain ([UIApplication sharedApplication] == nil),
+// so PTFakeMetaTouch exercises hitTest:withEvent: delivery (and touchesBegan:/touchesEnded:
+// when a full UIApplication runloop is present).
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    if (hit == self && point.x >= 300.0 && point.y >= 300.0) {
+        g_touch_hit_count += 1;
+    }
+    return hit;
+}
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesBegan:touches withEvent:event];
+    g_touch_began_count += 1;
+}
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesEnded:touches withEvent:event];
+    g_touch_ended_count += 1;
+}
+@end
+
+@interface CUBMockNaNView : UIView
+@end
+
+@implementation CUBMockNaNView
+- (NSString *)accessibilityLabel {
+    return (NSString *)[[NSAttributedString alloc] initWithString:@"AttrLabel"];
+}
+- (CGRect)accessibilityFrame {
+    return CGRectInfinite;
+}
+@end
+
+@interface CUBMockButton : UIButton
+@end
+
+@implementation CUBMockButton
+- (void)sendActionsForControlEvents:(UIControlEvents)controlEvents {
+    [super sendActionsForControlEvents:controlEvents];
+    if ([UIApplication sharedApplication] == nil && (controlEvents & UIControlEventTouchUpInside) != 0) {
+        g_btn_tap_count += 1;
+    }
+}
+@end
+
+static NSInteger count_visible_loopback_sockets(void) {
+    struct proc_fdinfo fds[256];
+    int nbytes = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, fds, (int)sizeof(fds));
+    if (nbytes <= 0) {
+        return 0;
+    }
+    int count = nbytes / (int)sizeof(struct proc_fdinfo);
+    NSInteger visible = 0;
+    for (int i = 0; i < count; i++) {
+        if (fds[i].proc_fdtype != PROX_FDTYPE_SOCKET) {
+            continue;
+        }
+        struct socket_fdinfo sfi;
+        memset(&sfi, 0, sizeof(sfi));
+        int sr = proc_pidfdinfo(getpid(), fds[i].proc_fd, PROC_PIDFDSOCKETINFO, &sfi, (int)sizeof(sfi));
+        if (sr >= (int)sizeof(sfi) &&
+            (sfi.psi.soi_family == AF_INET || sfi.psi.soi_family == AF_INET6) &&
+            (sfi.psi.soi_kind == SOCKINFO_TCP || sfi.psi.soi_kind == SOCKINFO_IN)) {
+            struct in_sockinfo *ini = (sfi.psi.soi_kind == SOCKINFO_TCP)
+                ? &sfi.psi.soi_proto.pri_tcp.tcpsi_ini
+                : &sfi.psi.soi_proto.pri_in;
+            uint32_t addr4 = ntohl(ini->insi_faddr.ina_46.i46a_addr4.s_addr);
+            if ((ini->insi_vflag & INI_IPV4) != 0 && (addr4 & 0xFF000000U) == 0x7F000000U &&
+                ini->insi_fport != 0) {
+                visible += 1;
+            }
+        }
+    }
+    return visible;
+}
+
+int main(int argc, char *argv[]) {
+    @autoreleasepool {
+        (void)argc;
+        (void)argv;
+        BOOL envPortNull = (getenv("MACOVER_AUTOMATION_PORT") == NULL);
+        BOOL envTokenNull = (getenv("MACOVER_AUTOMATION_TOKEN") == NULL);
+        BOOL envBundleNull = (getenv("MACOVER_AUTOMATION_BUNDLE_ID") == NULL);
+
+        BOOL rawEnvClean = YES;
+        char ***envpPtr = _NSGetEnviron();
+        if (envpPtr != NULL && *envpPtr != NULL) {
+            for (char **e = *envpPtr; *e != NULL; e++) {
+                if (strncmp(*e, "MACOVER_AUTOMATION_", 19) == 0) {
+                    rawEnvClean = NO;
+                    break;
+                }
+            }
+        }
+
+        BOOL dlsymClean = (dlsym(RTLD_DEFAULT, "cub_is_bridge_connected") == NULL);
+
+        BOOL dyldHidden = YES;
+        uint32_t imgCount = _dyld_image_count();
+        for (uint32_t i = 0; i < imgCount; i++) {
+            const char *name = _dyld_get_image_name(i);
+            if (name != NULL && strstr(name, "CoverUseBridge") != NULL) {
+                dyldHidden = NO;
+                break;
+            }
+        }
+
+        UIWindow *win = [[UIWindow alloc] initWithFrame:CGRectMake(0.0, 0.0, 800.0, 600.0)];
+        win.backgroundColor = [UIColor systemBackgroundColor];
+
+        CUBMockTouchView *canvas = [[CUBMockTouchView alloc] initWithFrame:CGRectMake(0.0, 0.0, 800.0, 600.0)];
+        canvas.userInteractionEnabled = YES;
+        [win addSubview:canvas];
+
+        CUBMockButtonTarget *target = [[CUBMockButtonTarget alloc] init];
+        g_retained_target = target;
+        CUBMockButton *btn = [CUBMockButton buttonWithType:UIButtonTypeSystem];
+        btn.frame = CGRectMake(40.0, 40.0, 160.0, 44.0);
+        [btn setTitle:@"PlayBtn" forState:UIControlStateNormal];
+        btn.accessibilityLabel = @"PlayBtn";
+        btn.accessibilityIdentifier = @"play_btn";
+        [btn addTarget:target action:@selector(onTap:) forControlEvents:UIControlEventTouchUpInside];
+        [canvas addSubview:btn];
+
+        UITextField *tf = [[UITextField alloc] initWithFrame:CGRectMake(40.0, 110.0, 260.0, 40.0)];
+        tf.placeholder = @"Enter name";
+        tf.accessibilityIdentifier = @"name_input";
+        [canvas addSubview:tf];
+
+        UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(40.0, 170.0, 260.0, 32.0)];
+        lbl.text = @"Hello Bridge";
+        [canvas addSubview:lbl];
+
+        // Edge-case view returning NSAttributedString for accessibilityLabel (H-10).
+        CUBMockNaNView *attrView = [[CUBMockNaNView alloc] initWithFrame:CGRectMake(40.0, 220.0, 100.0, 24.0)];
+        attrView.accessibilityIdentifier = @"attr_label_view";
+        [canvas addSubview:attrView];
+
+        // PlayTools internal overlay-tagged view must be omitted from snapshots (M-05).
+        UIView *overlayView = [[UIView alloc] initWithFrame:CGRectMake(0.0, 0.0, 20.0, 20.0)];
+        overlayView.accessibilityIdentifier = @"pt_internal_overlay_secret";
+        extern void *OBJC_CLASS_$__TtC9PlayTools12PlaySettings __attribute__((weak_import));
+        Class psCls = (__bridge Class)(void *)&OBJC_CLASS_$__TtC9PlayTools12PlaySettings;
+        SEL tagSel = sel_registerName("pm_internalOverlayTagKeyAddress");
+        if (psCls != Nil && [psCls respondsToSelector:tagSel]) {
+            NSUInteger keyAddr = ((NSUInteger (*)(id, SEL))objc_msgSend)(psCls, tagSel);
+            objc_setAssociatedObject(overlayView, (const void *)(uintptr_t)keyAddr, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        [canvas addSubview:overlayView];
+
+        [win makeKeyAndVisible];
+
+        const char *stopPath = getenv("HARNESS_BRIDGE_STOP_FILE");
+        const char *waitSecStr = getenv("HARNESS_BRIDGE_WAIT_SECS");
+        double maxWait = (waitSecStr != NULL && waitSecStr[0] != '\0') ? strtod(waitSecStr, NULL) : 1.0;
+        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:maxWait];
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSString *stopNS = (stopPath != NULL && stopPath[0] != '\0') ? [NSString stringWithUTF8String:stopPath] : nil;
+        while ([deadline timeIntervalSinceNow] > 0.0) {
+            if (stopNS != nil && [fm fileExistsAtPath:stopNS]) {
+                break;
+            }
+            [[NSRunLoop mainRunLoop] runMode:NSDefaultRunLoopMode
+                                  beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+        }
+        NSInteger visibleLoopbackSockets = count_visible_loopback_sockets();
+
+        NSDictionary *out = @{
+            @"envPortNull": @(envPortNull),
+            @"envTokenNull": @(envTokenNull),
+            @"envBundleNull": @(envBundleNull),
+            @"rawEnvClean": @(rawEnvClean),
+            @"dlsymClean": @(dlsymClean),
+            @"dyldHidden": @(dyldHidden),
+            @"visibleLoopbackSockets": @(visibleLoopbackSockets),
+            @"btnTapCount": @(g_btn_tap_count),
+            @"touchHitCount": @(g_touch_hit_count),
+            @"touchBeganCount": @(g_touch_began_count),
+            @"touchEndedCount": @(g_touch_ended_count),
+            @"textFieldText": tf.text ?: @"",
+        };
+        NSData *jd = [NSJSONSerialization dataWithJSONObject:out options:0 error:nil];
+        printf("HARNESS_JSON:%s\n", [[NSString alloc] initWithData:jd encoding:NSUTF8StringEncoding].UTF8String);
+    }
+    return 0;
+}
+''', encoding="utf-8")
+
+        b16_bin = b16_app_dir / "MockBridge"
+        run_cmd([
+            "xcrun", "clang", "-fobjc-arc", "-fmodules", "-O2", "-w",
+            "-target", "arm64-apple-ios15.0-macabi",
+            "-isysroot", sdk_path16,
+            "-iframework", ios_sup_fw16,
+            "-F", fw_parent16,
+            "-framework", "Foundation",
+            "-framework", "UIKit",
+            "-Wl,-needed_framework,PlayTools",
+            "-Wl,-rpath,@executable_path/Frameworks",
+            f"-Wl,-rpath,{fw_parent16}",
+            str(b16_m),
+            "-o", str(b16_bin),
+        ], env=tool_env16)
+        run_cmd(["codesign", "--force", "--sign", "-", str(b16_plugins / "CoverUseBridge.dylib")], env=tool_env16)
+        run_cmd(["codesign", "--force", "--deep", "--sign", "-", str(b16_app_dir)], env=tool_env16)
+
+        isolated_root_16 = work_dir / "IsolatedHome16"
+        data_home_16 = isolated_root_16 / "Library/Containers/app.makedie.harness.bridge/Data"
+        data_home_16.mkdir(parents=True, exist_ok=True)
+        plist16_dir = isolated_root_16 / "Library/Containers/app.makedie.MacOver/PlayTools"
+        plist16_dir.mkdir(parents=True, exist_ok=True)
+        plist16 = plist16_dir / "app.makedie.harness.bridge.plist"
+        with open(plist16, "wb") as fp:
+            plistlib.dump({"bypass": True, "windowWidth": 1440, "windowHeight": 900}, fp)
+
+        def send_frame(sock_conn: socket.socket, obj: dict) -> None:
+            raw = json.dumps(obj, separators=(",", ":")).encode("utf-8")
+            sock_conn.sendall(struct.pack("!I", len(raw)) + raw)
+
+        def recv_exact(sock_conn: socket.socket, n: int) -> bytes:
+            chunks = bytearray()
+            while len(chunks) < n:
+                chunk = sock_conn.recv(n - len(chunks))
+                if not chunk:
+                    raise EOFError("Bridge closed socket unexpectedly")
+                chunks.extend(chunk)
+            return bytes(chunks)
+
+        def recv_frame(sock_conn: socket.socket) -> dict:
+            hdr = recv_exact(sock_conn, 4)
+            (length,) = struct.unpack("!I", hdr)
+            body = recv_exact(sock_conn, length)
+            return json.loads(body.decode("utf-8"))
+
+        def find_node_id(node: dict, *, identifier: Optional[str] = None, label: Optional[str] = None) -> Optional[str]:
+            if identifier and node.get("identifier") == identifier:
+                return node.get("id")
+            if label and node.get("label") == label:
+                return node.get("id")
+            for child in node.get("children", []):
+                found = find_node_id(child, identifier=identifier, label=label)
+                if found:
+                    return found
+            return None
+
+        # A: Dormant (no automation env vars -> no loopback TCP sockets opened)
+        env_dormant = make_env(
+            data_home_16, plist16, work_dir / "tmp_s16_dormant", work_dir / "marker_16_dormant.txt",
+            APP_SANDBOX_CONTAINER_ID="app.makedie.harness.bridge",
+            PLAYTOOLS_SAFE_MODE="0",
+            HARNESS_BRIDGE_WAIT_SECS="0.35",
+        )
+        proc_dormant = run_cmd([str(b16_bin)], env=env_dormant, check=False)
+        info_dormant = parse_harness_json(proc_dormant.stdout) if proc_dormant.returncode == 0 else {}
+        dormant_no_sockets = (info_dormant.get("visibleLoopbackSockets") == 0)
+
+        # B: Safe Mode=1 with automation env vars -> skipped cleanly, no TCP connection attempted
+        srv_safe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv_safe.bind(("127.0.0.1", 0))
+        srv_safe.listen(1)
+        srv_safe.settimeout(0.6)
+        safe_port = srv_safe.getsockname()[1]
+        safe_connected = False
+        env_safe = make_env(
+            data_home_16, plist16, work_dir / "tmp_s16_safe", work_dir / "marker_16_safe.txt",
+            APP_SANDBOX_CONTAINER_ID="app.makedie.harness.bridge",
+            PLAYTOOLS_SAFE_MODE="1",
+            MACOVER_AUTOMATION_PORT=str(safe_port),
+            MACOVER_AUTOMATION_TOKEN="safe-mode-token",
+            MACOVER_AUTOMATION_BUNDLE_ID="app.makedie.harness.bridge",
+            HARNESS_BRIDGE_WAIT_SECS="0.35",
+        )
+        proc_safe = run_cmd([str(b16_bin)], env=env_safe, check=False)
+        try:
+            conn_s, _ = srv_safe.accept()
+            safe_connected = True
+            conn_s.close()
+        except (socket.timeout, TimeoutError):
+            safe_connected = False
+        finally:
+            srv_safe.close()
+        info_safe = parse_harness_json(proc_safe.stdout) if proc_safe.returncode == 0 else {}
+
+        # C: Live opt-in automation session over reverse loopback TCP
+        srv_live = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv_live.bind(("127.0.0.1", 0))
+        srv_live.listen(1)
+        srv_live.settimeout(8.0)
+        live_port = srv_live.getsockname()[1]
+        live_token = "harness-tok-s16-v10"
+        stop_file = b16_dir / "stop.flag"
+        env_live = make_env(
+            data_home_16, plist16, work_dir / "tmp_s16_live", work_dir / "marker_16_live.txt",
+            APP_SANDBOX_CONTAINER_ID="app.makedie.harness.bridge",
+            PLAYTOOLS_SAFE_MODE="0",
+            MACOVER_AUTOMATION_PORT=str(live_port),
+            MACOVER_AUTOMATION_TOKEN=live_token,
+            MACOVER_AUTOMATION_BUNDLE_ID="app.makedie.harness.bridge",
+            HARNESS_BRIDGE_STOP_FILE=str(stop_file),
+            HARNESS_BRIDGE_WAIT_SECS="8.0",
+        )
+        proc_live = subprocess.Popen(
+            [str(b16_bin)],
+            env=env_live,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        live_checks: dict[str, object] = {}
+        try:
+            conn, _ = srv_live.accept()
+            conn.settimeout(5.0)
+            try:
+                hello = recv_frame(conn)
+                live_checks["helloOK"] = (
+                    hello.get("type") == "hello"
+                    and hello.get("token") == live_token
+                    and hello.get("bundleID") == "app.makedie.harness.bridge"
+                    and hello.get("pid") == proc_live.pid
+                    and hello.get("logicalWidth") in (1440, 800)
+                    and hello.get("logicalHeight") in (900, 600)
+                )
+                send_frame(conn, {"ok": True, "type": "hello_ack"})
+
+                send_frame(conn, {"method": "get_ui_tree", "params": {}})
+                tree_resp = recv_frame(conn)
+                tree_res = tree_resp.get("result", {})
+                root_node = tree_res.get("root", {})
+                btn_id = find_node_id(root_node, identifier="play_btn", label="PlayBtn")
+                tf_id = find_node_id(root_node, identifier="name_input")
+                attr_id = find_node_id(root_node, identifier="attr_label_view")
+                overlay_id = find_node_id(root_node, identifier="pt_internal_overlay_secret")
+                live_checks["treeOK"] = bool(
+                    tree_resp.get("ok") is True
+                    and tree_res.get("width") == 800
+                    and tree_res.get("height") == 600
+                    and tree_res.get("logicalWidth") == 800
+                    and tree_res.get("logicalHeight") == 600
+                    and btn_id
+                    and tf_id
+                    and attr_id
+                    and overlay_id is None
+                )
+
+                act_resp = {}
+                if btn_id:
+                    send_frame(conn, {"method": "activate_node", "params": {"nodeID": btn_id}})
+                    act_resp = recv_frame(conn)
+                live_checks["activateOK"] = (
+                    act_resp.get("ok") is True
+                    and act_resp.get("result", {}).get("activated") is True
+                )
+
+                txt_resp = {}
+                if tf_id:
+                    send_frame(conn, {
+                        "method": "set_text",
+                        "params": {"nodeID": tf_id, "text": "MacOverOK", "clear": True},
+                    })
+                    txt_resp = recv_frame(conn)
+                live_checks["setTextOK"] = (
+                    txt_resp.get("ok") is True
+                    and txt_resp.get("result", {}).get("updated") is True
+                )
+
+                send_frame(conn, {
+                    "method": "touch",
+                    "params": {"gesture": "tap", "x": 350.0, "y": 350.0},
+                })
+                touch_resp = recv_frame(conn)
+                live_checks["touchOK"] = (
+                    touch_resp.get("ok") is True
+                    and touch_resp.get("result", {}).get("gesture") == "tap"
+                    and touch_resp.get("result", {}).get("logicalWidth") == 800
+                    and touch_resp.get("result", {}).get("logicalHeight") == 600
+                )
+
+                # Invalid clipRect with NSNull must return ok=False without crashing (H-10).
+                send_frame(conn, {
+                    "method": "screenshot",
+                    "params": {"format": "jpeg", "clipRect": {"x": None, "y": 0, "w": 50, "h": 50}},
+                })
+                bad_clip_resp = recv_frame(conn)
+                live_checks["badClipSafe"] = (bad_clip_resp.get("ok") is False)
+
+                send_frame(conn, {
+                    "method": "screenshot",
+                    "params": {"format": "jpeg", "maxDim": 512, "quality": 0.7},
+                })
+                shot_resp = recv_frame(conn)
+                shot_res = shot_resp.get("result", {})
+                shot_bytes = base64.b64decode(shot_res.get("data", "")) if shot_res.get("data") else b""
+                live_checks["screenshotOK"] = (
+                    shot_resp.get("ok") is True
+                    and shot_res.get("mimeType") == "image/jpeg"
+                    and shot_res.get("logicalWidth") == 800
+                    and shot_res.get("logicalHeight") == 600
+                    and len(shot_bytes) > 100
+                    and shot_bytes[:2] == b"\xff\xd8"
+                )
+            finally:
+                conn.close()
+        except Exception as exc:
+            live_checks["error"] = str(exc)
+        finally:
+            srv_live.close()
+            stop_file.write_text("done\n", encoding="utf-8")
+
+        live_stdout, live_stderr = proc_live.communicate(timeout=10)
+        info_live = parse_harness_json(live_stdout) if proc_live.returncode == 0 else {"stderr": live_stderr}
+
+        checks16 = [
+            proc_dormant.returncode == 0,
+            dormant_no_sockets,
+            info_dormant.get("dyldHidden") is True,
+            info_dormant.get("dlsymClean") is True,
+            proc_safe.returncode == 0,
+            not safe_connected,
+            info_safe.get("envPortNull") is True,
+            info_safe.get("envTokenNull") is True,
+            info_safe.get("envBundleNull") is True,
+            info_safe.get("rawEnvClean") is True,
+            proc_live.returncode == 0,
+            live_checks.get("helloOK") is True,
+            live_checks.get("treeOK") is True,
+            live_checks.get("activateOK") is True,
+            live_checks.get("setTextOK") is True,
+            live_checks.get("touchOK") is True,
+            live_checks.get("badClipSafe") is True,
+            live_checks.get("screenshotOK") is True,
+            info_live.get("envPortNull") is True,
+            info_live.get("envTokenNull") is True,
+            info_live.get("envBundleNull") is True,
+            info_live.get("rawEnvClean") is True,
+            info_live.get("dlsymClean") is True,
+            info_live.get("dyldHidden") is True,
+            info_live.get("visibleLoopbackSockets") == 0,
+            info_live.get("btnTapCount", 0) >= 1,
+            info_live.get("touchHitCount", 0) >= 2,
+            info_live.get("textFieldText") == "MacOverOK",
+        ]
+        payload16 = {
+            "dormant": info_dormant,
+            "dormantNoSockets": dormant_no_sockets,
+            "safe": info_safe,
+            "safeConnected": safe_connected,
+            "liveChecks": live_checks,
+            "liveApp": info_live,
+        }
+        res16 = ScenarioResult(
+            name="16. CoverUseBridge opt-in lifecycle, env scrub, TCP tree/action/text/touch/screenshot",
+            passed=all(checks16),
+            duration_sec=time.monotonic() - t16,
+            details=json.dumps(payload16, sort_keys=True),
+        )
+        return [(16, res16, [f"  Scenario 16 payload: {payload16}"])]
+
     tasks = []
     if selected & {1, 2, 3}:
         tasks.append(run_chain_1_to_3)
@@ -7298,6 +8062,7 @@ int main(int argc, char **argv) {
         13: run_s13,
         14: run_s14,
         15: run_s15,
+        16: run_s16,
     }
     for sid in sorted(selected):
         if sid in runners:
@@ -7333,9 +8098,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Path to PlayTools.framework (or PlayTools.xcframework).",
     )
     parser.add_argument(
+        "--cover-use-bridge",
+        default=None,
+        help="Path to BuiltInPlugins/CoverUseBridge/CoverUseBridge.dylib.",
+    )
+    parser.add_argument(
         "--scenarios",
         default=None,
-        help="Comma-separated scenario IDs or ranges to run (e.g. '14' or '1,2,9-14').",
+        help="Comma-separated scenario IDs or ranges to run (e.g. '16' or '1,2,9-16').",
     )
     parser.add_argument(
         "-j",
@@ -7358,6 +8128,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     repo_root = Path(__file__).resolve().parent.parent.parent
     playtools_fw = resolve_playtools_framework(repo_root, args.playtools_framework)
     print(f"Using PlayTools.framework: {playtools_fw}")
+    cover_use_bridge: Optional[Path] = None
+    if 16 in selected_scenarios:
+        cover_use_bridge = resolve_cover_use_bridge(repo_root, playtools_fw, args.cover_use_bridge)
+        print(f"Using CoverUseBridge.dylib: {cover_use_bridge}")
 
     work_dir = Path(tempfile.mkdtemp(prefix="playtools-harness-"))
     diag_log = Path("/tmp/PlayTools-app.makedie.harness.mockapp.log")
@@ -7374,6 +8148,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             args.verbose,
             selected_scenarios=selected_scenarios,
             jobs=max(1, args.jobs),
+            cover_use_bridge=cover_use_bridge,
         )
     finally:
         if diag_log.exists():

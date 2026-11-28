@@ -343,4 +343,18 @@ struct AppSettingsDataTests {
         let finalValue = recorded.withLock { $0.last }
         #expect(finalValue == false)
     }
+
+    @Test func enableAutomationBridgeDefaultsFalseAndTriggersRestartField() throws {
+        let data = AppSettingsData()
+        #expect(data.enableAutomationBridge == false)
+
+        let rawJSON = #"{ "playChain": false }"#.data(using: .utf8) ?? Data()
+        let decoded = try JSONDecoder().decode(AppSettingsData.self, from: rawJSON)
+        #expect(decoded.enableAutomationBridge == false)
+
+        var modified = data
+        modified.enableAutomationBridge = true
+        let changed = modified.restartRequiredChanges(comparedTo: data)
+        #expect(changed.contains(.enableAutomationBridge))
+    }
 }

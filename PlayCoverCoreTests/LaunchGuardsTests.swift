@@ -138,6 +138,9 @@ struct LaunchGuardsTests {
             isCatalyst: true,
             strictEmulationMode: false,
             interceptInlineSyscalls: false,
+            enableAutomationBridge: false,
+            coverUseBridge: nil,
+            coverUseBridgeStaged: false,
             storedHasIntrospection: false,
             storedHasIosFrameworks: false,
             entitlementsInputsHash: "abc123"
@@ -306,5 +309,144 @@ struct LaunchGuardsTests {
         app.setRunState(.terminating)
         monitor.notifyProcessTerminated(for: app, pid: -1)
         #expect(app.runState == .idle)
+    }
+
+    @Test func mcpPreferencesDefaultOffAndPersistThroughUserDefaults() throws {
+        let suiteName = "app.makedie.MacOver.tests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let prefs = MCPPreferences(userDefaults: defaults)
+        #expect(prefs.isEnabled == false)
+        #expect(prefs.allowSensitiveHeaders == false)
+
+        prefs.isEnabled = true
+        prefs.allowSensitiveHeaders = true
+
+        let reloaded = MCPPreferences(userDefaults: defaults)
+        #expect(reloaded.isEnabled == true)
+        #expect(reloaded.allowSensitiveHeaders == true)
+    }
+
+    @MainActor
+    @Test func mcpHostCoordinatorStartsLoopbackAndIssuesLaunchEnv() async throws {
+        let suiteName = "app.makedie.MacOver.mcp.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let prefs = MCPPreferences(userDefaults: defaults)
+        let deps = PlayCoverDependencies(loadInitialData: false)
+        let coordinator = MCPHostCoordinator(preferences: prefs)
+        coordinator.dependencies = deps
+        defer { coordinator.stop() }
+
+        #expect(coordinator.isRunning == false)
+        #expect(coordinator.prepareAutomationEnvironment(for: "com.example.game").isEmpty)
+
+        coordinator.setEnabled(true)
+        #expect(coordinator.isRunning == true)
+        #expect(coordinator.daemonPort != nil)
+        #expect(coordinator.bridgePort != nil)
+
+        let env = coordinator.prepareAutomationEnvironment(for: "com.example.game")
+        #expect(env["MACOVER_AUTOMATION_PORT"] == coordinator.bridgePort.map(String.init))
+        #expect(env["MACOVER_AUTOMATION_BUNDLE_ID"] == "com.example.game")
+        #expect((env["MACOVER_AUTOMATION_TOKEN"] ?? "").isEmpty == false)
+
+        let listResult = await coordinator.handleToolCall(
+            name: "macover_apps",
+            arguments: ["op": .string("list")]
+        )
+        #expect(listResult.isError != true)
+
+        let diagUnknown = await coordinator.handleToolCall(
+            name: "macover_diagnostics",
+            arguments: ["bundleID": .string("com.example.missing")]
+        )
+        #expect(diagUnknown.isError == true)
+
+        coordinator.setEnabled(false)
+        #expect(coordinator.isRunning == false)
+        #expect(coordinator.prepareAutomationEnvironment(for: "com.example.game").isEmpty)
+    }
+
+    @Test func appLaunchFingerprintStoreRejectsV1AndDetectsAutomationBridgeChange() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("fingerprint-v2-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let storeURL = tmp.appendingPathComponent("launch-fingerprints.json")
+        let dummyStamp = PlayTools.FileStatStamp(inode: 1, size: 123, mtimeSec: 456, mtimeNSec: 789)
+        let stampV1 = LaunchFastPathStamp(
+            schemaVersion: 1,
+            exec: dummyStamp,
+            infoPlist: dummyStamp,
+            codeResources: nil,
+            frameworksDir: nil,
+            plugInsDir: nil,
+            akExec: nil,
+            playTools: dummyStamp,
+            usesPlayTools: true,
+            isCatalyst: false,
+            strictEmulationMode: false,
+            interceptInlineSyscalls: false,
+            enableAutomationBridge: false,
+            coverUseBridge: nil,
+            coverUseBridgeStaged: false,
+            storedHasIntrospection: false,
+            storedHasIosFrameworks: false,
+            entitlementsInputsHash: "abc"
+        )
+        let encoded = try JSONEncoder().encode(["/Applications/Dummy.app": stampV1])
+        try encoded.write(to: storeURL)
+
+        let store = AppLaunchFingerprintStore(storeURL: storeURL)
+        #expect(store.matches(stampV1, for: "/Applications/Dummy.app") == false)
+
+        let stampV2Disabled = LaunchFastPathStamp(
+            schemaVersion: LaunchFastPathStamp.currentSchemaVersion,
+            exec: dummyStamp,
+            infoPlist: dummyStamp,
+            codeResources: nil,
+            frameworksDir: nil,
+            plugInsDir: nil,
+            akExec: nil,
+            playTools: dummyStamp,
+            usesPlayTools: true,
+            isCatalyst: false,
+            strictEmulationMode: false,
+            interceptInlineSyscalls: false,
+            enableAutomationBridge: false,
+            coverUseBridge: nil,
+            coverUseBridgeStaged: false,
+            storedHasIntrospection: false,
+            storedHasIosFrameworks: false,
+            entitlementsInputsHash: "abc"
+        )
+        let stampV2Enabled = LaunchFastPathStamp(
+            schemaVersion: LaunchFastPathStamp.currentSchemaVersion,
+            exec: dummyStamp,
+            infoPlist: dummyStamp,
+            codeResources: nil,
+            frameworksDir: nil,
+            plugInsDir: nil,
+            akExec: nil,
+            playTools: dummyStamp,
+            usesPlayTools: true,
+            isCatalyst: false,
+            strictEmulationMode: false,
+            interceptInlineSyscalls: false,
+            enableAutomationBridge: true,
+            coverUseBridge: nil,
+            coverUseBridgeStaged: true,
+            storedHasIntrospection: false,
+            storedHasIosFrameworks: false,
+            entitlementsInputsHash: "abc"
+        )
+
+        store.record(stampV2Disabled, for: "/Applications/Dummy.app")
+        #expect(store.matches(stampV2Disabled, for: "/Applications/Dummy.app") == true)
+        #expect(store.matches(stampV2Enabled, for: "/Applications/Dummy.app") == false)
     }
 }

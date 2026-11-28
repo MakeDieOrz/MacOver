@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 
 DERIVED_DATA="${REPO_ROOT}/.build/playtools-analyze-dd"
 DERIVED_DATA_EXPLICIT=0
@@ -72,6 +72,8 @@ if [[ "${CHECK_FORMAT}" -eq 1 ]]; then
     "${REPO_ROOT}/PlayTools/PlayTools/Subsystems/PTDetectionRules.c"
     "${REPO_ROOT}/PlayTools/PlayTools/PlayLoader.h"
     "${REPO_ROOT}/PlayTools/PlayTools/PlayLoader.m"
+    "${REPO_ROOT}/PlayTools/CoverUseBridge/CoverUseBridge.h"
+    "${REPO_ROOT}/PlayTools/CoverUseBridge/CoverUseBridge.m"
   )
   for fmt_file in "${CURATED_FORMAT_FILES[@]}"; do
     xcrun clang-format --style="file:${REPO_ROOT}/.clang-format" --dry-run --Werror "${fmt_file}"
@@ -96,7 +98,8 @@ xcodebuild \
   -destination 'generic/platform=macOS,variant=Mac Catalyst' \
   -derivedDataPath "${DERIVED_DATA}" \
   ARCHS=arm64 \
-  ONLY_ACTIVE_ARCH=NO \
+  ONLY_ACTIVE_ARCH=YES \
+  COMPILER_INDEX_STORE_ENABLE=NO \
   CLANG_ANALYZER_OUTPUT=text \
   CLANG_ANALYZER_LOCALIZABILITY_NONLOCALIZED=NO \
   CODE_SIGN_IDENTITY=- \
@@ -110,25 +113,23 @@ import re
 import sys
 from pathlib import Path
 
+raw_root = str(Path(sys.argv[1]))
 repo_root = str(Path(sys.argv[1]).resolve())
-log_path = Path(sys.argv[2])
-target_prefix = f"{repo_root}/PlayTools/"
+log_path = Path(sys.argv[2]).resolve()
+target_prefixes = tuple(dict.fromkeys([f"{repo_root}/PlayTools/", f"{raw_root}/PlayTools/"]))
 
 findings = []
-in_analyze = False
 for raw_line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
-    if raw_line.startswith("Analyze ") or raw_line.startswith("AnalyzeShallow "):
-        in_analyze = True
-    elif raw_line.startswith(("CompileC ", "SwiftCompile ", "Ld ", "PhaseScriptExecution ", "CopySwiftLibs ")):
-        in_analyze = False
-    if in_analyze and ": warning:" in raw_line and target_prefix in raw_line:
+    stripped = raw_line.strip()
+    if ": warning:" in stripped and any(prefix in stripped for prefix in target_prefixes):
         # Exclude standard compiler flags like [-Wundeclared-selector]; retain static analyzer checker tags [checker.name].
-        if "[-W" not in raw_line and re.search(r"\[[A-Za-z0-9_.]+]$", raw_line.strip()):
-            findings.append(raw_line.strip())
+        if "[-W" not in stripped and re.search(r"\[[A-Za-z0-9_.]+]$", stripped):
+            findings.append(stripped)
 
 print(f"Clang Static Analyzer findings count: {len(findings)}")
 for item in findings:
-    print("  " + item.replace(repo_root + "/", ""))
+    cleaned = item.replace(repo_root + "/", "").replace(raw_root + "/", "")
+    print("  " + cleaned)
 
 if findings:
     sys.exit(1)
