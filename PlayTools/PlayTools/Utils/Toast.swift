@@ -29,7 +29,7 @@ final class Toast {
         if !Thread.isMainThread {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    if let parent = screen.keyWindow ?? screen.primaryWindow {
+                    if let parent = PTOverlayWindowHost.shared.ensureOverlayContainerView() {
                         Toast.show(message: msg, parent: parent)
                     }
                 }
@@ -37,7 +37,7 @@ final class Toast {
             return
         }
         MainActor.assumeIsolated {
-            if let parent = screen.keyWindow ?? screen.primaryWindow {
+            if let parent = PTOverlayWindowHost.shared.ensureOverlayContainerView() {
                 Toast.show(message: msg, parent: parent)
             }
         }
@@ -48,21 +48,23 @@ final class Toast {
 
     @MainActor
     public static func hideHint(hint: UIView) {
-        guard let id = hintView.firstIndex(of: hint) else {return}
-        for index in 0..<hintView.count {
-            if index < id {
-                UIView.animate(withDuration: 0.5, delay: 0.0, options: .curveEaseOut, animations: {
-                    hintView[index].layer.position.y -= hint.frame.size.height + gap
-                })
-            } else if index > id {
-                hintView[index-1] = hintView[index]
-            }
+        guard let id = hintView.firstIndex(of: hint) else { return }
+        let viewsToShift = Array(hintView[..<id])
+        let deltaY = hint.frame.size.height + gap
+        hintView.remove(at: id)
+
+        if !viewsToShift.isEmpty {
+            UIView.animate(withDuration: 0.5, delay: 0.0, options: .curveEaseOut, animations: {
+                for target in viewsToShift {
+                    target.center.y -= deltaY
+                }
+            })
         }
-        hintView.removeLast()
         UIView.animate(withDuration: 0.5, delay: 0.0, options: .curveEaseOut, animations: {
             hint.alpha = 0.0
-        }, completion: {_ in
+        }, completion: { _ in
             hint.removeFromSuperview()
+            PTOverlayWindowHost.shared.hideIfEmpty()
         })
     }
 
@@ -113,7 +115,7 @@ final class Toast {
     @MainActor
     private static func showHintOnMain(title: String, text: [String] = [], timeout: Double = -3,
                                        notification: NSNotification.Name? = nil) {
-        guard let parent = screen.keyWindow ?? screen.primaryWindow else { return }
+        guard let parent = PTOverlayWindowHost.shared.ensureOverlayContainerView() else { return }
 
         // Width and height here serve as an upper limit.
         // Text would fill width first, then wrap, then fill height, then scroll
@@ -171,11 +173,13 @@ final class Toast {
                 }
             }
         }
-        for view in hintView {
-            UIView.animate(withDuration: 0.5, delay: 0.0, options: .curveEaseIn, animations: {
-                view.layer.position.y += messageLabel.frame.size.height + gap
-            })
-        }
+        let shiftY = messageLabel.frame.size.height + gap
+        let activeHints = hintView
+        UIView.animate(withDuration: 0.5, delay: 0.0, options: .curveEaseIn, animations: {
+            for view in activeHints {
+                view.center.y += shiftY
+            }
+        })
     }
 
     static func cleanupLegacyUserDefaults() {
@@ -324,8 +328,9 @@ final class Toast {
         }, completion: { _ in
             UIView.animate(withDuration: 0.5, delay: 1.5, options: .curveEaseOut, animations: {
                 toastContainer.alpha = 0.0
-            }, completion: {_ in
+            }, completion: { _ in
                 toastContainer.removeFromSuperview()
+                PTOverlayWindowHost.shared.hideIfEmpty()
             })
         })
     }

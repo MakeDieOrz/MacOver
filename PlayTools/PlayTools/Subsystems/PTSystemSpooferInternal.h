@@ -129,6 +129,8 @@ __attribute__((visibility("hidden"))) CFURLRef pt_resolve_cfbundle_input_url(CFU
 __attribute__((visibility("hidden"))) CFURLRef pt_sanitize_cfbundle_returned_url(CFURLRef CF_CONSUMED url, const void *caller) CF_RETURNS_RETAINED;
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_bundle_id_cstr(const char *bid);
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_macos_pref_key(const char *key);
+__attribute__((visibility("hidden"))) CFStringRef pt_rewrite_declared_app_group_pref_domain(CFStringRef applicationID) CF_RETURNS_RETAINED;
+__attribute__((visibility("hidden"))) BOOL pt_is_sanitized_mach_header_cow_range(uintptr_t cur_addr, uintptr_t cur_size);
 
 // Identity, proc/kevent & Mach VM / Syscall / MIG
 __attribute__((visibility("hidden"))) BOOL pt_is_desktop_supplemental_gid(gid_t g);

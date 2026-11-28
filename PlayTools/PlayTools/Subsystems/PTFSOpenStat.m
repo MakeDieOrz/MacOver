@@ -394,6 +394,14 @@ int pt_fs_open_extended_with_caller(const char *path,
 
 extern FILE *pt_orig_fopen_darwin_extsn(const char *, const char *) __asm("_fopen$DARWIN_EXTSN");
 
+static inline BOOL pt_is_internal_redirect_path(const char *p) {
+    return (p != NULL &&
+            (pt_is_active_app_backup_file_path(p) ||
+             pt_is_synth_system_version_path(p) ||
+             pt_is_synth_code_resources_path(p) ||
+             pt_is_synth_info_plist_path(p)));
+}
+
 static FILE *pt_fopen(const char *filename, const char *mode) {
     char vbuf[PATH_MAX];
     pt_fs_path_disposition_t disp = pt_prepare_fs_path_mode(filename,
@@ -409,6 +417,12 @@ static FILE *pt_fopen(const char *filename, const char *mode) {
     if (disp == PT_FS_PATH_VIRTUAL_ANCESTOR) {
         errno = EPERM;
         return NULL;
+    }
+    if (filename == vbuf && pt_is_internal_redirect_path(filename)) {
+        pt_enter_internal_scope();
+        FILE *fp = fopen(filename, mode);
+        pt_leave_internal_scope();
+        return fp;
     }
     return fopen(filename, mode);
 }
@@ -429,11 +443,18 @@ static FILE *pt_fopen_darwin_extsn(const char *filename, const char *mode) {
         errno = EPERM;
         return NULL;
     }
+    if (filename == vbuf && pt_is_internal_redirect_path(filename)) {
+        pt_enter_internal_scope();
+        FILE *fp = pt_orig_fopen_darwin_extsn(filename, mode);
+        pt_leave_internal_scope();
+        return fp;
+    }
     return pt_orig_fopen_darwin_extsn(filename, mode);
 }
 
 static FILE *pt_freopen(const char *filename, const char *mode, FILE *stream) {
     char vbuf[PATH_MAX];
+    BOOL is_redirect = NO;
     if (filename != NULL) {
         pt_fs_path_disposition_t disp = pt_prepare_fs_path_mode(filename,
                                                                 __builtin_return_address(0),
@@ -449,6 +470,13 @@ static FILE *pt_freopen(const char *filename, const char *mode, FILE *stream) {
             errno = EPERM;
             return NULL;
         }
+        is_redirect = (filename == vbuf && pt_is_internal_redirect_path(filename));
+    }
+    if (is_redirect) {
+        pt_enter_internal_scope();
+        FILE *fp = freopen(filename, mode, stream);
+        pt_leave_internal_scope();
+        return fp;
     }
     return freopen(filename, mode, stream);
 }
@@ -586,7 +614,14 @@ static int pt_statx_np(const char *path, struct stat *buf, filesec_t fsec) {
     if (disp == PT_FS_PATH_VIRTUAL_ANCESTOR) {
         return pt_stat_virtual_ancestor(path, buf, caller);
     }
-    int ret = statx_np(path, buf, fsec);
+    int ret;
+    if (path == vbuf && pt_is_internal_redirect_path(path)) {
+        pt_enter_internal_scope();
+        ret = statx_np(path, buf, fsec);
+        pt_leave_internal_scope();
+    } else {
+        ret = statx_np(path, buf, fsec);
+    }
     if (ret == 0) {
         pt_sanitize_stat_buf(buf, caller);
     }
@@ -604,7 +639,14 @@ static int pt_lstatx_np(const char *path, struct stat *buf, filesec_t fsec) {
     if (disp == PT_FS_PATH_VIRTUAL_ANCESTOR) {
         return pt_stat_virtual_ancestor(path, buf, caller);
     }
-    int ret = lstatx_np(path, buf, fsec);
+    int ret;
+    if (path == vbuf && pt_is_internal_redirect_path(path)) {
+        pt_enter_internal_scope();
+        ret = lstatx_np(path, buf, fsec);
+        pt_leave_internal_scope();
+    } else {
+        ret = lstatx_np(path, buf, fsec);
+    }
     if (ret == 0) {
         pt_sanitize_stat_buf(buf, caller);
     }
@@ -981,6 +1023,10 @@ extern ssize_t pt_orig_freadlink(int fd, char *buf, size_t bufsize) __asm("_frea
 __attribute__((visibility("hidden")))
 ssize_t pt_fs_freadlink_with_caller(int fd, char *buf, size_t bufsize, const void *caller) {
     BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
+    if (!is_sys && pt_is_hidden_fd(fd)) {
+        errno = EBADF;
+        return -1;
+    }
     if (!is_sys && pt_is_bypass_enabled()) {
         if (pt_is_compat13_7_active()) {
             errno = ENOSYS;
@@ -1052,6 +1098,10 @@ static ssize_t pt_readlink(const char * restrict path, char * restrict buf, size
 
 __attribute__((visibility("hidden")))
 ssize_t pt_fs_readlinkat_with_caller(int fd, const char *path, char *buf, size_t bufsize, const void *caller) {
+    if (pt_is_hidden_fd(fd) && !pt_is_effective_system_or_playtools_caller(caller)) {
+        errno = EBADF;
+        return -1;
+    }
     if (pt_fd_is_sensitive(fd, caller)) {
         errno = ENOENT;
         return -1;
@@ -1126,7 +1176,9 @@ static char *pt_realpath_common(const char * restrict file_name,
     BOOL is_virtual_in = (resolved == vbuf);
     if (is_sys_caller == 0 || is_virtual_in) {
         char tmp_resolved[PATH_MAX];
+        pt_enter_internal_scope();
         char *res = orig_fn(resolved, tmp_resolved);
+        pt_leave_internal_scope();
         if (res == NULL) {
             return NULL;
         }
@@ -1231,6 +1283,10 @@ static int pt_chdir(const char *path) {
 
 __attribute__((visibility("hidden")))
 int pt_fs_fchdir_with_caller(int fd, const void *caller) {
+    if (pt_is_hidden_fd(fd) && !pt_is_effective_system_or_playtools_caller(caller)) {
+        errno = EBADF;
+        return -1;
+    }
     if (pt_fd_is_sensitive(fd, caller)) {
         errno = EACCES;
         return -1;
@@ -1394,6 +1450,10 @@ static int pt_handle_fcntl_set_dpclass(int fd, int dpclass, int ret, int saved_e
 
 __attribute__((visibility("hidden")))
 int pt_fs_fcntl_with_caller(int fd, int cmd, uintptr_t arg, const void *caller) {
+    if (pt_is_hidden_fd(fd) && !pt_is_effective_system_or_playtools_caller(caller)) {
+        errno = EBADF;
+        return -1;
+    }
     switch (cmd) {
         case F_GETPROTECTIONCLASS: {
             int saved_errno = errno;
@@ -1464,11 +1524,16 @@ int pt_fs_fcntl_with_caller(int fd, int cmd, uintptr_t arg, const void *caller) 
 }
 
 static int pt_fcntl(int fd, int cmd, ...) {
+    const void *caller = __builtin_return_address(0);
+    if (pt_is_hidden_fd(fd) && !pt_is_effective_system_or_playtools_caller(caller)) {
+        errno = EBADF;
+        return -1;
+    }
     switch (cmd) {
         case F_GETPROTECTIONCLASS: {
             int saved_errno = errno;
             int ret = fcntl(fd, cmd);
-            return pt_handle_fcntl_get_dpclass(fd, ret, saved_errno, __builtin_return_address(0));
+            return pt_handle_fcntl_get_dpclass(fd, ret, saved_errno, caller);
         }
         case F_SETPROTECTIONCLASS: {
             int saved_errno = errno;
@@ -1477,7 +1542,7 @@ static int pt_fcntl(int fd, int cmd, ...) {
             int dpclass = va_arg(ap, int);
             va_end(ap);
             int ret = fcntl(fd, cmd, dpclass);
-            return pt_handle_fcntl_set_dpclass(fd, dpclass, ret, saved_errno, __builtin_return_address(0));
+            return pt_handle_fcntl_set_dpclass(fd, dpclass, ret, saved_errno, caller);
         }
         case F_GETFD:
         case F_GETFL:
@@ -1551,7 +1616,7 @@ static int pt_fcntl(int fd, int cmd, ...) {
             void *parg = va_arg(ap, void *);
             va_end(ap);
             int ret = fcntl(fd, cmd, parg);
-            return pt_handle_fcntl_getpath(ret, cmd, parg, __builtin_return_address(0));
+            return pt_handle_fcntl_getpath(ret, cmd, parg, caller);
         }
     }
 }
@@ -1559,11 +1624,16 @@ static int pt_fcntl(int fd, int cmd, ...) {
 extern int pt_orig_fcntl_nocancel(int, int, ...) __asm("_fcntl$NOCANCEL");
 
 static int pt_fcntl_nocancel(int fd, int cmd, ...) {
+    const void *caller = __builtin_return_address(0);
+    if (pt_is_hidden_fd(fd) && !pt_is_effective_system_or_playtools_caller(caller)) {
+        errno = EBADF;
+        return -1;
+    }
     switch (cmd) {
         case F_GETPROTECTIONCLASS: {
             int saved_errno = errno;
             int ret = pt_orig_fcntl_nocancel(fd, cmd);
-            return pt_handle_fcntl_get_dpclass(fd, ret, saved_errno, __builtin_return_address(0));
+            return pt_handle_fcntl_get_dpclass(fd, ret, saved_errno, caller);
         }
         case F_SETPROTECTIONCLASS: {
             int saved_errno = errno;
@@ -1572,7 +1642,7 @@ static int pt_fcntl_nocancel(int fd, int cmd, ...) {
             int dpclass = va_arg(ap, int);
             va_end(ap);
             int ret = pt_orig_fcntl_nocancel(fd, cmd, dpclass);
-            return pt_handle_fcntl_set_dpclass(fd, dpclass, ret, saved_errno, __builtin_return_address(0));
+            return pt_handle_fcntl_set_dpclass(fd, dpclass, ret, saved_errno, caller);
         }
         case F_GETFD:
         case F_GETFL:
@@ -1646,7 +1716,7 @@ static int pt_fcntl_nocancel(int fd, int cmd, ...) {
             void *parg = va_arg(ap, void *);
             va_end(ap);
             int ret = pt_orig_fcntl_nocancel(fd, cmd, parg);
-            return pt_handle_fcntl_getpath(ret, cmd, parg, __builtin_return_address(0));
+            return pt_handle_fcntl_getpath(ret, cmd, parg, caller);
         }
     }
 }
@@ -1661,6 +1731,7 @@ static int pt_proc_pidpath(int pid, void *buffer, uint32_t buffersize) {
     int ret = proc_pidpath(pid, buffer, buffersize);
     if (ret > 0 && buffer != NULL && buffersize > 1 && !is_sys) {
         char *pathbuf = (char *)buffer;
+        pathbuf[buffersize - 1U] = '\0';
         char vout[PATH_MAX];
         const char *virt = pt_virtualize_path_for_app(pathbuf, vout, sizeof(vout), YES);
         const char *effective = (virt != NULL) ? virt : pathbuf;
@@ -1672,12 +1743,14 @@ static int pt_proc_pidpath(int pid, void *buffer, uint32_t buffersize) {
         }
         if (virt != NULL && virt != pathbuf) {
             PT_DEBUG_TRACE("fs", "virtualized proc_pidpath %s -> %s", pathbuf, virt);
-            size_t n = strlcpy(pathbuf, virt, (size_t)buffersize);
-            if (n < (size_t)buffersize) {
-                return (int)n;
+            size_t vlen = strlen(virt);
+            if (vlen >= (size_t)buffersize) {
+                pathbuf[0] = '\0';
+                errno = ENOMEM;
+                return 0;
             }
-            errno = ENOMEM;
-            return 0;
+            memcpy(pathbuf, virt, vlen + 1U);
+            return (int)vlen;
         }
     }
     return ret;

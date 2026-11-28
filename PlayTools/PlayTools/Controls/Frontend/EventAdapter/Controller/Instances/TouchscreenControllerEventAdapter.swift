@@ -12,8 +12,8 @@ import GameController
 
 public final class TouchscreenControllerEventAdapter: ControllerEventAdapter, @unchecked Sendable {
 
-    private var directionPadXValue: Float = 0,
-                directionPadYValue: Float = 0
+    private let dpadStateLock = PTUnfairLock()
+    private var directionPadStateByProfile: [ObjectIdentifier: (x: Float, y: Float)] = [:]
     private static let controlsLock = PTUnfairLock()
     nonisolated(unsafe) static private var thumbstickCursorControl: [String: ThumbstickCursorControl] = [:]
 
@@ -32,20 +32,36 @@ public final class TouchscreenControllerEventAdapter: ControllerEventAdapter, @u
         guard let name = dpad.aliases.first else { return }
         let xAxis = dpad.xAxis, yAxis = dpad.yAxis
         if name == "Direction Pad" {
-            if (xAxis.value > 0) != (directionPadXValue > 0) {
+            let profileID = ObjectIdentifier(profile)
+            let nextX = xAxis.value
+            let nextY = yAxis.value
+            let previous = dpadStateLock.withLock { () -> (x: Float, y: Float) in
+                let prev = directionPadStateByProfile[profileID] ?? (0, 0)
+                if directionPadStateByProfile.count > 32 {
+                    let activeIDs = Set(
+                        GCController.controllers()
+                            .compactMap { $0.extendedGamepad }
+                            .map(ObjectIdentifier.init)
+                    )
+                    directionPadStateByProfile = directionPadStateByProfile.filter {
+                        activeIDs.contains($0.key)
+                    }
+                }
+                directionPadStateByProfile[profileID] = (nextX, nextY)
+                return prev
+            }
+            if (nextX > 0) != (previous.x > 0) {
                 handleValueChanged(profile, dpad.right)
             }
-            if (xAxis.value < 0) != (directionPadXValue < 0) {
+            if (nextX < 0) != (previous.x < 0) {
                 handleValueChanged(profile, dpad.left)
             }
-            if (yAxis.value > 0) != (directionPadYValue > 0) {
+            if (nextY > 0) != (previous.y > 0) {
                 handleValueChanged(profile, dpad.up)
             }
-            if (yAxis.value < 0) != (directionPadYValue < 0) {
+            if (nextY < 0) != (previous.y < 0) {
                 handleValueChanged(profile, dpad.down)
             }
-            directionPadXValue = xAxis.value
-            directionPadYValue = yAxis.value
             return
         }
         let deltaX = xAxis.value, deltaY = yAxis.value

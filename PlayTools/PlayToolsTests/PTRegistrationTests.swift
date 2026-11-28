@@ -74,5 +74,49 @@ final class PTRegistrationTests {
         #expect(pt_registered_hidden_class_count() == 40)
         #expect(pt_is_registered_hidden_module("StressMod_39"))
     }
+
+    @Test
+    func hiddenFDLoopbackPortAndOneShotAutomationBootstrap() {
+        #expect(!pt_is_hidden_fd(42))
+        pt_register_hidden_fd(42)
+        #expect(pt_is_hidden_fd(42))
+        #expect(!pt_is_hidden_fd(43))
+        pt_unregister_hidden_fd(42)
+        #expect(!pt_is_hidden_fd(42))
+
+        #expect(!pt_is_hidden_loopback_port(51234))
+        pt_register_hidden_loopback_port(51234)
+        #expect(pt_is_hidden_loopback_port(51234))
+        pt_unregister_hidden_loopback_port(51234)
+        #expect(!pt_is_hidden_loopback_port(51234))
+
+        #expect(!pt_has_automation_bootstrap())
+        pt_store_automation_bootstrap(54321, "secret-token", "com.example.app", "/tmp/built-in/CoverUseBridge")
+        #expect(pt_has_automation_bootstrap())
+
+        var dirBuf = [CChar](repeating: 0, count: 256)
+        #expect(pt_copy_automation_bootstrap_bridge_dir(&dirBuf, dirBuf.count))
+        let copiedDir = dirBuf.withUnsafeBufferPointer { buf in
+            buf.baseAddress.map { String(cString: $0) } ?? ""
+        }
+        #expect(copiedDir == "/tmp/built-in/CoverUseBridge")
+
+        var port: UInt16 = 0
+        var tokBuf = [CChar](repeating: 0, count: 128)
+        var bidBuf = [CChar](repeating: 0, count: 128)
+        #expect(pt_consume_automation_bootstrap(&port, &tokBuf, tokBuf.count, &bidBuf, bidBuf.count))
+        #expect(port == 54321)
+        let consumedTok = tokBuf.withUnsafeBufferPointer { buf in
+            buf.baseAddress.map { String(cString: $0) } ?? ""
+        }
+        let consumedBid = bidBuf.withUnsafeBufferPointer { buf in
+            buf.baseAddress.map { String(cString: $0) } ?? ""
+        }
+        #expect(consumedTok == "secret-token")
+        #expect(consumedBid == "com.example.app")
+        // One-shot consume clears stored bootstrap credentials immediately
+        #expect(!pt_has_automation_bootstrap())
+        #expect(!pt_consume_automation_bootstrap(&port, &tokBuf, tokBuf.count, &bidBuf, bidBuf.count))
+    }
 }
 }

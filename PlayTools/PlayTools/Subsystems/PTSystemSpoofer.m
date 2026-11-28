@@ -19,34 +19,94 @@ static _Thread_local int s_tls_early_device_init = 0;
 __attribute__((visibility("hidden"))) _Atomic int s_playchain_cached = -1;
 __attribute__((visibility("hidden"))) _Atomic int s_playchain_debug_cached = -1;
 __attribute__((visibility("hidden"))) pthread_once_t s_pt_bypass_early_once = PTHREAD_ONCE_INIT;
+static os_unfair_lock s_device_info_lock = OS_UNFAIR_LOCK_INIT;
 static char s_uncoerced_device_model[64] = "";
 static _Atomic BOOL s_has_uncoerced_device_model = NO;
 static char s_early_device_model[64] = "iPad13,8";
 static char s_early_oem_id[64] = "J522AP";
 static char s_final_device_model[64] = "iPad13,8";
 static char s_final_oem_id[64] = "J522AP";
-static _Atomic(const char *) s_active_device_model = s_early_device_model;
-static _Atomic(const char *) s_active_oem_id = s_early_oem_id;
+static char s_custom_final_oem_id[64] = "";
+static BOOL s_has_custom_final_oem_id = NO;
+static _Atomic(const char *) s_active_device_model = "iPad13,8";
+static _Atomic(const char *) s_active_oem_id = "J522AP";
 static _Atomic BOOL s_reported_ios_override_forced_off = NO;
 static pthread_once_t s_pt_early_device_once = PTHREAD_ONCE_INIT;
 __attribute__((visibility("hidden"))) pthread_once_t s_pt_device_info_once = PTHREAD_ONCE_INIT;
 __attribute__((visibility("hidden"))) _Thread_local BOOL s_tls_initializing_device_info = NO;
 
+#ifndef CPUFAMILY_ARM_TWISTER
+#define CPUFAMILY_ARM_TWISTER 0x92fb37c8U
+#endif
+#ifndef CPUFAMILY_ARM_VORTEX_TEMPEST
+#define CPUFAMILY_ARM_VORTEX_TEMPEST 0x07d34b9fU
+#endif
+#ifndef CPUFAMILY_ARM_LIGHTNING_THUNDER
+#define CPUFAMILY_ARM_LIGHTNING_THUNDER 0x462504d2U
+#endif
+#ifndef CPUFAMILY_ARM_FIRESTORM_ICESTORM
+#define CPUFAMILY_ARM_FIRESTORM_ICESTORM 0x1b588bb3U
+#endif
+#ifndef CPUFAMILY_ARM_BLIZZARD_AVALANCHE
+#define CPUFAMILY_ARM_BLIZZARD_AVALANCHE 0xda33d83dU
+#endif
+#ifndef CPUFAMILY_ARM_EVEREST_SAWTOOTH
+#define CPUFAMILY_ARM_EVEREST_SAWTOOTH 0x8765edeaU
+#endif
+#ifndef CPUFAMILY_ARM_COLL
+#define CPUFAMILY_ARM_COLL 0x2876f5b5U
+#endif
+#ifndef CPUFAMILY_ARM_DONAN
+#define CPUFAMILY_ARM_DONAN 0x6f5129acU
+#endif
+#ifndef CPUFAMILY_ARM_TUPAI
+#define CPUFAMILY_ARM_TUPAI 0x204526d0U
+#endif
+#ifndef CPUFAMILY_ARM_HIDRA
+#define CPUFAMILY_ARM_HIDRA 0x1d5a87e8U
+#endif
+#ifndef CPUFAMILY_ARM_THERA
+#define CPUFAMILY_ARM_THERA 0xab345f09U
+#endif
 
 static const pt_device_profile_t s_device_profiles[] = {
-    { "iPad6,7",    "J98aAP",  "Apple A9X",        "Apple A9X GPU",     2, 2, 0, 4ULL << 30, 0x67ceee93U, "RELEASE_ARM64_S8001", "s8001", "iPad Pro (12.9-inch)",                  "ML0F2", "A1584", YES, 2048, 2732, 2.0, 60,  1003, "applegpu_g8s",  12, "G8S"  },
-    { "iPad8,6",    "J320xAP", "Apple A12X Bionic","Apple A12X GPU",    8, 4, 4, 4ULL << 30, 0x07d34b9fU, "RELEASE_ARM64_T8027", "t8027", "iPad Pro (12.9-inch) (3rd generation)", "MTEL2", "A1876", YES, 2048, 2732, 2.0, 120, 1005, "applegpu_g11g",  7, "G11G" },
-    { "iPad13,8",   "J522AP",  "Apple M1",         "Apple M1 GPU",      8, 4, 4, 8ULL << 30, 0x1b588bb3U, "RELEASE_ARM64_T8103", "t8103", "iPad Pro (12.9-inch) (5th generation)", "MHNF3", "A2378", YES, 2048, 2732, 2.0, 120, 1007, "applegpu_g13g",  8, "G13G" },
-    { "iPad14,5",   "J620AP",  "Apple M2",         "Apple M2 GPU",      8, 4, 4, 8ULL << 30, 0xda33d83dU, "RELEASE_ARM64_T8112", "t8112", "iPad Pro (12.9-inch) (6th generation)", "MNXP3", "A2436", YES, 2048, 2732, 2.0, 120, 1008, "applegpu_g14g", 10, "G14G" },
-    { "iPad16,6",   "J720AP",  "Apple M4",         "Apple M4 GPU",      9, 3, 6, 8ULL << 30, 0x6f5129acU, "RELEASE_ARM64_T8132", "t8132", "iPad Pro 13-inch (M4)",                 "MVX23", "A2925", YES, 2064, 2752, 2.0, 120, 1009, "applegpu_g16g", 10, "G16G" },
-    { "iPad17,3",   "J820AP",  "Apple M5",         "Apple M5 GPU",      9, 3, 6, 12ULL << 30, 0x1d5a87e8U, "RELEASE_ARM64_T8142", "t8142", "iPad Pro 13-inch (M5)",                 "MD8R4", "A3360", YES, 2064, 2752, 2.0, 120, 1010, "applegpu_g18g", 10, "G18G" },
-    { "iPhone12,5", "D431AP",  "Apple A13 Bionic", "Apple A13 GPU",     6, 2, 4, 4ULL << 30, 0x573b5eecU, "RELEASE_ARM64_T8030", "t8030", "iPhone 11 Pro Max",                     "MWHD2", "A2161", NO,  1242, 2688, 3.0, 60,  1006, "applegpu_g12p",  4, "G12P" },
-    { "iPhone14,3", "D64AP",   "Apple A15 Bionic", "Apple A15 GPU",     6, 2, 4, 6ULL << 30, 0xda33d83dU, "RELEASE_ARM64_T8110", "t8110", "iPhone 13 Pro Max",                     "MLL63", "A2484", NO,  1284, 2778, 3.0, 120, 1008, "applegpu_g14p",  5, "G14P" },
-    { "iPhone15,3", "D74AP",   "Apple A16 Bionic", "Apple A16 GPU",     6, 2, 4, 6ULL << 30, 0x8765edeaU, "RELEASE_ARM64_T8120", "t8120", "iPhone 14 Pro Max",                     "MQ8N3", "A2651", NO,  1290, 2796, 3.0, 120, 1008, "applegpu_g15p",  5, "G15P" },
-    { "iPhone16,2", "D84AP",   "Apple A17 Pro",    "Apple A17 Pro GPU", 6, 2, 4, 8ULL << 30, 0xfa33415eU, "RELEASE_ARM64_T8130", "t8130", "iPhone 15 Pro Max",                     "MU683", "A2849", NO,  1290, 2796, 3.0, 120, 1009, "applegpu_g16p",  6, "G16P" },
-    { "iPhone17,2", "D94AP",   "Apple A18 Pro",    "Apple A18 Pro GPU", 6, 2, 4, 8ULL << 30, 0x75d4acb9U, "RELEASE_ARM64_T8140", "t8140", "iPhone 16 Pro Max",                     "MYWV3", "A3084", NO,  1320, 2868, 3.0, 120, 1009, "applegpu_g17p",  6, "G17P" },
-    { "iPhone18,2", "D94xAP",  "Apple A19 Pro",    "Apple A19 Pro GPU", 6, 2, 4, 12ULL << 30, 0xab345f09U, "RELEASE_ARM64_T8150", "t8150", "iPhone 17 Pro Max",                     "MFY84", "A3257", NO,  1320, 2868, 3.0, 120, 1010, "applegpu_g18p",  6, "G18P" },
+    { "iPad6,7",    "J98aAP",  "Apple A9X",        "Apple A9X GPU",     2, 2, 0, 4ULL << 30,  CPUFAMILY_ARM_TWISTER,            "RELEASE_ARM64_S8001", "s8001", "iPad Pro (12.9-inch)",                  "ML0F2", "A1584", YES, 2048, 2732, 2.0, 60,  1003, "applegpu_g8s",  12, "G8S"  },
+    { "iPad8,6",    "J320xAP", "Apple A12X Bionic","Apple A12X GPU",    8, 4, 4, 4ULL << 30,  CPUFAMILY_ARM_VORTEX_TEMPEST,     "RELEASE_ARM64_T8027", "t8027", "iPad Pro (12.9-inch) (3rd generation)", "MTEL2", "A1876", YES, 2048, 2732, 2.0, 120, 1005, "applegpu_g11g",  7, "G11G" },
+    { "iPad13,8",   "J522AP",  "Apple M1",         "Apple M1 GPU",      8, 4, 4, 8ULL << 30,  CPUFAMILY_ARM_FIRESTORM_ICESTORM, "RELEASE_ARM64_T8103", "t8103", "iPad Pro (12.9-inch) (5th generation)", "MHNF3", "A2378", YES, 2048, 2732, 2.0, 120, 1007, "applegpu_g13g",  8, "G13G" },
+    { "iPad14,5",   "J620AP",  "Apple M2",         "Apple M2 GPU",      8, 4, 4, 8ULL << 30,  CPUFAMILY_ARM_BLIZZARD_AVALANCHE, "RELEASE_ARM64_T8112", "t8112", "iPad Pro (12.9-inch) (6th generation)", "MNXP3", "A2436", YES, 2048, 2732, 2.0, 120, 1008, "applegpu_g14g", 10, "G14G" },
+    { "iPad16,6",   "J720AP",  "Apple M4",         "Apple M4 GPU",      9, 3, 6, 8ULL << 30,  CPUFAMILY_ARM_DONAN,              "RELEASE_ARM64_T8132", "t8132", "iPad Pro 13-inch (M4)",                 "MVX23", "A2925", YES, 2064, 2752, 2.0, 120, 1009, "applegpu_g16g", 10, "G16G" },
+    { "iPad17,3",   "J820AP",  "Apple M5",         "Apple M5 GPU",      9, 3, 6, 12ULL << 30, CPUFAMILY_ARM_HIDRA,              "RELEASE_ARM64_T8142", "t8142", "iPad Pro 13-inch (M5)",                 "MD8R4", "A3360", YES, 2064, 2752, 2.0, 120, 1010, "applegpu_g18g", 10, "G18G" },
+    { "iPhone12,5", "D431AP",  "Apple A13 Bionic", "Apple A13 GPU",     6, 2, 4, 4ULL << 30,  CPUFAMILY_ARM_LIGHTNING_THUNDER,  "RELEASE_ARM64_T8030", "t8030", "iPhone 11 Pro Max",                     "MWHD2", "A2161", NO,  1242, 2688, 3.0, 60,  1006, "applegpu_g12p",  4, "G12P" },
+    { "iPhone14,3", "D64AP",   "Apple A15 Bionic", "Apple A15 GPU",     6, 2, 4, 6ULL << 30,  CPUFAMILY_ARM_BLIZZARD_AVALANCHE, "RELEASE_ARM64_T8110", "t8110", "iPhone 13 Pro Max",                     "MLL63", "A2484", NO,  1284, 2778, 3.0, 120, 1008, "applegpu_g14p",  5, "G14P" },
+    { "iPhone15,3", "D74AP",   "Apple A16 Bionic", "Apple A16 GPU",     6, 2, 4, 6ULL << 30,  CPUFAMILY_ARM_EVEREST_SAWTOOTH,   "RELEASE_ARM64_T8120", "t8120", "iPhone 14 Pro Max",                     "MQ8N3", "A2651", NO,  1290, 2796, 3.0, 120, 1008, "applegpu_g15p",  5, "G15P" },
+    { "iPhone16,2", "D84AP",   "Apple A17 Pro",    "Apple A17 Pro GPU", 6, 2, 4, 8ULL << 30,  CPUFAMILY_ARM_COLL,               "RELEASE_ARM64_T8130", "t8130", "iPhone 15 Pro Max",                     "MU683", "A2849", NO,  1290, 2796, 3.0, 120, 1009, "applegpu_g16p",  6, "G16P" },
+    { "iPhone17,2", "D94AP",   "Apple A18 Pro",    "Apple A18 Pro GPU", 6, 2, 4, 8ULL << 30,  CPUFAMILY_ARM_TUPAI,              "RELEASE_ARM64_T8140", "t8140", "iPhone 16 Pro Max",                     "MYWV3", "A3084", NO,  1320, 2868, 3.0, 120, 1009, "applegpu_g17p",  6, "G17P" },
+    { "iPhone18,2", "D94xAP",  "Apple A19 Pro",    "Apple A19 Pro GPU", 6, 2, 4, 12ULL << 30, CPUFAMILY_ARM_THERA,              "RELEASE_ARM64_T8150", "t8150", "iPhone 17 Pro Max",                     "MFY84", "A3257", NO,  1320, 2868, 3.0, 120, 1010, "applegpu_g18p",  6, "G18P" },
 };
+
+typedef struct {
+    int min_ios_major;
+    int max_ios_major;
+} pt_device_os_bounds_t;
+
+static const pt_device_os_bounds_t s_device_os_bounds[] = {
+    {  9, 16 }, // iPad6,7    (A9X, EOL iPadOS 16.7.x)
+    { 12, 18 }, // iPad8,6    (A12X, EOL iPadOS 18.x)
+    { 14, 99 }, // iPad13,8   (M1)
+    { 16, 99 }, // iPad14,5   (M2)
+    { 17, 99 }, // iPad16,6   (M4)
+    { 26, 99 }, // iPad17,3   (M5)
+    { 13, 99 }, // iPhone12,5 (A13)
+    { 15, 99 }, // iPhone14,3 (A15)
+    { 16, 99 }, // iPhone15,3 (A16)
+    { 17, 99 }, // iPhone16,2 (A17 Pro)
+    { 18, 99 }, // iPhone17,2 (A18 Pro)
+    { 26, 99 }, // iPhone18,2 (A19 Pro)
+};
+
+_Static_assert(sizeof(s_device_os_bounds) / sizeof(s_device_os_bounds[0]) ==
+               sizeof(s_device_profiles) / sizeof(s_device_profiles[0]),
+               "s_device_os_bounds count mismatch");
 
 static _Atomic(const pt_device_profile_t *) s_active_device_profile = &s_device_profiles[2];
 
@@ -941,53 +1001,121 @@ static int pt_parse_reported_ios_override_mode_cstr(const char *raw_mode) {
     return 0;
 }
 
-static BOOL pt_is_compat13_7_mode_cstr(const char *rep_mode) {
-    return pt_parse_reported_ios_override_mode_cstr(rep_mode) == 2;
+static const char *pt_coerce_model_for_ios_major(const char *model, int ios_major) {
+    const char *base = (model != NULL && model[0] != '\0') ? model : "iPad13,8";
+    if (ios_major <= 0) {
+        return base;
+    }
+    BOOL is_iphone = (strncmp(base, "iPhone", 6) == 0);
+    int min_major = 0;
+    int max_major = 99;
+    BOOL matched_bounds = NO;
+    size_t count = sizeof(s_device_profiles) / sizeof(s_device_profiles[0]);
+    for (size_t i = 0; i < count; i++) {
+        if (strcmp(base, s_device_profiles[i].model) == 0) {
+            min_major = s_device_os_bounds[i].min_ios_major;
+            max_major = s_device_os_bounds[i].max_ios_major;
+            matched_bounds = YES;
+            break;
+        }
+    }
+    if (!matched_bounds) {
+        if (strncmp(base, "iPhone18,", 9) == 0 || strncmp(base, "iPad17,", 7) == 0) {
+            min_major = 26;
+            max_major = 99;
+        } else if (ios_major <= 13) {
+            return is_iphone ? "iPhone12,5" : "iPad8,6";
+        } else {
+            return base;
+        }
+    }
+    if (ios_major >= min_major && ios_major <= max_major) {
+        return base;
+    }
+    if (ios_major < min_major) {
+        // Model is newer than target iOS major: choose newest profile of same form factor within bounds.
+        for (size_t i = count; i > 0; i--) {
+            size_t idx = i - 1U;
+            if (s_device_profiles[idx].is_ipad == (!is_iphone) &&
+                ios_major >= s_device_os_bounds[idx].min_ios_major &&
+                ios_major <= s_device_os_bounds[idx].max_ios_major) {
+                return s_device_profiles[idx].model;
+            }
+        }
+        return is_iphone ? "iPhone12,5" : "iPad8,6";
+    }
+    // Model is EOL (ios_major > max_major): coerce to a current supported model of same form factor.
+    if (!is_iphone) {
+        if (ios_major >= 14) {
+            return "iPad13,8";
+        }
+        return "iPad8,6";
+    }
+    if (ios_major >= 18) {
+        return "iPhone17,2";
+    }
+    for (size_t i = count; i > 0; i--) {
+        size_t idx = i - 1U;
+        if (!s_device_profiles[idx].is_ipad &&
+            ios_major >= s_device_os_bounds[idx].min_ios_major &&
+            ios_major <= s_device_os_bounds[idx].max_ios_major) {
+            return s_device_profiles[idx].model;
+        }
+    }
+    return "iPhone12,5";
 }
 
-static const char *pt_coerce_model_for_compat13_7(const char *model) {
-    if (model != NULL &&
-        (strcmp(model, "iPad6,7") == 0 ||
-         strcmp(model, "iPad8,6") == 0 ||
-         strcmp(model, "iPhone12,5") == 0)) {
-        return model;
+static int pt_effective_ios_major_for_override(int override_mode) {
+    if (override_mode == 2) {
+        return 13;
     }
-    if (model != NULL && strncmp(model, "iPhone", 6) == 0) {
-        return "iPhone12,5";
+    if (override_mode == 1) {
+        return 18;
     }
-    return "iPad8,6";
+    pt_ensure_host_kernel_info();
+    int host_major = atoi(s_spoofed_ios_version);
+    return (host_major > 0) ? host_major : 18;
 }
 
 static void pt_init_early_device_info(void) {
     int fd = pt_open_early_settings_plist_fd();
+    char parsed_model[64] = {0};
+    BOOL has_model = NO;
+    int override_mode = 0;
+    BOOL safe_or_forced_off = (atomic_load_explicit(&s_reported_ios_override_forced_off, memory_order_acquire) ||
+                               pt_is_safe_mode_env_active());
     if (fd >= 0) {
         char raw_model[64] = {0};
-        char parsed_model[64] = {0};
         if (pt_read_plist_top_string_from_fd(fd, "iosDeviceModel", raw_model, sizeof(raw_model))) {
             pt_copy_trimmed_ascii(raw_model, parsed_model, sizeof(parsed_model));
+            has_model = (parsed_model[0] != '\0');
         }
-        BOOL has_model = (parsed_model[0] != '\0');
-        const char *base_model = has_model ? parsed_model : "iPad13,8";
-        strlcpy(s_uncoerced_device_model, base_model, sizeof(s_uncoerced_device_model));
-        atomic_store_explicit(&s_has_uncoerced_device_model, YES, memory_order_release);
-
         char rep_mode[32] = {0};
-        BOOL is_compat13 = (!atomic_load_explicit(&s_reported_ios_override_forced_off, memory_order_acquire) &&
-                            !pt_is_safe_mode_env_active() &&
-                            pt_read_plist_top_string_from_fd(fd, "reportedIOSVersion", rep_mode, sizeof(rep_mode)) &&
-                            pt_is_compat13_7_mode_cstr(rep_mode));
-        const char *effective_model = is_compat13 ? pt_coerce_model_for_compat13_7(base_model) : base_model;
-        if (has_model || is_compat13) {
-            const pt_device_profile_t *profile = pt_set_cached_device_profile_from_model(
-                effective_model,
-                s_early_device_model, sizeof(s_early_device_model),
-                s_early_oem_id, sizeof(s_early_oem_id));
-            atomic_store_explicit(&s_active_device_profile, profile, memory_order_release);
-            atomic_store_explicit(&s_active_device_model, profile->model, memory_order_release);
-            atomic_store_explicit(&s_active_oem_id, profile->oem_id, memory_order_release);
+        if (!safe_or_forced_off &&
+            pt_read_plist_top_string_from_fd(fd, "reportedIOSVersion", rep_mode, sizeof(rep_mode))) {
+            override_mode = pt_parse_reported_ios_override_mode_cstr(rep_mode);
         }
         close(fd);
     }
+
+    const char *base_model = has_model ? parsed_model : "iPad13,8";
+    const char *effective_model = base_model;
+    if (!safe_or_forced_off) {
+        int eff_ios_major = pt_effective_ios_major_for_override(override_mode);
+        effective_model = pt_coerce_model_for_ios_major(base_model, eff_ios_major);
+    }
+
+    os_unfair_lock_lock(&s_device_info_lock);
+    strlcpy(s_uncoerced_device_model, base_model, sizeof(s_uncoerced_device_model));
+    atomic_store_explicit(&s_has_uncoerced_device_model, YES, memory_order_release);
+    const pt_device_profile_t *profile = pt_set_cached_device_profile_from_model(
+        effective_model,
+        s_early_device_model, sizeof(s_early_device_model),
+        s_early_oem_id, sizeof(s_early_oem_id));
+    atomic_store_explicit(&s_active_device_profile, profile, memory_order_release);
+    atomic_store_explicit(&s_active_device_model, profile->model, memory_order_release);
+    atomic_store_explicit(&s_active_oem_id, profile->oem_id, memory_order_release);
+    os_unfair_lock_unlock(&s_device_info_lock);
 }
 
 __attribute__((visibility("hidden"))) void pt_init_device_info(void) {
@@ -997,11 +1125,17 @@ __attribute__((visibility("hidden"))) void pt_init_device_info(void) {
         pthread_once(&s_pt_early_device_once, pt_init_early_device_info);
         s_tls_early_device_init--;
     }
-    strlcpy(s_final_device_model, s_early_device_model, sizeof(s_final_device_model));
-    strlcpy(s_final_oem_id, s_early_oem_id, sizeof(s_final_oem_id));
-    const pt_device_profile_t *final_profile = pt_device_profile_for_model(s_final_device_model);
-    const char *published_model = final_profile->model;
-    const char *published_oem = final_profile->oem_id;
+
+    char early_model_copy[64] = {0};
+    char early_oem_copy[64] = {0};
+    os_unfair_lock_lock(&s_device_info_lock);
+    strlcpy(early_model_copy, s_early_device_model, sizeof(early_model_copy));
+    strlcpy(early_oem_copy, s_early_oem_id, sizeof(early_oem_copy));
+    os_unfair_lock_unlock(&s_device_info_lock);
+
+    char raw_cfg_model[64] = {0};
+    char settings_model[64] = {0};
+    char settings_oem[64] = {0};
     BOOL prev_tls = s_tls_initializing_device_info;
     s_tls_initializing_device_info = YES;
     @autoreleasepool {
@@ -1009,41 +1143,70 @@ __attribute__((visibility("hidden"))) void pt_init_device_info(void) {
         NSString *rawCfg = [ps rawConfiguredDeviceModel];
         const char *rm = [rawCfg UTF8String];
         if (rm != NULL && rm[0] != '\0') {
-            pt_copy_trimmed_ascii(rm, s_uncoerced_device_model, sizeof(s_uncoerced_device_model));
-            if (s_uncoerced_device_model[0] != '\0') {
-                atomic_store_explicit(&s_has_uncoerced_device_model, YES, memory_order_release);
-            }
+            pt_copy_trimmed_ascii(rm, raw_cfg_model, sizeof(raw_cfg_model));
         }
         NSString *model = [ps deviceModel];
         const char *m = [model UTF8String];
         if (m != NULL && m[0] != '\0') {
-            const char *eff_m = m;
-            if ((atomic_load_explicit(&s_reported_ios_override_forced_off, memory_order_acquire) ||
-                 pt_is_safe_mode_env_active()) &&
-                atomic_load_explicit(&s_has_uncoerced_device_model, memory_order_acquire) &&
-                s_uncoerced_device_model[0] != '\0') {
-                eff_m = s_uncoerced_device_model;
-            }
-            final_profile = pt_set_cached_device_profile_from_model(
-                eff_m,
-                s_final_device_model, sizeof(s_final_device_model),
-                s_final_oem_id, sizeof(s_final_oem_id));
-            published_model = final_profile->model;
-            published_oem = final_profile->oem_id;
+            pt_copy_trimmed_ascii(m, settings_model, sizeof(settings_model));
         } else {
             NSString *oem = [ps oemID];
             const char *o = [oem UTF8String];
             if (o != NULL && o[0] != '\0') {
-                strlcpy(s_final_oem_id, o, sizeof(s_final_oem_id));
-                published_oem = s_final_oem_id;
+                strlcpy(settings_oem, o, sizeof(settings_oem));
             }
         }
     }
     s_tls_initializing_device_info = prev_tls;
+
+    int eff_ios_major = 0;
+    BOOL safe_or_forced_off = (atomic_load_explicit(&s_reported_ios_override_forced_off, memory_order_acquire) ||
+                               pt_is_safe_mode_env_active());
+    if (!safe_or_forced_off) {
+        const char *eff_ver = pt_get_spoofed_ios_version_cstr();
+        eff_ios_major = (eff_ver != NULL) ? atoi(eff_ver) : 0;
+    }
+
+    os_unfair_lock_lock(&s_device_info_lock);
+    if (raw_cfg_model[0] != '\0') {
+        strlcpy(s_uncoerced_device_model, raw_cfg_model, sizeof(s_uncoerced_device_model));
+        atomic_store_explicit(&s_has_uncoerced_device_model, YES, memory_order_release);
+    }
+    strlcpy(s_final_device_model, early_model_copy, sizeof(s_final_device_model));
+    strlcpy(s_final_oem_id, early_oem_copy, sizeof(s_final_oem_id));
+    const pt_device_profile_t *final_profile = pt_device_profile_for_model(s_final_device_model);
+    const char *published_model = final_profile->model;
+    const char *published_oem = final_profile->oem_id;
+
+    if (settings_model[0] != '\0') {
+        const char *eff_m = settings_model;
+        if (safe_or_forced_off &&
+            atomic_load_explicit(&s_has_uncoerced_device_model, memory_order_acquire) &&
+            s_uncoerced_device_model[0] != '\0') {
+            eff_m = s_uncoerced_device_model;
+        } else if (!safe_or_forced_off && eff_ios_major > 0) {
+            eff_m = pt_coerce_model_for_ios_major(eff_m, eff_ios_major);
+        }
+        final_profile = pt_set_cached_device_profile_from_model(
+            eff_m,
+            s_final_device_model, sizeof(s_final_device_model),
+            s_final_oem_id, sizeof(s_final_oem_id));
+        published_model = final_profile->model;
+        published_oem = final_profile->oem_id;
+    } else if (settings_oem[0] != '\0') {
+        strlcpy(s_final_oem_id, settings_oem, sizeof(s_final_oem_id));
+        if (!s_has_custom_final_oem_id) {
+            strlcpy(s_custom_final_oem_id, settings_oem, sizeof(s_custom_final_oem_id));
+            s_has_custom_final_oem_id = YES;
+        }
+        published_oem = s_custom_final_oem_id;
+    }
+
     atomic_store_explicit(&s_active_device_profile, final_profile, memory_order_release);
     atomic_store_explicit(&s_active_device_model, published_model, memory_order_release);
     atomic_store_explicit(&s_active_oem_id, published_oem, memory_order_release);
     atomic_store_explicit(&s_pt_device_info_ready, YES, memory_order_release);
+    os_unfair_lock_unlock(&s_device_info_lock);
     pt_leave_internal_scope();
 }
 
@@ -1234,12 +1397,6 @@ __attribute__((visibility("hidden"))) int pt_write_sysctl_uint64(void *oldp, siz
         errno = EINVAL;
         return -1;
     }
-    if (*oldlenp == sizeof(uint32_t)) {
-        uint32_t v32 = (val > 0x80000000ULL) ? 0x80000000U : (uint32_t)val;
-        memcpy(oldp, &v32, sizeof(uint32_t));
-        *oldlenp = sizeof(uint32_t);
-        return 0;
-    }
     if (*oldlenp < sizeof(uint64_t)) {
         *oldlenp = sizeof(uint64_t);
         errno = ENOMEM;
@@ -1419,9 +1576,10 @@ __attribute__((visibility("hidden"))) void pt_fallback_ios_version_for_kern_majo
         case 23: strlcpy(out_buf, "17.6", out_size); break;
         case 24: strlcpy(out_buf, "18.3", out_size); break;
         case 25: strlcpy(out_buf, "26.0", out_size); break;
+        case 26: strlcpy(out_buf, "26.0", out_size); break;
         default:
-            if (kern_major > 25) {
-                snprintf(out_buf, out_size, "%d.0", kern_major + 1);
+            if (kern_major >= 27) {
+                snprintf(out_buf, out_size, "%d.0", kern_major);
             } else {
                 strlcpy(out_buf, "18.3", out_size);
             }
@@ -1459,8 +1617,12 @@ static BOOL pt_expected_ios_build_prefix_for_major(int ios_major, int *out_expec
         *out_expected_prefix = 22;
         return YES;
     }
-    if (ios_major >= 26 && ios_major <= 99) {
-        *out_expected_prefix = ios_major - 3;
+    if (ios_major == 26) {
+        *out_expected_prefix = 23;
+        return YES;
+    }
+    if (ios_major >= 27 && ios_major <= 99) {
+        *out_expected_prefix = ios_major - 1;
         return YES;
     }
     return NO;
@@ -1485,7 +1647,7 @@ __attribute__((visibility("hidden"))) BOOL pt_sanitize_ios_build_version_with_ke
         }
     }
     if (expected_prefix <= 0 && kern_major >= 19) {
-        expected_prefix = kern_major - 2;
+        expected_prefix = (kern_major >= 27) ? (kern_major - 1) : (kern_major - 2);
     }
 
     const char *p = build_cstr;
@@ -1613,6 +1775,7 @@ static pt_reported_ios_override_t pt_active_reported_ios_override(void) {
 __attribute__((visibility("hidden"))) void pt_disable_reported_ios_override_for_safe_mode(void) {
     atomic_store_explicit(&s_reported_ios_override_forced_off, YES, memory_order_release);
     atomic_store_explicit(&s_reported_ios_override_mode, PT_REPORTED_IOS_OVERRIDE_NONE, memory_order_release);
+    os_unfair_lock_lock(&s_device_info_lock);
     if (atomic_load_explicit(&s_has_uncoerced_device_model, memory_order_acquire) &&
         s_uncoerced_device_model[0] != '\0') {
         const pt_device_profile_t *orig_profile = pt_set_cached_device_profile_from_model(
@@ -1623,6 +1786,7 @@ __attribute__((visibility("hidden"))) void pt_disable_reported_ios_override_for_
         atomic_store_explicit(&s_active_device_model, orig_profile->model, memory_order_release);
         atomic_store_explicit(&s_active_oem_id, orig_profile->oem_id, memory_order_release);
     }
+    os_unfair_lock_unlock(&s_device_info_lock);
 }
 
 __attribute__((visibility("hidden")))

@@ -15,13 +15,21 @@
 extern "C" {
 #endif
 
-void pt_debug_trace_mark_ready(void);
-bool pt_debug_trace_is_enabled(void);
-void pt_debug_trace_emit(const char *subsystem, const char *func, const char *fmt, ...)
+#ifndef PT_INTERNAL_VISIBILITY
+#ifdef DEBUG
+#define PT_INTERNAL_VISIBILITY
+#else
+#define PT_INTERNAL_VISIBILITY __attribute__((visibility("hidden")))
+#endif
+#endif
+
+PT_INTERNAL_VISIBILITY void pt_debug_trace_mark_ready(void);
+PT_INTERNAL_VISIBILITY bool pt_debug_trace_is_enabled(void);
+PT_INTERNAL_VISIBILITY void pt_debug_trace_emit(const char *subsystem, const char *func, const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
-void pt_debug_trace_emit_cstr(const char *subsystem, const char *func, const char *message);
-void pt_debug_trace_set_sink_fd_for_testing(int fd);
-void pt_debug_trace_reset_for_testing(int forced_state);
+PT_INTERNAL_VISIBILITY void pt_debug_trace_emit_cstr(const char *subsystem, const char *func, const char *message);
+PT_INTERNAL_VISIBILITY void pt_debug_trace_set_sink_fd_for_testing(int fd);
+PT_INTERNAL_VISIBILITY void pt_debug_trace_reset_for_testing(int forced_state);
 
 #define PT_DEBUG_TRACE(subsystem, fmt, ...)                                                                            \
     do {                                                                                                               \

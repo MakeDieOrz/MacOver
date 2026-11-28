@@ -9,10 +9,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-@interface NSObject (SwizzleBattery)
-
-- (void)swizzleInstanceMethod:(SEL)origSelector withMethod:(SEL)newSelector;
-
-@end
+// Swizzling is handled via internal C helpers in BatteryLevel.m without adding
+// categories onto NSObject.
 
 NS_ASSUME_NONNULL_END

@@ -4,9 +4,11 @@
 //
 
 #import "PTInternal.h"
+#import "../PTCallerAddressMath.h"
 #import "PTCodeSignParser.h"
 #import "PTDetectionRules.h"
 #include <CommonCrypto/CommonDigest.h>
+#include <mach-o/loader.h>
 
 static NSDictionary *pt_get_fallback_entitlements_dict(void) {
     static NSDictionary *s_fallback_entitlements = nil;
@@ -1136,11 +1138,14 @@ static BOOL pt_get_or_compute_spoofed_primary_cdhash(uint8_t out_hash[20]) {
     return ok;
 }
 
-static int pt_handle_spoofed_csops_blob(pid_t pid,
-                                        void *useraddr,
-                                        size_t usersize,
-                                        BOOL use_audittoken,
-                                        audit_token_t *token) {
+static int pt_build_spoofed_csops_blob_opts(pid_t pid,
+                                            void *useraddr,
+                                            size_t usersize,
+                                            BOOL use_audittoken,
+                                            audit_token_t *token,
+                                            BOOL allow_team_grow,
+                                            BOOL allow_der_override,
+                                            BOOL keep_optional_slots) {
     if (usersize > 0 && useraddr == NULL) {
         errno = EFAULT;
         return -1;
@@ -1162,7 +1167,9 @@ static int pt_handle_spoofed_csops_blob(pid_t pid,
     }
     uint32_t raw_magic = ntohl(probe[0]);
     uint32_t raw_len = ntohl(probe[1]);
-    if (raw_magic != PT_CSMAGIC_EMBEDDED_SIGNATURE || raw_len < 12U || raw_len > (16U << 20)) {
+    // XNU leaves probe[0] == 0 on ERANGE while writing the required length into probe[1].
+    if ((raw_magic != 0U && raw_magic != PT_CSMAGIC_EMBEDDED_SIGNATURE) ||
+        raw_len < 12U || raw_len > (16U << 20)) {
         errno = saved_errno;
         return use_audittoken
             ? csops_audittoken(pid, PT_CS_OPS_BLOB, useraddr, usersize, token)
@@ -1182,6 +1189,19 @@ static int pt_handle_spoofed_csops_blob(pid_t pid,
         errno = saved;
         return -1;
     }
+    uint32_t actual_magic = 0, actual_len = 0;
+    memcpy(&actual_magic, raw_buf, sizeof(actual_magic));
+    memcpy(&actual_len, raw_buf + 4U, sizeof(actual_len));
+    actual_magic = ntohl(actual_magic);
+    actual_len = ntohl(actual_len);
+    if (actual_magic != PT_CSMAGIC_EMBEDDED_SIGNATURE || actual_len < 12U || actual_len > raw_len) {
+        free(raw_buf);
+        errno = saved_errno;
+        return use_audittoken
+            ? csops_audittoken(pid, PT_CS_OPS_BLOB, useraddr, usersize, token)
+            : csops(pid, PT_CS_OPS_BLOB, useraddr, usersize);
+    }
+    raw_len = actual_len;
     uint32_t slot_count = 0;
     memcpy(&slot_count, raw_buf + 8U, sizeof(slot_count));
     slot_count = ntohl(slot_count);
@@ -1220,7 +1240,7 @@ static int pt_handle_spoofed_csops_blob(pid_t pid,
     }
 
     BOOL compat13 = pt_is_compat13_7_active();
-    BOOL allow_der_slot = (!compat13 && max_cd_special_slots >= PT_CSSLOT_DER_ENTITLEMENTS);
+    BOOL allow_der_slot = (allow_der_override && !compat13 && max_cd_special_slots >= PT_CSSLOT_DER_ENTITLEMENTS);
     NSData *xmlData = pt_get_synthesized_entitlements_xml_data();
     NSData *derData = allow_der_slot ? pt_get_synthesized_entitlements_der_data() : nil;
     typedef struct {
@@ -1285,6 +1305,9 @@ static int pt_handle_spoofed_csops_blob(pid_t pid,
             payload_total += 8U + derData.length;
             out_count++;
         } else {
+            if (!keep_optional_slots && (stype == 0x10000U || stype == 2U)) {
+                continue;
+            }
             slots[out_count] = (pt_sb_slot_t){
                 .type = stype,
                 .magic_override = 0U,
@@ -1345,7 +1368,8 @@ static int pt_handle_spoofed_csops_blob(pid_t pid,
             (stype == PT_CSSLOT_CODEDIRECTORY ||
              (stype >= PT_CSSLOT_ALTERNATE_CODEDIRECTORIES &&
               stype < PT_CSSLOT_ALTERNATE_CODEDIRECTORIES + PT_CSSLOT_ALTERNATE_CODEDIRECTORY_MAX))) {
-            if (heap_cd_bufs != NULL &&
+            if (allow_team_grow &&
+                heap_cd_bufs != NULL &&
                 slots[i].len >= 52U &&
                 effective_team_id != NULL &&
                 strlen(effective_team_id) == 10U) {
@@ -1388,7 +1412,7 @@ static int pt_handle_spoofed_csops_blob(pid_t pid,
             }
         }
     }
-    if (best_cd_bytes != NULL) {
+    if (best_cd_bytes != NULL && allow_team_grow && allow_der_override && keep_optional_slots) {
         pt_store_spoofed_primary_cdhash(best_cd_bytes, best_cd_len, compat13);
     }
 
@@ -1452,6 +1476,236 @@ static int pt_handle_spoofed_csops_blob(pid_t pid,
     free(raw_buf);
     errno = saved_errno;
     return 0;
+}
+
+static int pt_handle_spoofed_csops_blob(pid_t pid,
+                                        void *useraddr,
+                                        size_t usersize,
+                                        BOOL use_audittoken,
+                                        audit_token_t *token) {
+    return pt_build_spoofed_csops_blob_opts(pid, useraddr, usersize, use_audittoken, token, YES, YES, YES);
+}
+
+static void pt_scrub_mapped_linkedit_entitlement_slots_in_place(uint8_t *mapped, uint32_t datasize) {
+    if (mapped == NULL || datasize < 12U) {
+        return;
+    }
+    uint32_t magic = 0, total_len = 0, slot_count = 0;
+    memcpy(&magic, mapped, sizeof(magic));
+    memcpy(&total_len, mapped + 4U, sizeof(total_len));
+    memcpy(&slot_count, mapped + 8U, sizeof(slot_count));
+    magic = ntohl(magic);
+    total_len = ntohl(total_len);
+    slot_count = ntohl(slot_count);
+    if (magic != PT_CSMAGIC_EMBEDDED_SIGNATURE || total_len < 12U || total_len > datasize ||
+        slot_count == 0U || slot_count > 256U || (size_t)slot_count * 8U > (size_t)(total_len - 12U)) {
+        return;
+    }
+    const char *effective_team_id = pt_get_effective_team_id_cstr();
+    for (uint32_t i = 0; i < slot_count; i++) {
+        uint32_t stype = 0, soff = 0;
+        memcpy(&stype, mapped + 12U + i * 8U, sizeof(stype));
+        memcpy(&soff, mapped + 16U + i * 8U, sizeof(soff));
+        stype = ntohl(stype);
+        soff = ntohl(soff);
+        if (soff < 12U + slot_count * 8U || soff + 8U > total_len) {
+            continue;
+        }
+        uint32_t clen = 0;
+        memcpy(&clen, mapped + soff + 4U, sizeof(clen));
+        clen = ntohl(clen);
+        if (clen < 8U || clen > total_len - soff) {
+            continue;
+        }
+        if (stype == PT_CSSLOT_ENTITLEMENTS || stype == PT_CSSLOT_DER_ENTITLEMENTS) {
+            if (clen > 8U) {
+                memset(mapped + soff + 8U, 0, (size_t)clen - 8U);
+            }
+        } else if (stype == PT_CSSLOT_CODEDIRECTORY ||
+                   (stype >= PT_CSSLOT_ALTERNATE_CODEDIRECTORIES &&
+                    stype < PT_CSSLOT_ALTERNATE_CODEDIRECTORIES + PT_CSSLOT_ALTERNATE_CODEDIRECTORY_MAX)) {
+            pt_patch_code_directory_metadata(mapped + soff, (size_t)clen, PT_CS_DESKTOP_CLEAR_MASK, effective_team_id);
+        }
+    }
+}
+
+__attribute__((visibility("hidden")))
+void pt_init_linkedit_cs_blob_cloaking(void) {
+    if (!pt_is_bypass_enabled()) {
+        return;
+    }
+    const struct mach_header *mh = pt_get_main_executable_header();
+    if (mh == NULL) {
+        mh = _dyld_get_image_header(0);
+    }
+    if (mh == NULL || !pt_is_valid_user_pointer(mh)) {
+        return;
+    }
+    const struct mach_header_64 *mh64 = (const struct mach_header_64 *)mh;
+    if (mh64->magic != MH_MAGIC_64 ||
+        mh64->cputype != CPU_TYPE_ARM64 ||
+        mh64->sizeofcmds == 0 ||
+        mh64->sizeofcmds > (1U << 20)) {
+        return;
+    }
+
+    const uint8_t *base = (const uint8_t *)mh64;
+    size_t total_hdr = sizeof(struct mach_header_64) + (size_t)mh64->sizeofcmds;
+    size_t off = sizeof(struct mach_header_64);
+    uint64_t text_vmaddr = 0;
+    BOOL has_text = NO;
+    struct segment_command_64 linkedit = {0};
+    BOOL has_linkedit = NO;
+    struct linkedit_data_command sig = {0};
+    BOOL has_sig = NO;
+
+    for (uint32_t i = 0; i < mh64->ncmds && off + sizeof(struct load_command) <= total_hdr; i++) {
+        const struct load_command *lc = (const struct load_command *)(base + off);
+        if (lc->cmdsize < sizeof(struct load_command) || off + lc->cmdsize > total_hdr) {
+            break;
+        }
+        if (lc->cmd == LC_SEGMENT_64 && lc->cmdsize >= sizeof(struct segment_command_64)) {
+            const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+            if (strncmp(seg->segname, "__TEXT", 16) == 0) {
+                text_vmaddr = seg->vmaddr;
+                has_text = YES;
+            } else if (strncmp(seg->segname, "__LINKEDIT", 16) == 0) {
+                linkedit = *seg;
+                has_linkedit = YES;
+            }
+        } else if (lc->cmd == LC_CODE_SIGNATURE && lc->cmdsize >= sizeof(struct linkedit_data_command)) {
+            sig = *(const struct linkedit_data_command *)lc;
+            has_sig = YES;
+        }
+        off += lc->cmdsize;
+    }
+
+    if (!has_text || !has_linkedit || !has_sig || sig.datasize < 12U) {
+        return;
+    }
+    if (sig.dataoff < linkedit.fileoff) {
+        return;
+    }
+    uint64_t link_span = (linkedit.vmsize < linkedit.filesize) ? linkedit.vmsize : linkedit.filesize;
+    uint64_t sig_rel = (uint64_t)(sig.dataoff - linkedit.fileoff);
+    if (sig_rel > link_span || (uint64_t)sig.datasize > link_span - sig_rel) {
+        return;
+    }
+    uintptr_t mh_addr = (uintptr_t)mh64;
+    if (mh_addr < (uintptr_t)text_vmaddr) {
+        return;
+    }
+    uintptr_t slide = mh_addr - (uintptr_t)text_vmaddr;
+    if ((uint64_t)linkedit.vmaddr > (uint64_t)UINTPTR_MAX - slide) {
+        return;
+    }
+    uintptr_t link_base = (uintptr_t)linkedit.vmaddr + slide;
+    if (sig_rel > (uint64_t)UINTPTR_MAX - link_base) {
+        return;
+    }
+    uintptr_t mapped = link_base + (uintptr_t)sig_rel;
+    if ((uintptr_t)sig.datasize > UINTPTR_MAX - mapped) {
+        return;
+    }
+
+    int saved_errno = errno;
+    static const struct {
+        BOOL allow_team_grow;
+        BOOL allow_der;
+        BOOL keep_optional;
+    } kLinkeditModes[] = {
+        { YES, YES, YES },
+        { NO,  YES, YES },
+        { NO,  NO,  YES },
+        { NO,  NO,  NO  },
+    };
+    uint8_t *sanitized = NULL;
+    uint32_t out_total = 0;
+    for (size_t m = 0; m < sizeof(kLinkeditModes) / sizeof(kLinkeditModes[0]); m++) {
+        uint32_t probe[2] = {0, 0};
+        if (pt_build_spoofed_csops_blob_opts(getpid(),
+                                             probe,
+                                             sizeof(probe),
+                                             NO,
+                                             NULL,
+                                             kLinkeditModes[m].allow_team_grow,
+                                             kLinkeditModes[m].allow_der,
+                                             kLinkeditModes[m].keep_optional) == 0 ||
+            errno != ERANGE) {
+            continue;
+        }
+        uint32_t probe_magic = ntohl(probe[0]);
+        uint32_t probe_total = ntohl(probe[1]);
+        if (probe_magic != PT_CSMAGIC_EMBEDDED_SIGNATURE ||
+            probe_total < 12U ||
+            probe_total > sig.datasize ||
+            probe_total > (16U << 20)) {
+            continue;
+        }
+        uint8_t *buf = (uint8_t *)malloc(probe_total);
+        if (buf == NULL) {
+            break;
+        }
+        if (pt_build_spoofed_csops_blob_opts(getpid(),
+                                             buf,
+                                             probe_total,
+                                             NO,
+                                             NULL,
+                                             kLinkeditModes[m].allow_team_grow,
+                                             kLinkeditModes[m].allow_der,
+                                             kLinkeditModes[m].keep_optional) == 0) {
+            sanitized = buf;
+            out_total = probe_total;
+            break;
+        }
+        free(buf);
+    }
+    errno = saved_errno;
+
+    uintptr_t page_sz = (vm_page_size > 0) ? (uintptr_t)vm_page_size : 16384U;
+    uintptr_t mapped_end = mapped + (uintptr_t)sig.datasize;
+    if (mapped_end > UINTPTR_MAX - (page_sz - 1U)) {
+        free(sanitized);
+        return;
+    }
+    uintptr_t page_start = mapped & ~(page_sz - 1U);
+    uintptr_t page_end = (mapped_end + page_sz - 1U) & ~(page_sz - 1U);
+    vm_size_t page_span = (vm_size_t)(page_end - page_start);
+
+    kern_return_t kr = vm_protect(mach_task_self(),
+                                  (vm_address_t)page_start,
+                                  page_span,
+                                  FALSE,
+                                  VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (kr != KERN_SUCCESS) {
+        PT_DEBUG_TRACE("entitlements", "linkedit COW vm_protect failed kr=%d", kr);
+        free(sanitized);
+        return;
+    }
+
+    if (sanitized != NULL && out_total >= 12U && out_total <= sig.datasize) {
+        memcpy((void *)mapped, sanitized, out_total);
+        if ((size_t)sig.datasize > (size_t)out_total) {
+            memset((void *)(mapped + out_total), 0, (size_t)sig.datasize - (size_t)out_total);
+        }
+        PT_DEBUG_TRACE("entitlements",
+                       "sanitized mapped __LINKEDIT signature len=%u/%u",
+                       out_total,
+                       sig.datasize);
+    } else {
+        // Fallback when even compact SuperBlob exceeds sig.datasize: scrub raw entitlement payloads
+        // and desktop CodeDirectory flags in-place so host SBPL strings never remain mapped.
+        pt_scrub_mapped_linkedit_entitlement_slots_in_place((uint8_t *)mapped, sig.datasize);
+        PT_DEBUG_TRACE("entitlements",
+                       "in-place scrubbed oversized mapped __LINKEDIT signature datasize=%u",
+                       sig.datasize);
+    }
+    (void)vm_protect(mach_task_self(),
+                     (vm_address_t)page_start,
+                     page_span,
+                     FALSE,
+                     VM_PROT_READ);
+    free(sanitized);
 }
 
 static int pt_handle_spoofed_csops_query(pid_t pid,
@@ -1833,7 +2087,7 @@ static void pt_ensure_playchain_default_access_group(void) {
 // Use the implementations from PlayKeychain
 static OSStatus pt_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
     const void *caller = __builtin_return_address(0);
-    OSStatus retval;
+    OSStatus retval = errSecUnimplemented;
     if (result != NULL) {
         *result = NULL;
     }
@@ -1841,7 +2095,12 @@ static OSStatus pt_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result)
         if (query == NULL) {
             return errSecParam;
         }
-        pt_ensure_playchain_default_access_group();
+        pt_enter_internal_scope();
+        @try {
+            pt_ensure_playchain_default_access_group();
+        } @finally {
+            pt_leave_internal_scope();
+        }
         BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
         if (!is_sys) {
             OSStatus agrpStatus = pt_validate_dict_access_group(query, YES);
@@ -1849,8 +2108,13 @@ static OSStatus pt_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result)
                 return agrpStatus;
             }
         }
-        retval = [PlayKeychain copyMatching:(__bridge NSDictionary * _Nonnull)(query) result:(void *)result];
-        if (retval == errSecItemNotFound && is_sys) {
+        pt_enter_internal_scope();
+        @try {
+            retval = [PlayKeychain copyMatching:(__bridge NSDictionary * _Nonnull)(query) result:(void *)result];
+        } @finally {
+            pt_leave_internal_scope();
+        }
+        if ((retval == errSecItemNotFound || retval == errSecParam) && is_sys) {
             CFTypeRef secClass = CFDictionaryGetValue(query, kSecClass);
             if ((secClass != NULL && CFEqual(secClass, kSecClassCertificate)) ||
                 CFDictionaryContainsKey(query, kSecMatchPolicy) ||
@@ -1865,15 +2129,20 @@ static OSStatus pt_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result)
         retval = SecItemCopyMatching(query, result);
     }
     if (result != NULL && retval == errSecSuccess && pt_is_playchain_debug_enabled()) {
-        [PlayKeychain debugLogger:[NSString stringWithFormat:@"SecItemCopyMatching: %@", query]];
-        [PlayKeychain debugLogger:[NSString stringWithFormat:@"SecItemCopyMatching result: %@", (result && *result) ? (__bridge id)(*result) : @"(null)"]];
+        pt_enter_internal_scope();
+        @try {
+            [PlayKeychain debugLogger:[NSString stringWithFormat:@"SecItemCopyMatching: %@", query]];
+            [PlayKeychain debugLogger:[NSString stringWithFormat:@"SecItemCopyMatching result: %@", (result && *result) ? (__bridge id)(*result) : @"(null)"]];
+        } @finally {
+            pt_leave_internal_scope();
+        }
     }
     return retval;
 }
 
 static OSStatus pt_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
     const void *caller = __builtin_return_address(0);
-    OSStatus retval;
+    OSStatus retval = errSecUnimplemented;
     if (result != NULL) {
         *result = NULL;
     }
@@ -1881,7 +2150,12 @@ static OSStatus pt_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
         if (attributes == NULL) {
             return errSecParam;
         }
-        pt_ensure_playchain_default_access_group();
+        pt_enter_internal_scope();
+        @try {
+            pt_ensure_playchain_default_access_group();
+        } @finally {
+            pt_leave_internal_scope();
+        }
         NSDictionary *attrsDict = (__bridge NSDictionary *)attributes;
         if (!pt_is_effective_system_or_playtools_caller(caller)) {
             id rawToken = attrsDict[(__bridge id)kSecAttrTokenID];
@@ -1903,25 +2177,40 @@ static OSStatus pt_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
                 }
             }
         }
-        retval = [PlayKeychain add:attrsDict result:(void *)result];
+        pt_enter_internal_scope();
+        @try {
+            retval = [PlayKeychain add:attrsDict result:(void *)result];
+        } @finally {
+            pt_leave_internal_scope();
+        }
     } else {
         retval = SecItemAdd(attributes, result);
     }
     if (result != NULL && retval == errSecSuccess && pt_is_playchain_debug_enabled()) {
-        [PlayKeychain debugLogger:[NSString stringWithFormat:@"SecItemAdd: %@", attributes]];
-        [PlayKeychain debugLogger:[NSString stringWithFormat:@"SecItemAdd result: %@", (result && *result) ? (__bridge id)(*result) : @"(null)"]];
+        pt_enter_internal_scope();
+        @try {
+            [PlayKeychain debugLogger:[NSString stringWithFormat:@"SecItemAdd: %@", attributes]];
+            [PlayKeychain debugLogger:[NSString stringWithFormat:@"SecItemAdd result: %@", (result && *result) ? (__bridge id)(*result) : @"(null)"]];
+        } @finally {
+            pt_leave_internal_scope();
+        }
     }
     return retval;
 }
 
 static OSStatus pt_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributesToUpdate) {
     const void *caller = __builtin_return_address(0);
-    OSStatus retval;
+    OSStatus retval = errSecUnimplemented;
     if (pt_is_playchain_enabled()) {
         if (query == NULL || attributesToUpdate == NULL) {
             return errSecParam;
         }
-        pt_ensure_playchain_default_access_group();
+        pt_enter_internal_scope();
+        @try {
+            pt_ensure_playchain_default_access_group();
+        } @finally {
+            pt_leave_internal_scope();
+        }
         if (!pt_is_effective_system_or_playtools_caller(caller)) {
             OSStatus agrpStatus = pt_validate_dict_access_group(query, NO);
             if (agrpStatus != errSecSuccess) {
@@ -1932,44 +2221,69 @@ static OSStatus pt_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attribut
                 return agrpStatus;
             }
         }
-        retval = [PlayKeychain update:(__bridge NSDictionary * _Nonnull)(query) attributesToUpdate:(__bridge NSDictionary * _Nonnull)(attributesToUpdate)];
+        pt_enter_internal_scope();
+        @try {
+            retval = [PlayKeychain update:(__bridge NSDictionary * _Nonnull)(query) attributesToUpdate:(__bridge NSDictionary * _Nonnull)(attributesToUpdate)];
+        } @finally {
+            pt_leave_internal_scope();
+        }
     } else {
         retval = SecItemUpdate(query, attributesToUpdate);
     }
     if (attributesToUpdate != NULL && pt_is_playchain_debug_enabled()) {
-        [PlayKeychain debugLogger:[NSString stringWithFormat:@"SecItemUpdate: %@", query]];
-        [PlayKeychain debugLogger:[NSString stringWithFormat:@"SecItemUpdate attributesToUpdate: %@", attributesToUpdate]];
+        pt_enter_internal_scope();
+        @try {
+            [PlayKeychain debugLogger:[NSString stringWithFormat:@"SecItemUpdate: %@", query]];
+            [PlayKeychain debugLogger:[NSString stringWithFormat:@"SecItemUpdate attributesToUpdate: %@", attributesToUpdate]];
+        } @finally {
+            pt_leave_internal_scope();
+        }
     }
     return retval;
 }
 
 static OSStatus pt_SecItemDelete(CFDictionaryRef query) {
     const void *caller = __builtin_return_address(0);
-    OSStatus retval;
+    OSStatus retval = errSecUnimplemented;
     if (pt_is_playchain_enabled()) {
         if (query == NULL) {
             return errSecParam;
         }
-        pt_ensure_playchain_default_access_group();
+        pt_enter_internal_scope();
+        @try {
+            pt_ensure_playchain_default_access_group();
+        } @finally {
+            pt_leave_internal_scope();
+        }
         if (!pt_is_effective_system_or_playtools_caller(caller)) {
             OSStatus agrpStatus = pt_validate_dict_access_group(query, NO);
             if (agrpStatus != errSecSuccess) {
                 return agrpStatus;
             }
         }
-        retval = [PlayKeychain delete:(__bridge NSDictionary * _Nonnull)(query)];
+        pt_enter_internal_scope();
+        @try {
+            retval = [PlayKeychain delete:(__bridge NSDictionary * _Nonnull)(query)];
+        } @finally {
+            pt_leave_internal_scope();
+        }
     } else {
         retval = SecItemDelete(query);
     }
     if (pt_is_playchain_debug_enabled()) {
-        [PlayKeychain debugLogger:[NSString stringWithFormat:@"SecItemDelete: %@", query]];
+        pt_enter_internal_scope();
+        @try {
+            [PlayKeychain debugLogger:[NSString stringWithFormat:@"SecItemDelete: %@", query]];
+        } @finally {
+            pt_leave_internal_scope();
+        }
     }
     return retval;
 }
 
 static SecKeyRef pt_SecKeyCreateRandomKey(CFDictionaryRef parameters, CFErrorRef *error) {
     const void *caller = __builtin_return_address(0);
-    SecKeyRef result;
+    SecKeyRef result = NULL;
     if (error != NULL) {
         *error = NULL;
     }
@@ -1980,7 +2294,12 @@ static SecKeyRef pt_SecKeyCreateRandomKey(CFDictionaryRef parameters, CFErrorRef
             }
             return NULL;
         }
-        pt_ensure_playchain_default_access_group();
+        pt_enter_internal_scope();
+        @try {
+            pt_ensure_playchain_default_access_group();
+        } @finally {
+            pt_leave_internal_scope();
+        }
         if (!pt_is_effective_system_or_playtools_caller(caller)) {
             OSStatus agrpStatus = pt_validate_key_params_access_groups(parameters);
             if (agrpStatus != errSecSuccess) {
@@ -1990,14 +2309,24 @@ static SecKeyRef pt_SecKeyCreateRandomKey(CFDictionaryRef parameters, CFErrorRef
                 return NULL;
             }
         }
-        result = (SecKeyRef)[PlayKeychain keyCreateRandomKey:(__bridge NSDictionary * _Nonnull)(parameters)
-                                                     error:(void *)error];
+        pt_enter_internal_scope();
+        @try {
+            result = (SecKeyRef)[PlayKeychain keyCreateRandomKey:(__bridge NSDictionary * _Nonnull)(parameters)
+                                                         error:(void *)error];
+        } @finally {
+            pt_leave_internal_scope();
+        }
     } else {
         result = SecKeyCreateRandomKey(parameters, (void *)error);
     }
     if (pt_is_playchain_debug_enabled()) {
-        [PlayKeychain debugLogger:[NSString stringWithFormat:@"SecKeyCreateRandomKey: %@", parameters]];
-        [PlayKeychain debugLogger:[NSString stringWithFormat:@"SecKeyCreateRandomKey result: %@", result]];
+        pt_enter_internal_scope();
+        @try {
+            [PlayKeychain debugLogger:[NSString stringWithFormat:@"SecKeyCreateRandomKey: %@", parameters]];
+            [PlayKeychain debugLogger:[NSString stringWithFormat:@"SecKeyCreateRandomKey result: %@", result]];
+        } @finally {
+            pt_leave_internal_scope();
+        }
     }
     return result;
 }
@@ -2014,21 +2343,34 @@ static CFDataRef pt_SecKeyCopyExternalRepresentation(SecKeyRef key, CFErrorRef *
     }
     const void *caller = __builtin_return_address(0);
     if (pt_is_playchain_enabled() &&
-        !pt_is_effective_system_or_playtools_caller(caller) &&
-        [PTPlayChainSecureEnclaveRegistry isSecureEnclaveKey:key]) {
-        if (error != NULL) {
-            NSDictionary *userInfo = @{
-                NSLocalizedDescriptionKey: @"Secure Enclave private keys cannot be exported."
-            };
-            *error = CFErrorCreate(kCFAllocatorDefault,
-                                   kCFErrorDomainOSStatus,
-                                   errSecUnimplemented,
-                                   (__bridge CFDictionaryRef)userInfo);
+        !pt_is_effective_system_or_playtools_caller(caller)) {
+        BOOL isSE = NO;
+        pt_enter_internal_scope();
+        @try {
+            isSE = [PTPlayChainSecureEnclaveRegistry isSecureEnclaveKey:key];
+        } @finally {
+            pt_leave_internal_scope();
         }
-        if (pt_is_playchain_debug_enabled()) {
-            [PlayKeychain debugLogger:@"Blocked SecKeyCopyExternalRepresentation on simulated Secure Enclave key"];
+        if (isSE) {
+            if (error != NULL) {
+                NSDictionary *userInfo = @{
+                    NSLocalizedDescriptionKey: @"Secure Enclave private keys cannot be exported."
+                };
+                *error = CFErrorCreate(kCFAllocatorDefault,
+                                       kCFErrorDomainOSStatus,
+                                       errSecUnimplemented,
+                                       (__bridge CFDictionaryRef)userInfo);
+            }
+            if (pt_is_playchain_debug_enabled()) {
+                pt_enter_internal_scope();
+                @try {
+                    [PlayKeychain debugLogger:@"Blocked SecKeyCopyExternalRepresentation on simulated Secure Enclave key"];
+                } @finally {
+                    pt_leave_internal_scope();
+                }
+            }
+            return NULL;
         }
-        return NULL;
     }
     return SecKeyCopyExternalRepresentation(key, error);
 }
@@ -2043,8 +2385,15 @@ static CFDictionaryRef pt_SecKeyCopyAttributes(SecKeyRef key) {
     }
     const void *caller = __builtin_return_address(0);
     if (pt_is_playchain_enabled() && !pt_is_effective_system_or_playtools_caller(caller)) {
-        BOOL isSE = [PTPlayChainSecureEnclaveRegistry isSecureEnclaveKey:key];
-        NSDictionary *persisted = [PTPlayChainSecureEnclaveRegistry persistedAttributesForKey:key];
+        BOOL isSE = NO;
+        NSDictionary *persisted = nil;
+        pt_enter_internal_scope();
+        @try {
+            isSE = [PTPlayChainSecureEnclaveRegistry isSecureEnclaveKey:key];
+            persisted = [PTPlayChainSecureEnclaveRegistry persistedAttributesForKey:key];
+        } @finally {
+            pt_leave_internal_scope();
+        }
         if (isSE || persisted.count > 0) {
             NSDictionary *dict = (__bridge NSDictionary *)attrs;
             if ([dict isKindOfClass:[NSDictionary class]]) {
@@ -2071,26 +2420,41 @@ static CFDictionaryRef pt_SecKeyCopyAttributes(SecKeyRef key) {
 // Deprecated, but some apps might still use it.
 static OSStatus pt_SecKeyGeneratePair(CFDictionaryRef parameters, SecKeyRef *publicKey, SecKeyRef *privateKey) {
     const void *caller = __builtin_return_address(0);
-    OSStatus retval;
+    OSStatus retval = errSecUnimplemented;
     if (pt_is_playchain_enabled()) {
         if (parameters == NULL) {
             return errSecParam;
         }
-        pt_ensure_playchain_default_access_group();
+        pt_enter_internal_scope();
+        @try {
+            pt_ensure_playchain_default_access_group();
+        } @finally {
+            pt_leave_internal_scope();
+        }
         if (!pt_is_effective_system_or_playtools_caller(caller)) {
             OSStatus agrpStatus = pt_validate_key_params_access_groups(parameters);
             if (agrpStatus != errSecSuccess) {
                 return agrpStatus;
             }
         }
-        retval = [PlayKeychain keyGeneratePair:(__bridge NSDictionary * _Nonnull)(parameters) publicKey:(void *)publicKey privateKey:(void *)privateKey];
+        pt_enter_internal_scope();
+        @try {
+            retval = [PlayKeychain keyGeneratePair:(__bridge NSDictionary * _Nonnull)(parameters) publicKey:(void *)publicKey privateKey:(void *)privateKey];
+        } @finally {
+            pt_leave_internal_scope();
+        }
     } else {
         retval = SecKeyGeneratePair(parameters, (void *)publicKey, (void *)privateKey);
     }
     if (pt_is_playchain_debug_enabled()) {
-        [PlayKeychain debugLogger:[NSString stringWithFormat:@"SecKeyGeneratePair: %@", parameters]];
-        [PlayKeychain debugLogger:[NSString stringWithFormat:@"SecKeyGeneratePair public key result: %@", (retval == errSecSuccess && publicKey != NULL) ? *publicKey : nil]];
-        [PlayKeychain debugLogger:[NSString stringWithFormat:@"SecKeyGeneratePair private key result: %@", (retval == errSecSuccess && privateKey != NULL) ? *privateKey : nil]];
+        pt_enter_internal_scope();
+        @try {
+            [PlayKeychain debugLogger:[NSString stringWithFormat:@"SecKeyGeneratePair: %@", parameters]];
+            [PlayKeychain debugLogger:[NSString stringWithFormat:@"SecKeyGeneratePair public key result: %@", (retval == errSecSuccess && publicKey != NULL) ? *publicKey : nil]];
+            [PlayKeychain debugLogger:[NSString stringWithFormat:@"SecKeyGeneratePair private key result: %@", (retval == errSecSuccess && privateKey != NULL) ? *privateKey : nil]];
+        } @finally {
+            pt_leave_internal_scope();
+        }
     }
     return retval;
 }

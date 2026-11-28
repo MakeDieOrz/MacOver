@@ -5,7 +5,7 @@
 
 #import "../Subsystems/PSInternal.h"
 
-@protocol PSPlayShadowExternalSelectors <NSObject>
+@protocol PlayShadowExternalSelectors <NSObject>
 @optional
 + (void)requestTrackingAuthorizationWithCompletionHandler:(void (^)(NSInteger status))completion;
 + (NSInteger)trackingAuthorizationStatus;

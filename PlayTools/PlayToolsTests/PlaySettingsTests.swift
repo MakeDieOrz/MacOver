@@ -132,7 +132,12 @@ final class PlaySettingsTests {
         let customData = try PropertyListSerialization.data(fromPropertyList: mutableDict, format: .xml, options: 0)
         try customData.write(to: settingsURL)
 
-        let loaded = PlaySettings(settingsURL: settingsURL, bundleIdentifier: "com.example.test")
+        let stateURL = tempDir.appendingPathComponent("container/pm_keymapping_state.plist")
+        let loaded = PlaySettings(
+            settingsURL: settingsURL,
+            bundleIdentifier: "com.example.test",
+            keymappingStateURL: stateURL
+        )
         #expect((loaded.oemID as String) == "D84AP")
         #expect(!loaded.quitOnWindowClose)
         #expect(!loaded.currentQuitOnWindowClose())
@@ -142,17 +147,50 @@ final class PlaySettingsTests {
         let updatedData = try encoder.encode(updated)
         try updatedData.write(to: settingsURL)
         #expect(loaded.currentQuitOnWindowClose())
-        let reloaded = PlaySettings(settingsURL: settingsURL, bundleIdentifier: "com.example.test")
+        let reloaded = PlaySettings(
+            settingsURL: settingsURL,
+            bundleIdentifier: "com.example.test",
+            keymappingStateURL: stateURL
+        )
         #expect(reloaded.quitOnWindowClose)
         try customData.write(to: settingsURL)
 
         loaded.keymappingDisabledAt = 42.5
-        let persistedData = try Data(contentsOf: settingsURL)
-        let persistedDict = try #require(
-            PropertyListSerialization.propertyList(from: persistedData, options: [], format: nil) as? [String: Any]
+        // Settings plist must remain read-only/untouched; keymappingDisabledAt persists to guest container stateURL
+        let persistedSettingsData = try Data(contentsOf: settingsURL)
+        let persistedSettingsDict = try #require(
+            PropertyListSerialization.propertyList(
+                from: persistedSettingsData,
+                options: [],
+                format: nil
+            ) as? [String: Any]
         )
-        #expect((persistedDict["customUnrelatedKey"] as? String) == "keep-me")
-        #expect((persistedDict["keymappingDisabledAt"] as? NSNumber)?.floatValue == 42.5)
+        #expect((persistedSettingsDict["customUnrelatedKey"] as? String) == "keep-me")
+        #expect((persistedSettingsDict["keymappingDisabledAt"] as? NSNumber)?.floatValue == 0)
+
+        let stateData = try Data(contentsOf: stateURL)
+        let stateDict = try #require(
+            PropertyListSerialization.propertyList(from: stateData, options: [], format: nil) as? [String: Any]
+        )
+        #expect((stateDict["keymappingDisabledAt"] as? NSNumber)?.floatValue == 42.5)
+        let reloadedWithState = PlaySettings(
+            settingsURL: settingsURL,
+            bundleIdentifier: "com.example.test",
+            keymappingStateURL: stateURL
+        )
+        #expect(reloadedWithState.keymappingDisabledAt == 42.5)
+
+        // Host AppSettings.reset() rewrites settingsURL with a newer mtime -> stale stateURL is ignored
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(10)],
+            ofItemAtPath: settingsURL.path
+        )
+        let afterHostReset = PlaySettings(
+            settingsURL: settingsURL,
+            bundleIdentifier: "com.example.test",
+            keymappingStateURL: stateURL
+        )
+        #expect(afterHostReset.keymappingDisabledAt == 0)
 
         let corruptURL = tempDir.appendingPathComponent("corrupt.plist")
         try Data("not-a-plist".utf8).write(to: corruptURL)
@@ -189,35 +227,61 @@ final class PlaySettingsTests {
 
     @Test
     func keymappingPersistenceWithMissingDirArrayPlistAndReadOnlyDir() throws {
-        // Missing nested parent directory creation
-        let nestedURL = tempDir.appendingPathComponent("a/b/c/com.nested.plist")
-        let nested = PlaySettings(settingsURL: nestedURL, bundleIdentifier: "com.nested")
+        // Missing nested parent directory creation in guest container state file
+        let nestedSettingsURL = tempDir.appendingPathComponent("settings/com.nested.plist")
+        let nestedStateURL = tempDir.appendingPathComponent("a/b/c/com.nested.state.plist")
+        let nested = PlaySettings(
+            settingsURL: nestedSettingsURL,
+            bundleIdentifier: "com.nested",
+            keymappingStateURL: nestedStateURL
+        )
         nested.keymappingDisabledAt = 15.0
-        #expect(FileManager.default.fileExists(atPath: nestedURL.path))
-        let reloadedNested = PlaySettings(settingsURL: nestedURL, bundleIdentifier: "com.nested")
+        #expect(!FileManager.default.fileExists(atPath: nestedSettingsURL.path))
+        #expect(FileManager.default.fileExists(atPath: nestedStateURL.path))
+        let reloadedNested = PlaySettings(
+            settingsURL: nestedSettingsURL,
+            bundleIdentifier: "com.nested",
+            keymappingStateURL: nestedStateURL
+        )
         #expect(reloadedNested.keymappingDisabledAt == 15.0)
 
-        // Non-dict <array/> plist overwritten cleanly
-        let arrayURL = tempDir.appendingPathComponent("com.array.plist")
+        // Non-dict <array/> state plist overwritten cleanly without touching settingsURL
+        let arraySettingsURL = tempDir.appendingPathComponent("com.array.plist")
+        let arrayStateURL = tempDir.appendingPathComponent("com.array.state.plist")
         let arrayPlist = """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
         <plist version="1.0"><array><string>stale</string></array></plist>
         """
-        try Data(arrayPlist.utf8).write(to: arrayURL)
-        let arraySettings = PlaySettings(settingsURL: arrayURL, bundleIdentifier: "com.array")
+        try Data(arrayPlist.utf8).write(to: arrayStateURL)
+        let arraySettings = PlaySettings(
+            settingsURL: arraySettingsURL,
+            bundleIdentifier: "com.array",
+            keymappingStateURL: arrayStateURL
+        )
         arraySettings.keymappingDisabledAt = 22.0
-        let overwritten = try PropertyListDecoder().decode(AppSettingsData.self, from: Data(contentsOf: arrayURL))
-        #expect(overwritten.keymappingDisabledAt == 22.0)
+        let reloadedArray = PlaySettings(
+            settingsURL: arraySettingsURL,
+            bundleIdentifier: "com.array",
+            keymappingStateURL: arrayStateURL
+        )
+        #expect(reloadedArray.keymappingDisabledAt == 22.0)
 
         // Read-only parent directory fails silently without leaving .tmp behind
         let roDir = tempDir.appendingPathComponent("readonly", isDirectory: true)
         try FileManager.default.createDirectory(at: roDir, withIntermediateDirectories: true)
-        let roURL = roDir.appendingPathComponent("com.ro.plist")
-        let roSettings = PlaySettings(settingsURL: roURL, bundleIdentifier: "com.ro")
+        let roURL = roDir.appendingPathComponent("com.ro.state.plist")
+        let roSettings = PlaySettings(
+            settingsURL: tempDir.appendingPathComponent("com.ro.plist"),
+            bundleIdentifier: "com.ro",
+            keymappingStateURL: roURL
+        )
         try FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o555)], ofItemAtPath: roDir.path)
         defer {
-            try? FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o755)], ofItemAtPath: roDir.path)
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: NSNumber(value: 0o755)],
+                ofItemAtPath: roDir.path
+            )
         }
         roSettings.keymappingDisabledAt = 33.0
         #expect(!FileManager.default.fileExists(atPath: roURL.appendingPathExtension("tmp").path))
@@ -225,23 +289,24 @@ final class PlaySettingsTests {
 
     @Test
     func allOemIDsMixedTypePlistAndDiscordActivityResilience() throws {
-        let expectedOEMs: [(model: String, oem: String)] = [
-            ("iPad6,7", "J98aAP"),
-            ("iPad8,6", "J320xAP"),
-            ("iPad13,8", "J522AP"),
-            ("iPad14,5", "J620AP"),
-            ("iPad16,6", "J720AP"),
-            ("iPad17,3", "J820AP"),
-            ("iPhone14,3", "D64AP"),
-            ("iPhone15,3", "D74AP"),
-            ("iPhone16,2", "D84AP"),
-            ("iPhone17,2", "D94AP"),
-            ("iPhone18,2", "D94xAP"),
-            ("iPhone99,9", "J522AP")
+        let expectedOEMs: [(model: String, reportedIOS: String, oem: String)] = [
+            ("iPad6,7", "compat13_7", "J98aAP"),
+            ("iPad8,6", "compat18_3", "J320xAP"),
+            ("iPad13,8", "automatic", "J522AP"),
+            ("iPad14,5", "automatic", "J620AP"),
+            ("iPad16,6", "automatic", "J720AP"),
+            ("iPad17,3", "automatic", "J820AP"),
+            ("iPhone14,3", "automatic", "D64AP"),
+            ("iPhone15,3", "automatic", "D74AP"),
+            ("iPhone16,2", "automatic", "D84AP"),
+            ("iPhone17,2", "automatic", "D94AP"),
+            ("iPhone18,2", "automatic", "D94xAP"),
+            ("iPhone99,9", "automatic", "J522AP")
         ]
         for (index, entry) in expectedOEMs.enumerated() {
             var data = AppSettingsData()
             data.iosDeviceModel = entry.model
+            data.reportedIOSVersion = entry.reportedIOS
             let url = tempDir.appendingPathComponent("oem_\(index).plist")
             let encoder = PropertyListEncoder()
             encoder.outputFormat = .xml
@@ -249,6 +314,36 @@ final class PlaySettingsTests {
             let ps = PlaySettings(settingsURL: url, bundleIdentifier: "com.oem.\(index)")
             #expect((ps.oemID as String) == entry.oem)
         }
+
+        // EOL iPads coerce to supported iPad13,8 when target iOS exceeds their upper bound
+        var eolData = AppSettingsData()
+        eolData.iosDeviceModel = "iPad6,7"
+        eolData.reportedIOSVersion = "compat18_3"
+        let eolURL = tempDir.appendingPathComponent("oem_eol.plist")
+        let eolEncoder = PropertyListEncoder()
+        eolEncoder.outputFormat = .xml
+        try eolEncoder.encode(eolData).write(to: eolURL)
+        let eolSettings = PlaySettings(settingsURL: eolURL, bundleIdentifier: "com.oem.eol")
+        #expect((eolSettings.deviceModel as String) == "iPad13,8")
+        #expect((eolSettings.oemID as String) == "J522AP")
+
+        // Discord activity is gated off under bypass or strictEmulationMode
+        var discordBypass = AppSettingsData()
+        discordBypass.discordActivity.enable = true
+        discordBypass.bypass = true
+        let dbURL = tempDir.appendingPathComponent("discord_bypass.plist")
+        try eolEncoder.encode(discordBypass).write(to: dbURL)
+        let dbSettings = PlaySettings(settingsURL: dbURL, bundleIdentifier: "com.discord.bypass")
+        #expect(!dbSettings.discordActivityEnabled)
+
+        var discordClean = AppSettingsData()
+        discordClean.discordActivity.enable = true
+        discordClean.bypass = false
+        discordClean.strictEmulationMode = false
+        let dcURL = tempDir.appendingPathComponent("discord_clean.plist")
+        try eolEncoder.encode(discordClean).write(to: dcURL)
+        let dcSettings = PlaySettings(settingsURL: dcURL, bundleIdentifier: "com.discord.clean")
+        #expect(dcSettings.discordActivityEnabled)
 
         // Mixed-type XML plist decoding
         let mixedURL = tempDir.appendingPathComponent("mixed.plist")
@@ -562,7 +657,14 @@ final class PlaySettingsTests {
         #expect(reloadedDisk.customScaler == 1.25)
         #expect(reloadedDisk.windowWidth == 800)
         #expect(reloadedDisk.windowHeight == 600)
-        #expect(reloadedDisk.keymappingDisabledAt == 12.0)
+        #expect(reloadedDisk.keymappingDisabledAt == 0)
+        #expect(playSettings.keymappingDisabledAt == 12.0)
+        let reloadedStrict = PlaySettings(
+            settingsURL: portraitURL,
+            bundleIdentifier: playSettings.bundleIdentifier,
+            keymappingStateURL: playSettings.keymappingStateUrl
+        )
+        #expect(reloadedStrict.keymappingDisabledAt == 12.0)
     }
 
     @Test

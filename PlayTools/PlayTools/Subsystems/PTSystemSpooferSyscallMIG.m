@@ -500,6 +500,37 @@ intptr_t pt_syscall_dispatch_with_caller(int number,
                 (uint64_t)args[4],
                 caller);
         }
+        case 4:    // SYS_write
+        case 397: { // SYS_write_nocancel
+            return (intptr_t)pt_fs_write_with_caller(
+                (int)args[0],
+                (const void *)(uintptr_t)args[1],
+                (size_t)args[2],
+                0,
+                NO,
+                (number == 397),
+                caller);
+        }
+        case 154:  // SYS_pwrite
+        case 415: { // SYS_pwrite_nocancel
+            return (intptr_t)pt_fs_write_with_caller(
+                (int)args[0],
+                (const void *)(uintptr_t)args[1],
+                (size_t)args[2],
+                (off_t)args[3],
+                YES,
+                (number == 415),
+                caller);
+        }
+        case 121:  // SYS_writev
+        case 412: { // SYS_writev_nocancel
+            return (intptr_t)pt_fs_writev_with_caller(
+                (int)args[0],
+                (const struct iovec *)(uintptr_t)args[1],
+                (int)args[2],
+                (number == 412),
+                caller);
+        }
         case 5: // SYS_open
         case 398: { // SYS_open_nocancel
             const char *path = (const char *)args[0];
@@ -555,7 +586,7 @@ intptr_t pt_syscall_dispatch_with_caller(int number,
             int fd = (int)args[0];
             void *ub = (void *)(uintptr_t)args[1];
             BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
-            if (!is_sys && pt_fd_is_sensitive(fd, caller)) {
+            if (!is_sys && (pt_is_hidden_fd(fd) || pt_fd_is_sensitive(fd, caller))) {
                 errno = EBADF;
                 return -1;
             }
@@ -694,7 +725,7 @@ intptr_t pt_syscall_dispatch_with_caller(int number,
         }
         case 349: { // SYS___pthread_fchdir
             if (!pt_is_effective_system_or_playtools_caller(caller) &&
-                pt_fd_is_sensitive((int)args[0], caller)) {
+                (pt_is_hidden_fd((int)args[0]) || pt_fd_is_sensitive((int)args[0], caller))) {
                 errno = EBADF;
                 return -1;
             }
@@ -724,6 +755,10 @@ intptr_t pt_syscall_dispatch_with_caller(int number,
         case 399:  // SYS_close_nocancel
         case 442: { // SYS_guarded_close_np
             int fd = (int)args[0];
+            if (pt_is_hidden_fd(fd) && !pt_is_effective_system_or_playtools_caller(caller)) {
+                errno = EBADF;
+                return -1;
+            }
             intptr_t r = pt_orig_syscall(number, args[0], args[1], 0, 0, 0, 0, 0, 0);
             if (r == 0) {
                 pt_network_notify_fd_close(fd);
@@ -733,8 +768,13 @@ intptr_t pt_syscall_dispatch_with_caller(int number,
         case 149: { // SYS_dup3
             int oldfd = (int)args[0];
             int newfd = (int)args[1];
+            BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
+            if (!is_sys && (pt_is_hidden_fd(oldfd) || pt_is_hidden_fd(newfd))) {
+                errno = EBADF;
+                return -1;
+            }
             if (pt_is_bypass_enabled() &&
-                !pt_is_effective_system_or_playtools_caller(caller) &&
+                !is_sys &&
                 pt_fd_is_sensitive(oldfd, caller)) {
                 errno = EBADF;
                 return -1;
@@ -765,6 +805,19 @@ intptr_t pt_syscall_dispatch_with_caller(int number,
                 number,
                 caller);
         }
+        case 447: { // SYS_connectx
+            return (intptr_t)pt_network_connectx_with_caller(
+                (int)args[0],
+                (const sa_endpoints_t *)(uintptr_t)args[1],
+                (sae_associd_t)args[2],
+                (unsigned int)args[3],
+                (const struct iovec *)(uintptr_t)args[4],
+                (unsigned int)args[5],
+                (size_t *)(uintptr_t)args[6],
+                (sae_connid_t *)(uintptr_t)args[7],
+                447,
+                caller);
+        }
         case 30:   // SYS_accept
         case 404: { // SYS_accept_nocancel
             return (intptr_t)pt_network_accept_with_caller(
@@ -783,6 +836,36 @@ intptr_t pt_syscall_dispatch_with_caller(int number,
                 (int)args[3],
                 (const struct sockaddr *)(uintptr_t)args[4],
                 (socklen_t)args[5],
+                number,
+                caller);
+        }
+        case 28:   // SYS_sendmsg
+        case 402: { // SYS_sendmsg_nocancel
+            return (intptr_t)pt_network_sendmsg_with_caller(
+                (int)args[0],
+                (const struct msghdr *)(uintptr_t)args[1],
+                (int)args[2],
+                number,
+                caller);
+        }
+        case 29:   // SYS_recvfrom
+        case 403: { // SYS_recvfrom_nocancel
+            return (intptr_t)pt_network_recvfrom_with_caller(
+                (int)args[0],
+                (void *)(uintptr_t)args[1],
+                (size_t)args[2],
+                (int)args[3],
+                (struct sockaddr *)(uintptr_t)args[4],
+                (socklen_t *)(uintptr_t)args[5],
+                number,
+                caller);
+        }
+        case 27:   // SYS_recvmsg
+        case 401: { // SYS_recvmsg_nocancel
+            return (intptr_t)pt_network_recvmsg_with_caller(
+                (int)args[0],
+                (struct msghdr *)(uintptr_t)args[1],
+                (int)args[2],
                 number,
                 caller);
         }
@@ -935,9 +1018,25 @@ intptr_t pt_syscall_dispatch_with_caller(int number,
         }
         case 41:   // SYS_dup
         case 90: { // SYS_dup2
+            int oldfd = (int)args[0];
+            int newfd = (number == 90) ? (int)args[1] : -1;
+            BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
+            if (!is_sys && (pt_is_hidden_fd(oldfd) || (number == 90 && pt_is_hidden_fd(newfd)))) {
+                errno = EBADF;
+                return -1;
+            }
+            if (pt_is_bypass_enabled() &&
+                !is_sys &&
+                pt_fd_is_sensitive(oldfd, caller)) {
+                errno = EBADF;
+                return -1;
+            }
             intptr_t r = pt_orig_syscall(number, args[0], args[1], 0, 0, 0, 0, 0, 0);
             if (r >= 0) {
-                pt_network_notify_fd_dup((int)args[0], (int)r);
+                if (number == 90 && newfd >= 0 && newfd != oldfd) {
+                    pt_network_notify_fd_close(newfd);
+                }
+                pt_network_notify_fd_dup(oldfd, (int)r);
             }
             return r;
         }
@@ -1245,7 +1344,7 @@ intptr_t pt_syscall_dispatch_with_caller(int number,
         case 237:  // SYS_fsetxattr
         case 239: { // SYS_fremovexattr
             if (!pt_is_effective_system_or_playtools_caller(caller) &&
-                pt_fd_is_sensitive((int)args[0], caller)) {
+                (pt_is_hidden_fd((int)args[0]) || pt_fd_is_sensitive((int)args[0], caller))) {
                 errno = EBADF;
                 return -1;
             }
@@ -1390,6 +1489,7 @@ static BOOL pt_is_tracked_mig_req_id(int req_id) {
             req_id == 3414 ||
             req_id == 3415 ||
             req_id == 3460 ||
+            req_id == 3603 ||
             req_id == 3612 ||
             req_id == 3613 ||
             req_id == 3614 ||
@@ -1676,7 +1776,8 @@ static bool pt_extract_mig_request_meta(void *req_buf,
         *out_flavor = flavor;
     }
     if (out_target_is_self != NULL) {
-        *out_target_is_self = (req_id == 200 || req_id == 216 || req_id == 204 || req_id == 219 || req_id == 3612)
+        *out_target_is_self = (req_id == 200 || req_id == 216 || req_id == 204 || req_id == 219 ||
+                               req_id == 3603 || req_id == 3612)
             ? true
             : (remote_port == mach_task_self());
     }
@@ -2132,6 +2233,16 @@ static void pt_sanitize_mig_exc_ports_info_reply(void *rcv_buf,
     hdr_mut->msgh_size = (mach_msg_size_t)new_total;
 }
 
+extern __attribute__((visibility("hidden"))) void pt_svc_sanitize_arm_debug_state_buf(thread_state_flavor_t flavor,
+                                                                                      void *state_buf,
+                                                                                      size_t state_bytes);
+extern __attribute__((visibility("hidden"))) BOOL pt_sanitize_vm_region_info(uintptr_t cur_addr,
+                                                                             uintptr_t cur_size,
+                                                                             vm_region_flavor_t flavor,
+                                                                             vm_region_info_t info,
+                                                                             mach_msg_type_number_t infoCnt,
+                                                                             BOOL is_recurse);
+
 static void pt_sanitize_mig_vm_region_complex_reply(void *rcv_buf,
                                                     size_t usable_bytes,
                                                     size_t rcv_cap,
@@ -2164,6 +2275,10 @@ static void pt_sanitize_mig_vm_region_complex_reply(void *rcv_buf,
     }
     vm_region_flavor_t flavor = (vm_region_flavor_t)vm_meta->region_depth_or_flavor;
     if (!pt_vm_region_should_hide_range((uintptr_t)cur_addr, (uintptr_t)cur_size, flavor, info_buf, cur_cnt, NO, caller)) {
+        if (cur_cnt > 0U &&
+            pt_sanitize_vm_region_info((uintptr_t)cur_addr, (uintptr_t)cur_size, flavor, (vm_region_info_t)info_buf, cur_cnt, NO)) {
+            memcpy(bytes + info_off, info_buf, (size_t)cur_cnt * sizeof(int));
+        }
         return;
     }
     mach_msg_port_descriptor_t obj_desc;
@@ -2262,6 +2377,10 @@ static void pt_sanitize_mig_vm_region_recurse_reply(void *rcv_buf,
         memcpy(info_buf, bytes + info_off, (size_t)cur_cnt * sizeof(int));
     }
     if (!pt_vm_region_should_hide_range((uintptr_t)cur_addr, (uintptr_t)cur_size, 0, info_buf, cur_cnt, YES, caller)) {
+        if (cur_cnt > 0U &&
+            pt_sanitize_vm_region_info((uintptr_t)cur_addr, (uintptr_t)cur_size, 0, (vm_region_info_t)info_buf, cur_cnt, YES)) {
+            memcpy(bytes + info_off, info_buf, (size_t)cur_cnt * sizeof(int));
+        }
         return;
     }
     kern_return_t kr = KERN_INVALID_ADDRESS;
@@ -2330,7 +2449,7 @@ static void pt_sanitize_mig_reply_if_needed(void *rcv_buf,
     int reply_id = hdr->msgh_id;
     bool is_simple_reply = (reply_id == 300 || reply_id == 301 || reply_id == 316 ||
                             reply_id == 319 || reply_id == 3505 || reply_id == 3560 ||
-                            reply_id == 3712 || reply_id == 3730 ||
+                            reply_id == 3703 || reply_id == 3712 || reply_id == 3730 ||
                             reply_id == 3906 || reply_id == 3908 || reply_id == 3909 || reply_id == 3922 ||
                             reply_id == 4905 || reply_id == 4907 || reply_id == 4908 || reply_id == 4915);
     bool is_complex_reply = (reply_id == 304 || reply_id == 3502 || reply_id == 3514 ||
@@ -2549,6 +2668,8 @@ static void pt_sanitize_mig_reply_if_needed(void *rcv_buf,
                 memcpy(payload, &ext, copy_bytes);
             }
         }
+    } else if (reply_id == 3703 && target_is_self && req_id == 3603) {
+        pt_svc_sanitize_arm_debug_state_buf((thread_state_flavor_t)req_flavor, payload, payload_bytes);
     }
 }
 

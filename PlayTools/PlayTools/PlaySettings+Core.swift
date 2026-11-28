@@ -27,6 +27,7 @@ public final class PTUnfairLock: Sendable {
 
     @objc public let bundleIdentifier: String
     @objc public let settingsUrl: URL
+    public let keymappingStateUrl: URL
 
     private let stateLock = PTUnfairLock()
     private let persistenceLock = PTUnfairLock()
@@ -116,6 +117,35 @@ public final class PTUnfairLock: Sendable {
         return settingsDir.appendingPathComponent("\(bundleIdentifier).plist")
     }
 
+    static func resolveKeymappingStateURL(bundleIdentifier: String) -> URL {
+        if let cfHomePtr = getenv("CFFIXED_USER_HOME"),
+           let cfHome = String(validatingCString: cfHomePtr),
+           cfHome.hasPrefix("/") {
+            return URL(fileURLWithPath: cfHome, isDirectory: true)
+                .appendingPathComponent("Library", isDirectory: true)
+                .appendingPathComponent("Application Support", isDirectory: true)
+                .appendingPathComponent("pm_keymapping_state.plist")
+        }
+        let baseDir: URL
+        if let appSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first {
+            baseDir = appSupport
+        } else {
+            baseDir = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+                .appendingPathComponent("Library", isDirectory: true)
+                .appendingPathComponent("Application Support", isDirectory: true)
+        }
+        let sanitized = bundleIdentifier
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "/", with: "_")
+        let filename = sanitized.isEmpty
+            ? "pm_keymapping_state.plist"
+            : "pm_keymapping_state_\(sanitized).plist"
+        return baseDir.appendingPathComponent(filename)
+    }
+
     convenience override init() {
         let bundleID = Bundle.main.infoDictionary?["CFBundleIdentifier"] as? String ?? ""
         self.init(
@@ -124,11 +154,17 @@ public final class PTUnfairLock: Sendable {
         )
     }
 
-    init(settingsURL: URL, bundleIdentifier: String = "") {
+    init(
+        settingsURL: URL,
+        bundleIdentifier: String = "",
+        keymappingStateURL: URL? = nil
+    ) {
         self.bundleIdentifier = bundleIdentifier
         self.settingsUrl = settingsURL
+        self.keymappingStateUrl = keymappingStateURL
+            ?? Self.resolveKeymappingStateURL(bundleIdentifier: bundleIdentifier)
 
-        let decoded: AppSettingsData
+        var decoded: AppSettingsData
         if let data = try? Data(contentsOf: settingsURL),
            let parsed = try? PropertyListDecoder().decode(AppSettingsData.self, from: data) {
             decoded = parsed
@@ -136,6 +172,26 @@ public final class PTUnfairLock: Sendable {
             var defaults = AppSettingsData()
             defaults.bundleIdentifier = bundleIdentifier
             decoded = defaults
+        }
+        let shouldUseKeymappingState: Bool
+        if let stateAttrs = try? FileManager.default.attributesOfItem(atPath: self.keymappingStateUrl.path),
+           let stateMTime = stateAttrs[.modificationDate] as? Date {
+            if let settingsAttrs = try? FileManager.default.attributesOfItem(atPath: settingsURL.path),
+               let settingsMTime = settingsAttrs[.modificationDate] as? Date {
+                shouldUseKeymappingState = stateMTime >= settingsMTime
+            } else {
+                shouldUseKeymappingState = true
+            }
+        } else {
+            shouldUseKeymappingState = false
+        }
+        if shouldUseKeymappingState,
+           let stateData = try? Data(contentsOf: self.keymappingStateUrl),
+           let stateDict = (try? PropertyListSerialization.propertyList(
+               from: stateData, options: [], format: nil
+           )) as? [String: Any],
+           let savedAt = stateDict["keymappingDisabledAt"] as? NSNumber {
+            decoded.keymappingDisabledAt = savedAt.floatValue
         }
 
         self._settingsData = decoded
@@ -189,7 +245,10 @@ public final class PTUnfairLock: Sendable {
     let discordActivity: DiscordActivity
 
     @objc public var discordActivityEnabled: Bool {
-        discordActivity.enable
+        guard !PTSafeMode.isActive, !isStrictEmulationActive, !bypass else {
+            return false
+        }
+        return discordActivity.enable
     }
 
     @objc public let keymapping: Bool
@@ -307,36 +366,22 @@ public final class PTUnfairLock: Sendable {
             stateLock.withLock { _settingsData.keymappingDisabledAt }
         }
         set {
-            let snapshot: AppSettingsData = stateLock.withLock {
+            stateLock.withLock {
                 _settingsData.keymappingDisabledAt = newValue
-                return _settingsData
             }
-            saveKeymappingDisabledAt(newValue, fallbackSnapshot: snapshot)
+            saveKeymappingDisabledAt(newValue)
         }
     }
 
-    private func saveKeymappingDisabledAt(_ value: Float, fallbackSnapshot: AppSettingsData) {
+    private func saveKeymappingDisabledAt(_ value: Float) {
         persistenceLock.withLock {
-            let parentDir = settingsUrl.deletingLastPathComponent()
-            let outData: Data
-            if let data = try? Data(contentsOf: settingsUrl),
-               var plistDict = (try? PropertyListSerialization.propertyList(
-                   from: data, options: [], format: nil
-               )) as? [String: Any] {
-                plistDict["keymappingDisabledAt"] = NSNumber(value: value)
-                guard let serialized = try? PropertyListSerialization.data(
-                    fromPropertyList: plistDict, format: .xml, options: 0
-                ) else {
-                    return
-                }
-                outData = serialized
-            } else {
-                let encoder = PropertyListEncoder()
-                encoder.outputFormat = .xml
-                guard let encoded = try? encoder.encode(fallbackSnapshot) else {
-                    return
-                }
-                outData = encoded
+            let stateURL = keymappingStateUrl
+            let parentDir = stateURL.deletingLastPathComponent()
+            let plistDict: [String: Any] = ["keymappingDisabledAt": NSNumber(value: value)]
+            guard let outData = try? PropertyListSerialization.data(
+                fromPropertyList: plistDict, format: .xml, options: 0
+            ) else {
+                return
             }
 
             do {
@@ -346,17 +391,14 @@ public final class PTUnfairLock: Sendable {
                         withIntermediateDirectories: true
                     )
                 }
-                // Write to <BundleID>.plist.tmp + rename so host SBPL
-                // `(prefix ".../App Settings/${BundleID}.plist")` permits atomic replacement
-                // without Foundation `.dat.nosync` temp files.
-                let tmpURL = settingsUrl.appendingPathExtension("tmp")
+                let tmpURL = stateURL.appendingPathExtension("tmp")
                 try outData.write(to: tmpURL, options: [])
-                if Darwin.rename(tmpURL.path, settingsUrl.path) != 0 {
+                if Darwin.rename(tmpURL.path, stateURL.path) != 0 {
                     try? FileManager.default.removeItem(at: tmpURL)
-                    try outData.write(to: settingsUrl, options: [])
+                    try outData.write(to: stateURL, options: [])
                 }
             } catch {
-                // Best-effort persistence inside PlayCover App Settings
+                // Best-effort persistence inside guest app container
             }
         }
     }
@@ -700,7 +742,7 @@ public enum PTPlayChainAccessGroupPolicy {
     ) -> OSStatus {
         guard let requestedGroup else { return errSecSuccess }
         guard let group = requestedGroup as? String else { return errSecParam }
-        if group.isEmpty { return errSecSuccess }
+        if group.isEmpty { return errSecMissingEntitlement }
         if isReadOnlyQuery && group == (kSecAttrAccessGroupToken as String) { return errSecSuccess }
         for rawPattern in allowedPatterns {
             let pattern = rawPattern.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -718,6 +760,8 @@ public enum PTPlayChainAccessGroupPolicy {
 public enum PTPlayChainKeyUpdatePolicy {
     public static func isUpdatableColumn(_ column: String, internalTokenIDColumn: String) -> Bool {
         column != internalTokenIDColumn
+            && column != (kSecValuePersistentRef as String)
+            && column != (kSecAttrCreationDate as String)
     }
 }
 
@@ -757,6 +801,16 @@ public enum PTStrictViewportFocusPolicy {
             return (false, lastAppliedFitScreenKey)
         }
         return (true, currentKey)
+    }
+}
+
+public enum PTPlayChainMutationFilterPolicy {
+    public static func shouldRejectMutation(
+        droppedNonMetaFilterKey: Bool,
+        hasEffectiveFilter: Bool,
+        hasExplicitSecClass: Bool
+    ) -> Bool {
+        droppedNonMetaFilterKey || (!hasEffectiveFilter && !hasExplicitSecClass)
     }
 }
 

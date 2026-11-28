@@ -6,6 +6,8 @@
 #import "PTFSInternal.h"
 #import "PTSystemSpooferInternal.h"
 #import "PTDyldInternal.h"
+#import "PTSvcInternal.h"
+#include <limits.h>
 #if __has_include(<sys/fsgetpath.h>)
 #include <sys/fsgetpath.h>
 #endif
@@ -59,7 +61,10 @@ static inline uint8_t pt_classify_caller_addr(const void *ret_addr) {
     uint8_t kind = pt_classify_caller_image_path(fname, &cacheable);
     if (kind == PT_CALLER_APP) {
         const struct mach_header *self_mh = pt_get_self_playtools_mh();
-        if (self_mh != NULL && dyld_image_header_containing_address(ret_addr) == self_mh) {
+        const struct mach_header *caller_mh = dyld_image_header_containing_address(ret_addr);
+        if ((self_mh != NULL && caller_mh == self_mh) ||
+            pt_is_registered_hidden_module(fname) ||
+            (caller_mh != NULL && pt_is_hidden_dyld_image_header(caller_mh))) {
             kind = PT_CALLER_PLAYTOOLS;
             cacheable = true;
         }
@@ -85,20 +90,16 @@ static _Thread_local uintptr_t s_tls_stack_top = 0;
 
 static _Atomic uint64_t s_wrapper_context_cache[PT_WRAPPER_CACHE_SIZE];
 
-static BOOL pt_inspect_backtrace_frames(BOOL seen_wrapper) {
+static BOOL pt_inspect_backtrace_frames(void) {
     void *addrs[PT_MAX_CALLER_UNWIND_DEPTH + 10];
     int count = backtrace(addrs, PT_MAX_CALLER_UNWIND_DEPTH + 10);
     int caller_depth = 0;
     for (int i = 1; i < count; i++) {
         uint8_t fkind = pt_classify_caller_addr(pt_strip_return_addr((uintptr_t)addrs[i]));
         if (fkind == PT_CALLER_PLAYTOOLS) {
-            if (!seen_wrapper) {
-                continue;
-            }
-            return YES;
+            continue;
         }
         if (fkind == PT_CALLER_SYS_WRAPPER) {
-            seen_wrapper = YES;
             caller_depth++;
             if (caller_depth >= PT_MAX_CALLER_UNWIND_DEPTH) {
                 return YES;
@@ -132,7 +133,6 @@ BOOL pt_is_effective_system_or_playtools_caller(const void *ret_addr) {
     }
     s_tls_in_callstack = YES;
     BOOL result = YES;
-    BOOL seen_wrapper = NO;
 #if defined(__arm64__) || defined(__aarch64__)
     if (s_tls_stack_top == 0) {
         pthread_t self = pthread_self();
@@ -200,6 +200,7 @@ BOOL pt_is_effective_system_or_playtools_caller(const void *ret_addr) {
         uint8_t frame_kinds[PT_MAX_CALLER_UNWIND_DEPTH];
         size_t collected = 0;
         uintptr_t walk_fp = fp;
+        BOOL saw_playtools_frame = NO;
         for (int depth = 0; depth < PT_MAX_CALLER_UNWIND_DEPTH; depth++) {
             uint8_t wkind;
             uintptr_t wnext;
@@ -217,8 +218,11 @@ BOOL pt_is_effective_system_or_playtools_caller(const void *ret_addr) {
                 }
                 wkind = pt_classify_caller_addr(wlr);
             }
+            if (wkind == PT_CALLER_PLAYTOOLS) {
+                saw_playtools_frame = YES;
+            }
             frame_kinds[collected++] = wkind;
-            if (wkind != PT_CALLER_SYS_WRAPPER) {
+            if (wkind != PT_CALLER_SYS_WRAPPER && wkind != PT_CALLER_PLAYTOOLS) {
                 break;
             }
             if (wnext <= walk_fp) {
@@ -227,7 +231,22 @@ BOOL pt_is_effective_system_or_playtools_caller(const void *ret_addr) {
             walk_fp = wnext;
         }
         bool cacheable_3frame = false;
-        bool bounded_sys = pt_classify_bounded_frame_kinds_ex(frame_kinds, collected, true, &cacheable_3frame);
+        bool bounded_sys = true;
+        if (saw_playtools_frame) {
+            // Unwind past swizzled pm_*/pt_* PlayTools frames (internal PlayTools
+            // operations opt in via pt_is_in_internal_scope()) and avoid 3-frame
+            // caching across PlayTools trampoline frames.
+            for (size_t i = 0; i < collected; i++) {
+                uint8_t fk = frame_kinds[i];
+                if (fk == PT_CALLER_SYS_WRAPPER || fk == PT_CALLER_PLAYTOOLS) {
+                    continue;
+                }
+                bounded_sys = (fk != PT_CALLER_APP);
+                break;
+            }
+        } else {
+            bounded_sys = pt_classify_bounded_frame_kinds_ex(frame_kinds, collected, true, &cacheable_3frame);
+        }
         result = bounded_sys ? YES : NO;
         // Only cache verdicts fully determined within the 3-frame key [0..2];
         // deeper chains must not poison the 3-frame slot for other origins.
@@ -238,10 +257,10 @@ BOOL pt_is_effective_system_or_playtools_caller(const void *ret_addr) {
         break;
     }
     if (need_backtrace_fallback) {
-        result = pt_inspect_backtrace_frames(seen_wrapper);
+        result = pt_inspect_backtrace_frames();
     }
 #else
-    result = pt_inspect_backtrace_frames(seen_wrapper);
+    result = pt_inspect_backtrace_frames();
 #endif
     s_tls_in_callstack = NO;
     return result;
@@ -320,7 +339,7 @@ static char s_real_main_exec_path[PATH_MAX];
 static size_t s_real_main_exec_len = 0;
 static char s_real_main_exec_rel_path[PATH_MAX];
 static void pt_ensure_app_backup_map(void);
-static BOOL pt_norm_is_inside_group_container(const char *norm);
+static const char *pt_match_group_container_subpath(const char *norm);
 
 static inline BOOL pt_match_path_component_token(const char *start,
                                                  const char *q,
@@ -525,6 +544,7 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_normalized_path_cached_c
             const char *rel = pt_match_prefix_modulo_private(stripped, s_real_data_container_dir, s_real_data_container_len);
             if (rel != NULL) {
                 if (!pt_rel_subpath_has_hidden_plugin_component(rel) &&
+                    !pt_path_has_hidden_runtime_artifact_cstr(rel) &&
                     !pt_rel_data_subpath_is_macos_artifact(rel) &&
                     !pt_rel_data_subpath_is_host_user_symlink(rel)) {
                     return NO;
@@ -535,8 +555,10 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_normalized_path_cached_c
                 return (*inout_is_sys_caller == 0);
             }
         }
-        if (pt_norm_is_inside_group_container(stripped)) {
-            if (!pt_rel_subpath_has_hidden_plugin_component(stripped)) {
+        const char *grp_rel = pt_match_group_container_subpath(stripped);
+        if (grp_rel != NULL) {
+            if (!pt_rel_subpath_has_hidden_plugin_component(grp_rel) &&
+                !pt_path_has_hidden_runtime_artifact_cstr(grp_rel)) {
                 return NO;
             }
             if (*inout_is_sys_caller < 0) {
@@ -886,7 +908,8 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_normalized_path_cached_c
                 break;
         }
     }
-    if (!is_candidate && pt_is_registered_hidden_module(stripped)) {
+    if (!is_candidate &&
+        (pt_is_registered_hidden_module(stripped) || pt_path_has_hidden_runtime_artifact_cstr(stripped))) {
         is_candidate = YES;
     }
     if (!is_candidate) {
@@ -1012,28 +1035,30 @@ __attribute__((visibility("hidden"))) pt_group_container_entry_t s_group_map[PT_
 __attribute__((visibility("hidden"))) size_t s_group_map_count = 0;
 __attribute__((visibility("hidden"))) BOOL s_group_root_scanned = NO;
 
-static BOOL pt_norm_is_inside_group_container(const char *norm) {
+static const char *pt_match_group_container_subpath(const char *norm) {
     if (norm == NULL || norm[0] != '/') {
-        return NO;
+        return NULL;
     }
     if (s_real_group_containers_root_len > 0 &&
         pt_match_prefix_modulo_private(norm, s_real_group_containers_root, s_real_group_containers_root_len) != NULL) {
         if (!atomic_load_explicit(&s_group_map_nonempty, memory_order_acquire)) {
-            return NO;
+            return NULL;
         }
         os_unfair_lock_lock(&s_group_map_lock);
-        BOOL matched = NO;
+        const char *matched_rel = NULL;
         for (size_t i = 0; i < s_group_map_count; i++) {
-            if (s_group_map[i].real_len > 0 &&
-                pt_match_prefix_modulo_private(norm, s_group_map[i].real_dir, s_group_map[i].real_len) != NULL) {
-                matched = YES;
-                break;
+            if (s_group_map[i].real_len > 0) {
+                const char *rel = pt_match_prefix_modulo_private(norm, s_group_map[i].real_dir, s_group_map[i].real_len);
+                if (rel != NULL) {
+                    matched_rel = rel;
+                    break;
+                }
             }
         }
         os_unfair_lock_unlock(&s_group_map_lock);
-        return matched;
+        return matched_rel;
     }
-    return NO;
+    return NULL;
 }
 
 
@@ -2263,6 +2288,212 @@ static int pt_searchfs(const char *path,
                                       __builtin_return_address(0));
 }
 
+extern ssize_t pt_orig_write_nocancel(int, const void *, size_t) __asm__("_write$NOCANCEL") __attribute__((weak_import));
+extern ssize_t pt_orig_pwrite_nocancel(int, const void *, size_t, off_t) __asm__("_pwrite$NOCANCEL") __attribute__((weak_import));
+extern ssize_t pt_orig_writev_nocancel(int, const struct iovec *, int) __asm__("_writev$NOCANCEL") __attribute__((weak_import));
+
+static ssize_t pt_raw_write_dispatch(int fd,
+                                     const void *buf,
+                                     size_t nbyte,
+                                     off_t offset,
+                                     BOOL has_offset,
+                                     BOOL nocancel) {
+    if (has_offset) {
+        if (nocancel && &pt_orig_pwrite_nocancel != NULL) {
+            return pt_orig_pwrite_nocancel(fd, buf, nbyte, offset);
+        }
+        return pwrite(fd, buf, nbyte, offset);
+    }
+    if (nocancel && &pt_orig_write_nocancel != NULL) {
+        return pt_orig_write_nocancel(fd, buf, nbyte);
+    }
+    return write(fd, buf, nbyte);
+}
+
+static ssize_t pt_raw_writev_dispatch(int fd, const struct iovec *iov, int iovcnt, BOOL nocancel) {
+    if (nocancel && &pt_orig_writev_nocancel != NULL) {
+        return pt_orig_writev_nocancel(fd, iov, iovcnt);
+    }
+    return writev(fd, iov, iovcnt);
+}
+
+__attribute__((visibility("hidden")))
+ssize_t pt_fs_write_with_caller(int fd,
+                                const void *buf,
+                                size_t nbyte,
+                                off_t offset,
+                                BOOL has_offset,
+                                BOOL nocancel,
+                                const void *caller) {
+    if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire)) {
+        return pt_raw_write_dispatch(fd, buf, nbyte, offset, has_offset, nocancel);
+    }
+    if (pt_is_hidden_fd(fd) && !pt_is_effective_system_or_playtools_caller(caller)) {
+        errno = EBADF;
+        return -1;
+    }
+    if (buf == NULL || nbyte == 0U) {
+        return pt_raw_write_dispatch(fd, buf, nbyte, offset, has_offset, nocancel);
+    }
+
+    uintptr_t uaddr = (uintptr_t)buf;
+    BOOL hits_hidden_img = pt_range_overlaps_hidden_playtools_image(uaddr, nbyte);
+    BOOL hits_svc_site = (!hits_hidden_img) && pt_svc_range_overlaps_patched_site(uaddr, nbyte);
+    if (!hits_hidden_img && !hits_svc_site) {
+        return pt_raw_write_dispatch(fd, buf, nbyte, offset, has_offset, nocancel);
+    }
+
+    if (!pt_is_bypass_enabled() || pt_is_effective_system_or_playtools_caller(caller)) {
+        return pt_raw_write_dispatch(fd, buf, nbyte, offset, has_offset, nocancel);
+    }
+
+    if (hits_hidden_img) {
+        errno = EFAULT;
+        return -1;
+    }
+
+    if (nbyte > (1U << 20)) {
+        return pt_raw_write_dispatch(fd, buf, nbyte, offset, has_offset, nocancel);
+    }
+
+    uint8_t stack_copy[4096];
+    uint8_t *heap_copy = NULL;
+    uint8_t *copy_buf = stack_copy;
+    if (nbyte > sizeof(stack_copy)) {
+        heap_copy = (uint8_t *)malloc(nbyte);
+        if (heap_copy == NULL) {
+            return pt_raw_write_dispatch(fd, buf, nbyte, offset, has_offset, nocancel);
+        }
+        copy_buf = heap_copy;
+    }
+    memcpy(copy_buf, buf, nbyte);
+    pt_svc_restore_patched_bytes_in_buffer(uaddr, copy_buf, nbyte);
+    ssize_t ret = pt_raw_write_dispatch(fd, copy_buf, nbyte, offset, has_offset, nocancel);
+    int saved_err = errno;
+    if (heap_copy != NULL) {
+        free(heap_copy);
+    }
+    errno = saved_err;
+    return ret;
+}
+
+__attribute__((visibility("hidden")))
+ssize_t pt_fs_writev_with_caller(int fd,
+                                 const struct iovec *iov,
+                                 int iovcnt,
+                                 BOOL nocancel,
+                                 const void *caller) {
+    if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire)) {
+        return pt_raw_writev_dispatch(fd, iov, iovcnt, nocancel);
+    }
+    if (pt_is_hidden_fd(fd) && !pt_is_effective_system_or_playtools_caller(caller)) {
+        errno = EBADF;
+        return -1;
+    }
+    if (iov == NULL ||
+        iovcnt <= 0 ||
+        iovcnt > IOV_MAX ||
+        !pt_is_valid_user_pointer(iov)) {
+        return pt_raw_writev_dispatch(fd, iov, iovcnt, nocancel);
+    }
+
+    BOOL any_hidden_img = NO;
+    BOOL any_svc_site = NO;
+    for (int i = 0; i < iovcnt; i++) {
+        size_t len = iov[i].iov_len;
+        const void *base = iov[i].iov_base;
+        if (len == 0 || base == NULL) {
+            continue;
+        }
+        uintptr_t uaddr = (uintptr_t)base;
+        if (pt_range_overlaps_hidden_playtools_image(uaddr, len)) {
+            any_hidden_img = YES;
+            break;
+        }
+        if (pt_svc_range_overlaps_patched_site(uaddr, len)) {
+            any_svc_site = YES;
+        }
+    }
+
+    if (!any_hidden_img && !any_svc_site) {
+        return pt_raw_writev_dispatch(fd, iov, iovcnt, nocancel);
+    }
+    if (!pt_is_bypass_enabled() || pt_is_effective_system_or_playtools_caller(caller)) {
+        return pt_raw_writev_dispatch(fd, iov, iovcnt, nocancel);
+    }
+    if (any_hidden_img) {
+        errno = EFAULT;
+        return -1;
+    }
+
+    struct iovec *patched_iov = (struct iovec *)malloc((size_t)iovcnt * sizeof(struct iovec));
+    uint8_t **temp_bufs = (uint8_t **)calloc((size_t)iovcnt, sizeof(uint8_t *));
+    if (patched_iov == NULL || temp_bufs == NULL) {
+        free(patched_iov);
+        free(temp_bufs);
+        return pt_raw_writev_dispatch(fd, iov, iovcnt, nocancel);
+    }
+
+    for (int i = 0; i < iovcnt; i++) {
+        patched_iov[i] = iov[i];
+        size_t len = iov[i].iov_len;
+        const void *base = iov[i].iov_base;
+        if (len == 0 || len > (1U << 20) || base == NULL) {
+            continue;
+        }
+        uintptr_t uaddr = (uintptr_t)base;
+        if (pt_svc_range_overlaps_patched_site(uaddr, len)) {
+            uint8_t *copy = (uint8_t *)malloc(len);
+            if (copy != NULL) {
+                memcpy(copy, base, len);
+                pt_svc_restore_patched_bytes_in_buffer(uaddr, copy, len);
+                temp_bufs[i] = copy;
+                patched_iov[i].iov_base = copy;
+            }
+        }
+    }
+
+    ssize_t ret = pt_raw_writev_dispatch(fd, patched_iov, iovcnt, nocancel);
+    int saved_err = errno;
+    for (int i = 0; i < iovcnt; i++) {
+        free(temp_bufs[i]);
+    }
+    free(temp_bufs);
+    free(patched_iov);
+    errno = saved_err;
+    return ret;
+}
+
+static ssize_t pt_write(int fd, const void *buf, size_t nbyte) {
+    return pt_fs_write_with_caller(fd, buf, nbyte, 0, NO, NO, __builtin_return_address(0));
+}
+
+static ssize_t pt_write_nocancel(int fd, const void *buf, size_t nbyte) {
+    return pt_fs_write_with_caller(fd, buf, nbyte, 0, NO, YES, __builtin_return_address(0));
+}
+
+static ssize_t pt_pwrite(int fd, const void *buf, size_t nbyte, off_t offset) {
+    return pt_fs_write_with_caller(fd, buf, nbyte, offset, YES, NO, __builtin_return_address(0));
+}
+
+static ssize_t pt_pwrite_nocancel(int fd, const void *buf, size_t nbyte, off_t offset) {
+    return pt_fs_write_with_caller(fd, buf, nbyte, offset, YES, YES, __builtin_return_address(0));
+}
+
+static ssize_t pt_writev(int fd, const struct iovec *iov, int iovcnt) {
+    return pt_fs_writev_with_caller(fd, iov, iovcnt, NO, __builtin_return_address(0));
+}
+
+static ssize_t pt_writev_nocancel(int fd, const struct iovec *iov, int iovcnt) {
+    return pt_fs_writev_with_caller(fd, iov, iovcnt, YES, __builtin_return_address(0));
+}
+
+PT_INTERPOSE(pt_write, write)
+PT_INTERPOSE_WEAK_NAMED(pt_write_nocancel, pt_orig_write_nocancel, "write$NOCANCEL")
+PT_INTERPOSE(pt_pwrite, pwrite)
+PT_INTERPOSE_WEAK_NAMED(pt_pwrite_nocancel, pt_orig_pwrite_nocancel, "pwrite$NOCANCEL")
+PT_INTERPOSE(pt_writev, writev)
+PT_INTERPOSE_WEAK_NAMED(pt_writev_nocancel, pt_orig_writev_nocancel, "writev$NOCANCEL")
 PT_INTERPOSE(pt_fsgetpath, fsgetpath)
 PT_INTERPOSE_WEAK_NAMED(pt_fsgetpath_ext, pt_orig_fsgetpath_ext, "fsgetpath_ext")
 PT_INTERPOSE_WEAK_NAMED(pt_searchfs, pt_orig_searchfs, "searchfs")

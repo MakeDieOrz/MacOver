@@ -8,6 +8,7 @@
 #ifndef PTKernelABI_h
 #define PTKernelABI_h
 
+#include <netinet/in.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/mount.h>
@@ -277,8 +278,20 @@ extern int proc_regionfilename(int pid, uint64_t address, void *buffer, uint32_t
 #ifndef PROC_PIDFDSOCKETINFO
 #define PROC_PIDFDSOCKETINFO 3
 #endif
+#ifndef SOCKINFO_IN
+#define SOCKINFO_IN 1
+#endif
+#ifndef SOCKINFO_TCP
+#define SOCKINFO_TCP 2
+#endif
 #ifndef SOCKINFO_UN
 #define SOCKINFO_UN 3
+#endif
+#ifndef INI_IPV4
+#define INI_IPV4 0x1
+#endif
+#ifndef INI_IPV6
+#define INI_IPV6 0x2
 #endif
 
 struct proc_uniqidentifierinfo {
@@ -300,6 +313,49 @@ typedef struct {
     short    sbi_flags;
     short    sbi_timeo;
 } pt_sockbuf_info_t;
+
+typedef struct {
+    uint32_t       i46a_pad32[3];
+    struct in_addr i46a_addr4;
+} pt_in4in6_addr_t;
+
+typedef struct {
+    int      insi_fport;
+    int      insi_lport;
+    uint64_t insi_gencnt;
+    uint32_t insi_flags;
+    uint32_t insi_flow;
+    uint8_t  insi_vflag;
+    uint8_t  insi_ip_ttl;
+    uint32_t rfu_1;
+    union {
+        pt_in4in6_addr_t ina_46;
+        struct in6_addr  ina_6;
+    } insi_faddr;
+    union {
+        pt_in4in6_addr_t ina_46;
+        struct in6_addr  ina_6;
+    } insi_laddr;
+    struct {
+        unsigned char in4_tos;
+    } insi_v4;
+    struct {
+        uint8_t  in6_hlim;
+        int      in6_cksum;
+        uint16_t in6_ifindex;
+        int16_t  in6_hops;
+    } insi_v6;
+} pt_in_sockinfo_t;
+
+typedef struct {
+    pt_in_sockinfo_t tcpsi_ini;
+    int              tcpsi_state;
+    int              tcpsi_timer[4];
+    int              tcpsi_mss;
+    uint32_t         tcpsi_flags;
+    uint32_t         rfu_1;
+    uint64_t         tcpsi_tp;
+} pt_tcp_sockinfo_t;
 
 typedef struct {
     uint8_t  sun_len;
@@ -341,8 +397,10 @@ typedef struct {
     int               soi_kind;
     uint32_t          rfu_1;
     union {
-        pt_un_sockinfo_t pri_un;
-        uint8_t          pri_raw[528];
+        pt_in_sockinfo_t  pri_in;
+        pt_tcp_sockinfo_t pri_tcp;
+        pt_un_sockinfo_t  pri_un;
+        uint8_t           pri_raw[528];
     } soi_proto;
 } pt_socket_info_t;
 
@@ -351,6 +409,11 @@ typedef struct {
     pt_socket_info_t     psi;
 } pt_socket_fdinfo_t;
 
+_Static_assert(sizeof(pt_in_sockinfo_t) == 80, "pt_in_sockinfo_t size mismatch");
+_Static_assert(offsetof(pt_in_sockinfo_t, insi_vflag) == 24, "pt_in_sockinfo_t insi_vflag offset mismatch");
+_Static_assert(offsetof(pt_in_sockinfo_t, insi_faddr) == 32, "pt_in_sockinfo_t insi_faddr offset mismatch");
+_Static_assert(offsetof(pt_in_sockinfo_t, insi_laddr) == 48, "pt_in_sockinfo_t insi_laddr offset mismatch");
+_Static_assert(sizeof(pt_tcp_sockinfo_t) == 120, "pt_tcp_sockinfo_t size mismatch");
 _Static_assert(sizeof(pt_sockbuf_info_t) == 24, "pt_sockbuf_info_t size mismatch");
 _Static_assert(sizeof(pt_un_sockinfo_t) == 528, "pt_un_sockinfo_t size mismatch");
 _Static_assert(sizeof(pt_socket_info_t) == 768, "pt_socket_info_t size mismatch");

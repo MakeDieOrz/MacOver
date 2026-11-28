@@ -162,6 +162,7 @@ static BOOL ps_vfile_parse_uint64(NSString *str, uint64_t *outVal) {
 
 static const char kPSWKReadScopeAssocKey = 0;
 
+__attribute__((visibility("hidden")))
 @interface PSVirtualFileReadScope : NSObject
 @property (nonatomic, copy) NSString *allowedRealPath;
 @property (nonatomic, copy) NSString *expectedDocRealPath;
@@ -371,76 +372,89 @@ static PSVirtualFileReadScope *ps_get_wkwebview_read_scope(id webView) {
     return objc_getAssociatedObject(webView, &kPSWKReadScopeAssocKey);
 }
 
+static inline BOOL ps_wk_scheme_is_vfile_or_file(NSString *scheme) {
+    if (![scheme isKindOfClass:[NSString class]] || scheme.length == 0) {
+        return NO;
+    }
+    return ([scheme caseInsensitiveCompare:@"file"] == NSOrderedSame ||
+            [scheme caseInsensitiveCompare:@"pt-vfile"] == NSOrderedSame);
+}
+
 static BOOL ps_verify_wk_initiator_on_main(id webView, id urlSchemeTask, NSURLRequest *req, PSVirtualFileReadScope *scope) {
-    if (webView == nil || scope == nil || (!scope.allowAllAppContainers && scope.allowedRealPath.length == 0)) {
+    if (webView == nil || urlSchemeTask == nil || scope == nil ||
+        (!scope.allowAllAppContainers && scope.allowedRealPath.length == 0)) {
         return NO;
     }
     SEL urlSel = @selector(URL);
     if ([webView respondsToSelector:urlSel]) {
         NSURL *wvURL = ((NSURL *(*)(id, SEL))objc_msgSend)(webView, urlSel);
         if (wvURL != nil && wvURL.absoluteString.length > 0) {
-            NSString *wvScheme = wvURL.scheme ?: @"";
-            if ([wvScheme caseInsensitiveCompare:@"about"] != NSOrderedSame &&
-                [wvScheme caseInsensitiveCompare:@"file"] != NSOrderedSame &&
-                [wvScheme caseInsensitiveCompare:@"pt-vfile"] != NSOrderedSame) {
+            if (!ps_wk_scheme_is_vfile_or_file(wvURL.scheme)) {
                 return NO;
             }
         }
     }
     SEL frameSel = NSSelectorFromString(@"_frame");
-    if (urlSchemeTask != nil && [urlSchemeTask respondsToSelector:frameSel]) {
-        id frameInfo = ((id (*)(id, SEL))objc_msgSend)(urlSchemeTask, frameSel);
-        if (frameInfo != nil) {
-            SEL secOriginSel = NSSelectorFromString(@"securityOrigin");
-            if ([frameInfo respondsToSelector:secOriginSel]) {
-                id secOrigin = ((id (*)(id, SEL))objc_msgSend)(frameInfo, secOriginSel);
-                SEL protoSel = NSSelectorFromString(@"protocol");
-                if (secOrigin != nil && [secOrigin respondsToSelector:protoSel]) {
-                    NSString *proto = ((NSString *(*)(id, SEL))objc_msgSend)(secOrigin, protoSel);
-                    if ([proto isKindOfClass:[NSString class]] && proto.length > 0 &&
-                        [proto caseInsensitiveCompare:@"file"] != NSOrderedSame &&
-                        [proto caseInsensitiveCompare:@"pt-vfile"] != NSOrderedSame &&
-                        [proto caseInsensitiveCompare:@"about"] != NSOrderedSame &&
-                        [proto caseInsensitiveCompare:@"null"] != NSOrderedSame) {
-                        return NO;
-                    }
-                }
+    if (![urlSchemeTask respondsToSelector:frameSel]) {
+        return NO;
+    }
+    id frameInfo = ((id (*)(id, SEL))objc_msgSend)(urlSchemeTask, frameSel);
+    if (frameInfo == nil) {
+        return NO;
+    }
+    BOOL isMainFrame = NO;
+    SEL mainFrameSel = NSSelectorFromString(@"isMainFrame");
+    if ([frameInfo respondsToSelector:mainFrameSel]) {
+        isMainFrame = ((BOOL (*)(id, SEL))objc_msgSend)(frameInfo, mainFrameSel);
+    }
+    SEL secOriginSel = NSSelectorFromString(@"securityOrigin");
+    if (![frameInfo respondsToSelector:secOriginSel]) {
+        return NO;
+    }
+    id secOrigin = ((id (*)(id, SEL))objc_msgSend)(frameInfo, secOriginSel);
+    SEL protoSel = NSSelectorFromString(@"protocol");
+    if (secOrigin == nil || ![secOrigin respondsToSelector:protoSel]) {
+        return NO;
+    }
+    NSString *proto = ((NSString *(*)(id, SEL))objc_msgSend)(secOrigin, protoSel);
+    if (!ps_wk_scheme_is_vfile_or_file(proto)) {
+        return NO;
+    }
+    SEL frameReqSel = @selector(request);
+    if ([frameInfo respondsToSelector:frameReqSel]) {
+        NSURLRequest *frameReq = ((NSURLRequest *(*)(id, SEL))objc_msgSend)(frameInfo, frameReqSel);
+        NSURL *frameURL = frameReq.URL;
+        if (frameURL != nil && frameURL.absoluteString.length > 0) {
+            if (!ps_wk_scheme_is_vfile_or_file(frameURL.scheme)) {
+                return NO;
             }
-            SEL frameReqSel = @selector(request);
-            if ([frameInfo respondsToSelector:frameReqSel]) {
-                NSURLRequest *frameReq = ((NSURLRequest *(*)(id, SEL))objc_msgSend)(frameInfo, frameReqSel);
-                NSURL *frameURL = frameReq.URL;
-                if (frameURL != nil && frameURL.absoluteString.length > 0) {
-                    NSString *frameScheme = frameURL.scheme ?: @"";
-                    if ([frameScheme caseInsensitiveCompare:@"about"] != NSOrderedSame &&
-                        [frameScheme caseInsensitiveCompare:@"file"] != NSOrderedSame &&
-                        [frameScheme caseInsensitiveCompare:@"pt-vfile"] != NSOrderedSame) {
-                        return NO;
-                    }
-                }
-            }
+        } else if (!isMainFrame) {
+            return NO;
         }
+    } else if (!isMainFrame) {
+        return NO;
     }
     NSURL *mainDocURL = req.mainDocumentURL;
     if (mainDocURL != nil && mainDocURL.absoluteString.length > 0) {
-        NSString *scheme = mainDocURL.scheme ?: @"";
-        if ([scheme caseInsensitiveCompare:@"about"] != NSOrderedSame &&
-            [scheme caseInsensitiveCompare:@"file"] != NSOrderedSame &&
-            [scheme caseInsensitiveCompare:@"pt-vfile"] != NSOrderedSame) {
+        if (!ps_wk_scheme_is_vfile_or_file(mainDocURL.scheme)) {
             return NO;
         }
     }
     NSString *originHdr = [req valueForHTTPHeaderField:@"Origin"];
-    if (originHdr.length > 0 && ![originHdr isEqualToString:@"null"]) {
-        NSString *lo = [originHdr lowercaseString];
-        if (![lo hasPrefix:@"file:"] && ![lo hasPrefix:@"pt-vfile:"] && ![lo hasPrefix:@"about:"]) {
+    if (originHdr.length > 0) {
+        NSString *lo = [[originHdr stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
+        if ([lo isEqualToString:@"null"]) {
+            if (!isMainFrame) {
+                return NO;
+            }
+        } else if (![lo hasPrefix:@"file:"] && ![lo hasPrefix:@"pt-vfile:"]) {
             return NO;
         }
     }
     NSString *refererHdr = [req valueForHTTPHeaderField:@"Referer"];
     if (refererHdr.length > 0) {
-        NSString *lr = [refererHdr lowercaseString];
-        if (![lr hasPrefix:@"file:"] && ![lr hasPrefix:@"pt-vfile:"] && ![lr hasPrefix:@"about:"]) {
+        NSString *lr = [[refererHdr stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
+        if (![lr hasPrefix:@"file:"] && ![lr hasPrefix:@"pt-vfile:"]) {
             return NO;
         }
     }
@@ -531,12 +545,13 @@ __attribute__((visibility("hidden")))
                 return;
             }
 
-            NSString *lowerOrigin = originHeader ? [originHeader lowercaseString] : @"";
-            BOOL allowOrigin = (lowerOrigin.length == 0 ||
-                                [lowerOrigin isEqualToString:@"null"] ||
-                                [lowerOrigin hasPrefix:@"file:"] ||
-                                [lowerOrigin hasPrefix:@"pt-vfile:"] ||
-                                [lowerOrigin hasPrefix:@"about:"]);
+            NSString *lowerOrigin = originHeader
+                ? [[originHeader stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString]
+                : @"";
+            BOOL allowOrigin = (lowerOrigin.length > 0 &&
+                                ![lowerOrigin isEqualToString:@"null"] &&
+                                ([lowerOrigin hasPrefix:@"file:"] ||
+                                 [lowerOrigin hasPrefix:@"pt-vfile:"]));
 
             if (isOptions) {
                 NSMutableDictionary<NSString *, NSString *> *optHeaders = [NSMutableDictionary dictionaryWithDictionary:@{
@@ -915,11 +930,32 @@ static void ps_install_wk_scheme_privacy_hooks_if_loaded(void) {
     }
 }
 
+@interface PSSwizzleHooks (PlayShadowWebKitInternal)
+- (void) pm_wk_evaluateJavaScript:(NSString *)javaScriptString
+                completionHandler:(void (^)(id, NSError *))completionHandler;
+- (void) pm_wk_evaluateJavaScript:(NSString *)javaScriptString
+                          inFrame:(id)frame
+                   inContentWorld:(id)contentWorld
+                completionHandler:(void (^)(id, NSError *))completionHandler;
+- (void) pm_wk_callAsyncJavaScript:(NSString *)functionBody
+                         arguments:(NSDictionary<NSString *, id> *)arguments
+                           inFrame:(id)frame
+                    inContentWorld:(id)contentWorld
+                 completionHandler:(void (^)(id, NSError *))completionHandler;
+- (void) pm_wk_addUserScript:(id)userScript;
+@end
+
+static inline BOOL ps_wk_spoofing_active(void) {
+    return pt_is_bypass_enabled() && ![PTSafeMode isActive];
+}
+
 @implementation PSSwizzleHooks (PlayShadowWebKit)
 
 static _Atomic bool s_wk_custom_protocol_handles_file = false;
 static const char kPSWKExplicitCustomUAKey = 0;
 static const char kPSWKUCCManagedModeKey = 0;
+static const char kPSWKBootstrappedWorldsKey = 0;
+static const char kPSWKNavGenerationKey = 0;
 
 
 static NSString *ps_ios_os_version_for_ua(void) {
@@ -1417,8 +1453,93 @@ static PSVirtualFileReadScope *ps_make_read_scope_for_base_url(NSURL *baseURL) {
     return scope;
 }
 
+static void ps_reset_wkwebview_bootstrap_state(id webView) {
+    if (webView == nil) {
+        return;
+    }
+    @synchronized (webView) {
+        objc_setAssociatedObject(webView, &kPSWKBootstrappedWorldsKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        NSNumber *gen = objc_getAssociatedObject(webView, &kPSWKNavGenerationKey);
+        NSUInteger nextGen = (gen != nil) ? ([gen unsignedIntegerValue] + 1U) : 1U;
+        objc_setAssociatedObject(webView, &kPSWKNavGenerationKey, @(nextGen), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+
+static BOOL ps_should_inject_bootstrap_for_world(id webView, id frame, id contentWorld, BOOL isPageWorld) {
+    if (webView == nil) {
+        return NO;
+    }
+    NSURL *wvURL = nil;
+    if ([webView respondsToSelector:@selector(URL)]) {
+        wvURL = ((NSURL *(*)(id, SEL))objc_msgSend)(webView, @selector(URL));
+    }
+    NSString *urlStr = (wvURL != nil && wvURL.absoluteString != nil) ? wvURL.absoluteString : @"";
+    if (isPageWorld) {
+        BOOL isPreNav = (urlStr.length == 0 ||
+                         [wvURL.scheme caseInsensitiveCompare:@"about"] == NSOrderedSame);
+        if (!isPreNav) {
+            return NO;
+        }
+    }
+    NSString *worldTag = @"page";
+    if (!isPageWorld && contentWorld != nil) {
+        NSString *wName = nil;
+        SEL nameSel = @selector(name);
+        if ([contentWorld respondsToSelector:nameSel]) {
+            id rawName = ((id (*)(id, SEL))objc_msgSend)(contentWorld, nameSel);
+            if ([rawName isKindOfClass:[NSString class]]) {
+                wName = (NSString *)rawName;
+            }
+        }
+        worldTag = (wName.length > 0)
+            ? [NSString stringWithFormat:@"n:%@", wName]
+            : [NSString stringWithFormat:@"p:%p", contentWorld];
+    }
+    NSString *frameTag = @"main";
+    if (frame != nil) {
+        BOOL isMain = YES;
+        SEL mainSel = NSSelectorFromString(@"isMainFrame");
+        if ([frame respondsToSelector:mainSel]) {
+            isMain = ((BOOL (*)(id, SEL))objc_msgSend)(frame, mainSel);
+        }
+        if (!isMain) {
+            NSString *fURLStr = nil;
+            if ([frame respondsToSelector:@selector(request)]) {
+                NSURLRequest *fReq = ((NSURLRequest *(*)(id, SEL))objc_msgSend)(frame, @selector(request));
+                fURLStr = fReq.URL.absoluteString;
+            }
+            frameTag = (fURLStr.length > 0)
+                ? [NSString stringWithFormat:@"sub:%@", fURLStr]
+                : [NSString stringWithFormat:@"sub:%p", frame];
+        }
+    }
+    @synchronized (webView) {
+        NSNumber *gen = objc_getAssociatedObject(webView, &kPSWKNavGenerationKey);
+        NSUInteger navGen = (gen != nil) ? [gen unsignedIntegerValue] : 0U;
+        NSString *key = [NSString stringWithFormat:@"%lu|%@|%@|%@",
+                         (unsigned long)navGen, worldTag, frameTag, urlStr];
+        NSMutableSet<NSString *> *seen = objc_getAssociatedObject(webView, &kPSWKBootstrappedWorldsKey);
+        if (seen == nil) {
+            seen = [NSMutableSet setWithCapacity:4];
+            objc_setAssociatedObject(webView, &kPSWKBootstrappedWorldsKey, seen, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        if ([seen containsObject:key]) {
+            return NO;
+        }
+        if (seen.count >= 64) {
+            [seen removeAllObjects];
+        }
+        [seen addObject:key];
+        return YES;
+    }
+}
+
 static void ps_sync_wkwebview_for_scope(id webView, PSVirtualFileReadScope *scope) {
     if (webView == nil) {
+        return;
+    }
+    if (!ps_wk_spoofing_active()) {
+        ps_set_wkwebview_read_scope(webView, nil);
         return;
     }
     ps_set_wkwebview_read_scope(webView, scope);
@@ -1443,7 +1564,7 @@ static void ps_sync_wkwebview_for_scope(id webView, PSVirtualFileReadScope *scop
 - (NSArray *) pm_wk_userScripts {
     const void *caller = __builtin_return_address(0);
     NSArray *scripts = [self pm_wk_userScripts];
-    if (scripts.count == 0 || !pt_is_bypass_enabled() || ps_is_effective_system_or_playtools_caller(caller)) {
+    if (scripts.count == 0 || !ps_wk_spoofing_active() || ps_is_effective_system_or_playtools_caller(caller)) {
         return scripts;
     }
     SEL srcSel = NSSelectorFromString(@"source");
@@ -1474,7 +1595,7 @@ static void ps_sync_wkwebview_for_scope(id webView, PSVirtualFileReadScope *scop
 
 - (void) pm_wk_addUserScript:(id)userScript {
     if (userScript != nil &&
-        pt_is_bypass_enabled() &&
+        ps_wk_spoofing_active() &&
         !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         SEL cwSel = NSSelectorFromString(@"contentWorld");
         if (![userScript respondsToSelector:cwSel]) {
@@ -1494,20 +1615,34 @@ static void ps_sync_wkwebview_for_scope(id webView, PSVirtualFileReadScope *scop
     NSNumber *mode = objc_getAssociatedObject(self, &kPSWKUCCManagedModeKey);
     if (mode != nil) {
         objc_setAssociatedObject(self, &kPSWKUCCManagedModeKey, nil, OBJC_ASSOCIATION_RETAIN);
-        BOOL wantVFile = ([mode integerValue] == 2) &&
-                         !atomic_load_explicit(&s_wk_custom_protocol_handles_file, memory_order_relaxed);
-        ps_apply_playtools_scripts_to_ucc(self, wantVFile);
+        if (ps_wk_spoofing_active()) {
+            BOOL wantVFile = ([mode integerValue] == 2) &&
+                             !atomic_load_explicit(&s_wk_custom_protocol_handles_file, memory_order_relaxed);
+            ps_apply_playtools_scripts_to_ucc(self, wantVFile);
+        }
     }
+}
+
+- (void) pm_wk_evaluateJavaScript:(NSString *)javaScriptString
+                completionHandler:(void (^)(id, NSError *))completionHandler {
+    if (ps_wk_spoofing_active() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        ps_should_inject_bootstrap_for_world(self, nil, nil, YES)) {
+        [self pm_wk_evaluateJavaScript:ps_build_wk_env_user_script_source()
+                     completionHandler:nil];
+    }
+    [self pm_wk_evaluateJavaScript:javaScriptString
+                 completionHandler:completionHandler];
 }
 
 - (void) pm_wk_evaluateJavaScript:(NSString *)javaScriptString
                           inFrame:(id)frame
                    inContentWorld:(id)contentWorld
                 completionHandler:(void (^)(id, NSError *))completionHandler {
-    if (pt_is_bypass_enabled() &&
-        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
-        !ps_is_wk_page_content_world(contentWorld)) {
-        if ([self respondsToSelector:@selector(configuration)]) {
+    if (ps_wk_spoofing_active() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        BOOL isPageWorld = ps_is_wk_page_content_world(contentWorld);
+        if (!isPageWorld && [self respondsToSelector:@selector(configuration)]) {
             id cfg = ((id (*)(id, SEL))objc_msgSend)(self, @selector(configuration));
             SEL uccSel = NSSelectorFromString(@"userContentController");
             if (cfg != nil && [cfg respondsToSelector:uccSel]) {
@@ -1515,10 +1650,12 @@ static void ps_sync_wkwebview_for_scope(id webView, PSVirtualFileReadScope *scop
                 ps_ensure_playtools_env_in_world(ucc, contentWorld);
             }
         }
-        [self pm_wk_evaluateJavaScript:ps_build_wk_env_user_script_source()
-                               inFrame:frame
-                        inContentWorld:contentWorld
-                     completionHandler:nil];
+        if (ps_should_inject_bootstrap_for_world(self, frame, contentWorld, isPageWorld)) {
+            [self pm_wk_evaluateJavaScript:ps_build_wk_env_user_script_source()
+                                   inFrame:frame
+                            inContentWorld:contentWorld
+                         completionHandler:nil];
+        }
     }
     [self pm_wk_evaluateJavaScript:javaScriptString
                            inFrame:frame
@@ -1531,10 +1668,10 @@ static void ps_sync_wkwebview_for_scope(id webView, PSVirtualFileReadScope *scop
                            inFrame:(id)frame
                     inContentWorld:(id)contentWorld
                  completionHandler:(void (^)(id, NSError *))completionHandler {
-    if (pt_is_bypass_enabled() &&
-        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
-        !ps_is_wk_page_content_world(contentWorld)) {
-        if ([self respondsToSelector:@selector(configuration)]) {
+    if (ps_wk_spoofing_active() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        BOOL isPageWorld = ps_is_wk_page_content_world(contentWorld);
+        if (!isPageWorld && [self respondsToSelector:@selector(configuration)]) {
             id cfg = ((id (*)(id, SEL))objc_msgSend)(self, @selector(configuration));
             SEL uccSel = NSSelectorFromString(@"userContentController");
             if (cfg != nil && [cfg respondsToSelector:uccSel]) {
@@ -1542,12 +1679,14 @@ static void ps_sync_wkwebview_for_scope(id webView, PSVirtualFileReadScope *scop
                 ps_ensure_playtools_env_in_world(ucc, contentWorld);
             }
         }
-        SEL origEvalSel = @selector(pm_wk_evaluateJavaScript:inFrame:inContentWorld:completionHandler:);
-        if ([self respondsToSelector:origEvalSel]) {
-            [self pm_wk_evaluateJavaScript:ps_build_wk_env_user_script_source()
-                                   inFrame:frame
-                            inContentWorld:contentWorld
-                         completionHandler:nil];
+        if (ps_should_inject_bootstrap_for_world(self, frame, contentWorld, isPageWorld)) {
+            SEL origEvalSel = @selector(pm_wk_evaluateJavaScript:inFrame:inContentWorld:completionHandler:);
+            if ([self respondsToSelector:origEvalSel]) {
+                [self pm_wk_evaluateJavaScript:ps_build_wk_env_user_script_source()
+                                       inFrame:frame
+                                inContentWorld:contentWorld
+                             completionHandler:nil];
+            }
         }
     }
     [self pm_wk_callAsyncJavaScript:functionBody
@@ -1561,26 +1700,28 @@ static void ps_prepare_wk_configuration(id cfg) {
     if (cfg == nil) {
         return;
     }
-    SEL getHandlerSel = @selector(urlSchemeHandlerForURLScheme:);
-    SEL setHandlerSel = NSSelectorFromString(@"setURLSchemeHandler:forURLScheme:");
-    if ([cfg respondsToSelector:getHandlerSel] &&
-        [cfg respondsToSelector:setHandlerSel]) {
-        id existingHandler = ((id (*)(id, SEL, NSString *))objc_msgSend)(cfg, getHandlerSel, @"pt-vfile");
-        if (existingHandler == nil) {
-            @try {
-                ((void (*)(id, SEL, id, NSString *))objc_msgSend)(cfg,
-                                                                  setHandlerSel,
-                                                                  ps_shared_vfile_scheme_handler(),
-                                                                  @"pt-vfile");
-            } @catch (NSException *exception) {
-                (void)exception;
+    if (ps_wk_spoofing_active()) {
+        SEL getHandlerSel = @selector(urlSchemeHandlerForURLScheme:);
+        SEL setHandlerSel = NSSelectorFromString(@"setURLSchemeHandler:forURLScheme:");
+        if ([cfg respondsToSelector:getHandlerSel] &&
+            [cfg respondsToSelector:setHandlerSel]) {
+            id existingHandler = ((id (*)(id, SEL, NSString *))objc_msgSend)(cfg, getHandlerSel, @"pt-vfile");
+            if (existingHandler == nil) {
+                @try {
+                    ((void (*)(id, SEL, id, NSString *))objc_msgSend)(cfg,
+                                                                      setHandlerSel,
+                                                                      ps_shared_vfile_scheme_handler(),
+                                                                      @"pt-vfile");
+                } @catch (NSException *exception) {
+                    (void)exception;
+                }
             }
         }
-    }
-    SEL uccSel = NSSelectorFromString(@"userContentController");
-    if ([cfg respondsToSelector:uccSel]) {
-        id ucc = ((id (*)(id, SEL))objc_msgSend)(cfg, uccSel);
-        ps_apply_playtools_scripts_to_ucc(ucc, NO);
+        SEL uccSel = NSSelectorFromString(@"userContentController");
+        if ([cfg respondsToSelector:uccSel]) {
+            id ucc = ((id (*)(id, SEL))objc_msgSend)(cfg, uccSel);
+            ps_apply_playtools_scripts_to_ucc(ucc, NO);
+        }
     }
     ps_apply_proxy_to_wk_configuration(cfg);
 }
@@ -1607,7 +1748,7 @@ static const char kPSWKAppVFileSchemeHandlerKey = 0;
     const void *caller = __builtin_return_address(0);
     if ([urlScheme isKindOfClass:[NSString class]] &&
         [urlScheme caseInsensitiveCompare:@"pt-vfile"] == NSOrderedSame &&
-        pt_is_bypass_enabled() &&
+        ps_wk_spoofing_active() &&
         !ps_is_effective_system_or_playtools_caller(caller)) {
         objc_setAssociatedObject(self,
                                  &kPSWKAppVFileSchemeHandlerKey,
@@ -1623,7 +1764,7 @@ static const char kPSWKAppVFileSchemeHandlerKey = 0;
     id result = [self pm_wk_cfg_urlSchemeHandlerForURLScheme:urlScheme];
     if ([urlScheme isKindOfClass:[NSString class]] &&
         [urlScheme caseInsensitiveCompare:@"pt-vfile"] == NSOrderedSame &&
-        pt_is_bypass_enabled() &&
+        ps_wk_spoofing_active() &&
         !ps_is_effective_system_or_playtools_caller(caller)) {
         id appHandler = objc_getAssociatedObject(self, &kPSWKAppVFileSchemeHandlerKey);
         if (appHandler != nil) {
@@ -1644,31 +1785,33 @@ static void ps_finish_wkwebview_init(id initialized, id cfg) {
     if (initialized == nil) {
         return;
     }
-    id effectiveCfg = cfg;
-    if (effectiveCfg == nil && [initialized respondsToSelector:@selector(configuration)]) {
-        effectiveCfg = ((id (*)(id, SEL))objc_msgSend)(initialized, @selector(configuration));
-        if (effectiveCfg != nil) {
-            SEL uccSel = NSSelectorFromString(@"userContentController");
-            if ([effectiveCfg respondsToSelector:uccSel]) {
-                id ucc = ((id (*)(id, SEL))objc_msgSend)(effectiveCfg, uccSel);
-                ps_apply_playtools_scripts_to_ucc(ucc, NO);
+    if (ps_wk_spoofing_active()) {
+        id effectiveCfg = cfg;
+        if (effectiveCfg == nil && [initialized respondsToSelector:@selector(configuration)]) {
+            effectiveCfg = ((id (*)(id, SEL))objc_msgSend)(initialized, @selector(configuration));
+            if (effectiveCfg != nil) {
+                SEL uccSel = NSSelectorFromString(@"userContentController");
+                if ([effectiveCfg respondsToSelector:uccSel]) {
+                    id ucc = ((id (*)(id, SEL))objc_msgSend)(effectiveCfg, uccSel);
+                    ps_apply_playtools_scripts_to_ucc(ucc, NO);
+                }
             }
         }
-    }
-    NSString *origUA = [initialized respondsToSelector:@selector(pm_wk_customUserAgent)]
-        ? [initialized pm_wk_customUserAgent]
-        : nil;
-    if ([origUA isKindOfClass:[NSString class]] && origUA.length > 0) {
-        NSString *sanitized = ps_sanitize_mac_token_in_ua(origUA);
-        objc_setAssociatedObject(initialized, &kPSWKExplicitCustomUAKey, sanitized, OBJC_ASSOCIATION_COPY_NONATOMIC);
-        if (![sanitized isEqualToString:origUA] &&
-            [initialized respondsToSelector:@selector(pm_wk_setCustomUserAgent:)]) {
-            [initialized pm_wk_setCustomUserAgent:sanitized];
+        NSString *origUA = [initialized respondsToSelector:@selector(pm_wk_customUserAgent)]
+            ? [initialized pm_wk_customUserAgent]
+            : nil;
+        if ([origUA isKindOfClass:[NSString class]] && origUA.length > 0) {
+            NSString *sanitized = ps_sanitize_mac_token_in_ua(origUA);
+            objc_setAssociatedObject(initialized, &kPSWKExplicitCustomUAKey, sanitized, OBJC_ASSOCIATION_COPY_NONATOMIC);
+            if (![sanitized isEqualToString:origUA] &&
+                [initialized respondsToSelector:@selector(pm_wk_setCustomUserAgent:)]) {
+                [initialized pm_wk_setCustomUserAgent:sanitized];
+            }
+        } else if ([initialized respondsToSelector:@selector(pm_wk_setCustomUserAgent:)] &&
+                   objc_getAssociatedObject(initialized, &kPSWKExplicitCustomUAKey) == nil) {
+            NSString *defaultUA = ps_build_default_wk_user_agent(effectiveCfg);
+            [initialized pm_wk_setCustomUserAgent:defaultUA];
         }
-    } else if ([initialized respondsToSelector:@selector(pm_wk_setCustomUserAgent:)] &&
-               objc_getAssociatedObject(initialized, &kPSWKExplicitCustomUAKey) == nil) {
-        NSString *defaultUA = ps_build_default_wk_user_agent(effectiveCfg);
-        [initialized pm_wk_setCustomUserAgent:defaultUA];
     }
     ps_install_default_wk_trust_delegate(initialized);
 }
@@ -1694,6 +1837,11 @@ static void ps_finish_wkwebview_init(id initialized, id cfg) {
 }
 
 - (void) pm_wk_setCustomUserAgent:(NSString *)customUserAgent {
+    if (!ps_wk_spoofing_active()) {
+        objc_setAssociatedObject(self, &kPSWKExplicitCustomUAKey, customUserAgent, OBJC_ASSOCIATION_COPY_NONATOMIC);
+        [self pm_wk_setCustomUserAgent:customUserAgent];
+        return;
+    }
     if (customUserAgent == nil || customUserAgent.length == 0) {
         objc_setAssociatedObject(self, &kPSWKExplicitCustomUAKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
         id cfg = [self respondsToSelector:@selector(configuration)]
@@ -1709,14 +1857,14 @@ static void ps_finish_wkwebview_init(id initialized, id cfg) {
 
 - (NSString *) pm_wk_customUserAgent {
     const void *caller = __builtin_return_address(0);
-    if (!pt_is_bypass_enabled() || ps_is_effective_system_or_playtools_caller(caller)) {
+    if (!ps_wk_spoofing_active() || ps_is_effective_system_or_playtools_caller(caller)) {
         return [self pm_wk_customUserAgent];
     }
     return objc_getAssociatedObject(self, &kPSWKExplicitCustomUAKey);
 }
 
 static NSURLRequest *ps_virtualize_url_request_for_caller(NSURLRequest *req, const void *caller) {
-    if (req == nil || !pt_is_bypass_enabled() || ps_is_effective_system_or_playtools_caller(caller)) {
+    if (req == nil || !ps_wk_spoofing_active() || ps_is_effective_system_or_playtools_caller(caller)) {
         return req;
     }
     NSURL *origURL = req.URL;
@@ -1806,12 +1954,7 @@ static NSURL *ps_wk_native_read_access_url_for_wide_ancestor(NSURL *docURL) {
 
 static PSVirtualFileReadScope *ps_make_read_scope_for_base_url_or_nil(NSURL *baseURL) {
     if (baseURL == nil || [baseURL.scheme caseInsensitiveCompare:@"about"] == NSOrderedSame) {
-        PSVirtualFileReadScope *scope = [[PSVirtualFileReadScope alloc] init];
-        scope.expectedDocRealPath = @"";
-        scope.allowedRealPath = @"";
-        scope.allowSubtree = YES;
-        scope.allowAllAppContainers = YES;
-        return scope;
+        return nil;
     }
     if ([baseURL isFileURL]) {
         return ps_make_read_scope_for_base_url(baseURL);
@@ -1820,6 +1963,7 @@ static PSVirtualFileReadScope *ps_make_read_scope_for_base_url_or_nil(NSURL *bas
 }
 
 - (id) pm_loadFileURL:(NSURL *)URL allowingReadAccessToURL:(NSURL *)readAccessURL {
+    ps_reset_wkwebview_bootstrap_state(self);
     if (ps_wkwebview_has_custom_file_interception(self)) {
         ps_sync_wkwebview_for_scope(self, nil);
         return [self pm_loadFileURL:URL allowingReadAccessToURL:readAccessURL];
@@ -1844,6 +1988,7 @@ static PSVirtualFileReadScope *ps_make_read_scope_for_base_url_or_nil(NSURL *bas
 }
 
 - (id) pm_loadFileRequest:(NSURLRequest *)request allowingReadAccessToURL:(NSURL *)readAccessURL {
+    ps_reset_wkwebview_bootstrap_state(self);
     if (ps_wkwebview_has_custom_file_interception(self)) {
         ps_sync_wkwebview_for_scope(self, nil);
         return [self pm_loadFileRequest:request allowingReadAccessToURL:readAccessURL];
@@ -1889,6 +2034,7 @@ static PSVirtualFileReadScope *ps_make_read_scope_for_base_url_or_nil(NSURL *bas
 }
 
 - (id) pm_wk_loadRequest:(NSURLRequest *)request {
+    ps_reset_wkwebview_bootstrap_state(self);
     if (!ps_wkwebview_has_custom_file_interception(self) &&
         request != nil && [request.URL isFileURL]) {
         PSVirtualFileReadScope *scope = ps_make_read_scope_for_file_request(self, request.URL);
@@ -1906,6 +2052,7 @@ static PSVirtualFileReadScope *ps_make_read_scope_for_base_url_or_nil(NSURL *bas
 }
 
 - (id) pm_wk_loadHTMLString:(NSString *)string baseURL:(NSURL *)baseURL {
+    ps_reset_wkwebview_bootstrap_state(self);
     if (ps_wkwebview_has_custom_file_interception(self)) {
         ps_sync_wkwebview_for_scope(self, nil);
         return [self pm_wk_loadHTMLString:string baseURL:baseURL];
@@ -1920,6 +2067,7 @@ static PSVirtualFileReadScope *ps_make_read_scope_for_base_url_or_nil(NSURL *bas
              MIMEType:(NSString *)MIMEType
 characterEncodingName:(NSString *)characterEncodingName
               baseURL:(NSURL *)baseURL {
+    ps_reset_wkwebview_bootstrap_state(self);
     if (ps_wkwebview_has_custom_file_interception(self)) {
         ps_sync_wkwebview_for_scope(self, nil);
         return [self pm_wk_loadData:data
@@ -1956,6 +2104,12 @@ characterEncodingName:(NSString *)characterEncodingName
 @end
 
 __attribute__((visibility("hidden"))) void ps_install_webkit_hooks_if_loaded(void) {
+    static dispatch_once_t wkHiddenOnce;
+    dispatch_once(&wkHiddenOnce, ^{
+        pt_register_hidden_class("PSVirtualFileSchemeHandler");
+        pt_register_hidden_class("PSVirtualFileReadScope");
+        pt_register_hidden_class("PSVFileTaskState");
+    });
     Class wkCls = objc_getClass("WKWebView");
     if (wkCls != nil) {
         static dispatch_once_t wkOnce;
@@ -1999,6 +2153,11 @@ __attribute__((visibility("hidden"))) void ps_install_webkit_hooks_if_loaded(voi
                                        @selector(pm_wk_loadHTMLString:baseURL:));
             ps_swizzle_instance_method(wkCls, NSSelectorFromString(@"loadData:MIMEType:characterEncodingName:baseURL:"),
                                        @selector(pm_wk_loadData:MIMEType:characterEncodingName:baseURL:));
+            SEL evalSel = NSSelectorFromString(@"evaluateJavaScript:completionHandler:");
+            if (class_getInstanceMethod(wkCls, evalSel) != NULL) {
+                ps_swizzle_instance_method(wkCls, evalSel,
+                                           @selector(pm_wk_evaluateJavaScript:completionHandler:));
+            }
             SEL evalWorldSel = NSSelectorFromString(@"evaluateJavaScript:inFrame:inContentWorld:completionHandler:");
             if (class_getInstanceMethod(wkCls, evalWorldSel) != NULL) {
                 ps_swizzle_instance_method(wkCls, evalWorldSel,

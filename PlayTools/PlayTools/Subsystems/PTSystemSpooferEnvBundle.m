@@ -18,6 +18,9 @@ static char *pt_getenv(const char *name) {
         return NULL;
     }
     char *raw_val = getenv(name);
+    if (raw_val == NULL) {
+        return NULL;
+    }
     if (pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return raw_val;
     }
@@ -26,7 +29,7 @@ static char *pt_getenv(const char *name) {
     const char *vt = pt_get_virtual_tmpdir_cstr();
     const char *rewritten = NULL;
     pt_env_entry_action_t act = pt_resolve_env_entry(
-        name, raw_val, (raw_val != NULL), bypass, vh, vt, &rewritten);
+        name, raw_val, YES, bypass, vh, vt, &rewritten);
     switch (act) {
         case PT_ENV_ENTRY_HIDE:
             PT_DEBUG_TRACE("spoofer", "hid getenv key=%s", name);
@@ -62,6 +65,8 @@ static size_t s_last_real_env_count = 0;
 static char **s_last_real_snapshot = NULL;
 static char *s_last_vh = NULL;
 static char *s_last_vt = NULL;
+static BOOL s_last_bypass = YES;
+static BOOL s_has_last_bypass = NO;
 static char **s_immortal_shadow_envs[PT_IMMORTAL_SHADOW_ENV_SLOTS] = {0};
 static size_t s_immortal_shadow_env_count = 0;
 static char **s_retired_shadow_envs[PT_RETIRED_SHADOW_ENV_SLOTS] = {0};
@@ -109,8 +114,11 @@ static char ***pt_refresh_shadow_environ(char ***real_envp) {
     }
     const char *vh = pt_get_virtual_home_cstr();
     const char *vt = pt_get_virtual_tmpdir_cstr();
+    BOOL bypass = pt_is_bypass_enabled();
 
     BOOL needs_rebuild = (s_shadow_environ == NULL ||
+                          !s_has_last_bypass ||
+                          bypass != s_last_bypass ||
                           cur_real != s_last_real_environ ||
                           real_count != s_last_real_env_count ||
                           (real_count > 0 && s_last_real_snapshot == NULL) ||
@@ -129,8 +137,7 @@ static char ***pt_refresh_shadow_environ(char ***real_envp) {
     }
 
     if (needs_rebuild) {
-        BOOL bypass = pt_is_bypass_enabled();
-        char **new_env = (char **)calloc(real_count + 6, sizeof(char *));
+        char **new_env = (char **)calloc(real_count + 1U, sizeof(char *));
         char **new_real_snapshot = (char **)calloc(real_count + 1, sizeof(char *));
         char *new_vh = (vh != NULL) ? strdup(vh) : NULL;
         char *new_vt = (vt != NULL) ? strdup(vt) : NULL;
@@ -229,23 +236,6 @@ static char ***pt_refresh_shadow_environ(char ***real_envp) {
                     free(heap_key);
                 }
             }
-            const char *const kMandatoryKeys[] = { "HOME", "CFFIXED_USER_HOME", "TMPDIR", "PATH" };
-            const BOOL addedFlags[] = { added_home, added_cffixed_home, added_tmpdir, added_path };
-            for (size_t mi = 0; alloc_ok && mi < 4U; mi++) {
-                if (!addedFlags[mi]) {
-                    const char *mkey = kMandatoryKeys[mi];
-                    const char *rewritten = NULL;
-                    if (pt_resolve_env_entry(mkey, NULL, NO, bypass, vh, vt, &rewritten) == PT_ENV_ENTRY_REWRITE &&
-                        rewritten != NULL) {
-                        char *kv = pt_alloc_env_kv(mkey, rewritten);
-                        if (kv == NULL) {
-                            alloc_ok = NO;
-                            break;
-                        }
-                        new_env[out_idx++] = kv;
-                    }
-                }
-            }
         }
         if (alloc_ok) {
             new_env[out_idx] = NULL;
@@ -268,6 +258,8 @@ static char ***pt_refresh_shadow_environ(char ***real_envp) {
             s_last_real_snapshot = new_real_snapshot;
             s_last_vh = new_vh;
             s_last_vt = new_vt;
+            s_last_bypass = bypass;
+            s_has_last_bypass = YES;
         } else {
             pt_free_env_array(new_env);
             pt_free_env_snapshot(new_real_snapshot, real_count);
@@ -295,6 +287,7 @@ static char ***pt_NSGetEnviron(void) {
     char ***real_envp = _NSGetEnviron();
     if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire) ||
         real_envp == NULL || *real_envp == NULL ||
+        !pt_is_bypass_enabled() ||
         pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return real_envp;
     }
@@ -336,6 +329,8 @@ int pt_macos_launch_arg_skip_count(const char *arg, const char *next_arg) {
 
 static pthread_mutex_t s_shadow_argv_mutex = PTHREAD_MUTEX_INITIALIZER;
 static char **s_shadow_argv = NULL;
+static char **s_shadow_raw_argv_ptr = NULL;
+static char **s_shadow_raw_argv_snapshot = NULL;
 static int s_shadow_raw_argc = -1;
 static int s_shadow_filtered_argc = 0;
 static char **s_immortal_shadow_argvs[PT_IMMORTAL_SHADOW_ARGV_SLOTS] = {0};
@@ -347,23 +342,54 @@ static char *s_shadow_progname_ptr = NULL;
 static pthread_once_t s_shadow_progname_once = PTHREAD_ONCE_INIT;
 
 static void pt_refresh_shadow_argv_locked(char **cur_argv, int raw_argc) {
+    if (raw_argc < 0) {
+        raw_argc = 0;
+    }
     char **cur_shadow = __atomic_load_n(&s_shadow_argv, __ATOMIC_RELAXED);
-    if (cur_shadow != NULL && s_shadow_raw_argc == raw_argc) {
+    BOOL needs_rebuild = (cur_shadow == NULL ||
+                          cur_argv != s_shadow_raw_argv_ptr ||
+                          raw_argc != s_shadow_raw_argc ||
+                          (raw_argc > 0 && s_shadow_raw_argv_snapshot == NULL));
+    if (!needs_rebuild) {
+        for (int i = 0; i < raw_argc; i++) {
+            const char *cur_arg = (cur_argv != NULL && cur_argv[i] != NULL) ? cur_argv[i] : "";
+            const char *snap_arg = (s_shadow_raw_argv_snapshot[i] != NULL) ? s_shadow_raw_argv_snapshot[i] : "";
+            if (strcmp(cur_arg, snap_arg) != 0) {
+                needs_rebuild = YES;
+                break;
+            }
+        }
+    }
+    if (!needs_rebuild) {
         return;
     }
     char **built = (char **)calloc((size_t)raw_argc + 1U, sizeof(char *));
-    if (built == NULL) {
+    char **new_snapshot = (char **)calloc((size_t)raw_argc + 1U, sizeof(char *));
+    if (built == NULL || new_snapshot == NULL) {
+        free(built);
+        free(new_snapshot);
         return;
     }
     BOOL ok = YES;
     int out_idx = 0;
     for (int i = 0; i < raw_argc; i++) {
-        const char *arg = cur_argv[i] != NULL ? cur_argv[i] : "";
+        const char *arg = (cur_argv != NULL && cur_argv[i] != NULL) ? cur_argv[i] : "";
+        new_snapshot[i] = strdup(arg);
+        if (new_snapshot[i] == NULL) {
+            ok = NO;
+            break;
+        }
         if (i > 0) {
-            const char *next_arg = (i + 1 < raw_argc) ? cur_argv[i + 1] : NULL;
+            const char *next_arg = (i + 1 < raw_argc && cur_argv != NULL) ? cur_argv[i + 1] : NULL;
             int skip = pt_macos_launch_arg_skip_count(arg, next_arg);
             if (skip > 0) {
                 if (skip == 2 && i + 1 < raw_argc) {
+                    const char *skipped_next = (cur_argv != NULL && cur_argv[i + 1] != NULL) ? cur_argv[i + 1] : "";
+                    new_snapshot[i + 1] = strdup(skipped_next);
+                    if (new_snapshot[i + 1] == NULL) {
+                        ok = NO;
+                        break;
+                    }
                     i++;
                 }
                 continue;
@@ -394,11 +420,16 @@ static void pt_refresh_shadow_argv_locked(char **cur_argv, int raw_argc) {
                 s_retired_shadow_argv_idx = (s_retired_shadow_argv_idx + 1U) % PT_RETIRED_SHADOW_ARGV_SLOTS;
             }
         }
+        pt_free_env_snapshot(s_shadow_raw_argv_snapshot,
+                             (s_shadow_raw_argc > 0) ? (size_t)s_shadow_raw_argc : 0U);
+        s_shadow_raw_argv_ptr = cur_argv;
+        s_shadow_raw_argv_snapshot = new_snapshot;
+        s_shadow_raw_argc = raw_argc;
         __atomic_store_n(&s_shadow_filtered_argc, out_idx, __ATOMIC_RELEASE);
         __atomic_store_n(&s_shadow_argv, built, __ATOMIC_RELEASE);
-        s_shadow_raw_argc = raw_argc;
     } else {
         pt_free_env_array(built);
+        pt_free_env_snapshot(new_snapshot, (size_t)raw_argc);
     }
 }
 
@@ -496,7 +527,8 @@ extern CFURLRef CFCopyHomeDirectoryURLForUser(CFStringRef uName);
 extern CFStringRef CFCopyUserName(void);
 
 static CFURLRef pt_CFCopyHomeDirectoryURL(void) {
-    if (!pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         const char *vh = pt_get_virtual_home_cstr();
         if (vh != NULL) {
             return CFURLCreateFromFileSystemRepresentation(kCFAllocatorDefault,
@@ -509,7 +541,8 @@ static CFURLRef pt_CFCopyHomeDirectoryURL(void) {
 }
 
 static CFURLRef pt_CFCopyHomeDirectoryURLForUser(CFStringRef uName) {
-    if (!pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         const char *vh = pt_get_virtual_home_cstr();
         if (vh != NULL) {
             NSString *uStr = (__bridge NSString *)uName;
@@ -526,14 +559,16 @@ static CFURLRef pt_CFCopyHomeDirectoryURLForUser(CFStringRef uName) {
 }
 
 static CFStringRef pt_CFCopyUserName(void) {
-    if (!pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return CFSTR("mobile");
     }
     return CFCopyUserName();
 }
 
 static NSString *pt_NSHomeDirectory(void) {
-    if (!pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         const char *vh = pt_get_virtual_home_cstr();
         if (vh != NULL) {
             return [NSString stringWithUTF8String:vh];
@@ -543,7 +578,8 @@ static NSString *pt_NSHomeDirectory(void) {
 }
 
 static NSString *pt_NSHomeDirectoryForUser(NSString *userName) {
-    if (!pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         const char *vh = pt_get_virtual_home_cstr();
         if (vh != NULL) {
             if (userName == nil || [userName isEqualToString:@"mobile"]) {
@@ -556,7 +592,8 @@ static NSString *pt_NSHomeDirectoryForUser(NSString *userName) {
 }
 
 static NSString *pt_NSTemporaryDirectory(void) {
-    if (!pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         const char *vt = pt_get_virtual_tmpdir_cstr();
         if (vt != NULL) {
             return [NSString stringWithUTF8String:vt];
@@ -570,8 +607,7 @@ static NSArray<NSString *> *pt_NSSearchPathForDirectoriesInDomains(NSSearchPathD
                                                                    BOOL expandTilde) {
     const void *caller = __builtin_return_address(0);
     NSArray<NSString *> *orig = NSSearchPathForDirectoriesInDomains(directory, domainMask, expandTilde);
-    if (orig.count > 0 && !pt_is_effective_system_or_playtools_caller(caller)) {
-        BOOL bypass = pt_is_bypass_enabled();
+    if (orig.count > 0 && pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller)) {
         NSMutableArray<NSString *> *filtered = nil;
         for (NSUInteger i = 0; i < orig.count; i++) {
             NSString *item = orig[i];
@@ -587,7 +623,7 @@ static NSArray<NSString *> *pt_NSSearchPathForDirectoriesInDomains(NSSearchPathD
                 }
             }
             const char *checkPath = (virt != NULL) ? virt : raw;
-            BOOL hide = (bypass && checkPath != NULL && pt_is_hidden_path(checkPath, caller));
+            BOOL hide = (checkPath != NULL && pt_is_hidden_path(checkPath, caller));
             if ((outItem != item || hide) && filtered == nil) {
                 filtered = [NSMutableArray arrayWithCapacity:orig.count];
                 for (NSUInteger j = 0; j < i; j++) {
@@ -1281,12 +1317,215 @@ static CFPropertyListRef pt_sanitize_cfpref_value_retained(CFPropertyListRef CF_
     return NULL;
 }
 
+typedef struct __SecTask *pt_pref_sec_task_ref_t;
+extern pt_pref_sec_task_ref_t pt_pref_raw_SecTaskCreateFromSelf(CFAllocatorRef allocator)
+    __asm__("_SecTaskCreateFromSelf") __attribute__((weak_import));
+extern CFTypeRef pt_pref_raw_SecTaskCopyValueForEntitlement(pt_pref_sec_task_ref_t task,
+                                                            CFStringRef entitlement,
+                                                            CFErrorRef *error)
+    __asm__("_SecTaskCopyValueForEntitlement") __attribute__((weak_import));
+
+static BOOL pt_is_safe_app_group_or_bundle_token(NSString *str, BOOL allowGroupPrefix) {
+    if (![str isKindOfClass:[NSString class]] || str.length == 0 || str.length > 255) {
+        return NO;
+    }
+    if ([str containsString:@".."] || [str containsString:@"/"] || [str containsString:@"\\"]) {
+        return NO;
+    }
+    NSString *lower = [str lowercaseString];
+    if ([lower isEqualToString:@"app.makedie"] ||
+        [lower isEqualToString:@"io.playcover"] ||
+        [lower isEqualToString:@"com.apple"] ||
+        [lower isEqualToString:@".globalpreferences"] ||
+        [lower hasPrefix:@"app.makedie."] ||
+        [lower hasPrefix:@"io.playcover."] ||
+        [lower hasPrefix:@"com.apple."]) {
+        return NO;
+    }
+    if (allowGroupPrefix &&
+        ([lower hasPrefix:@"group.app.makedie."] ||
+         [lower hasPrefix:@"group.io.playcover."] ||
+         [lower hasPrefix:@"group.com.apple."])) {
+        return NO;
+    }
+    NSUInteger len = str.length;
+    for (NSUInteger i = 0; i < len; i++) {
+        unichar ch = [str characterAtIndex:i];
+        BOOL ok = ((ch >= '0' && ch <= '9') ||
+                   (ch >= 'A' && ch <= 'Z') ||
+                   (ch >= 'a' && ch <= 'z') ||
+                   ch == '.' || ch == '-' || ch == '_');
+        if (!ok) {
+            return NO;
+        }
+    }
+    return YES;
+}
+
+static NSString *pt_get_app_group_pref_prefix(void) {
+    static NSString *s_prefix = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        char bidBuf[256];
+        bidBuf[0] = '\0';
+        NSString *mainBid = [[NSBundle mainBundle] bundleIdentifier];
+        if (mainBid.length == 0 && pt_read_main_bundle_id_early(bidBuf, sizeof(bidBuf)) && bidBuf[0] != '\0') {
+            mainBid = [NSString stringWithUTF8String:bidBuf];
+        }
+        if (pt_is_safe_app_group_or_bundle_token(mainBid, NO)) {
+            s_prefix = [NSString stringWithFormat:@"app.makedie.MacOver.AppGroups.%@.", mainBid];
+        }
+    });
+    return s_prefix;
+}
+
+static void pt_collect_app_groups_from_array(id arrObj, NSMutableSet<NSString *> *dst) {
+    if (![arrObj isKindOfClass:[NSArray class]]) {
+        return;
+    }
+    for (id item in (NSArray *)arrObj) {
+        if ([item isKindOfClass:[NSString class]]) {
+            NSString *trimmed = [(NSString *)item stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (pt_is_safe_app_group_or_bundle_token(trimmed, YES)) {
+                [dst addObject:trimmed];
+            }
+        }
+    }
+}
+
+static NSDictionary<NSString *, NSString *> *pt_get_declared_app_group_pref_map(void) {
+    static NSDictionary<NSString *, NSString *> *s_map = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *prefix = pt_get_app_group_pref_prefix();
+        if (prefix.length == 0) {
+            s_map = @{};
+            return;
+        }
+        NSMutableSet<NSString *> *groups = [NSMutableSet set];
+        if (&pt_pref_raw_SecTaskCreateFromSelf != NULL && &pt_pref_raw_SecTaskCopyValueForEntitlement != NULL) {
+            pt_pref_sec_task_ref_t task = pt_pref_raw_SecTaskCreateFromSelf(kCFAllocatorDefault);
+            if (task != NULL) {
+                CFTypeRef entGroups = pt_pref_raw_SecTaskCopyValueForEntitlement(
+                    task, CFSTR("com.apple.security.application-groups"), NULL);
+                if (entGroups != NULL) {
+                    pt_collect_app_groups_from_array((__bridge id)entGroups, groups);
+                    CFRelease(entGroups);
+                }
+                CFTypeRef sbplRules = pt_pref_raw_SecTaskCopyValueForEntitlement(
+                    task, CFSTR("com.apple.security.temporary-exception.sbpl"), NULL);
+                if (sbplRules != NULL) {
+                    id sbplObj = (__bridge id)sbplRules;
+                    NSString *marker = [NSString stringWithFormat:@"(preference-domain \"%@", prefix];
+                    if ([sbplObj isKindOfClass:[NSArray class]]) {
+                        for (id ruleObj in (NSArray *)sbplObj) {
+                            if (![ruleObj isKindOfClass:[NSString class]]) {
+                                continue;
+                            }
+                            NSString *rule = (NSString *)ruleObj;
+                            NSRange r = [rule rangeOfString:marker];
+                            if (r.location != NSNotFound) {
+                                NSUInteger start = NSMaxRange(r);
+                                NSRange closeQuote = [rule rangeOfString:@"\""
+                                                                 options:0
+                                                                   range:NSMakeRange(start, rule.length - start)];
+                                if (closeQuote.location != NSNotFound && closeQuote.location > start) {
+                                    NSString *grp = [rule substringWithRange:NSMakeRange(start, closeQuote.location - start)];
+                                    if (pt_is_safe_app_group_or_bundle_token(grp, YES)) {
+                                        [groups addObject:grp];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    CFRelease(sbplRules);
+                }
+                CFRelease(task);
+            }
+        }
+        const char *user_root = pt_get_host_user_root_cstr();
+        char bidBuf[256];
+        bidBuf[0] = '\0';
+        NSString *mainBid = [[NSBundle mainBundle] bundleIdentifier];
+        if (mainBid.length > 0) {
+            strlcpy(bidBuf, [mainBid UTF8String], sizeof(bidBuf));
+        } else {
+            (void)pt_read_main_bundle_id_early(bidBuf, sizeof(bidBuf));
+        }
+        if (user_root != NULL && bidBuf[0] != '\0') {
+            char ent_path[PATH_MAX];
+            int n = snprintf(ent_path, sizeof(ent_path),
+                             "%s/Library/Containers/app.makedie.MacOver/Entitlements/%s.plist",
+                             user_root, bidBuf);
+            if (n > 0 && (size_t)n < sizeof(ent_path)) {
+                int fd = open(ent_path, O_RDONLY | O_NOFOLLOW);
+                if (fd >= 0) {
+                    size_t len = 0;
+                    size_t map_size = 0;
+                    uint8_t *bytes = pt_read_fd_plist_bytes(fd, &len, &map_size);
+                    close(fd);
+                    if (bytes != NULL && len > 0) {
+                        NSData *data = [NSData dataWithBytes:bytes length:len];
+                        munmap(bytes, map_size);
+                        id plist = [NSPropertyListSerialization propertyListWithData:data
+                                                                             options:NSPropertyListImmutable
+                                                                              format:nil
+                                                                               error:nil];
+                        if ([plist isKindOfClass:[NSDictionary class]]) {
+                            pt_collect_app_groups_from_array(
+                                ((NSDictionary *)plist)[@"com.apple.security.application-groups"], groups);
+                        }
+                    } else if (bytes != NULL) {
+                        munmap(bytes, map_size);
+                    }
+                }
+            }
+        }
+        NSMutableDictionary<NSString *, NSString *> *built = [NSMutableDictionary dictionaryWithCapacity:groups.count];
+        for (NSString *grp in groups) {
+            built[grp] = [prefix stringByAppendingString:grp];
+        }
+        s_map = [built copy];
+    });
+    return s_map;
+}
+
+__attribute__((visibility("hidden")))
+CFStringRef pt_rewrite_declared_app_group_pref_domain(CFStringRef applicationID) CF_RETURNS_RETAINED {
+    if (applicationID == NULL ||
+        applicationID == kCFPreferencesCurrentApplication ||
+        applicationID == kCFPreferencesAnyApplication) {
+        return NULL;
+    }
+    NSString *appID = (__bridge NSString *)applicationID;
+    if (![appID isKindOfClass:[NSString class]] || appID.length == 0) {
+        return NULL;
+    }
+    NSString *rewritten = pt_get_declared_app_group_pref_map()[appID];
+    if (rewritten != nil) {
+        return (CFStringRef)CFBridgingRetain(rewritten);
+    }
+    return NULL;
+}
+
+static NSString *pt_unmap_namespaced_app_group_pref_domain(NSString *domain) {
+    NSString *prefix = pt_get_app_group_pref_prefix();
+    if (prefix.length == 0 || domain.length <= prefix.length || ![domain hasPrefix:prefix]) {
+        return nil;
+    }
+    NSString *grp = [domain substringFromIndex:prefix.length];
+    if (pt_get_declared_app_group_pref_map()[grp] != nil) {
+        return grp;
+    }
+    return nil;
+}
+
 static CFPropertyListRef pt_CFPreferencesCopyAppValue(CFStringRef key, CFStringRef applicationID) CF_RETURNS_RETAINED {
     if (key == NULL) {
         return NULL;
     }
-    BOOL should_filter = (pt_is_bypass_enabled() &&
-                          !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
+    BOOL is_app_caller = !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0));
+    BOOL should_filter = (pt_is_bypass_enabled() && is_app_caller);
     if (should_filter) {
         char kbuf[256];
         const char *kstr = NULL;
@@ -1294,7 +1533,12 @@ static CFPropertyListRef pt_CFPreferencesCopyAppValue(CFStringRef key, CFStringR
             return NULL;
         }
     }
-    CFPropertyListRef val = CFPreferencesCopyAppValue(key, applicationID);
+    CFStringRef rewritten = is_app_caller ? pt_rewrite_declared_app_group_pref_domain(applicationID) : NULL;
+    CFStringRef effAppID = (rewritten != NULL) ? rewritten : applicationID;
+    CFPropertyListRef val = CFPreferencesCopyAppValue(key, effAppID);
+    if (rewritten != NULL) {
+        CFRelease(rewritten);
+    }
     if (val != NULL && should_filter) {
         return pt_sanitize_cfpref_value_retained(val, 0);
     }
@@ -1308,8 +1552,8 @@ static CFPropertyListRef pt_CFPreferencesCopyValue(CFStringRef key,
     if (key == NULL) {
         return NULL;
     }
-    BOOL should_filter = (pt_is_bypass_enabled() &&
-                          !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
+    BOOL is_app_caller = !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0));
+    BOOL should_filter = (pt_is_bypass_enabled() && is_app_caller);
     if (should_filter) {
         char kbuf[256];
         const char *kstr = NULL;
@@ -1317,7 +1561,12 @@ static CFPropertyListRef pt_CFPreferencesCopyValue(CFStringRef key,
             return NULL;
         }
     }
-    CFPropertyListRef val = CFPreferencesCopyValue(key, applicationID, userName, hostName);
+    CFStringRef rewritten = is_app_caller ? pt_rewrite_declared_app_group_pref_domain(applicationID) : NULL;
+    CFStringRef effAppID = (rewritten != NULL) ? rewritten : applicationID;
+    CFPropertyListRef val = CFPreferencesCopyValue(key, effAppID, userName, hostName);
+    if (rewritten != NULL) {
+        CFRelease(rewritten);
+    }
     if (val != NULL && should_filter) {
         return pt_sanitize_cfpref_value_retained(val, 0);
     }
@@ -1327,10 +1576,14 @@ static CFPropertyListRef pt_CFPreferencesCopyValue(CFStringRef key,
 static CFArrayRef pt_CFPreferencesCopyKeyList(CFStringRef applicationID,
                                               CFStringRef userName,
                                               CFStringRef hostName) CF_RETURNS_RETAINED {
-    CFArrayRef keys = CFPreferencesCopyKeyList(applicationID, userName, hostName);
-    if (keys == NULL ||
-        !pt_is_bypass_enabled() ||
-        pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    BOOL is_app_caller = !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0));
+    CFStringRef rewritten = is_app_caller ? pt_rewrite_declared_app_group_pref_domain(applicationID) : NULL;
+    CFStringRef effAppID = (rewritten != NULL) ? rewritten : applicationID;
+    CFArrayRef keys = CFPreferencesCopyKeyList(effAppID, userName, hostName);
+    if (rewritten != NULL) {
+        CFRelease(rewritten);
+    }
+    if (keys == NULL || !pt_is_bypass_enabled() || !is_app_caller) {
         return keys;
     }
     CFIndex n = CFArrayGetCount(keys);
@@ -1373,8 +1626,8 @@ static Boolean pt_CFPreferencesGetAppBooleanValue(CFStringRef key,
         }
         return false;
     }
-    if (pt_is_bypass_enabled() &&
-        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    BOOL is_app_caller = !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0));
+    if (pt_is_bypass_enabled() && is_app_caller) {
         char kbuf[256];
         const char *kstr = NULL;
         if (pt_cfstr_to_cstr(key, kbuf, sizeof(kbuf), &kstr) && pt_is_hidden_macos_pref_key(kstr)) {
@@ -1384,7 +1637,13 @@ static Boolean pt_CFPreferencesGetAppBooleanValue(CFStringRef key,
             return false;
         }
     }
-    return CFPreferencesGetAppBooleanValue(key, applicationID, keyExistsAndHasValidFormat);
+    CFStringRef rewritten = is_app_caller ? pt_rewrite_declared_app_group_pref_domain(applicationID) : NULL;
+    CFStringRef effAppID = (rewritten != NULL) ? rewritten : applicationID;
+    Boolean res = CFPreferencesGetAppBooleanValue(key, effAppID, keyExistsAndHasValidFormat);
+    if (rewritten != NULL) {
+        CFRelease(rewritten);
+    }
+    return res;
 }
 
 static CFIndex pt_CFPreferencesGetAppIntegerValue(CFStringRef key,
@@ -1396,8 +1655,8 @@ static CFIndex pt_CFPreferencesGetAppIntegerValue(CFStringRef key,
         }
         return 0;
     }
-    if (pt_is_bypass_enabled() &&
-        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    BOOL is_app_caller = !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0));
+    if (pt_is_bypass_enabled() && is_app_caller) {
         char kbuf[256];
         const char *kstr = NULL;
         if (pt_cfstr_to_cstr(key, kbuf, sizeof(kbuf), &kstr) && pt_is_hidden_macos_pref_key(kstr)) {
@@ -1407,17 +1666,27 @@ static CFIndex pt_CFPreferencesGetAppIntegerValue(CFStringRef key,
             return 0;
         }
     }
-    return CFPreferencesGetAppIntegerValue(key, applicationID, keyExistsAndHasValidFormat);
+    CFStringRef rewritten = is_app_caller ? pt_rewrite_declared_app_group_pref_domain(applicationID) : NULL;
+    CFStringRef effAppID = (rewritten != NULL) ? rewritten : applicationID;
+    CFIndex res = CFPreferencesGetAppIntegerValue(key, effAppID, keyExistsAndHasValidFormat);
+    if (rewritten != NULL) {
+        CFRelease(rewritten);
+    }
+    return res;
 }
 
 static CFDictionaryRef pt_CFPreferencesCopyMultiple(CFArrayRef keysToFetch,
                                                     CFStringRef applicationID,
                                                     CFStringRef userName,
                                                     CFStringRef hostName) CF_RETURNS_RETAINED {
-    CFDictionaryRef dict = CFPreferencesCopyMultiple(keysToFetch, applicationID, userName, hostName);
-    if (dict == NULL ||
-        !pt_is_bypass_enabled() ||
-        pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    BOOL is_app_caller = !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0));
+    CFStringRef rewritten = is_app_caller ? pt_rewrite_declared_app_group_pref_domain(applicationID) : NULL;
+    CFStringRef effAppID = (rewritten != NULL) ? rewritten : applicationID;
+    CFDictionaryRef dict = CFPreferencesCopyMultiple(keysToFetch, effAppID, userName, hostName);
+    if (rewritten != NULL) {
+        CFRelease(rewritten);
+    }
+    if (dict == NULL || !pt_is_bypass_enabled() || !is_app_caller) {
         return dict;
     }
     return (CFDictionaryRef)pt_sanitize_cfpref_value_retained(dict, 0);
@@ -1427,15 +1696,100 @@ static Boolean pt_CFPreferencesAppValueIsForced(CFStringRef key, CFStringRef app
     if (key == NULL) {
         return false;
     }
-    if (pt_is_bypass_enabled() &&
-        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    BOOL is_app_caller = !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0));
+    if (pt_is_bypass_enabled() && is_app_caller) {
         char kbuf[256];
         const char *kstr = NULL;
         if (pt_cfstr_to_cstr(key, kbuf, sizeof(kbuf), &kstr) && pt_is_hidden_macos_pref_key(kstr)) {
             return false;
         }
     }
-    return CFPreferencesAppValueIsForced(key, applicationID);
+    CFStringRef rewritten = is_app_caller ? pt_rewrite_declared_app_group_pref_domain(applicationID) : NULL;
+    CFStringRef effAppID = (rewritten != NULL) ? rewritten : applicationID;
+    Boolean res = CFPreferencesAppValueIsForced(key, effAppID);
+    if (rewritten != NULL) {
+        CFRelease(rewritten);
+    }
+    return res;
+}
+
+static void pt_CFPreferencesSetValue(CFStringRef key,
+                                     CFPropertyListRef value,
+                                     CFStringRef applicationID,
+                                     CFStringRef userName,
+                                     CFStringRef hostName) {
+    if (key == NULL || applicationID == NULL) {
+        return;
+    }
+    BOOL is_app_caller = !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0));
+    CFStringRef rewritten = is_app_caller ? pt_rewrite_declared_app_group_pref_domain(applicationID) : NULL;
+    CFStringRef effAppID = (rewritten != NULL) ? rewritten : applicationID;
+    CFPreferencesSetValue(key, value, effAppID, userName, hostName);
+    if (rewritten != NULL) {
+        CFRelease(rewritten);
+    }
+}
+
+static void pt_CFPreferencesSetAppValue(CFStringRef key,
+                                        CFPropertyListRef value,
+                                        CFStringRef applicationID) {
+    if (key == NULL || applicationID == NULL) {
+        return;
+    }
+    BOOL is_app_caller = !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0));
+    CFStringRef rewritten = is_app_caller ? pt_rewrite_declared_app_group_pref_domain(applicationID) : NULL;
+    CFStringRef effAppID = (rewritten != NULL) ? rewritten : applicationID;
+    CFPreferencesSetAppValue(key, value, effAppID);
+    if (rewritten != NULL) {
+        CFRelease(rewritten);
+    }
+}
+
+static void pt_CFPreferencesSetMultiple(CFDictionaryRef keysToSet,
+                                        CFArrayRef keysToRemove,
+                                        CFStringRef applicationID,
+                                        CFStringRef userName,
+                                        CFStringRef hostName) {
+    if (applicationID == NULL) {
+        return;
+    }
+    BOOL is_app_caller = !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0));
+    CFStringRef rewritten = is_app_caller ? pt_rewrite_declared_app_group_pref_domain(applicationID) : NULL;
+    CFStringRef effAppID = (rewritten != NULL) ? rewritten : applicationID;
+    CFPreferencesSetMultiple(keysToSet, keysToRemove, effAppID, userName, hostName);
+    if (rewritten != NULL) {
+        CFRelease(rewritten);
+    }
+}
+
+static Boolean pt_CFPreferencesAppSynchronize(CFStringRef applicationID) {
+    if (applicationID == NULL) {
+        return false;
+    }
+    BOOL is_app_caller = !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0));
+    CFStringRef rewritten = is_app_caller ? pt_rewrite_declared_app_group_pref_domain(applicationID) : NULL;
+    CFStringRef effAppID = (rewritten != NULL) ? rewritten : applicationID;
+    Boolean res = CFPreferencesAppSynchronize(effAppID);
+    if (rewritten != NULL) {
+        CFRelease(rewritten);
+    }
+    return res;
+}
+
+static Boolean pt_CFPreferencesSynchronize(CFStringRef applicationID,
+                                           CFStringRef userName,
+                                           CFStringRef hostName) {
+    if (applicationID == NULL) {
+        return false;
+    }
+    BOOL is_app_caller = !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0));
+    CFStringRef rewritten = is_app_caller ? pt_rewrite_declared_app_group_pref_domain(applicationID) : NULL;
+    CFStringRef effAppID = (rewritten != NULL) ? rewritten : applicationID;
+    Boolean res = CFPreferencesSynchronize(effAppID, userName, hostName);
+    if (rewritten != NULL) {
+        CFRelease(rewritten);
+    }
+    return res;
 }
 
 #pragma clang diagnostic push
@@ -1459,6 +1813,11 @@ static CFArrayRef pt_CFPreferencesCopyApplicationList(CFStringRef userName,
     for (CFIndex i = 0; i < n; i++) {
         CFTypeRef item = CFArrayGetValueAtIndex(list, i);
         if (item == NULL || CFGetTypeID(item) != CFStringGetTypeID()) {
+            continue;
+        }
+        NSString *unmappedGroup = pt_unmap_namespaced_app_group_pref_domain((__bridge NSString *)item);
+        if (unmappedGroup != nil) {
+            CFArrayAppendValue(out, (__bridge CFStringRef)unmappedGroup);
             continue;
         }
         char dbuf[256];
@@ -1510,8 +1869,60 @@ static CFDictionaryRef pt_sanitize_info_dict_copy(CFDictionaryRef infoDict, cons
     return infoDict;
 }
 
+#define PT_BUNDLE_INFO_CACHE_CAP 2048U
+#define PT_BUNDLE_INFO_RETIRED_CAP 64U
+
+typedef struct {
+    CFDictionaryRef key;
+    CFDictionaryRef val;
+    int32_t prev;
+    int32_t next;
+} pt_bundle_info_lru_node_t;
+
 static os_unfair_lock s_bundle_info_cache_lock = OS_UNFAIR_LOCK_INIT;
 static CFMutableDictionaryRef s_bundle_info_cache = NULL;
+static pt_bundle_info_lru_node_t s_bundle_info_nodes[PT_BUNDLE_INFO_CACHE_CAP];
+static uint32_t s_bundle_info_used_count = 0;
+static int32_t s_bundle_info_lru_head = -1;
+static int32_t s_bundle_info_lru_tail = -1;
+static CFDictionaryRef s_bundle_info_retired_vals[PT_BUNDLE_INFO_RETIRED_CAP] = {0};
+static uint32_t s_bundle_info_retired_idx = 0;
+
+static void pt_bundle_info_lru_detach_locked(int32_t idx) {
+    int32_t p = s_bundle_info_nodes[idx].prev;
+    int32_t n = s_bundle_info_nodes[idx].next;
+    if (p >= 0) {
+        s_bundle_info_nodes[p].next = n;
+    } else {
+        s_bundle_info_lru_head = n;
+    }
+    if (n >= 0) {
+        s_bundle_info_nodes[n].prev = p;
+    } else {
+        s_bundle_info_lru_tail = p;
+    }
+    s_bundle_info_nodes[idx].prev = -1;
+    s_bundle_info_nodes[idx].next = -1;
+}
+
+static void pt_bundle_info_lru_push_front_locked(int32_t idx) {
+    s_bundle_info_nodes[idx].prev = -1;
+    s_bundle_info_nodes[idx].next = s_bundle_info_lru_head;
+    if (s_bundle_info_lru_head >= 0) {
+        s_bundle_info_nodes[s_bundle_info_lru_head].prev = idx;
+    } else {
+        s_bundle_info_lru_tail = idx;
+    }
+    s_bundle_info_lru_head = idx;
+}
+
+static void pt_bundle_info_lru_touch_locked(int32_t idx) {
+    if (idx == s_bundle_info_lru_head) {
+        return;
+    }
+    pt_bundle_info_lru_detach_locked(idx);
+    pt_bundle_info_lru_push_front_locked(idx);
+}
 
 static CFDictionaryRef pt_sanitize_info_dict_cached_get(CFDictionaryRef rawDict, const void *caller) {
     if (rawDict == NULL) {
@@ -1524,26 +1935,24 @@ static CFDictionaryRef pt_sanitize_info_dict_cached_get(CFDictionaryRef rawDict,
     if (!pt_info_dict_needs_sanitize(dict)) {
         return rawDict;
     }
+    CFDictionaryRef cached = NULL;
     os_unfair_lock_lock(&s_bundle_info_cache_lock);
     if (s_bundle_info_cache == NULL) {
-        static const CFDictionaryKeyCallBacks kPtrRetainKeyCallBacks = {
-            0,
-            NULL,
-            NULL,
-            NULL,
-            NULL,
-            NULL
-        };
-        CFDictionaryKeyCallBacks keyCB = kPtrRetainKeyCallBacks;
-        keyCB.retain = kCFTypeDictionaryKeyCallBacks.retain;
-        keyCB.release = kCFTypeDictionaryKeyCallBacks.release;
-        keyCB.copyDescription = kCFTypeDictionaryKeyCallBacks.copyDescription;
+        static const CFDictionaryKeyCallBacks kPtrKeyCallBacks = { 0, NULL, NULL, NULL, NULL, NULL };
+        static const CFDictionaryValueCallBacks kSlotValueCallBacks = { 0, NULL, NULL, NULL, NULL };
         s_bundle_info_cache = CFDictionaryCreateMutable(
-            kCFAllocatorDefault, 0, &keyCB, &kCFTypeDictionaryValueCallBacks);
+            kCFAllocatorDefault, (CFIndex)PT_BUNDLE_INFO_CACHE_CAP, &kPtrKeyCallBacks, &kSlotValueCallBacks);
     }
-    CFDictionaryRef cached = (s_bundle_info_cache != NULL)
-        ? (CFDictionaryRef)CFDictionaryGetValue(s_bundle_info_cache, rawDict)
-        : NULL;
+    if (s_bundle_info_cache != NULL) {
+        const void *slot_val = CFDictionaryGetValue(s_bundle_info_cache, rawDict);
+        if (slot_val != NULL) {
+            int32_t slot = (int32_t)((uintptr_t)slot_val - 1U);
+            if (slot >= 0 && (uint32_t)slot < PT_BUNDLE_INFO_CACHE_CAP) {
+                pt_bundle_info_lru_touch_locked(slot);
+                cached = s_bundle_info_nodes[slot].val;
+            }
+        }
+    }
     os_unfair_lock_unlock(&s_bundle_info_cache_lock);
     if (cached != NULL) {
         return cached;
@@ -1554,25 +1963,61 @@ static CFDictionaryRef pt_sanitize_info_dict_cached_get(CFDictionaryRef rawDict,
     if (clean == nil) {
         return rawDict;
     }
-    CFDictionaryRef cleanRef = (__bridge CFDictionaryRef)clean;
+    CFDictionaryRef evicted_key = NULL;
+    CFDictionaryRef retired_to_release = NULL;
+    CFDictionaryRef kept = NULL;
     os_unfair_lock_lock(&s_bundle_info_cache_lock);
     if (s_bundle_info_cache != NULL) {
-        CFDictionaryRef race = (CFDictionaryRef)CFDictionaryGetValue(s_bundle_info_cache, rawDict);
-        if (race != NULL) {
-            os_unfair_lock_unlock(&s_bundle_info_cache_lock);
-            return race;
-        }
-        if (CFDictionaryGetCount(s_bundle_info_cache) < 2048) {
-            CFDictionarySetValue(s_bundle_info_cache, rawDict, cleanRef);
-            CFDictionaryRef kept = (CFDictionaryRef)CFDictionaryGetValue(s_bundle_info_cache, rawDict);
-            os_unfair_lock_unlock(&s_bundle_info_cache_lock);
-            return kept;
+        const void *race_val = CFDictionaryGetValue(s_bundle_info_cache, rawDict);
+        if (race_val != NULL) {
+            int32_t race_slot = (int32_t)((uintptr_t)race_val - 1U);
+            if (race_slot >= 0 && (uint32_t)race_slot < PT_BUNDLE_INFO_CACHE_CAP) {
+                pt_bundle_info_lru_touch_locked(race_slot);
+                kept = s_bundle_info_nodes[race_slot].val;
+            }
+        } else {
+            int32_t slot = -1;
+            if (s_bundle_info_used_count < PT_BUNDLE_INFO_CACHE_CAP) {
+                slot = (int32_t)s_bundle_info_used_count++;
+            } else if (s_bundle_info_lru_tail >= 0) {
+                slot = s_bundle_info_lru_tail;
+                pt_bundle_info_lru_detach_locked(slot);
+                evicted_key = s_bundle_info_nodes[slot].key;
+                CFDictionaryRef evicted_val = s_bundle_info_nodes[slot].val;
+                if (evicted_key != NULL) {
+                    CFDictionaryRemoveValue(s_bundle_info_cache, evicted_key);
+                }
+                retired_to_release = s_bundle_info_retired_vals[s_bundle_info_retired_idx];
+                s_bundle_info_retired_vals[s_bundle_info_retired_idx] = evicted_val;
+                s_bundle_info_retired_idx = (s_bundle_info_retired_idx + 1U) % PT_BUNDLE_INFO_RETIRED_CAP;
+            }
+            if (slot >= 0) {
+                CFDictionaryRef retained_key = (CFDictionaryRef)CFRetain(rawDict);
+                CFDictionaryRef retained_val = (CFDictionaryRef)CFBridgingRetain(clean);
+                s_bundle_info_nodes[slot].key = retained_key;
+                s_bundle_info_nodes[slot].val = retained_val;
+                s_bundle_info_nodes[slot].prev = -1;
+                s_bundle_info_nodes[slot].next = -1;
+                pt_bundle_info_lru_push_front_locked(slot);
+                CFDictionarySetValue(s_bundle_info_cache,
+                                     retained_key,
+                                     (const void *)(uintptr_t)((uint32_t)slot + 1U));
+                kept = retained_val;
+            }
         }
     }
     os_unfair_lock_unlock(&s_bundle_info_cache_lock);
-    // Keep clean alive for the current autorelease pool instead of failing open or evicting live entries.
-    (void)[clean self];
-    return cleanRef;
+    if (evicted_key != NULL) {
+        CFRelease(evicted_key);
+    }
+    if (retired_to_release != NULL) {
+        CFRelease(retired_to_release);
+    }
+    if (kept != NULL) {
+        return kept;
+    }
+    // Fallback when cache could not store the entry: retain and autorelease safely under ARC.
+    return (CFDictionaryRef)CFAutorelease(CFBridgingRetain(clean));
 }
 
 static CFBundleRef pt_CFBundleCreate(CFAllocatorRef allocator, CFURLRef bundleURL) {
@@ -2161,6 +2606,11 @@ PT_INTERPOSE(pt_CFPreferencesCopyKeyList, CFPreferencesCopyKeyList)
 PT_INTERPOSE(pt_CFPreferencesGetAppBooleanValue, CFPreferencesGetAppBooleanValue)
 PT_INTERPOSE(pt_CFPreferencesGetAppIntegerValue, CFPreferencesGetAppIntegerValue)
 PT_INTERPOSE(pt_CFPreferencesAppValueIsForced, CFPreferencesAppValueIsForced)
+PT_INTERPOSE(pt_CFPreferencesSetValue, CFPreferencesSetValue)
+PT_INTERPOSE(pt_CFPreferencesSetAppValue, CFPreferencesSetAppValue)
+PT_INTERPOSE(pt_CFPreferencesSetMultiple, CFPreferencesSetMultiple)
+PT_INTERPOSE(pt_CFPreferencesAppSynchronize, CFPreferencesAppSynchronize)
+PT_INTERPOSE(pt_CFPreferencesSynchronize, CFPreferencesSynchronize)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 PT_INTERPOSE(pt_CFPreferencesCopyApplicationList, CFPreferencesCopyApplicationList)

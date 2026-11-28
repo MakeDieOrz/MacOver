@@ -80,6 +80,11 @@ extern kern_return_t pt_orig_thread_get_exception_ports(thread_act_t thread,
                                                        exception_behavior_array_t old_behaviors,
                                                        exception_flavor_array_t old_flavors)
     __asm("_thread_get_exception_ports");
+extern kern_return_t pt_orig_thread_get_state(thread_act_t target_act,
+                                              thread_state_flavor_t flavor,
+                                              thread_state_t old_state,
+                                              mach_msg_type_number_t *old_stateCnt)
+    __asm("_thread_get_state");
 
 extern kern_return_t pt_orig_task_get_exception_ports_info(mach_port_t port,
                                                            exception_mask_t exception_mask,
@@ -134,6 +139,8 @@ typedef struct {
 static _Atomic bool s_svc_interceptor_active = false;
 static _Atomic bool s_svc_has_registered_sites = false;
 static _Atomic bool s_svc_safe_mode_passthrough = false;
+static _Atomic uintptr_t s_svc_min_pc = 0;
+static _Atomic uintptr_t s_svc_max_pc = 0;
 
 static pt_svc_manifest_t s_manifest = {0};
 static os_unfair_lock s_svc_sites_lock = OS_UNFAIR_LOCK_INIT;
@@ -284,6 +291,25 @@ static void pt_svc_update_thread_bp(thread_act_t thread,
             match->seq = ++s_saved_thread_bp_seq;
         }
     } else if (MACH_PORT_VALID(retained_new_port)) {
+        if (free_slot == NULL) {
+            for (size_t i = 0; i < PT_SVC_THREAD_EXC_SLOTS; i++) {
+                pt_svc_thread_exc_entry_t *e = &s_saved_thread_bp_handlers[i];
+                if (!e->in_use) {
+                    continue;
+                }
+                mach_port_type_t ptype = 0;
+                kern_return_t tkr = mach_port_type(mach_task_self(), e->thread, &ptype);
+                if (tkr != KERN_SUCCESS ||
+                    (ptype & MACH_PORT_TYPE_DEAD_NAME) != 0 ||
+                    (ptype & MACH_PORT_TYPE_SEND) == 0) {
+                    pt_svc_release_send_right(e->bp.port);
+                    memset(e, 0, sizeof(*e));
+                    if (free_slot == NULL) {
+                        free_slot = e;
+                    }
+                }
+            }
+        }
         pt_svc_thread_exc_entry_t *dst = (free_slot != NULL) ? free_slot : oldest_slot;
         if (dst->in_use) {
             pt_svc_release_send_right(dst->bp.port);
@@ -940,7 +966,8 @@ static BOOL pt_svc_parse_manifest_json(const char *json, size_t len, pt_svc_mani
         break;
     }
 
-    if (out_manifest->schema_version != 1 || out_manifest->file_count == 0 || out_manifest->total_sites == 0) {
+    if (out_manifest->schema_version < 1 || out_manifest->schema_version > 2 ||
+        out_manifest->file_count == 0 || out_manifest->total_sites == 0) {
         pt_svc_free_manifest(out_manifest);
         return NO;
     }
@@ -1178,9 +1205,53 @@ static void pt_svc_on_dyld_image_added(const struct mach_header *mh, intptr_t vm
         }
     }
     if (added) {
+        if (s_registered_pc_count > 0) {
+            atomic_store_explicit(&s_svc_min_pc, s_registered_pcs[0], memory_order_release);
+            atomic_store_explicit(&s_svc_max_pc, s_registered_pcs[s_registered_pc_count - 1U], memory_order_release);
+        }
         atomic_store_explicit(&s_svc_has_registered_sites, true, memory_order_release);
     }
     os_unfair_lock_unlock(&s_svc_sites_lock);
+}
+
+__attribute__((visibility("hidden")))
+BOOL pt_svc_range_overlaps_patched_site(uintptr_t addr, size_t len) {
+    if (!atomic_load_explicit(&s_svc_has_registered_sites, memory_order_acquire) ||
+        addr == 0 || len == 0) {
+        return NO;
+    }
+    uintptr_t min_pc = atomic_load_explicit(&s_svc_min_pc, memory_order_acquire);
+    uintptr_t max_pc = atomic_load_explicit(&s_svc_max_pc, memory_order_acquire);
+    if (min_pc == 0 || max_pc < min_pc) {
+        return NO;
+    }
+    uintptr_t end = (len <= UINTPTR_MAX - addr) ? (addr + len) : UINTPTR_MAX;
+    uintptr_t max_end = (max_pc <= UINTPTR_MAX - 4U) ? (max_pc + 4U) : UINTPTR_MAX;
+    if (end <= min_pc || addr >= max_end) {
+        return NO;
+    }
+    BOOL overlap = NO;
+    os_unfair_lock_lock(&s_svc_sites_lock);
+    size_t lo = 0;
+    size_t hi = s_registered_pc_count;
+    uintptr_t first_target = (addr >= 3U) ? (addr - 3U) : 0U;
+    while (lo < hi) {
+        size_t mid = lo + ((hi - lo) / 2U);
+        if (s_registered_pcs[mid] < first_target) {
+            lo = mid + 1U;
+        } else {
+            hi = mid;
+        }
+    }
+    if (lo < s_registered_pc_count) {
+        uintptr_t site_start = s_registered_pcs[lo];
+        uintptr_t site_end = (site_start <= UINTPTR_MAX - 4U) ? (site_start + 4U) : UINTPTR_MAX;
+        if (site_start < end && site_end > addr) {
+            overlap = YES;
+        }
+    }
+    os_unfair_lock_unlock(&s_svc_sites_lock);
+    return overlap;
 }
 
 static BOOL pt_svc_is_registered_pc(uintptr_t pc) {
@@ -1535,7 +1606,7 @@ static BOOL pt_svc_forward_to_saved_bp_handler(const pt_svc_saved_exc_handler_t 
 #endif
             if (!is_none_flavor && MACH_PORT_VALID(thread_port)) {
                 fwd_old_cnt = 1296U;
-                if (thread_get_state(thread_port, fwd_flavor, (thread_state_t)fwd_old_state, &fwd_old_cnt) != KERN_SUCCESS) {
+                if (pt_orig_thread_get_state(thread_port, fwd_flavor, (thread_state_t)fwd_old_state, &fwd_old_cnt) != KERN_SUCCESS) {
                     return NO;
                 }
             }
@@ -1613,7 +1684,7 @@ static BOOL pt_svc_forward_to_saved_bp_handler(const pt_svc_saved_exc_handler_t 
         }
         mach_msg_type_number_t cur_cnt = ARM_THREAD_STATE64_COUNT;
         if (MACH_PORT_VALID(thread_port) &&
-            thread_get_state(thread_port, ARM_THREAD_STATE64, (thread_state_t)reply->new_state, &cur_cnt) == KERN_SUCCESS &&
+            pt_orig_thread_get_state(thread_port, ARM_THREAD_STATE64, (thread_state_t)reply->new_state, &cur_cnt) == KERN_SUCCESS &&
             cur_cnt >= ARM_THREAD_STATE64_COUNT &&
             cur_cnt <= 1296U) {
             reply->flavor = req_flavor;
@@ -1633,8 +1704,21 @@ static BOOL pt_svc_forward_to_saved_bp_handler(const pt_svc_saved_exc_handler_t 
     return YES;
 }
 
+static inline void pt_svc_load_sp_args(const arm_thread_state64_t *state, uint64_t sp_args[2]) {
+    sp_args[0] = 0;
+    sp_args[1] = 0;
+    uint64_t sp = PT_TS_SP(*state);
+    if (sp != 0 && pt_is_valid_user_pointer((const void *)(uintptr_t)sp)) {
+        memcpy(&sp_args[0], (const void *)(uintptr_t)sp, sizeof(sp_args[0]));
+        if (sp <= UINT64_MAX - sizeof(uint64_t) &&
+            pt_is_valid_user_pointer((const void *)(uintptr_t)(sp + sizeof(uint64_t)))) {
+            memcpy(&sp_args[1], (const void *)(uintptr_t)(sp + sizeof(uint64_t)), sizeof(sp_args[1]));
+        }
+    }
+}
+
 static BOOL pt_svc_handle_exception_msg(const pt_mach_exc_req_t *req, pt_mach_exc_reply_t *reply) {
-    memset(reply, 0, sizeof(*reply));
+    memset(reply, 0, offsetof(pt_mach_exc_reply_t, new_state));
     reply->Head.msgh_bits = MACH_MSGH_BITS(MACH_MSGH_BITS_REMOTE(req->Head.msgh_bits), 0);
     reply->Head.msgh_remote_port = req->Head.msgh_remote_port;
     reply->Head.msgh_local_port = MACH_PORT_NULL;
@@ -1734,19 +1818,8 @@ static BOOL pt_svc_handle_exception_msg(const pt_mach_exc_req_t *req, pt_mach_ex
     for (int i = 0; i < 8; i++) {
         in_x[i] = PT_TS_X(state)[i];
     }
-    uint64_t sp_args[2] = {0, 0};
-    {
-        uint64_t sp = PT_TS_SP(state);
-        if (sp != 0 && pt_is_valid_user_pointer((const void *)(uintptr_t)sp)) {
-            memcpy(&sp_args[0], (const void *)(uintptr_t)sp, sizeof(sp_args[0]));
-            if (sp <= UINT64_MAX - sizeof(uint64_t) &&
-                pt_is_valid_user_pointer((const void *)(uintptr_t)(sp + sizeof(uint64_t)))) {
-                memcpy(&sp_args[1], (const void *)(uintptr_t)(sp + sizeof(uint64_t)), sizeof(sp_args[1]));
-            }
-        }
-    }
 
-    // Preserve faulting thread identity for thread_self_trap (-27) and SYS_thread_selfid (372)
+    // Fast path for faulting thread identity (-27, 372) and SYS_getpid (20)
     BOOL handled_faulting_thread_identity = NO;
     if (x16 == -27 && MACH_PORT_VALID(req_thread)) {
         PT_TS_X(state)[0] = (uint64_t)req_thread;
@@ -1761,6 +1834,13 @@ static BOOL pt_svc_handle_exception_msg(const pt_mach_exc_req_t *req, pt_mach_ex
             handled_faulting_thread_identity = YES;
         }
         pt_svc_dealloc_req_ports(req_thread, req_task);
+    } else if (x16 == 20 &&
+               !atomic_load_explicit(&s_svc_safe_mode_passthrough, memory_order_acquire) &&
+               pt_is_bypass_enabled()) {
+        PT_TS_X(state)[0] = (uint64_t)(uint32_t)getpid();
+        PT_TS_CPSR(state) &= ~PT_ARM64_CPSR_C;
+        pt_svc_dealloc_req_ports(req_thread, req_task);
+        handled_faulting_thread_identity = YES;
     } else {
         pt_svc_dealloc_req_ports(req_thread, req_task);
     }
@@ -1769,8 +1849,10 @@ static BOOL pt_svc_handle_exception_msg(const pt_mach_exc_req_t *req, pt_mach_ex
                        !pt_is_bypass_enabled() ||
                        (x16 < 0);
     if (handled_faulting_thread_identity) {
-        // Already populated x0 (and CPSR.C if applicable) on state from req_thread.
+        // Already populated x0 (and CPSR.C if applicable) on state.
     } else if (passthrough) {
+        uint64_t sp_args[2] = {0, 0};
+        pt_svc_load_sp_args(&state, sp_args);
         BOOL intercept_mach_msg = ((x16 == -31 || x16 == -32 || x16 == -47) &&
                                    !atomic_load_explicit(&s_svc_safe_mode_passthrough, memory_order_acquire) &&
                                    pt_is_bypass_enabled() &&
@@ -1800,12 +1882,7 @@ static BOOL pt_svc_handle_exception_msg(const pt_mach_exc_req_t *req, pt_mach_ex
                 mig_rcv_cap = (size_t)rcv_size;
                 if (x16 == -32 && in_x[7] != 0 && pt_is_valid_user_pointer((const void *)(uintptr_t)in_x[7])) {
                     mig_rcv_buf = (void *)(uintptr_t)in_x[7];
-                    uint64_t sp = PT_TS_SP(state);
-                    if (sp != 0 && pt_is_valid_user_pointer((const void *)(uintptr_t)sp)) {
-                        uint32_t rcv_limit = 0;
-                        memcpy(&rcv_limit, (const void *)(uintptr_t)sp, sizeof(rcv_limit));
-                        mig_rcv_cap = (size_t)rcv_limit;
-                    }
+                    mig_rcv_cap = (size_t)(uint32_t)sp_args[0];
                 }
                 if (mig_sending) {
                     mach_msg_size_t eff_sz = (send_size > 0) ? send_size : hdr->msgh_size;
@@ -1904,7 +1981,11 @@ static BOOL pt_svc_handle_exception_msg(const pt_mach_exc_req_t *req, pt_mach_ex
     } else {
         uintptr_t args[8] = {0};
         int sys_num = (int)x16;
+        uint64_t sp_args[2] = {0, 0};
+        BOOL sp_loaded = NO;
         if (sys_num == 0 || sys_num == 198) {
+            pt_svc_load_sp_args(&state, sp_args);
+            sp_loaded = YES;
             sys_num = (int)in_x[0];
             for (size_t i = 0; i < 7U; i++) {
                 args[i] = (uintptr_t)in_x[i + 1U];
@@ -1927,6 +2008,9 @@ static BOOL pt_svc_handle_exception_msg(const pt_mach_exc_req_t *req, pt_mach_ex
                 PT_TS_CPSR(state) &= ~PT_ARM64_CPSR_C;
             }
         } else {
+            if (!sp_loaded) {
+                pt_svc_load_sp_args(&state, sp_args);
+            }
             uint64_t out_x[2] = {0, 0};
             bool carry = false;
             pt_raw_arm64_svc80_sp(x16, in_x, sp_args[0], sp_args[1], out_x, &carry);
@@ -1951,10 +2035,15 @@ static BOOL pt_svc_handle_exception_msg(const pt_mach_exc_req_t *req, pt_mach_ex
     reply->RetCode = KERN_SUCCESS;
     reply->flavor = flavor;
     reply->new_stateCnt = old_stateCnt;
-    memcpy(reply->new_state, tail + min_tail, (size_t)old_stateCnt * sizeof(natural_t));
     memcpy(reply->new_state, &state, sizeof(state));
+    size_t reply_state_bytes = (size_t)old_stateCnt * sizeof(natural_t);
+    if (reply_state_bytes > sizeof(state)) {
+        memcpy((uint8_t *)reply->new_state + sizeof(state),
+               tail + min_tail + sizeof(state),
+               reply_state_bytes - sizeof(state));
+    }
     reply->Head.msgh_size = (mach_msg_size_t)(offsetof(pt_mach_exc_reply_t, new_state) +
-                                              (size_t)old_stateCnt * sizeof(natural_t));
+                                              reply_state_bytes);
     return YES;
 }
 
@@ -1965,7 +2054,7 @@ static void *pt_svc_exc_server_thread(void *arg) {
     pt_mach_exc_req_t req;
     pt_mach_exc_reply_t reply;
     for (;;) {
-        memset(&req, 0, sizeof(req));
+        memset(&req.Head, 0, sizeof(req.Head));
         mach_msg_return_t mr = mach_msg(&req.Head,
                                         MACH_RCV_MSG | MACH_RCV_LARGE,
                                         0,
@@ -2434,14 +2523,22 @@ BOOL pt_svc_record_bp_handler_from_mig(BOOL is_thread,
     return YES;
 }
 
-__attribute__((visibility("hidden")))
-void pt_svc_redact_exc_ports_info_arrays(BOOL is_thread,
-                                         mach_port_t target_port,
-                                         exception_mask_t *masks,
-                                         mach_msg_type_number_t *masksCnt,
-                                         ipc_info_port_t *handlers_info,
-                                         exception_behavior_t *behaviors,
-                                         thread_state_flavor_t *flavors) {
+typedef struct {
+    exception_mask_t masks[EXC_TYPES_COUNT];
+    ipc_info_port_t handlers_info[EXC_TYPES_COUNT];
+    exception_behavior_t behaviors[EXC_TYPES_COUNT];
+    thread_state_flavor_t flavors[EXC_TYPES_COUNT];
+    mach_msg_type_number_t count;
+} pt_svc_local_exc_ports_info_t;
+
+static void pt_svc_redact_exc_ports_info_local(BOOL is_thread,
+                                               mach_port_t target_port,
+                                               BOOL inject_if_missing_bp,
+                                               exception_mask_t *masks,
+                                               mach_msg_type_number_t *masksCnt,
+                                               ipc_info_port_t *handlers_info,
+                                               exception_behavior_t *behaviors,
+                                               thread_state_flavor_t *flavors) {
     if (!atomic_load_explicit(&s_svc_interceptor_active, memory_order_acquire) ||
         masks == NULL || masksCnt == NULL || handlers_info == NULL ||
         behaviors == NULL || flavors == NULL) {
@@ -2455,6 +2552,8 @@ void pt_svc_redact_exc_ports_info_arrays(BOOL is_thread,
         ? pt_svc_copy_retained_thread_bp(target_port)
         : pt_svc_copy_retained_task_bp();
     BOOL has_saved = (saved.valid && MACH_PORT_VALID(saved.port));
+    BOOL saw_svc_bp = NO;
+    BOOL saw_bp_slot = NO;
     mach_msg_type_number_t write_idx = 0;
     for (mach_msg_type_number_t i = 0; i < count; i++) {
         BOOL matches_svc = NO;
@@ -2467,6 +2566,7 @@ void pt_svc_redact_exc_ports_info_arrays(BOOL is_thread,
             }
         }
         if (matches_svc) {
+            saw_svc_bp = YES;
             exception_mask_t rem = masks[i] & ~((exception_mask_t)EXC_MASK_BREAKPOINT);
             if (rem != 0) {
                 masks[write_idx] = rem;
@@ -2477,6 +2577,9 @@ void pt_svc_redact_exc_ports_info_arrays(BOOL is_thread,
             }
             continue;
         }
+        if ((masks[i] & (exception_mask_t)EXC_MASK_BREAKPOINT) != 0) {
+            saw_bp_slot = YES;
+        }
         if (write_idx != i) {
             masks[write_idx] = masks[i];
             handlers_info[write_idx] = handlers_info[i];
@@ -2485,7 +2588,8 @@ void pt_svc_redact_exc_ports_info_arrays(BOOL is_thread,
         }
         write_idx++;
     }
-    if (has_saved && write_idx < (mach_msg_type_number_t)EXC_TYPES_COUNT) {
+    BOOL should_inject = has_saved && (saw_svc_bp || (inject_if_missing_bp && !saw_bp_slot));
+    if (should_inject && write_idx < (mach_msg_type_number_t)EXC_TYPES_COUNT) {
         masks[write_idx] = (exception_mask_t)EXC_MASK_BREAKPOINT;
         handlers_info[write_idx] = (ipc_info_port_t){ 0U, 0U };
         behaviors[write_idx] = saved.behavior;
@@ -2494,6 +2598,58 @@ void pt_svc_redact_exc_ports_info_arrays(BOOL is_thread,
     }
     pt_svc_release_send_right(saved.port);
     *masksCnt = write_idx;
+}
+
+__attribute__((visibility("hidden")))
+void pt_svc_redact_exc_ports_info_arrays(BOOL is_thread,
+                                         mach_port_t target_port,
+                                         exception_mask_t *masks,
+                                         mach_msg_type_number_t *masksCnt,
+                                         ipc_info_port_t *handlers_info,
+                                         exception_behavior_t *behaviors,
+                                         thread_state_flavor_t *flavors) {
+    pt_svc_redact_exc_ports_info_local(is_thread,
+                                       target_port,
+                                       NO,
+                                       masks,
+                                       masksCnt,
+                                       handlers_info,
+                                       behaviors,
+                                       flavors);
+}
+
+static void pt_svc_publish_redacted_exc_ports_info(BOOL is_thread,
+                                                   mach_port_t target_port,
+                                                   BOOL inject_if_missing_bp,
+                                                   pt_svc_local_exc_ports_info_t *local,
+                                                   mach_msg_type_number_t caller_capacity,
+                                                   exception_mask_array_t out_masks,
+                                                   mach_msg_type_number_t *out_masksCnt,
+                                                   exception_handler_info_array_t out_handlers_info,
+                                                   exception_behavior_array_t out_behaviors,
+                                                   exception_flavor_array_t out_flavors) {
+    if (local == NULL || out_masksCnt == NULL) {
+        return;
+    }
+    pt_svc_redact_exc_ports_info_local(is_thread,
+                                       target_port,
+                                       inject_if_missing_bp,
+                                       local->masks,
+                                       &local->count,
+                                       local->handlers_info,
+                                       local->behaviors,
+                                       local->flavors);
+    mach_msg_type_number_t effective_cap = (caller_capacity < (mach_msg_type_number_t)EXC_TYPES_COUNT)
+        ? caller_capacity
+        : (mach_msg_type_number_t)EXC_TYPES_COUNT;
+    mach_msg_type_number_t copy_count = (local->count < effective_cap) ? local->count : effective_cap;
+    for (mach_msg_type_number_t i = 0; i < copy_count; i++) {
+        out_masks[i] = local->masks[i];
+        out_handlers_info[i] = local->handlers_info[i];
+        out_behaviors[i] = local->behaviors[i];
+        out_flavors[i] = local->flavors[i];
+    }
+    *out_masksCnt = copy_count;
 }
 
 static kern_return_t pt_task_get_exception_ports_info(mach_port_t port,
@@ -2506,12 +2662,32 @@ static kern_return_t pt_task_get_exception_ports_info(mach_port_t port,
     if (&pt_orig_task_get_exception_ports_info == NULL) {
         return KERN_NOT_SUPPORTED;
     }
+    BOOL should_redact = (port == mach_task_self() &&
+                          atomic_load_explicit(&s_svc_interceptor_active, memory_order_acquire) &&
+                          !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
+    BOOL has_out_arrays = (masks != NULL && masksCnt != NULL &&
+                           old_handlers_info != NULL && old_behaviors != NULL && old_flavors != NULL);
+    if (!should_redact || !has_out_arrays) {
+        return pt_orig_task_get_exception_ports_info(
+            port, exception_mask, masks, masksCnt, old_handlers_info, old_behaviors, old_flavors);
+    }
+    mach_msg_type_number_t caller_capacity = *masksCnt;
+    pt_svc_local_exc_ports_info_t local = {0};
+    local.count = EXC_TYPES_COUNT;
     kern_return_t kr = pt_orig_task_get_exception_ports_info(
-        port, exception_mask, masks, masksCnt, old_handlers_info, old_behaviors, old_flavors);
-    if (kr == KERN_SUCCESS &&
-        atomic_load_explicit(&s_svc_interceptor_active, memory_order_acquire) &&
-        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        pt_svc_redact_exc_ports_info_arrays(NO, port, masks, masksCnt, old_handlers_info, old_behaviors, old_flavors);
+        port, exception_mask, local.masks, &local.count, local.handlers_info, local.behaviors, local.flavors);
+    if (kr == KERN_SUCCESS) {
+        BOOL inject_missing = ((exception_mask & (exception_mask_t)EXC_MASK_BREAKPOINT) != 0);
+        pt_svc_publish_redacted_exc_ports_info(NO,
+                                               port,
+                                               inject_missing,
+                                               &local,
+                                               caller_capacity,
+                                               masks,
+                                               masksCnt,
+                                               old_handlers_info,
+                                               old_behaviors,
+                                               old_flavors);
     }
     return kr;
 }
@@ -2526,12 +2702,67 @@ static kern_return_t pt_thread_get_exception_ports_info(mach_port_t port,
     if (&pt_orig_thread_get_exception_ports_info == NULL) {
         return KERN_NOT_SUPPORTED;
     }
+    BOOL should_redact = (atomic_load_explicit(&s_svc_interceptor_active, memory_order_acquire) &&
+                          !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
+    BOOL has_out_arrays = (masks != NULL && masksCnt != NULL &&
+                           old_handlers_info != NULL && old_behaviors != NULL && old_flavors != NULL);
+    if (!should_redact || !has_out_arrays) {
+        return pt_orig_thread_get_exception_ports_info(
+            port, exception_mask, masks, masksCnt, old_handlers_info, old_behaviors, old_flavors);
+    }
+    mach_msg_type_number_t caller_capacity = *masksCnt;
+    pt_svc_local_exc_ports_info_t local = {0};
+    local.count = EXC_TYPES_COUNT;
     kern_return_t kr = pt_orig_thread_get_exception_ports_info(
-        port, exception_mask, masks, masksCnt, old_handlers_info, old_behaviors, old_flavors);
+        port, exception_mask, local.masks, &local.count, local.handlers_info, local.behaviors, local.flavors);
+    if (kr == KERN_SUCCESS) {
+        BOOL inject_missing = ((exception_mask & (exception_mask_t)EXC_MASK_BREAKPOINT) != 0);
+        pt_svc_publish_redacted_exc_ports_info(YES,
+                                               port,
+                                               inject_missing,
+                                               &local,
+                                               caller_capacity,
+                                               masks,
+                                               masksCnt,
+                                               old_handlers_info,
+                                               old_behaviors,
+                                               old_flavors);
+    }
+    return kr;
+}
+
+__attribute__((visibility("hidden")))
+void pt_svc_sanitize_arm_debug_state_buf(thread_state_flavor_t flavor, void *state_buf, size_t state_bytes) {
+    if (state_buf == NULL || state_bytes == 0U) {
+        return;
+    }
+    size_t max_clear = 0U;
+    if (flavor == ARM_DEBUG_STATE64) {
+        max_clear = sizeof(arm_debug_state64_t);
+    } else if (flavor == ARM_DEBUG_STATE32) {
+        max_clear = sizeof(arm_debug_state32_t);
+    } else if (flavor == ARM_DEBUG_STATE) {
+        max_clear = sizeof(arm_debug_state_t);
+    } else {
+        return;
+    }
+    size_t clear_bytes = (state_bytes < max_clear) ? state_bytes : max_clear;
+    memset(state_buf, 0, clear_bytes);
+}
+
+static kern_return_t pt_thread_get_state(thread_act_t target_act,
+                                         thread_state_flavor_t flavor,
+                                         thread_state_t old_state,
+                                         mach_msg_type_number_t *old_stateCnt) {
+    kern_return_t kr = pt_orig_thread_get_state(target_act, flavor, old_state, old_stateCnt);
     if (kr == KERN_SUCCESS &&
-        atomic_load_explicit(&s_svc_interceptor_active, memory_order_acquire) &&
+        old_state != NULL &&
+        old_stateCnt != NULL &&
+        pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        pt_svc_redact_exc_ports_info_arrays(YES, port, masks, masksCnt, old_handlers_info, old_behaviors, old_flavors);
+        pt_svc_sanitize_arm_debug_state_buf(flavor,
+                                            (void *)old_state,
+                                            (size_t)(*old_stateCnt) * sizeof(natural_t));
     }
     return kr;
 }
@@ -2544,6 +2775,7 @@ PT_INTERPOSE(pt_thread_set_exception_ports, thread_set_exception_ports)
 PT_INTERPOSE(pt_thread_swap_exception_ports, thread_swap_exception_ports)
 PT_INTERPOSE(pt_thread_get_exception_ports, thread_get_exception_ports)
 PT_INTERPOSE_WEAK_NAMED(pt_thread_get_exception_ports_info, pt_orig_thread_get_exception_ports_info, "thread_get_exception_ports_info")
+PT_INTERPOSE_NAMED(pt_thread_get_state, pt_orig_thread_get_state, "thread_get_state")
 
 __attribute__((visibility("hidden")))
 BOOL pt_svc_get_redaction_info(mach_port_t *out_svc_port,

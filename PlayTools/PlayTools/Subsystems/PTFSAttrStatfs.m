@@ -87,7 +87,12 @@ static size_t pt_attr_offset_in_record(const struct attrlist *req,
         case PT_ATTR_GROUP_VOL:    target_mask = vol_mask; break;
         case PT_ATTR_GROUP_DIR:    target_mask = dir_mask; break;
         case PT_ATTR_GROUP_FILE:   target_mask = file_mask; break;
-        case PT_ATTR_GROUP_FORK:   target_mask = fork_mask; break;
+        case PT_ATTR_GROUP_FORK:
+            if ((options & FSOPT_ATTR_CMN_EXTENDED) == 0) {
+                return 0;
+            }
+            target_mask = fork_mask;
+            break;
     }
     if ((target_mask & target_bit) == 0) {
         return 0;
@@ -219,9 +224,11 @@ static size_t pt_attr_offset_in_record(const struct attrlist *req,
         *out_present = found;
         return found_off;
     }
-    pt_attr_walk_group(fork_mask, kForkLayout, sizeof(kForkLayout) / sizeof(kForkLayout[0]),
-                       options, NO, &off, target_bit, target_group == PT_ATTR_GROUP_FORK,
-                       rec_len, &found_off, &found);
+    if ((options & FSOPT_ATTR_CMN_EXTENDED) != 0) {
+        pt_attr_walk_group(fork_mask, kForkLayout, sizeof(kForkLayout) / sizeof(kForkLayout[0]),
+                           options, NO, &off, target_bit, target_group == PT_ATTR_GROUP_FORK,
+                           rec_len, &found_off, &found);
+    }
     *out_present = found;
     return found_off;
 }
@@ -680,15 +687,17 @@ static void pt_sanitize_attr_fullpath_in_record(const struct attrlist *alist,
                                   PT_ATTR_GROUP_VOL, ATTR_VOL_MOUNTEDDEVICE, NO,
                                   is_synth_sysver ? "/dev/disk0s1s1" : NULL, caller);
     }
-    if ((alist->forkattr & ATTR_CMNEXT_RELPATH) != 0) {
-        pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
-                                  PT_ATTR_GROUP_FORK, ATTR_CMNEXT_RELPATH, NO,
-                                  is_synth_sysver ? "System/Library/CoreServices/SystemVersion.plist" : NULL, caller);
-    }
-    if ((alist->forkattr & ATTR_CMNEXT_NOFIRMLINKPATH) != 0) {
-        pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
-                                  PT_ATTR_GROUP_FORK, ATTR_CMNEXT_NOFIRMLINKPATH, NO,
-                                  is_synth_sysver ? "/System/Library/CoreServices/SystemVersion.plist" : NULL, caller);
+    if ((options & FSOPT_ATTR_CMN_EXTENDED) != 0) {
+        if ((alist->forkattr & ATTR_CMNEXT_RELPATH) != 0) {
+            pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
+                                      PT_ATTR_GROUP_FORK, ATTR_CMNEXT_RELPATH, NO,
+                                      is_synth_sysver ? "System/Library/CoreServices/SystemVersion.plist" : NULL, caller);
+        }
+        if ((alist->forkattr & ATTR_CMNEXT_NOFIRMLINKPATH) != 0) {
+            pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
+                                      PT_ATTR_GROUP_FORK, ATTR_CMNEXT_NOFIRMLINKPATH, NO,
+                                      is_synth_sysver ? "/System/Library/CoreServices/SystemVersion.plist" : NULL, caller);
+        }
     }
 }
 
@@ -725,14 +734,16 @@ static void pt_sanitize_attr_virtual_ancestor_record(const struct attrlist *alis
         pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
                                   PT_ATTR_GROUP_VOL, ATTR_VOL_MOUNTEDDEVICE, NO, "/dev/disk0s1s2", caller);
     }
-    if ((alist->forkattr & ATTR_CMNEXT_RELPATH) != 0) {
-        const char *rel_anc = (ancestor_path[0] == '/') ? (ancestor_path + 1) : ancestor_path;
-        pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
-                                  PT_ATTR_GROUP_FORK, ATTR_CMNEXT_RELPATH, NO, rel_anc, caller);
-    }
-    if ((alist->forkattr & ATTR_CMNEXT_NOFIRMLINKPATH) != 0) {
-        pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
-                                  PT_ATTR_GROUP_FORK, ATTR_CMNEXT_NOFIRMLINKPATH, NO, ancestor_path, caller);
+    if ((options & FSOPT_ATTR_CMN_EXTENDED) != 0) {
+        if ((alist->forkattr & ATTR_CMNEXT_RELPATH) != 0) {
+            const char *rel_anc = (ancestor_path[0] == '/') ? (ancestor_path + 1) : ancestor_path;
+            pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
+                                      PT_ATTR_GROUP_FORK, ATTR_CMNEXT_RELPATH, NO, rel_anc, caller);
+        }
+        if ((alist->forkattr & ATTR_CMNEXT_NOFIRMLINKPATH) != 0) {
+            pt_sanitize_attr_path_ref(alist, rec_ptr, max_rec_cap, options, can_grow_record,
+                                      PT_ATTR_GROUP_FORK, ATTR_CMNEXT_NOFIRMLINKPATH, NO, ancestor_path, caller);
+        }
     }
 }
 
@@ -896,6 +907,10 @@ int pt_fs_getattrlistbulk_with_caller(int dirfd,
     if (is_sys) {
         return getattrlistbulk(dirfd, attrList, attrBuf, attrBufSize, options);
     }
+    if (pt_is_hidden_fd(dirfd)) {
+        errno = EBADF;
+        return -1;
+    }
     char dirpath[PATH_MAX];
     dirpath[0] = '\0';
     if (dirfd >= 0 && fcntl(dirfd, F_GETPATH, dirpath) != -1 && pt_is_sensitive_host_fd_path(dirpath, caller)) {
@@ -969,7 +984,12 @@ static int pt_setattrlist(const char *path, void *attrList, void *attrBuf, size_
 }
 
 static int pt_fsetattrlist(int fd, void *attrList, void *attrBuf, size_t attrBufSize, unsigned int options) {
-    if (pt_fd_is_sensitive(fd, __builtin_return_address(0))) {
+    const void *caller = __builtin_return_address(0);
+    if (pt_is_hidden_fd(fd) && !pt_is_effective_system_or_playtools_caller(caller)) {
+        errno = EBADF;
+        return -1;
+    }
+    if (pt_fd_is_sensitive(fd, caller)) {
         errno = EACCES;
         return -1;
     }
@@ -983,6 +1003,10 @@ static int pt_setattrlistat(int dirfd,
                             size_t attrBufSize,
                             uint32_t options) {
     const void *caller = __builtin_return_address(0);
+    if (pt_is_hidden_fd(dirfd) && !pt_is_effective_system_or_playtools_caller(caller)) {
+        errno = EBADF;
+        return -1;
+    }
     if (pt_fd_is_sensitive(dirfd, caller)) {
         errno = EACCES;
         return -1;

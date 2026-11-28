@@ -20,15 +20,21 @@ public enum ControlModeLiteral: String {
 public final class ControlMode: Equatable, @unchecked Sendable {
     static public let mode = ControlMode()
 
+    private let stateLock = PTUnfairLock()
     private var controlMode = ControlModeLiteral.off
 
-    private var keyboardAdapter: KeyboardEventAdapter!
-    private var mouseAdapter: MouseEventAdapter!
-    private var controllerAdapter: ControllerEventAdapter!
+    private var keyboardAdapter: KeyboardEventAdapter?
+    private var mouseAdapter: MouseEventAdapter?
+    private var controllerAdapter: ControllerEventAdapter?
     private var keyWindowObserver: NSObjectProtocol?
 
+    private var currentMode: ControlModeLiteral {
+        stateLock.withLock { controlMode }
+    }
+
     public func cursorHidden() -> Bool {
-        return mouseAdapter?.cursorHidden() ?? false
+        let adapter = stateLock.withLock { mouseAdapter }
+        return adapter?.cursorHidden() ?? false
     }
 
     public func initialize() {
@@ -59,7 +65,7 @@ public final class ControlMode: Equatable, @unchecked Sendable {
             queue: .main
         ) { _ in
             if PlaySettings.shared.keymapping {
-                ActionDispatcher.invalidateNonButtonActions()
+                ActionDispatcher.invalidateActions()
             }
         }
 
@@ -117,17 +123,25 @@ public final class ControlMode: Equatable, @unchecked Sendable {
         }
     }
 
+    private func shouldEnableBackgroundControllerMonitoring() -> Bool {
+        (PlaySettings.shared.reportedIOSVersion as String) != "compat13_7"
+    }
+
     private func configureGameController(_ controller: GCController) {
         controller.handlerQueue = PlayInput.touchQueue
         controller.extendedGamepad?.valueChangedHandler = { [weak self] profile, element in
-            self?.controllerAdapter.handleValueChanged(profile, element)
+            guard let self else { return }
+            let adapter = self.stateLock.withLock { self.controllerAdapter }
+            adapter?.handleValueChanged(profile, element)
         }
     }
 
     private func setupGameController() {
         let centre = NotificationCenter.default
         let main = OperationQueue.main
-        GCController.shouldMonitorBackgroundEvents = true
+        if shouldEnableBackgroundControllerMonitoring() {
+            GCController.shouldMonitorBackgroundEvents = true
+        }
         for existing in GCController.controllers() {
             configureGameController(existing)
         }
@@ -139,11 +153,14 @@ public final class ControlMode: Equatable, @unchecked Sendable {
             object: nil,
             queue: main
         ) { [weak self] note in
-            GCController.shouldMonitorBackgroundEvents = true
+            guard let self else { return }
+            if self.shouldEnableBackgroundControllerMonitoring() {
+                GCController.shouldMonitorBackgroundEvents = true
+            }
             if let connected = note.object as? GCController {
-                self?.configureGameController(connected)
+                self.configureGameController(connected)
             } else if let current = GCController.current {
-                self?.configureGameController(current)
+                self.configureGameController(current)
             }
         }
     }
@@ -151,7 +168,9 @@ public final class ControlMode: Equatable, @unchecked Sendable {
     private func setupKeyboard() {
         AKInterface.shared?.setupKeyboard(
             keyboard: { [weak self] keycode, pressed, isRepeat, ctrlModified in
-                self?.keyboardAdapter.handleKey(
+                guard let self else { return false }
+                let adapter = self.stateLock.withLock { self.keyboardAdapter }
+                return adapter?.handleKey(
                     keycode: keycode,
                     pressed: pressed,
                     isRepeat: isRepeat,
@@ -164,33 +183,49 @@ public final class ControlMode: Equatable, @unchecked Sendable {
 
     private func setupScrollWheel() {
         AKInterface.shared?.setupScrollWheel({ [weak self] deltaX, deltaY in
-            self?.mouseAdapter.handleScrollWheel(deltaX: deltaX, deltaY: deltaY) ?? false
+            guard let self else { return false }
+            let adapter = self.stateLock.withLock { self.mouseAdapter }
+            return adapter?.handleScrollWheel(deltaX: deltaX, deltaY: deltaY) ?? false
         })
     }
 
     private func setupMouseButtons() {
         AKInterface.shared?.setupMouseButton(left: true, right: false, { [weak self] _, pressed in
-            self?.mouseAdapter.handleLeftButton(pressed: pressed) ?? false
+            guard let self else { return false }
+            let adapter = self.stateLock.withLock { self.mouseAdapter }
+            return adapter?.handleLeftButton(pressed: pressed) ?? false
         })
 
         AKInterface.shared?.setupMouseButton(left: false, right: false, { [weak self] id, pressed in
-            self?.mouseAdapter.handleOtherButton(id: id, pressed: pressed) ?? false
+            guard let self else { return false }
+            let adapter = self.stateLock.withLock { self.mouseAdapter }
+            return adapter?.handleOtherButton(id: id, pressed: pressed) ?? false
         })
 
         AKInterface.shared?.setupMouseButton(left: false, right: true, { [weak self] id, pressed in
-            self?.mouseAdapter.handleOtherButton(id: id, pressed: pressed) ?? false
+            guard let self else { return false }
+            let adapter = self.stateLock.withLock { self.mouseAdapter }
+            return adapter?.handleOtherButton(id: id, pressed: pressed) ?? false
         })
     }
 
     private func initializeResizableWindowSupport() {
         // Reactivate keymapping once the key window is initialized
-        keyWindowObserver = NotificationCenter.default.addObserver(forName: UIWindow.didBecomeKeyNotification,
+        let observer = NotificationCenter.default.addObserver(forName: UIWindow.didBecomeKeyNotification,
             object: nil, queue: .main) { [weak self] _ in
             ActionDispatcher.build()
-            if let observer = self?.keyWindowObserver {
-                NotificationCenter.default.removeObserver(observer)
-                self?.keyWindowObserver = nil
+            guard let self else { return }
+            let registered = self.stateLock.withLock { () -> NSObjectProtocol? in
+                let existing = self.keyWindowObserver
+                self.keyWindowObserver = nil
+                return existing
             }
+            if let registered {
+                NotificationCenter.default.removeObserver(registered)
+            }
+        }
+        stateLock.withLock {
+            keyWindowObserver = observer
         }
         // Reactivate keymapping once the user finishes resizing the window
         NotificationCenter.default.addObserver(forName: Notification.Name("NSWindowDidEndLiveResizeNotification"),
@@ -213,20 +248,29 @@ public final class ControlMode: Equatable, @unchecked Sendable {
             ) else {
                 return consumed
             }
-            consumed = self?.mouseAdapter.handleMove(deltaX: flushed.dx, deltaY: flushed.dy) ?? false
+            guard let self else { return false }
+            let adapter = self.stateLock.withLock { self.mouseAdapter }
+            consumed = adapter?.handleMove(deltaX: flushed.dx, deltaY: flushed.dy) ?? false
             return consumed
         })
     }
 
     public func set(_ mode: ControlModeLiteral) {
-        let previousMode = controlMode
-        let wasHidden = mouseAdapter?.cursorHidden() ?? false
-        let first = mouseAdapter == nil
-        keyboardAdapter = EventAdapters.keyboard(controlMode: mode)
-        mouseAdapter = EventAdapters.mouse(controlMode: mode)
-        controllerAdapter = EventAdapters.controller(controlMode: mode)
-        controlMode = mode
-        let nextHidden = mouseAdapter.cursorHidden()
+        let nextKeyboard = EventAdapters.keyboard(controlMode: mode)
+        let nextMouse = EventAdapters.mouse(controlMode: mode)
+        let nextController = EventAdapters.controller(controlMode: mode)
+        let nextHidden = nextMouse.cursorHidden()
+
+        let (previousMode, wasHidden, first) = stateLock.withLock { () -> (ControlModeLiteral, Bool, Bool) in
+            let prev = controlMode
+            let prevHidden = mouseAdapter?.cursorHidden() ?? false
+            let isFirst = mouseAdapter == nil
+            keyboardAdapter = nextKeyboard
+            mouseAdapter = nextMouse
+            controllerAdapter = nextController
+            controlMode = mode
+            return (prev, prevHidden, isFirst)
+        }
 
         let invalidation = PTControlModeTransitionPolicy.invalidation(
             from: previousMode.rawValue,
@@ -267,7 +311,7 @@ public final class ControlMode: Equatable, @unchecked Sendable {
     }
 
     public static func == (lhs: ControlModeLiteral, rhs: ControlMode) -> Bool {
-        lhs == rhs.controlMode
+        lhs == rhs.currentMode
     }
 
     public static func == (lhs: ControlMode, rhs: ControlModeLiteral) -> Bool {
@@ -275,7 +319,7 @@ public final class ControlMode: Equatable, @unchecked Sendable {
     }
 
     public static func == (lhs: ControlMode, rhs: ControlMode) -> Bool {
-        rhs.controlMode == lhs.controlMode
+        rhs.currentMode == lhs.currentMode
     }
 
 }

@@ -17,14 +17,15 @@ final class DebugController {
     private var debugView = DebugContainer.instance
 
     public func toggleDebugOverlay() {
-        guard let window = screen.keyWindow ?? screen.primaryWindow,
-              let view = window.rootViewController?.view else {
-            return
-        }
         if debugView.superview == nil {
+            guard let container = PTOverlayWindowHost.shared.ensureOverlayContainerView() else {
+                return
+            }
             PlaySettings.tagInternalView(debugView)
-            view.addSubview(debugView)
-            view.bringSubviewToFront(debugView)
+            debugView.frame = container.bounds
+            debugView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            container.addSubview(debugView)
+            container.bringSubviewToFront(debugView)
             debugView.isHidden = false
             debugView.isUserInteractionEnabled = false
             PlayInput.touchQueue.async {
@@ -32,6 +33,7 @@ final class DebugController {
             }
         } else {
             debugView.removeFromSuperview()
+            PTOverlayWindowHost.shared.hideIfEmpty()
             PlayInput.touchQueue.async {
                 DebugModel.instance.setEnabled(false)
             }

@@ -1535,7 +1535,54 @@ __attribute__((visibility("hidden"))) bool pt_is_dirty_code_resources_key_cstr(c
     return (strcasestr(key, "PlayTools") != NULL || strcasestr(key, "PlayCover") != NULL ||
             strcasestr(key, "MacOver") != NULL || strcasestr(key, "AKInterface") != NULL ||
             strcasestr(key, "SVCPatches") != NULL || strcasestr(key, "Playtools.strings") != NULL ||
-            strcasestr(key, "UserPlugins") != NULL);
+            strcasestr(key, "UserPlugins") != NULL || strcasestr(key, "pm_keymapping_state") != NULL ||
+            strcasestr(key, "toucher.log") != NULL);
+}
+
+__attribute__((visibility("hidden"))) bool pt_is_hidden_runtime_artifact_name_cstr(const char *name) {
+    if (name == NULL || name[0] == '\0') {
+        return false;
+    }
+    if (strcasecmp(name, "toucher.log") == 0 || strcasecmp(name, "pm_keymapping_state.plist") == 0) {
+        return true;
+    }
+    if (strncasecmp(name, "pm_keymapping_state_", 20) == 0) {
+        size_t len = strlen(name);
+        if (len >= 26U && strcasecmp(name + len - 6U, ".plist") == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+__attribute__((visibility("hidden"))) bool pt_path_has_hidden_runtime_artifact_cstr(const char *path) {
+    if (path == NULL || path[0] == '\0') {
+        return false;
+    }
+    const char *p = path;
+    while (*p != '\0') {
+        while (*p == '/') {
+            p++;
+        }
+        if (*p == '\0') {
+            break;
+        }
+        const char *end = p;
+        while (*end != '\0' && *end != '/') {
+            end++;
+        }
+        size_t len = (size_t)(end - p);
+        if (len > 0U && len < 256U) {
+            char comp[256];
+            memcpy(comp, p, len);
+            comp[len] = '\0';
+            if (pt_is_hidden_runtime_artifact_name_cstr(comp)) {
+                return true;
+            }
+        }
+        p = end;
+    }
+    return false;
 }
 
 __attribute__((visibility("hidden"))) bool pt_is_sensitive_unix_socket_token_cstr(const char *sun_path) {

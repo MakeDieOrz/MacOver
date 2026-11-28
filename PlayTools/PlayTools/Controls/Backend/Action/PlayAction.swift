@@ -4,6 +4,7 @@
 //
 
 import Foundation
+import Synchronization
 
 protocol Action: AnyObject, Sendable {
     func invalidate()
@@ -56,11 +57,50 @@ class ButtonAction: Action, @unchecked Sendable {
 }
 
 final class DraggableButtonAction: ButtonAction, @unchecked Sendable {
+    private static let activeCursorHideCount = Mutex<Int>(0)
     var releasePoint: CGPoint
+    private var didRequestCursorHide = false
 
     override init(keyCode: Int, keyName: String, point: CGPoint) {
         self.releasePoint = point
         super.init(keyCode: keyCode, keyName: keyName, point: point)
+    }
+
+    convenience init(data: Button) {
+        let resolvedKeyName = data.buttonKeyName ?? KeyCodeNames.keyCodes[data.keyCode] ?? data.keyName
+        self.init(
+            keyCode: data.keyCode,
+            keyName: resolvedKeyName,
+            point: CGPoint(
+                x: data.transform.xCoord.absoluteX,
+                y: data.transform.yCoord.absoluteY
+            )
+        )
+    }
+
+    private func acquireCursorHideIfNeeded() {
+        guard !didRequestCursorHide, !mode.cursorHidden() else { return }
+        didRequestCursorHide = true
+        let shouldHide = Self.activeCursorHideCount.withLock { count -> Bool in
+            count += 1
+            return count == 1
+        }
+        if shouldHide {
+            AKInterface.shared?.hideCursor()
+        }
+    }
+
+    private func releaseCursorHideIfNeeded() {
+        guard didRequestCursorHide else { return }
+        didRequestCursorHide = false
+        let shouldUnhide = Self.activeCursorHideCount.withLock { count -> Bool in
+            guard count > 0 else { return false }
+            count -= 1
+            return count == 0
+        }
+        if shouldUnhide && !mode.cursorHidden() {
+            AKInterface.shared?.unhideCursor()
+        }
     }
 
     override func update(pressed: Bool) {
@@ -68,33 +108,36 @@ final class DraggableButtonAction: ButtonAction, @unchecked Sendable {
             Toucher.touchcam(point: point, phase: UITouch.Phase.began, tid: &id,
                              actionName: "DraggableButton", keyName: keyName)
             self.releasePoint = point
-            ActionDispatcher.register(key: KeyCodeNames.mouseMove,
-                                      handler: self.onMouseMoved,
-                                      priority: .DRAGGABLE)
-            if !mode.cursorHidden() {
-                AKInterface.shared?.hideCursor()
-            }
+            ActionDispatcher.registerDraggable(
+                key: KeyCodeNames.mouseMove,
+                token: ObjectIdentifier(self),
+                handler: self.onMouseMoved
+            )
+            acquireCursorHideIfNeeded()
         } else {
             Toucher.touchcam(point: releasePoint, phase: UITouch.Phase.ended, tid: &id,
                              actionName: "DraggableButton", keyName: keyName)
             if id == nil {
-                ActionDispatcher.unregister(key: KeyCodeNames.mouseMove)
-                if !mode.cursorHidden() {
-                    AKInterface.shared?.unhideCursor()
-                }
+                ActionDispatcher.unregisterDraggable(
+                    key: KeyCodeNames.mouseMove,
+                    token: ObjectIdentifier(self)
+                )
+                releaseCursorHideIfNeeded()
             }
         }
     }
 
     override func invalidate() {
-        ActionDispatcher.unregister(key: KeyCodeNames.mouseMove)
+        ActionDispatcher.unregisterDraggable(
+            key: KeyCodeNames.mouseMove,
+            token: ObjectIdentifier(self)
+        )
         PlayInput.touchQueue.async { [weak self] in
             guard let self = self else { return }
-            let hadActiveTouch = self.id != nil
             Toucher.touchcam(point: self.releasePoint, phase: UITouch.Phase.ended, tid: &self.id,
                              actionName: "DraggableButton", keyName: self.keyName)
-            if hadActiveTouch && self.id == nil && !mode.cursorHidden() {
-                AKInterface.shared?.unhideCursor()
+            if self.id == nil {
+                self.releaseCursorHideIfNeeded()
             }
         }
     }
@@ -110,7 +153,7 @@ final class DraggableButtonAction: ButtonAction, @unchecked Sendable {
 class ContinuousJoystickAction: Action, @unchecked Sendable {
     var key: String
     var center: CGPoint
-    var position: CGPoint!
+    var position: CGPoint
     private var id: Int?
     var sensitivity: CGFloat
     var mode: JoystickMode
@@ -121,7 +164,7 @@ class ContinuousJoystickAction: Action, @unchecked Sendable {
             x: data.transform.xCoord.absoluteX,
             y: data.transform.yCoord.absoluteY)
         self.key = data.keyName
-        position = center
+        self.position = center
         self.sensitivity = data.transform.size.absoluteSize / 4
         self.mode = data.mode ?? Joystick.defaultMode
         if key == KeyCodeNames.mouseMove {
@@ -172,16 +215,28 @@ class ContinuousJoystickAction: Action, @unchecked Sendable {
     }
 
     func mouseUpdate(_ deltaX: CGFloat, _ deltaY: CGFloat) {
-        position.x += deltaX
-        position.y -= deltaY
+        let maxRadius = max(sensitivity, 16)
+        var nextX = position.x + deltaX
+        var nextY = position.y - deltaY
+        let dx = nextX - center.x
+        let dy = nextY - center.y
+        let distance = hypot(dx, dy)
+        if distance > maxRadius && distance > 0 {
+            let scale = maxRadius / distance
+            nextX = center.x + dx * scale
+            nextY = center.y + dy * scale
+        }
+        position = CGPoint(x: nextX, y: nextY)
         self.update(position)
     }
 
     func invalidate() {
         PlayInput.touchQueue.async { [weak self] in
             guard let self = self else { return }
+            let endPoint = self.position
             self.begun = false
-            Toucher.touchcam(point: CGPoint(x: 10, y: 10), phase: UITouch.Phase.ended, tid: &self.id,
+            self.position = self.center
+            Toucher.touchcam(point: endPoint, phase: UITouch.Phase.ended, tid: &self.id,
                              actionName: "ControllerJoystick", keyName: self.key)
         }
     }
@@ -321,7 +376,7 @@ class JoystickAction: Action, @unchecked Sendable {
 final class CameraAction: Action, @unchecked Sendable {
     var swipeMove, swipeScale1, swipeScale2: SwipeAction
     static let swipeDrag = SwipeAction(actionName: "Drag", keyName: "ScrollWheel")
-    var key: String!
+    var key: String
     var center: CGPoint
 
     init(data: MouseArea) {
@@ -344,18 +399,30 @@ final class CameraAction: Action, @unchecked Sendable {
     }
 
     func scaleUpdated(_ deltaX: CGFloat, _ deltaY: CGFloat) {
-        let centerY = screen.height/2
-        let centerX = screen.width/2
+        let centerY = screen.height / 2
+        let centerX = screen.width / 2
+        let minGap = max(centerY / 16, 8)
+        var effectiveDeltaY = deltaY
+        if effectiveDeltaY < 0 {
+            let currentY2 = swipeScale2.isActive ? swipeScale2.location.y : (centerY + centerY / 2)
+            let availableInward = currentY2 - (centerY + minGap)
+            if availableInward <= 0 {
+                swipeScale1.doLiftOff()
+                swipeScale2.doLiftOff()
+                return
+            }
+            effectiveDeltaY = max(effectiveDeltaY, -availableInward)
+        }
         swipeScale1.move(from: {
-            CGPoint(x: centerX, y: centerY/2)
-        }, deltaX: 0, deltaY: deltaY)
+            CGPoint(x: centerX, y: centerY / 2)
+        }, deltaX: 0, deltaY: effectiveDeltaY)
 
         swipeScale2.move(from: {
-            CGPoint(x: centerX, y: centerY + (centerY/2))
-        }, deltaX: 0, deltaY: -deltaY)
-        // a move can't be longer than `centerY/16` due to the velocity limiter of `CameraAction`
-        // so lifting off before two touches meet
-        if swipeScale2.location.y - centerY < centerY/16 {
+            CGPoint(x: centerX, y: centerY + (centerY / 2))
+        }, deltaX: 0, deltaY: -effectiveDeltaY)
+        // Lift off once the two pinch touches reach the minimum separation around centerY.
+        if swipeScale2.isActive &&
+            (swipeScale2.location.y - centerY <= minGap || centerY - swipeScale1.location.y <= minGap) {
             swipeScale1.doLiftOff()
             swipeScale2.doLiftOff()
         }
@@ -376,6 +443,7 @@ final class CameraAction: Action, @unchecked Sendable {
 final class SwipeAction: Action, @unchecked Sendable {
     var location: CGPoint = CGPoint.zero
     private var id: Int?
+    var isActive: Bool { id != nil }
     let timer = DispatchSource.makeTimerSource(flags: [], queue: PlayInput.touchQueue)
     private let timerLock = PTUnfairLock()
     private var isTimerSuspended = true

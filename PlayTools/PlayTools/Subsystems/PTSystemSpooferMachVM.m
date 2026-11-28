@@ -816,7 +816,6 @@ __attribute__((visibility("hidden"))) void pt_sanitize_vm_read_buffer(uintptr_t 
         return;
     }
     pt_svc_restore_patched_bytes_in_buffer(read_start, dst, copied);
-    pt_dyld_sanitize_got_ptrs_in_vm_read_buffer(read_start, dst, copied);
     uintptr_t read_end = read_start + copied;
     const struct mach_header *mh = dyld_image_header_containing_address((const void *)read_start);
     if (mh == NULL && copied > sizeof(struct mach_header_64)) {
@@ -1229,6 +1228,193 @@ BOOL pt_vm_region_should_hide_range(uintptr_t cur_addr,
             pt_is_hidden_unregistered_macho_region(cur_addr, cur_size, prot));
 }
 
+static _Atomic uintptr_t s_main_linkedit_start = 0;
+static _Atomic uintptr_t s_main_linkedit_end = 0;
+static _Atomic BOOL s_main_linkedit_resolved = NO;
+
+static BOOL pt_get_main_linkedit_range(uintptr_t *out_start, uintptr_t *out_end) {
+    if (!atomic_load_explicit(&s_main_linkedit_resolved, memory_order_acquire)) {
+        const struct mach_header *mh = pt_get_main_executable_header();
+        if (mh == NULL) {
+            mh = _dyld_get_image_header(0);
+        }
+        if (mh != NULL && pt_is_valid_user_pointer(mh)) {
+            const struct mach_header_64 *mh64 = (const struct mach_header_64 *)mh;
+            if (mh64->magic == MH_MAGIC_64 &&
+                mh64->sizeofcmds > 0U &&
+                mh64->sizeofcmds <= (1U << 20)) {
+                const uint8_t *base = (const uint8_t *)mh64;
+                size_t total_hdr = sizeof(struct mach_header_64) + (size_t)mh64->sizeofcmds;
+                size_t off = sizeof(struct mach_header_64);
+                uint64_t text_vmaddr = 0;
+                BOOL has_text = NO;
+                struct segment_command_64 linkedit = {0};
+                BOOL has_linkedit = NO;
+                for (uint32_t i = 0; i < mh64->ncmds && off + sizeof(struct load_command) <= total_hdr; i++) {
+                    const struct load_command *lc = (const struct load_command *)(base + off);
+                    if (lc->cmdsize < sizeof(struct load_command) || off + lc->cmdsize > total_hdr) {
+                        break;
+                    }
+                    if (lc->cmd == LC_SEGMENT_64 && lc->cmdsize >= sizeof(struct segment_command_64)) {
+                        const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+                        if (strncmp(seg->segname, "__TEXT", 16) == 0) {
+                            text_vmaddr = seg->vmaddr;
+                            has_text = YES;
+                        } else if (strncmp(seg->segname, "__LINKEDIT", 16) == 0) {
+                            linkedit = *seg;
+                            has_linkedit = YES;
+                        }
+                    }
+                    off += lc->cmdsize;
+                }
+                if (has_text && has_linkedit && linkedit.vmsize > 0ULL) {
+                    uintptr_t mh_addr = (uintptr_t)mh64;
+                    if (mh_addr >= (uintptr_t)text_vmaddr) {
+                        uintptr_t slide = mh_addr - (uintptr_t)text_vmaddr;
+                        if ((uint64_t)linkedit.vmaddr <= (uint64_t)UINTPTR_MAX - slide) {
+                            uintptr_t start = (uintptr_t)linkedit.vmaddr + slide;
+                            uintptr_t span = (uintptr_t)linkedit.vmsize;
+                            if (span <= UINTPTR_MAX - start) {
+                                atomic_store_explicit(&s_main_linkedit_start, start, memory_order_relaxed);
+                                atomic_store_explicit(&s_main_linkedit_end, start + span, memory_order_relaxed);
+                            }
+                        }
+                    }
+                }
+            }
+            atomic_store_explicit(&s_main_linkedit_resolved, YES, memory_order_release);
+        }
+    }
+    uintptr_t start = atomic_load_explicit(&s_main_linkedit_start, memory_order_relaxed);
+    uintptr_t end = atomic_load_explicit(&s_main_linkedit_end, memory_order_relaxed);
+    if (end <= start) {
+        return NO;
+    }
+    if (out_start != NULL) {
+        *out_start = start;
+    }
+    if (out_end != NULL) {
+        *out_end = end;
+    }
+    return YES;
+}
+
+extern __attribute__((visibility("hidden")))
+BOOL pt_is_sanitized_mach_header_cow_range(uintptr_t cur_addr, uintptr_t cur_size);
+
+__attribute__((visibility("hidden")))
+BOOL pt_sanitize_vm_region_info(uintptr_t cur_addr,
+                                uintptr_t cur_size,
+                                vm_region_flavor_t flavor,
+                                vm_region_info_t info,
+                                mach_msg_type_number_t infoCnt,
+                                BOOL is_recurse) {
+    if (info == NULL || cur_size == 0U || cur_addr > UINTPTR_MAX - cur_size) {
+        return NO;
+    }
+    uintptr_t cur_end = cur_addr + cur_size;
+    uintptr_t link_start = 0;
+    uintptr_t link_end = 0;
+    BOOL overlaps_linkedit = NO;
+    if (pt_get_main_linkedit_range(&link_start, &link_end)) {
+        overlaps_linkedit = (cur_end > link_start && cur_addr < link_end);
+    }
+    BOOL overlaps_hdr_cow = pt_is_sanitized_mach_header_cow_range(cur_addr, cur_size);
+    if (!overlaps_linkedit && !overlaps_hdr_cow) {
+        return NO;
+    }
+    if (is_recurse) {
+        if (infoCnt == VM_REGION_SUBMAP_SHORT_INFO_COUNT_64) {
+            vm_region_submap_short_info_data_64_t *si = (vm_region_submap_short_info_data_64_t *)info;
+            if (overlaps_hdr_cow) {
+                si->protection = (si->protection | VM_PROT_READ | VM_PROT_EXECUTE) & ~VM_PROT_WRITE;
+                si->max_protection |= (VM_PROT_READ | VM_PROT_EXECUTE);
+            }
+            si->max_protection &= ~VM_PROT_WRITE;
+            if (si->share_mode == SM_COW || si->share_mode == SM_PRIVATE || si->share_mode == SM_PRIVATE_ALIASED) {
+                si->share_mode = SM_SHARED;
+                si->shadow_depth = 0;
+            }
+            return YES;
+        }
+        mach_msg_type_number_t min_full =
+            (mach_msg_type_number_t)(offsetof(vm_region_submap_info_data_64_t, is_submap) / sizeof(natural_t));
+        if (infoCnt >= min_full) {
+            vm_region_submap_info_data_64_t *si = (vm_region_submap_info_data_64_t *)info;
+            if (overlaps_hdr_cow) {
+                si->protection = (si->protection | VM_PROT_READ | VM_PROT_EXECUTE) & ~VM_PROT_WRITE;
+                si->max_protection |= (VM_PROT_READ | VM_PROT_EXECUTE);
+            }
+            si->max_protection &= ~VM_PROT_WRITE;
+            si->pages_dirtied = 0;
+            si->pages_shared_now_private = 0;
+            if (si->share_mode == SM_COW || si->share_mode == SM_PRIVATE || si->share_mode == SM_PRIVATE_ALIASED) {
+                si->share_mode = SM_SHARED;
+                si->shadow_depth = 0;
+            }
+            return YES;
+        }
+        return NO;
+    }
+    switch (flavor) {
+        case VM_REGION_BASIC_INFO_64:
+            if (infoCnt >= VM_REGION_BASIC_INFO_COUNT_64) {
+                vm_region_basic_info_data_64_t *bi = (vm_region_basic_info_data_64_t *)info;
+                if (overlaps_hdr_cow) {
+                    bi->protection = (bi->protection | VM_PROT_READ | VM_PROT_EXECUTE) & ~VM_PROT_WRITE;
+                    bi->max_protection |= (VM_PROT_READ | VM_PROT_EXECUTE);
+                }
+                bi->max_protection &= ~VM_PROT_WRITE;
+                bi->shared = TRUE;
+                return YES;
+            }
+            return NO;
+        case VM_REGION_BASIC_INFO:
+            if (infoCnt >= VM_REGION_BASIC_INFO_COUNT) {
+                vm_region_basic_info_data_t *bi = (vm_region_basic_info_data_t *)info;
+                if (overlaps_hdr_cow) {
+                    bi->protection = (bi->protection | VM_PROT_READ | VM_PROT_EXECUTE) & ~VM_PROT_WRITE;
+                    bi->max_protection |= (VM_PROT_READ | VM_PROT_EXECUTE);
+                }
+                bi->max_protection &= ~VM_PROT_WRITE;
+                bi->shared = TRUE;
+                return YES;
+            }
+            return NO;
+        case VM_REGION_EXTENDED_INFO: {
+            mach_msg_type_number_t min_ext =
+                (mach_msg_type_number_t)(offsetof(vm_region_extended_info_data_t, pages_reusable) / sizeof(natural_t));
+            if (infoCnt >= min_ext) {
+                vm_region_extended_info_data_t *ei = (vm_region_extended_info_data_t *)info;
+                if (overlaps_hdr_cow) {
+                    ei->protection = (ei->protection | VM_PROT_READ | VM_PROT_EXECUTE) & ~VM_PROT_WRITE;
+                }
+                ei->pages_dirtied = 0;
+                ei->pages_shared_now_private = 0;
+                if (ei->share_mode == SM_COW || ei->share_mode == SM_PRIVATE || ei->share_mode == SM_PRIVATE_ALIASED) {
+                    ei->share_mode = SM_SHARED;
+                    ei->shadow_depth = 0;
+                }
+                return YES;
+            }
+            return NO;
+        }
+        case VM_REGION_TOP_INFO:
+            if (infoCnt >= VM_REGION_TOP_INFO_COUNT) {
+                vm_region_top_info_data_t *ti = (vm_region_top_info_data_t *)info;
+                if (ti->share_mode == SM_COW || ti->share_mode == SM_PRIVATE || ti->share_mode == SM_PRIVATE_ALIASED) {
+                    ti->shared_pages_resident += ti->private_pages_resident;
+                    ti->private_pages_resident = 0;
+                    ti->share_mode = SM_SHARED;
+                }
+                return YES;
+            }
+            return NO;
+        default:
+            return NO;
+    }
+}
+
 __attribute__((visibility("hidden")))
 kern_return_t pt_vm_region_64_with_caller(vm_map_read_t target_task,
                                           vm_address_t *address,
@@ -1251,6 +1437,7 @@ kern_return_t pt_vm_region_64_with_caller(vm_map_read_t target_task,
         vm_address_t cur_addr = *address;
         vm_size_t cur_size = *size;
         if (!pt_vm_region_should_hide_range((uintptr_t)cur_addr, (uintptr_t)cur_size, flavor, info, *infoCnt, NO, caller)) {
+            (void)pt_sanitize_vm_region_info((uintptr_t)cur_addr, (uintptr_t)cur_size, flavor, info, *infoCnt, NO);
             return kr;
         }
         if (object_name != NULL && MACH_PORT_VALID(*object_name)) {
@@ -1299,6 +1486,7 @@ kern_return_t pt_vm_region_recurse_64_with_caller(vm_map_read_t target_task,
         vm_address_t cur_addr = *address;
         vm_size_t cur_size = *size;
         if (!pt_vm_region_should_hide_range((uintptr_t)cur_addr, (uintptr_t)cur_size, 0, info, *infoCnt, YES, caller)) {
+            (void)pt_sanitize_vm_region_info((uintptr_t)cur_addr, (uintptr_t)cur_size, 0, (vm_region_info_t)info, *infoCnt, YES);
             return kr;
         }
         if (cur_size == 0 || cur_addr + cur_size <= cur_addr) {
@@ -1345,6 +1533,7 @@ kern_return_t pt_mach_vm_region_with_caller(vm_map_read_t target_task,
         mach_vm_address_t cur_addr = *address;
         mach_vm_size_t cur_size = *size;
         if (!pt_vm_region_should_hide_range((uintptr_t)cur_addr, (uintptr_t)cur_size, flavor, info, *infoCnt, NO, caller)) {
+            (void)pt_sanitize_vm_region_info((uintptr_t)cur_addr, (uintptr_t)cur_size, flavor, info, *infoCnt, NO);
             return kr;
         }
         if (object_name != NULL && MACH_PORT_VALID(*object_name)) {
@@ -1393,6 +1582,7 @@ kern_return_t pt_mach_vm_region_recurse_with_caller(vm_map_read_t target_task,
         mach_vm_address_t cur_addr = *address;
         mach_vm_size_t cur_size = *size;
         if (!pt_vm_region_should_hide_range((uintptr_t)cur_addr, (uintptr_t)cur_size, 0, info, *infoCnt, YES, caller)) {
+            (void)pt_sanitize_vm_region_info((uintptr_t)cur_addr, (uintptr_t)cur_size, 0, (vm_region_info_t)info, *infoCnt, YES);
             return kr;
         }
         if (cur_size == 0 || cur_addr + cur_size <= cur_addr) {

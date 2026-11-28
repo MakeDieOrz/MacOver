@@ -95,6 +95,7 @@ static struct passwd *pt_getpwuid(uid_t uid) {
     struct passwd *real_pw = getpwuid(uid);
     if (real_pw != NULL &&
         (uid == getuid() || uid == 501) &&
+        pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         gid_t mapped_gid = pt_map_spoofed_gid(real_pw->pw_gid);
         struct passwd *pw_buf = pt_get_mobile_tls_passwd(real_pw->pw_uid, mapped_gid);
@@ -112,6 +113,7 @@ static int pt_getpwuid_r(uid_t uid, struct passwd *pwd, char *buffer, size_t buf
     int rc = getpwuid_r(uid, pwd, buffer, bufsize, result);
     if (rc == 0 && pwd != NULL && result != NULL && *result != NULL &&
         (uid == getuid() || uid == 501) &&
+        pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         gid_t mapped_gid = pt_map_spoofed_gid(pwd->pw_gid);
         pt_fill_mobile_passwd_struct(pwd->pw_uid, mapped_gid, pwd, buffer, bufsize);
@@ -120,7 +122,9 @@ static int pt_getpwuid_r(uid_t uid, struct passwd *pwd, char *buffer, size_t buf
 }
 
 static struct passwd *pt_getpwnam(const char *login) {
-    if (login != NULL && !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (login != NULL &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         if (strcmp(login, "mobile") == 0) {
             gid_t mapped_gid = pt_map_spoofed_gid(getgid());
             struct passwd *pw_buf = pt_get_mobile_tls_passwd(getuid(), mapped_gid);
@@ -135,7 +139,9 @@ static struct passwd *pt_getpwnam(const char *login) {
 }
 
 static int pt_getpwnam_r(const char *login, struct passwd *pwd, char *buffer, size_t bufsize, struct passwd **result) {
-    if (login != NULL && !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (login != NULL &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         if (strcmp(login, "mobile") == 0) {
             if (pwd == NULL || result == NULL) {
                 return EINVAL;
@@ -156,14 +162,16 @@ static int pt_getpwnam_r(const char *login, struct passwd *pwd, char *buffer, si
 }
 
 static char *pt_getlogin(void) {
-    if (!pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return (char *)"mobile";
     }
     return getlogin();
 }
 
 static int pt_getlogin_r(char *buf, size_t bufsize) {
-    if (!pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         if (buf == NULL || bufsize < 7) {
             return ERANGE;
         }
@@ -174,14 +182,16 @@ static int pt_getlogin_r(char *buf, size_t bufsize) {
 }
 
 static NSString *pt_NSUserName(void) {
-    if (!pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return @"mobile";
     }
     return NSUserName();
 }
 
 static NSString *pt_NSFullUserName(void) {
-    if (!pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return @"Mobile User";
     }
     return NSFullUserName();
@@ -189,6 +199,7 @@ static NSString *pt_NSFullUserName(void) {
 
 static char *pt_user_from_uid(uid_t uid, int nouser) {
     if ((uid == getuid() || uid == 501) &&
+        pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         return (char *)"mobile";
     }
@@ -1192,36 +1203,49 @@ static int pt_getrlimit(int resource, struct rlimit *rlp) {
     return pt_getrlimit_with_caller(resource, rlp, __builtin_return_address(0));
 }
 
-#define PT_THERMAL_NOTIFY_TOKEN_CAP 64U
+#define PT_THERMAL_NOTIFY_TOKEN_MAX_CAP 65536U
 static os_unfair_lock s_thermal_notify_lock = OS_UNFAIR_LOCK_INIT;
-static int s_thermal_notify_tokens[PT_THERMAL_NOTIFY_TOKEN_CAP];
-static BOOL s_thermal_notify_valid[PT_THERMAL_NOTIFY_TOKEN_CAP];
+static int *s_thermal_notify_tokens = NULL;
+static size_t s_thermal_notify_count = 0;
+static size_t s_thermal_notify_cap = 0;
 
 static void pt_record_thermal_notify_token(int token) {
     os_unfair_lock_lock(&s_thermal_notify_lock);
-    int free_idx = -1;
-    for (size_t i = 0; i < PT_THERMAL_NOTIFY_TOKEN_CAP; i++) {
-        if (s_thermal_notify_valid[i] && s_thermal_notify_tokens[i] == token) {
+    for (size_t i = 0; i < s_thermal_notify_count; i++) {
+        if (s_thermal_notify_tokens[i] == token) {
             os_unfair_lock_unlock(&s_thermal_notify_lock);
             return;
         }
-        if (!s_thermal_notify_valid[i] && free_idx < 0) {
-            free_idx = (int)i;
+    }
+    if (s_thermal_notify_count >= s_thermal_notify_cap) {
+        if (s_thermal_notify_cap >= PT_THERMAL_NOTIFY_TOKEN_MAX_CAP) {
+            os_unfair_lock_unlock(&s_thermal_notify_lock);
+            return;
         }
+        size_t new_cap = (s_thermal_notify_cap == 0U) ? 64U : (s_thermal_notify_cap * 2U);
+        if (new_cap > PT_THERMAL_NOTIFY_TOKEN_MAX_CAP) {
+            new_cap = PT_THERMAL_NOTIFY_TOKEN_MAX_CAP;
+        }
+        int *grown = (int *)realloc(s_thermal_notify_tokens, new_cap * sizeof(int));
+        if (grown == NULL) {
+            os_unfair_lock_unlock(&s_thermal_notify_lock);
+            return;
+        }
+        s_thermal_notify_tokens = grown;
+        s_thermal_notify_cap = new_cap;
     }
-    if (free_idx >= 0) {
-        s_thermal_notify_tokens[free_idx] = token;
-        s_thermal_notify_valid[free_idx] = YES;
-    }
+    s_thermal_notify_tokens[s_thermal_notify_count++] = token;
     os_unfair_lock_unlock(&s_thermal_notify_lock);
 }
 
 static void pt_remove_thermal_notify_token(int token) {
     os_unfair_lock_lock(&s_thermal_notify_lock);
-    for (size_t i = 0; i < PT_THERMAL_NOTIFY_TOKEN_CAP; i++) {
-        if (s_thermal_notify_valid[i] && s_thermal_notify_tokens[i] == token) {
-            s_thermal_notify_valid[i] = NO;
-            s_thermal_notify_tokens[i] = 0;
+    size_t i = 0;
+    while (i < s_thermal_notify_count) {
+        if (s_thermal_notify_tokens[i] == token) {
+            s_thermal_notify_tokens[i] = s_thermal_notify_tokens[--s_thermal_notify_count];
+        } else {
+            i++;
         }
     }
     os_unfair_lock_unlock(&s_thermal_notify_lock);
@@ -1230,8 +1254,8 @@ static void pt_remove_thermal_notify_token(int token) {
 static BOOL pt_is_thermal_notify_token(int token) {
     BOOL found = NO;
     os_unfair_lock_lock(&s_thermal_notify_lock);
-    for (size_t i = 0; i < PT_THERMAL_NOTIFY_TOKEN_CAP; i++) {
-        if (s_thermal_notify_valid[i] && s_thermal_notify_tokens[i] == token) {
+    for (size_t i = 0; i < s_thermal_notify_count; i++) {
+        if (s_thermal_notify_tokens[i] == token) {
             found = YES;
             break;
         }
@@ -1240,10 +1264,24 @@ static BOOL pt_is_thermal_notify_token(int token) {
     return found;
 }
 
+static inline BOOL pt_should_spoof_thermal_notify_name(const char *name, const void *caller) {
+    return (name != NULL &&
+            strcmp(name, "com.apple.system.thermalpressurelevel") == 0 &&
+            pt_is_bypass_enabled() &&
+            !pt_is_effective_system_or_playtools_caller(caller));
+}
+
+static const char *pt_thermal_inert_notify_name(char *buf, size_t bufsz) {
+    snprintf(buf, bufsz, "com.apple.thermal.nominal.%d", (int)getpid());
+    return buf;
+}
+
 static uint32_t pt_notify_register_check(const char *name, int *out_token) {
-    uint32_t st = notify_register_check(name, out_token);
-    if (st == NOTIFY_STATUS_OK && out_token != NULL && name != NULL &&
-        strcmp(name, "com.apple.system.thermalpressurelevel") == 0) {
+    BOOL spoof = pt_should_spoof_thermal_notify_name(name, __builtin_return_address(0));
+    char inert_name[64];
+    const char *reg_name = spoof ? pt_thermal_inert_notify_name(inert_name, sizeof(inert_name)) : name;
+    uint32_t st = notify_register_check(reg_name, out_token);
+    if (spoof && st == NOTIFY_STATUS_OK && out_token != NULL) {
         pt_record_thermal_notify_token(*out_token);
     }
     return st;
@@ -1253,36 +1291,44 @@ static uint32_t pt_notify_register_dispatch(const char *name,
                                             int *out_token,
                                             dispatch_queue_t queue,
                                             notify_handler_t handler) {
-    uint32_t st = notify_register_dispatch(name, out_token, queue, handler);
-    if (st == NOTIFY_STATUS_OK && out_token != NULL && name != NULL &&
-        strcmp(name, "com.apple.system.thermalpressurelevel") == 0) {
+    BOOL spoof = pt_should_spoof_thermal_notify_name(name, __builtin_return_address(0));
+    char inert_name[64];
+    const char *reg_name = spoof ? pt_thermal_inert_notify_name(inert_name, sizeof(inert_name)) : name;
+    uint32_t st = notify_register_dispatch(reg_name, out_token, queue, handler);
+    if (spoof && st == NOTIFY_STATUS_OK && out_token != NULL) {
         pt_record_thermal_notify_token(*out_token);
     }
     return st;
 }
 
 static uint32_t pt_notify_register_signal(const char *name, int sig, int *out_token) {
-    uint32_t st = notify_register_signal(name, sig, out_token);
-    if (st == NOTIFY_STATUS_OK && out_token != NULL && name != NULL &&
-        strcmp(name, "com.apple.system.thermalpressurelevel") == 0) {
+    BOOL spoof = pt_should_spoof_thermal_notify_name(name, __builtin_return_address(0));
+    char inert_name[64];
+    const char *reg_name = spoof ? pt_thermal_inert_notify_name(inert_name, sizeof(inert_name)) : name;
+    uint32_t st = notify_register_signal(reg_name, sig, out_token);
+    if (spoof && st == NOTIFY_STATUS_OK && out_token != NULL) {
         pt_record_thermal_notify_token(*out_token);
     }
     return st;
 }
 
 static uint32_t pt_notify_register_mach_port(const char *name, mach_port_t *notify_port, int flags, int *out_token) {
-    uint32_t st = notify_register_mach_port(name, notify_port, flags, out_token);
-    if (st == NOTIFY_STATUS_OK && out_token != NULL && name != NULL &&
-        strcmp(name, "com.apple.system.thermalpressurelevel") == 0) {
+    BOOL spoof = pt_should_spoof_thermal_notify_name(name, __builtin_return_address(0));
+    char inert_name[64];
+    const char *reg_name = spoof ? pt_thermal_inert_notify_name(inert_name, sizeof(inert_name)) : name;
+    uint32_t st = notify_register_mach_port(reg_name, notify_port, flags, out_token);
+    if (spoof && st == NOTIFY_STATUS_OK && out_token != NULL) {
         pt_record_thermal_notify_token(*out_token);
     }
     return st;
 }
 
 static uint32_t pt_notify_register_file_descriptor(const char *name, int *notify_fd, int flags, int *out_token) {
-    uint32_t st = notify_register_file_descriptor(name, notify_fd, flags, out_token);
-    if (st == NOTIFY_STATUS_OK && out_token != NULL && name != NULL &&
-        strcmp(name, "com.apple.system.thermalpressurelevel") == 0) {
+    BOOL spoof = pt_should_spoof_thermal_notify_name(name, __builtin_return_address(0));
+    char inert_name[64];
+    const char *reg_name = spoof ? pt_thermal_inert_notify_name(inert_name, sizeof(inert_name)) : name;
+    uint32_t st = notify_register_file_descriptor(reg_name, notify_fd, flags, out_token);
+    if (spoof && st == NOTIFY_STATUS_OK && out_token != NULL) {
         pt_record_thermal_notify_token(*out_token);
     }
     return st;
@@ -1599,7 +1645,7 @@ __attribute__((visibility("hidden"))) dispatch_semaphore_t thread_sleep_sem = ni
 __attribute__((visibility("hidden"))) _Atomic int s_block_sleep_spamming_cached = -1;
 static pthread_once_t s_sleep_setting_once = PTHREAD_ONCE_INIT;
 static _Thread_local uint32_t tls_sleep_counter = 0;
-static _Thread_local uint64_t tls_sleep_timestamp = 0;
+static _Thread_local uint64_t tls_window_start = 0;
 
 static void pt_init_sleep_setting(void) {
     @autoreleasepool {
@@ -1607,6 +1653,14 @@ static void pt_init_sleep_setting(void) {
                               [[PlaySettings shared] blockSleepSpamming] ? 1 : 0,
                               memory_order_release);
     }
+}
+
+static uint64_t pt_monotonic_now_ms(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC_RAW, &ts) == 0) {
+        return ((uint64_t)ts.tv_sec * 1000ULL) + ((uint64_t)ts.tv_nsec / 1000000ULL);
+    }
+    return (uint64_t)time(NULL) * 1000ULL;
 }
 
 static int pt_usleep(useconds_t usec) {
@@ -1617,25 +1671,31 @@ static int pt_usleep(useconds_t usec) {
         atomic_load_explicit(&s_block_sleep_spamming_cached, memory_order_acquire) < 0) {
         pthread_once(&s_sleep_setting_once, pt_init_sleep_setting);
     }
-    if (atomic_load_explicit(&s_block_sleep_spamming_cached, memory_order_acquire) == 1) {
-        dispatch_once(&thread_sleep_once, ^{
-            thread_sleep_sem = dispatch_semaphore_create(0);
-        });
+    if (atomic_load_explicit(&s_block_sleep_spamming_cached, memory_order_acquire) == 1 &&
+        pt_is_bypass_enabled() &&
+        pthread_main_np() == 0 &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         if (usec == 100000) {
-            uint64_t now = (uint64_t)time(NULL);
-            if (now >= tls_sleep_timestamp && (now - tls_sleep_timestamp) < 2) {
+            dispatch_once(&thread_sleep_once, ^{
+                thread_sleep_sem = dispatch_semaphore_create(0);
+            });
+            uint64_t now_ms = pt_monotonic_now_ms();
+            // Fixed 12-second window: 100 real 100ms sleeps take >= 10s, so > 100 calls
+            // inside one fixed 12s window catches sustained >8.4 Hz spam loops without
+            // deadlocking normal 1-8 Hz polling threads.
+            if (tls_window_start != 0 && now_ms >= tls_window_start && (now_ms - tls_window_start) < 12000ULL) {
                 tls_sleep_counter++;
             } else {
+                tls_window_start = now_ms;
                 tls_sleep_counter = 1;
             }
-            tls_sleep_timestamp = now;
-        }
-        if (tls_sleep_counter > 100) {
-            PT_DEBUG_TRACE("spoofer", "stalled sleep-spamming thread usec=%u count=%u",
-                           (unsigned int)usec, tls_sleep_counter);
-            dispatch_semaphore_wait(thread_sleep_sem, DISPATCH_TIME_FOREVER);
-            dispatch_semaphore_signal(thread_sleep_sem);
-            return 0;
+            if (tls_sleep_counter > 100) {
+                PT_DEBUG_TRACE("spoofer", "stalled sleep-spamming thread usec=%u count=%u",
+                               (unsigned int)usec, tls_sleep_counter);
+                dispatch_semaphore_wait(thread_sleep_sem, DISPATCH_TIME_FOREVER);
+                dispatch_semaphore_signal(thread_sleep_sem);
+                return 0;
+            }
         }
     }
     return usleep(usec);

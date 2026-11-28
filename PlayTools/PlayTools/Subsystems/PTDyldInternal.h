@@ -36,7 +36,8 @@ __attribute__((visibility("hidden"))) void pt_register_swizzled_imp(const void *
 __attribute__((visibility("hidden"))) void pt_register_hidden_swizzle_selector(SEL sel);
 __attribute__((visibility("hidden"))) BOOL pt_is_address_in_playtools(const void *addr);
 __attribute__((visibility("hidden"))) void pt_init_nonlazy_got_cloaking(void);
-__attribute__((visibility("hidden"))) void pt_dyld_sanitize_got_ptrs_in_vm_read_buffer(uintptr_t read_start, uint8_t *dst, size_t copied);
+__attribute__((visibility("hidden"))) void pt_refresh_hidden_image_bounds(void);
+__attribute__((visibility("hidden"))) BOOL pt_range_overlaps_hidden_playtools_image(uintptr_t addr, size_t len);
 __attribute__((visibility("hidden"))) void ps_install_nsobject_reflection_hooks(void);
 
 // Internal helpers shared across PTDyldVirtualizer / PTDyldLoaders / PTObjCRuntimeVirtualizer

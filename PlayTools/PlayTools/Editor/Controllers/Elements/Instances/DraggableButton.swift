@@ -15,7 +15,10 @@ class DraggableButtonModel: ControlModel<Button>, ParentElement {
     var childButton: ChildButtonModel?
 
     func save() -> Button {
-        data.keyCode = childButton!.data.keyCode
+        if let child = childButton {
+            data.keyCode = child.data.keyCode
+            data.buttonKeyName = child.data.keyName
+        }
         return data
     }
 
@@ -28,10 +31,17 @@ class DraggableButtonModel: ControlModel<Button>, ParentElement {
             height: data.transform.size.absoluteSize
         ))
         button.model = self
-        // temporarily, cannot map controller keys to draggable buttons
-        // `data.keyName` is the key for the move area, not that of the button key.
+        // `data.keyName` is the drag device ("Mouse" or thumbstick), while
+        // `data.buttonKeyName` / `data.keyCode` stores the trigger button key.
+        let childKeyName = data.buttonKeyName ?? KeyCodeNames.keyCodes[data.keyCode] ?? "Btn"
+        let childData = Button(
+            keyCode: data.keyCode,
+            keyName: childKeyName,
+            transform: self.data.transform,
+            buttonKeyName: data.buttonKeyName
+        )
         childButton = ChildButtonModel(
-            data: self.data,
+            data: childData,
             parent: self
         )
         setKey(name: data.keyName)
@@ -39,13 +49,13 @@ class DraggableButtonModel: ControlModel<Button>, ParentElement {
     }
 
     override func setKey(code: Int, name: String) {
-        if code == KeyCodeNames.defaultCode {
-            // set the parent key
+        if code == KeyCodeNames.defaultCode && (name == "Mouse" || name.hasSuffix("tick")) {
+            // set the parent drag-device key
             self.data.keyName = name
             button.setTitle(data.keyName, for: UIControl.State.normal)
         } else {
-            // set the child key
-            childButton!.setKey(code: code)
+            // set the child trigger key
+            childButton?.setKey(code: code, name: name)
         }
     }
 

@@ -121,36 +121,88 @@ static void ps_inject_proxy_into_config(NSURLSessionConfiguration *config) {
     }
 }
 
-static void ps_inject_block_protocol_into_config(NSURLSessionConfiguration *config) {
-    if (config == nil) return;
-    ps_swizzle_cfg_instance_methods_if_needed(object_getClass(config));
-    ps_inject_proxy_into_config(config);
+static BOOL ps_config_has_app_custom_proxy(NSURLSessionConfiguration *config) {
+    if (config == nil) {
+        return NO;
+    }
+    if ([objc_getAssociatedObject(config, &s_ptProxyInjectedTagKey) boolValue]) {
+        return NO;
+    }
+    NSDictionary *rawDict = nil;
+    if ([config respondsToSelector:@selector(pm_ps_connectionProxyDictionary)]) {
+        rawDict = [(id)config pm_ps_connectionProxyDictionary];
+    } else {
+        rawDict = config.connectionProxyDictionary;
+    }
+    if (!ps_dict_has_active_proxy(rawDict)) {
+        return NO;
+    }
+    PSNetworkRuleSnapshot *snap = [PTSafeMode isActive] ? nil : ps_get_network_snapshot();
+    if (snap != nil && ps_proxy_dict_matches_snapshot(rawDict, snap)) {
+        return NO;
+    }
+    return YES;
+}
+
+static Class ps_desired_block_protocol_class_for_config(NSURLSessionConfiguration *config) {
+    if (ps_config_has_app_custom_proxy(config)) {
+        Class directCls = objc_getClass("PTNetworkDirectBlockProtocol");
+        if (directCls != Nil) {
+            return directCls;
+        }
+    }
+    return objc_getClass("PTNetworkBlockProtocol");
+}
+
+static void ps_sync_block_protocol_in_config_protocols(NSURLSessionConfiguration *config) {
+    if (config == nil || [PTSafeMode isActive]) return;
     if ([config respondsToSelector:@selector(identifier)] && config.identifier.length > 0) {
         return;
     }
-    if (ps_get_network_rules() == nil) {
-        return;
-    }
-    Class protoCls = objc_getClass("PTNetworkBlockProtocol");
-    if (protoCls == nil) return;
-    NSArray *existing = config.protocolClasses;
-    if (existing.count > 0 && existing.firstObject == protoCls) {
+    Class desiredCls = ps_desired_block_protocol_class_for_config(config);
+    Class stdCls = objc_getClass("PTNetworkBlockProtocol");
+    Class directCls = objc_getClass("PTNetworkDirectBlockProtocol");
+    if (desiredCls == Nil) return;
+    NSArray *existing = [config respondsToSelector:@selector(pm_ps_protocolClasses)]
+        ? [(id)config pm_ps_protocolClasses]
+        : config.protocolClasses;
+    Class otherCls = (desiredCls == directCls) ? stdCls : directCls;
+    if (existing.count > 0 && existing.firstObject == desiredCls &&
+        (otherCls == Nil || ![existing containsObject:otherCls])) {
         return;
     }
     NSMutableArray *protocols = existing ? [existing mutableCopy] : [NSMutableArray array];
-    [protocols removeObject:protoCls];
-    [protocols insertObject:protoCls atIndex:0];
-    config.protocolClasses = protocols;
+    if (stdCls != Nil) [protocols removeObject:stdCls];
+    if (directCls != Nil) [protocols removeObject:directCls];
+    [protocols insertObject:desiredCls atIndex:0];
+    if ([config respondsToSelector:@selector(pm_setProtocolClasses:)]) {
+        [(id)config pm_setProtocolClasses:protocols];
+    } else {
+        config.protocolClasses = protocols;
+    }
+}
+
+static void ps_inject_block_protocol_into_config(NSURLSessionConfiguration *config) {
+    if (config == nil || [PTSafeMode isActive]) return;
+    ps_swizzle_cfg_instance_methods_if_needed(object_getClass(config));
+    ps_inject_proxy_into_config(config);
+    ps_sync_block_protocol_in_config_protocols(config);
 }
 
 static BOOL ps_trust_accepted_by_custom_ca(SecTrustRef serverTrust, NSString *host, PSNetworkRuleSnapshot *snap) {
     if (serverTrust == NULL || snap == nil || snap.customCertificates.count == 0 || [PTSafeMode isActive]) {
         return NO;
     }
-    if (!snap.mitmAllHosts &&
-        !ps_host_matches_mitm_scope(host, snap) &&
-        !ps_should_apply_custom_ca_for_trust(serverTrust, snap)) {
+    if (!snap.mitmAllowPinningBypass && ps_trust_state_is_anchors_only(serverTrust)) {
         return NO;
+    }
+    if (!snap.mitmAllHosts) {
+        BOOL inScope = (host.length > 0)
+            ? ps_host_matches_mitm_scope(host, snap)
+            : ps_should_apply_custom_ca_for_trust(serverTrust, snap);
+        if (!inScope) {
+            return NO;
+        }
     }
     return ps_evaluate_trust_with_custom_anchors(serverTrust, snap, NULL);
 }
@@ -180,9 +232,16 @@ static void ps_handle_server_trust_challenge(
     SecTrustRef serverTrust = challenge.protectionSpace.serverTrust;
     NSString *host = challenge.protectionSpace.host;
     PSNetworkRuleSnapshot *snap = [PTSafeMode isActive] ? nil : ps_get_network_snapshot();
-    BOOL inCustomCAScope = (snap != nil && snap.customCertificates.count > 0 &&
-                            (snap.mitmAllHosts || ps_host_matches_mitm_scope(host, snap) ||
-                             ps_should_apply_custom_ca_for_trust(serverTrust, snap)));
+    BOOL inCustomCAScope = NO;
+    if (snap != nil && snap.customCertificates.count > 0) {
+        if (snap.mitmAllHosts) {
+            inCustomCAScope = YES;
+        } else if (host.length > 0) {
+            inCustomCAScope = ps_host_matches_mitm_scope(host, snap);
+        } else {
+            inCustomCAScope = ps_should_apply_custom_ca_for_trust(serverTrust, snap);
+        }
+    }
 
     if (snap != nil && snap.mitmAllowPinningBypass && inCustomCAScope) {
         CFErrorRef err = NULL;
@@ -308,6 +367,89 @@ __attribute__((visibility("hidden")))
     return _target;
 }
 
+static NSMethodSignature *ps_signature_from_protocols_or_selector(Protocol * __unsafe_unretained *protos,
+                                                                  size_t protoCount,
+                                                                  SEL sel) {
+    if (sel == NULL) {
+        return [NSMethodSignature signatureWithObjCTypes:"v@:"];
+    }
+    for (size_t i = 0; i < protoCount; i++) {
+        Protocol *proto = protos[i];
+        if (proto == nil) continue;
+        struct objc_method_description desc = protocol_getMethodDescription(proto, sel, NO, YES);
+        if (desc.types == NULL) {
+            desc = protocol_getMethodDescription(proto, sel, YES, YES);
+        }
+        if (desc.types != NULL) {
+            NSMethodSignature *sig = [NSMethodSignature signatureWithObjCTypes:desc.types];
+            if (sig != nil) {
+                return sig;
+            }
+        }
+    }
+    const char *name = sel_getName(sel);
+    size_t colons = 0;
+    if (name != NULL) {
+        for (const char *p = name; *p != '\0'; p++) {
+            if (*p == ':') colons++;
+        }
+    }
+    if (colons > 16U) {
+        colons = 16U;
+    }
+    char types[24];
+    types[0] = 'v';
+    types[1] = '@';
+    types[2] = ':';
+    for (size_t i = 0; i < colons; i++) {
+        types[3U + i] = '@';
+    }
+    types[3U + colons] = '\0';
+    return [NSMethodSignature signatureWithObjCTypes:types];
+}
+
+static void ps_zero_invocation_return_value(NSInvocation *invocation) {
+    NSUInteger retLen = invocation.methodSignature.methodReturnLength;
+    if (retLen == 0) {
+        return;
+    }
+    if (retLen <= 128U) {
+        uint8_t zeroBuf[128] = {0};
+        [invocation setReturnValue:zeroBuf];
+    } else {
+        void *zeroBuf = calloc(1U, retLen);
+        if (zeroBuf != NULL) {
+            [invocation setReturnValue:zeroBuf];
+            free(zeroBuf);
+        }
+    }
+}
+
+static NSMethodSignature *ps_wk_nav_fallback_signature(SEL sel) {
+    Protocol *wkNavProto = objc_getProtocol("WKNavigationDelegate");
+    if (wkNavProto != nil) {
+        struct objc_method_description desc = protocol_getMethodDescription(wkNavProto, sel, NO, YES);
+        if (desc.types == NULL) {
+            desc = protocol_getMethodDescription(wkNavProto, sel, YES, YES);
+        }
+        if (desc.types != NULL) {
+            NSMethodSignature *sig = [NSMethodSignature signatureWithObjCTypes:desc.types];
+            if (sig != nil) {
+                return sig;
+            }
+        }
+    }
+    if (sel == NSSelectorFromString(@"webView:decidePolicyForNavigationAction:decisionHandler:") ||
+        sel == NSSelectorFromString(@"webView:decidePolicyForNavigationResponse:decisionHandler:") ||
+        sel == NSSelectorFromString(@"webView:authenticationChallenge:shouldAllowDeprecatedTLS:")) {
+        return [NSMethodSignature signatureWithObjCTypes:"v@:@@@?"];
+    }
+    if (sel == NSSelectorFromString(@"webView:decidePolicyForNavigationAction:preferences:decisionHandler:")) {
+        return [NSMethodSignature signatureWithObjCTypes:"v@:@@@@?"];
+    }
+    return ps_signature_from_protocols_or_selector(NULL, 0, sel);
+}
+
 - (NSMethodSignature *)methodSignatureForSelector:(SEL)sel {
     id target = _target;
     if (target != nil) {
@@ -316,14 +458,59 @@ __attribute__((visibility("hidden")))
             return sig;
         }
     }
-    return [NSMethodSignature signatureWithObjCTypes:"v@:"];
+    return ps_wk_nav_fallback_signature(sel);
 }
 
 - (void)forwardInvocation:(NSInvocation *)invocation {
     id target = _target;
-    if (target != nil && [target respondsToSelector:invocation.selector]) {
+    SEL sel = invocation.selector;
+    if (target != nil && [target respondsToSelector:sel]) {
         [invocation invokeWithTarget:target];
+        return;
     }
+    // Weak target deallocated before callback: invoke mandatory WebKit decision/completion
+    // handlers with safe defaults so WebKit's CompletionHandlerCallChecker never aborts.
+    NSUInteger numArgs = invocation.methodSignature.numberOfArguments;
+    if (sel == NSSelectorFromString(@"webView:decidePolicyForNavigationAction:decisionHandler:") && numArgs >= 5U) {
+        __unsafe_unretained id rawHandler = nil;
+        [invocation getArgument:&rawHandler atIndex:4];
+        void (^handler)(NSInteger) = rawHandler;
+        if (handler != nil) {
+            handler(1); // WKNavigationActionPolicyAllow
+        }
+        return;
+    }
+    if (sel == NSSelectorFromString(@"webView:decidePolicyForNavigationAction:preferences:decisionHandler:") && numArgs >= 6U) {
+        __unsafe_unretained id rawPrefs = nil;
+        __unsafe_unretained id rawHandler = nil;
+        [invocation getArgument:&rawPrefs atIndex:4];
+        [invocation getArgument:&rawHandler atIndex:5];
+        id prefs = rawPrefs;
+        void (^handler)(NSInteger, id) = rawHandler;
+        if (handler != nil) {
+            handler(1, prefs); // WKNavigationActionPolicyAllow
+        }
+        return;
+    }
+    if (sel == NSSelectorFromString(@"webView:decidePolicyForNavigationResponse:decisionHandler:") && numArgs >= 5U) {
+        __unsafe_unretained id rawHandler = nil;
+        [invocation getArgument:&rawHandler atIndex:4];
+        void (^handler)(NSInteger) = rawHandler;
+        if (handler != nil) {
+            handler(1); // WKNavigationResponsePolicyAllow
+        }
+        return;
+    }
+    if (sel == NSSelectorFromString(@"webView:authenticationChallenge:shouldAllowDeprecatedTLS:") && numArgs >= 5U) {
+        __unsafe_unretained id rawHandler = nil;
+        [invocation getArgument:&rawHandler atIndex:4];
+        void (^handler)(BOOL) = rawHandler;
+        if (handler != nil) {
+            handler(NO);
+        }
+        return;
+    }
+    ps_zero_invocation_return_value(invocation);
 }
 
 - (void)webView:(id)webView
@@ -501,13 +688,76 @@ __attribute__((visibility("hidden")))
             return sig;
         }
     }
-    return [NSMethodSignature signatureWithObjCTypes:"v@:"];
+    Protocol * __unsafe_unretained protos[] = {
+        @protocol(NSURLSessionDelegate),
+        @protocol(NSURLSessionTaskDelegate),
+        @protocol(NSURLSessionDataDelegate),
+        @protocol(NSURLSessionDownloadDelegate),
+        @protocol(NSURLSessionStreamDelegate),
+        objc_getProtocol("NSURLSessionWebSocketDelegate")
+    };
+    return ps_signature_from_protocols_or_selector(protos, sizeof(protos) / sizeof(protos[0]), sel);
 }
 
 - (void)forwardInvocation:(NSInvocation *)invocation {
-    if (_target != nil && [_target respondsToSelector:invocation.selector]) {
+    SEL sel = invocation.selector;
+    if (_target != nil && [_target respondsToSelector:sel]) {
         [invocation invokeWithTarget:_target];
+        return;
     }
+    NSUInteger numArgs = invocation.methodSignature.numberOfArguments;
+    if (sel == @selector(URLSession:task:willPerformHTTPRedirection:newRequest:completionHandler:) && numArgs >= 7U) {
+        __unsafe_unretained id rawReq = nil;
+        __unsafe_unretained id rawHandler = nil;
+        [invocation getArgument:&rawReq atIndex:5];
+        [invocation getArgument:&rawHandler atIndex:6];
+        NSURLRequest *req = rawReq;
+        void (^handler)(NSURLRequest *) = rawHandler;
+        if (handler != nil) {
+            handler(req);
+        }
+        return;
+    }
+    if (sel == @selector(URLSession:task:needNewBodyStream:) && numArgs >= 5U) {
+        __unsafe_unretained id rawHandler = nil;
+        [invocation getArgument:&rawHandler atIndex:4];
+        void (^handler)(NSInputStream *) = rawHandler;
+        if (handler != nil) {
+            handler(nil);
+        }
+        return;
+    }
+    if (sel == NSSelectorFromString(@"URLSession:task:needNewBodyStreamFromOffset:completionHandler:") && numArgs >= 6U) {
+        __unsafe_unretained id rawHandler = nil;
+        [invocation getArgument:&rawHandler atIndex:5];
+        void (^handler)(NSInputStream *) = rawHandler;
+        if (handler != nil) {
+            handler(nil);
+        }
+        return;
+    }
+    if (sel == @selector(URLSession:dataTask:didReceiveResponse:completionHandler:) && numArgs >= 6U) {
+        __unsafe_unretained id rawHandler = nil;
+        [invocation getArgument:&rawHandler atIndex:5];
+        void (^handler)(NSURLSessionResponseDisposition) = rawHandler;
+        if (handler != nil) {
+            handler(NSURLSessionResponseAllow);
+        }
+        return;
+    }
+    if (sel == @selector(URLSession:dataTask:willCacheResponse:completionHandler:) && numArgs >= 6U) {
+        __unsafe_unretained id rawResp = nil;
+        __unsafe_unretained id rawHandler = nil;
+        [invocation getArgument:&rawResp atIndex:4];
+        [invocation getArgument:&rawHandler atIndex:5];
+        NSCachedURLResponse *resp = rawResp;
+        void (^handler)(NSCachedURLResponse *) = rawHandler;
+        if (handler != nil) {
+            handler(resp);
+        }
+        return;
+    }
+    ps_zero_invocation_return_value(invocation);
 }
 
 - (void)URLSession:(NSURLSession *)session
@@ -527,6 +777,10 @@ didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
 
 static os_unfair_lock s_ptSharedSessionLock = OS_UNFAIR_LOCK_INIT;
 static NSURLSession *s_ptSharedSession = nil;
+static NSString *s_ptSharedSessionProxyHost = nil;
+static NSInteger s_ptSharedSessionProxyPort = 0;
+static BOOL s_ptSharedSessionProxyIsSOCKS5 = NO;
+static BOOL s_ptSharedSessionHasCustomCerts = NO;
 static _Thread_local BOOL t_ptCreatingSharedSession = NO;
 
 __attribute__((visibility("hidden")))
@@ -573,10 +827,12 @@ __attribute__((visibility("hidden")))
     if (snap != nil && snap.activeProxyDictionary.count > 0 && !ps_dict_has_active_proxy(proxyDict)) {
         [self pm_ps_setConnectionProxyDictionary:snap.activeProxyDictionary];
         objc_setAssociatedObject(self, &s_ptProxyInjectedTagKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ps_sync_block_protocol_in_config_protocols((NSURLSessionConfiguration *)self);
         return;
     }
     objc_setAssociatedObject(self, &s_ptProxyInjectedTagKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [self pm_ps_setConnectionProxyDictionary:proxyDict];
+    ps_sync_block_protocol_in_config_protocols((NSURLSessionConfiguration *)self);
 }
 
 - (NSArray<Class> *) pm_ps_protocolClasses {
@@ -586,11 +842,15 @@ __attribute__((visibility("hidden")))
         return classes;
     }
     Class protoCls = objc_getClass("PTNetworkBlockProtocol");
-    if (protoCls == Nil || ![classes containsObject:protoCls]) {
+    Class directCls = objc_getClass("PTNetworkDirectBlockProtocol");
+    BOOL hasStd = (protoCls != Nil && [classes containsObject:protoCls]);
+    BOOL hasDirect = (directCls != Nil && [classes containsObject:directCls]);
+    if (!hasStd && !hasDirect) {
         return classes;
     }
     NSMutableArray<Class> *filtered = [classes mutableCopy];
-    [filtered removeObject:protoCls];
+    if (hasStd) [filtered removeObject:protoCls];
+    if (hasDirect) [filtered removeObject:directCls];
     return filtered;
 }
 
@@ -602,16 +862,22 @@ __attribute__((visibility("hidden")))
             return;
         }
     }
-    if (ps_get_network_rules() != nil) {
-        Class protoCls = objc_getClass("PTNetworkBlockProtocol");
-        if (protoCls != nil) {
-            NSMutableArray<Class> *modified = protocolClasses ? [protocolClasses mutableCopy] : [NSMutableArray array];
-            if (modified.count == 0 || modified.firstObject != protoCls) {
-                [modified removeObject:protoCls];
-                [modified insertObject:protoCls atIndex:0];
+    if (![PTSafeMode isActive]) {
+        Class desiredCls = ps_desired_block_protocol_class_for_config((NSURLSessionConfiguration *)self);
+        Class stdCls = objc_getClass("PTNetworkBlockProtocol");
+        Class directCls = objc_getClass("PTNetworkDirectBlockProtocol");
+        if (desiredCls != Nil) {
+            Class otherCls = (desiredCls == directCls) ? stdCls : directCls;
+            BOOL alreadyGood = (protocolClasses.count > 0 && protocolClasses.firstObject == desiredCls &&
+                                (otherCls == Nil || ![protocolClasses containsObject:otherCls]));
+            if (!alreadyGood) {
+                NSMutableArray<Class> *modified = protocolClasses ? [protocolClasses mutableCopy] : [NSMutableArray array];
+                if (stdCls != Nil) [modified removeObject:stdCls];
+                if (directCls != Nil) [modified removeObject:directCls];
+                [modified insertObject:desiredCls atIndex:0];
+                [self pm_setProtocolClasses:modified];
+                return;
             }
-            [self pm_setProtocolClasses:modified];
-            return;
         }
     }
     [self pm_setProtocolClasses:protocolClasses];
@@ -629,31 +895,70 @@ __attribute__((visibility("hidden")))
                                                   snap.urlRules.count > 0 ||
                                                   snap.regexRules.count > 0))));
     if (!needsCustomSession) {
+        NSURLSession *stale = nil;
+        os_unfair_lock_lock(&s_ptSharedSessionLock);
+        if (s_ptSharedSession != nil) {
+            stale = s_ptSharedSession;
+            s_ptSharedSession = nil;
+            s_ptSharedSessionProxyHost = nil;
+            s_ptSharedSessionProxyPort = 0;
+            s_ptSharedSessionProxyIsSOCKS5 = NO;
+            s_ptSharedSessionHasCustomCerts = NO;
+        }
+        os_unfair_lock_unlock(&s_ptSharedSessionLock);
+        if (stale != nil) {
+            [stale finishTasksAndInvalidate];
+        }
         return [self pm_sharedSession];
     }
+    NSString *wantProxyHost = snap.proxyHost ?: @"";
+    NSInteger wantProxyPort = snap.proxyPort;
+    BOOL wantSOCKS5 = snap.proxyIsSOCKS5;
+    BOOL wantCustomCerts = (snap.customCertificates.count > 0);
+
     os_unfair_lock_lock(&s_ptSharedSessionLock);
     NSURLSession *existing = s_ptSharedSession;
+    BOOL matches = (existing != nil &&
+                    s_ptSharedSessionProxyPort == wantProxyPort &&
+                    s_ptSharedSessionProxyIsSOCKS5 == wantSOCKS5 &&
+                    s_ptSharedSessionHasCustomCerts == wantCustomCerts &&
+                    [(s_ptSharedSessionProxyHost ?: @"") isEqualToString:wantProxyHost]);
     os_unfair_lock_unlock(&s_ptSharedSessionLock);
-    if (existing != nil) {
+    if (matches) {
         return existing;
     }
 
     t_ptCreatingSharedSession = YES;
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
     ps_inject_block_protocol_into_config(cfg);
-    id<NSURLSessionDelegate> delegateProxy = (snap.customCertificates.count > 0)
+    id<NSURLSessionDelegate> delegateProxy = wantCustomCerts
         ? [[PTNetworkSessionTrustProxy alloc] initWithTarget:nil]
         : nil;
     NSURLSession *created = [self pm_sessionWithConfiguration:cfg delegate:delegateProxy delegateQueue:nil];
     t_ptCreatingSharedSession = NO;
 
+    NSURLSession *toInvalidate = nil;
     os_unfair_lock_lock(&s_ptSharedSessionLock);
-    if (s_ptSharedSession == nil) {
-        s_ptSharedSession = created;
-    } else {
+    BOOL nowMatches = (s_ptSharedSession != nil &&
+                       s_ptSharedSessionProxyPort == wantProxyPort &&
+                       s_ptSharedSessionProxyIsSOCKS5 == wantSOCKS5 &&
+                       s_ptSharedSessionHasCustomCerts == wantCustomCerts &&
+                       [(s_ptSharedSessionProxyHost ?: @"") isEqualToString:wantProxyHost]);
+    if (nowMatches) {
+        toInvalidate = created;
         created = s_ptSharedSession;
+    } else {
+        toInvalidate = s_ptSharedSession;
+        s_ptSharedSession = created;
+        s_ptSharedSessionProxyHost = [wantProxyHost copy];
+        s_ptSharedSessionProxyPort = wantProxyPort;
+        s_ptSharedSessionProxyIsSOCKS5 = wantSOCKS5;
+        s_ptSharedSessionHasCustomCerts = wantCustomCerts;
     }
     os_unfair_lock_unlock(&s_ptSharedSessionLock);
+    if (toInvalidate != nil) {
+        [toInvalidate finishTasksAndInvalidate];
+    }
     return created;
 }
 
@@ -731,11 +1036,37 @@ __attribute__((visibility("hidden")))
     if (url == nil) return NO;
     NSString *scheme = url.scheme;
     if (scheme == nil) return NO;
-    if ([scheme caseInsensitiveCompare:@"http"] != NSOrderedSame &&
-        [scheme caseInsensitiveCompare:@"https"] != NSOrderedSame &&
-        [scheme caseInsensitiveCompare:@"ws"] != NSOrderedSame &&
-        [scheme caseInsensitiveCompare:@"wss"] != NSOrderedSame) {
+    BOOL isHTTP = ([scheme caseInsensitiveCompare:@"http"] == NSOrderedSame);
+    BOOL isHTTPS = ([scheme caseInsensitiveCompare:@"https"] == NSOrderedSame);
+    BOOL isWS = ([scheme caseInsensitiveCompare:@"ws"] == NSOrderedSame ||
+                 [scheme caseInsensitiveCompare:@"wss"] == NSOrderedSame);
+    if (!isHTTP && !isHTTPS && !isWS) {
         return NO;
+    }
+    PSNetworkRuleSnapshot *snap = ps_get_network_rules();
+    if (snap == nil || !snap.enabled) return NO;
+    if ((isHTTP || isHTTPS) && snap.isBuiltInMITM && snap.proxyPort > 0 && snap.proxyHost.length > 0) {
+        NSString *host = url.host;
+        const char *hostCStr = (host.length > 0) ? [host UTF8String] : NULL;
+        BOOL isLoopback = (hostCStr == NULL ||
+                           strcasecmp(hostCStr, "localhost") == 0 ||
+                           strcmp(hostCStr, "127.0.0.1") == 0 ||
+                           strcmp(hostCStr, "::1") == 0 ||
+                           strcmp(hostCStr, "0.0.0.0") == 0 ||
+                           strcasecmp(hostCStr, snap.proxyHost.UTF8String) == 0);
+        if (!isLoopback) {
+            if (isHTTP) {
+                // Route plaintext HTTP through LocalMITMProxyServer so rules are enforced and captured uniformly.
+                return NO;
+            }
+            BOOL mitmDecrypted = (snap.customCertificates.count > 0 &&
+                                  (snap.mitmAllHosts || ps_host_matches_mitm_scope(host, snap)));
+            if (mitmDecrypted || ps_should_block_host_cstr(hostCStr) != 0) {
+                // MITM-decrypted HTTPS (full URL/regex/MOCK-200) and host-blocked CONNECT tunnels
+                // are enforced and recorded by LocalMITMProxyServer.
+                return NO;
+            }
+        }
     }
     return ps_should_block_url(url, NULL);
 }
@@ -799,19 +1130,52 @@ __attribute__((visibility("hidden")))
 
 @end
 
+__attribute__((visibility("hidden")))
+@interface PTNetworkDirectBlockProtocol : PTNetworkBlockProtocol
+@end
+
+@implementation PTNetworkDirectBlockProtocol
+
++ (BOOL)canInitWithRequest:(NSURLRequest *)request {
+    if (!ps_is_network_blocking_possibly_active()) return NO;
+    NSURL *url = request.URL;
+    if (url == nil) return NO;
+    NSString *scheme = url.scheme;
+    if (scheme == nil) return NO;
+    BOOL isSupported = ([scheme caseInsensitiveCompare:@"http"] == NSOrderedSame ||
+                        [scheme caseInsensitiveCompare:@"https"] == NSOrderedSame ||
+                        [scheme caseInsensitiveCompare:@"ws"] == NSOrderedSame ||
+                        [scheme caseInsensitiveCompare:@"wss"] == NSOrderedSame);
+    if (!isSupported) {
+        return NO;
+    }
+    PSNetworkRuleSnapshot *snap = ps_get_network_rules();
+    if (snap == nil || !snap.enabled) return NO;
+    // Never defer to LocalMITMProxyServer: this protocol is attached to sessions that use
+    // an app-supplied custom proxy and therefore bypass MacOver's local MITM server.
+    return ps_should_block_url(url, NULL);
+}
+
+@end
+
 __attribute__((visibility("hidden"))) void ps_install_network_blocker_hooks(void) {
     if ([PTSafeMode isActive]) {
         return;
     }
+    pt_register_hidden_class("PTNetworkBlockProtocol");
+    pt_register_hidden_class("PTNetworkDirectBlockProtocol");
+    pt_register_hidden_class("PTNetworkWKNavigationTrustProxy");
+    pt_register_hidden_class("PTNetworkSessionTrustProxy");
+    // Register unconditionally outside Safe Mode so live rule reloads work even when
+    // rules start disabled at process launch; +canInitWithRequest: fast-exits atomically.
+    [NSURLProtocol registerClass:[PTNetworkBlockProtocol class]];
     PSNetworkRuleSnapshot *snap = ps_get_network_snapshot();
-    BOOL hasBlocking = (snap != nil && snap.enabled &&
-        (snap.hostRules.count > 0 || snap.urlRules.count > 0 || snap.regexRules.count > 0));
-    if (hasBlocking) {
+    if (snap != nil && snap.enabled &&
+        (snap.hostRules.count > 0 || snap.urlRules.count > 0 || snap.regexRules.count > 0)) {
         PT_DEBUG_TRACE("network", "installing network blocker hooks hosts=%lu urls=%lu regex=%lu",
                        (unsigned long)snap.hostRules.count,
                        (unsigned long)snap.urlRules.count,
                        (unsigned long)snap.regexRules.count);
-        [NSURLProtocol registerClass:[PTNetworkBlockProtocol class]];
     }
     Class cfgCls = objc_getClass("NSURLSessionConfiguration");
     ps_swizzle_class_method(cfgCls, @selector(defaultSessionConfiguration), @selector(pm_defaultSessionConfiguration));
@@ -980,10 +1344,116 @@ __attribute__((visibility("hidden"))) void ps_install_webkit_network_hooks_if_lo
 
 
 
+static OSStatus pt_SecTrustCreateWithCertificates(CFTypeRef certificates,
+                                                  CFTypeRef policies,
+                                                  SecTrustRef *trust) {
+    OSStatus st = SecTrustCreateWithCertificates(certificates, policies, trust);
+    if (st == errSecSuccess && trust != NULL && *trust != NULL) {
+        ps_trust_state_reset(*trust);
+    }
+    return st;
+}
+
+static OSStatus pt_SecTrustSetAnchorCertificates(SecTrustRef trust, CFArrayRef anchorCertificates) {
+    OSStatus st = SecTrustSetAnchorCertificates(trust, anchorCertificates);
+    if (st == errSecSuccess && trust != NULL) {
+        // Security.framework implicitly disables built-in anchors when non-NULL custom anchors are set,
+        // and restores them when anchorCertificates is NULL.
+        ps_trust_state_set_anchors_only(trust, anchorCertificates != NULL ? YES : NO);
+    }
+    return st;
+}
+
+static OSStatus pt_SecTrustSetAnchorCertificatesOnly(SecTrustRef trust, Boolean anchorCertificatesOnly) {
+    OSStatus st = SecTrustSetAnchorCertificatesOnly(trust, anchorCertificatesOnly);
+    if (st == errSecSuccess && trust != NULL) {
+        ps_trust_state_set_anchors_only(trust, anchorCertificatesOnly ? YES : NO);
+    }
+    return st;
+}
+
+static OSStatus pt_SecTrustGetTrustResult(SecTrustRef trust, SecTrustResultType *result) {
+    if (trust == NULL || result == NULL) {
+        return errSecParam;
+    }
+    SecTrustResultType synth = kSecTrustResultInvalid;
+    if (ps_trust_state_get_synthetic_result(trust, &synth)) {
+        *result = synth;
+        return errSecSuccess;
+    }
+    return SecTrustGetTrustResult(trust, result);
+}
+
+static SecKeyRef pt_SecTrustCopyKey(SecTrustRef trust) CF_RETURNS_RETAINED {
+    SecTrustRef clone = ps_trust_state_copy_evaluated_clone(trust);
+    if (clone != NULL) {
+        SecKeyRef key = SecTrustCopyKey(clone);
+        CFRelease(clone);
+        return key;
+    }
+    return SecTrustCopyKey(trust);
+}
+
+static CFArrayRef pt_SecTrustCopyCertificateChain(SecTrustRef trust) CF_RETURNS_RETAINED {
+    SecTrustRef clone = ps_trust_state_copy_evaluated_clone(trust);
+    if (clone != NULL) {
+        CFArrayRef chain = SecTrustCopyCertificateChain(clone);
+        CFRelease(clone);
+        return chain;
+    }
+    return SecTrustCopyCertificateChain(trust);
+}
+
+static CFDictionaryRef pt_SecTrustCopyResult(SecTrustRef trust) CF_RETURNS_RETAINED {
+    SecTrustRef clone = ps_trust_state_copy_evaluated_clone(trust);
+    if (clone != NULL) {
+        CFDictionaryRef res = SecTrustCopyResult(clone);
+        CFRelease(clone);
+        return res;
+    }
+    return SecTrustCopyResult(trust);
+}
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+static SecKeyRef pt_SecTrustCopyPublicKey(SecTrustRef trust) CF_RETURNS_RETAINED {
+    SecTrustRef clone = ps_trust_state_copy_evaluated_clone(trust);
+    if (clone != NULL) {
+        SecKeyRef key = SecTrustCopyPublicKey(clone);
+        CFRelease(clone);
+        return key;
+    }
+    return SecTrustCopyPublicKey(trust);
+}
+
+static CFIndex pt_SecTrustGetCertificateCount(SecTrustRef trust) {
+    SecTrustRef clone = ps_trust_state_copy_evaluated_clone(trust);
+    if (clone != NULL) {
+        CFIndex count = SecTrustGetCertificateCount(clone);
+        CFRelease(clone);
+        return count;
+    }
+    return SecTrustGetCertificateCount(trust);
+}
+
+static SecCertificateRef pt_SecTrustGetCertificateAtIndex(SecTrustRef trust, CFIndex ix) {
+    SecTrustRef clone = ps_trust_state_copy_evaluated_clone(trust);
+    if (clone != NULL) {
+        SecCertificateRef cert = SecTrustGetCertificateAtIndex(clone, ix);
+        CFRelease(clone);
+        return cert;
+    }
+    return SecTrustGetCertificateAtIndex(trust, ix);
+}
+#pragma clang diagnostic pop
+
 static bool pt_SecTrustEvaluateWithError(SecTrustRef trust, CFErrorRef *error) {
     CFErrorRef firstErr = NULL;
     bool ok = SecTrustEvaluateWithError(trust, &firstErr);
     if (ok) {
+        if (trust != NULL) {
+            ps_trust_state_clear_synthetic_result(trust);
+        }
         if (error != NULL) {
             *error = NULL;
         }
@@ -1025,6 +1495,9 @@ static OSStatus pt_SecTrustEvaluateAsyncWithError(
     }
     SecTrustWithErrorCallback origResult = [result copy];
     return SecTrustEvaluateAsyncWithError(trust, queue, ^(SecTrustRef tRef, bool ok, CFErrorRef err) {
+        if (ok && tRef != NULL) {
+            ps_trust_state_clear_synthetic_result(tRef);
+        }
         if (!ok && tRef != NULL) {
             PSNetworkRuleSnapshot *snap = ps_get_network_snapshot();
             if (ps_should_apply_custom_ca_for_trust(tRef, snap)) {
@@ -1047,13 +1520,16 @@ static OSStatus pt_SecTrustEvaluate(SecTrustRef trust, SecTrustResultType *resul
     OSStatus status = SecTrustEvaluate(trust, result);
     if (status == errSecSuccess && result != NULL &&
         (*result == kSecTrustResultUnspecified || *result == kSecTrustResultProceed)) {
+        if (trust != NULL) {
+            ps_trust_state_clear_synthetic_result(trust);
+        }
         return status;
     }
     PSNetworkRuleSnapshot *snap = ps_get_network_snapshot();
     if (ps_should_apply_custom_ca_for_trust(trust, snap)) {
         if (ps_evaluate_trust_with_custom_anchors(trust, snap, NULL)) {
             SecTrustResultType evaluatedResult = kSecTrustResultUnspecified;
-            (void)SecTrustGetTrustResult(trust, &evaluatedResult);
+            (void)ps_trust_state_get_synthetic_result(trust, &evaluatedResult);
             if (result != NULL) {
                 *result = evaluatedResult;
             }
@@ -1073,12 +1549,15 @@ static OSStatus pt_SecTrustEvaluateAsync(
     }
     SecTrustCallback origResult = [result copy];
     return SecTrustEvaluateAsync(trust, queue, ^(SecTrustRef tRef, SecTrustResultType trustResult) {
+        if (tRef != NULL && (trustResult == kSecTrustResultUnspecified || trustResult == kSecTrustResultProceed)) {
+            ps_trust_state_clear_synthetic_result(tRef);
+        }
         if (tRef != NULL && trustResult != kSecTrustResultUnspecified && trustResult != kSecTrustResultProceed) {
             PSNetworkRuleSnapshot *snap = ps_get_network_snapshot();
             if (ps_should_apply_custom_ca_for_trust(tRef, snap) &&
                 ps_evaluate_trust_with_custom_anchors(tRef, snap, NULL)) {
                 SecTrustResultType customResult = kSecTrustResultUnspecified;
-                (void)SecTrustGetTrustResult(tRef, &customResult);
+                (void)ps_trust_state_get_synthetic_result(tRef, &customResult);
                 origResult(tRef, customResult);
                 return;
             }
@@ -1168,7 +1647,7 @@ static void ps_apply_nw_proxy_if_needed(nw_parameters_t params, PSNetworkRuleSna
     }
     nw_proxy_config_t proxyCfg = ps_create_nw_proxy_config_for_snapshot(snap);
     if (proxyCfg != nil) {
-        nw_privacy_context_t privacyCtx = nw_privacy_context_create("MacOverProxy");
+        nw_privacy_context_t privacyCtx = nw_privacy_context_create("DefaultPrivacyContext");
         if (privacyCtx != nil) {
             nw_privacy_context_add_proxy(privacyCtx, proxyCfg);
             nw_parameters_set_privacy_context(params, privacyCtx);
@@ -1223,19 +1702,37 @@ static NW_RETURNS_RETAINED nw_connection_t pt_nw_connection_create(
     if (endpoint == nil || parameters == nil) {
         return nil;
     }
+    nw_endpoint_t effectiveEndpoint = endpoint;
     nw_parameters_t effectiveParams = parameters;
     PSNetworkRuleSnapshot *snap = [PTSafeMode isActive] ? nil : ps_get_network_snapshot();
-    if (snap != nil && snap.proxyHost.length > 0 && snap.proxyPort > 0) {
+    BOOL hasProxy = (snap != nil && snap.proxyHost.length > 0 && snap.proxyPort > 0);
+    BOOL hasRules = (snap != nil && snap.enabled &&
+                     (snap.hostRules.count > 0 || snap.urlRules.count > 0 || snap.regexRules.count > 0));
+    if (hasProxy || hasRules) {
         nw_endpoint_type_t endpointType = nw_endpoint_get_type(endpoint);
+        const char *host = NULL;
+        uint16_t port = 0;
+        NSURL *parsedURL = nil;
         BOOL eligibleTarget = NO;
         if (endpointType == nw_endpoint_type_host) {
-            const char *host = nw_endpoint_get_hostname(endpoint);
+            host = nw_endpoint_get_hostname(endpoint);
+            port = nw_endpoint_get_port(endpoint);
             eligibleTarget = !ps_is_loopback_or_proxy_host(host, snap);
         } else if (endpointType == nw_endpoint_type_url) {
             const char *urlStr = nw_endpoint_get_url(endpoint);
             if (urlStr != NULL) {
-                NSURL *parsed = [NSURL URLWithString:[NSString stringWithUTF8String:urlStr]];
-                eligibleTarget = (parsed != nil && !ps_is_loopback_proxy_url((__bridge CFURLRef)parsed, snap));
+                parsedURL = [NSURL URLWithString:[NSString stringWithUTF8String:urlStr]];
+                if (parsedURL != nil) {
+                    host = parsedURL.host.UTF8String;
+                    if (parsedURL.port != nil) {
+                        port = (uint16_t)parsedURL.port.unsignedShortValue;
+                    } else if ([parsedURL.scheme caseInsensitiveCompare:@"https"] == NSOrderedSame) {
+                        port = 443;
+                    } else if ([parsedURL.scheme caseInsensitiveCompare:@"http"] == NSOrderedSame) {
+                        port = 80;
+                    }
+                    eligibleTarget = !ps_is_loopback_proxy_url((__bridge CFURLRef)parsedURL, snap);
+                }
             }
         }
         if (eligibleTarget) {
@@ -1251,7 +1748,29 @@ static NW_RETURNS_RETAINED nw_connection_t pt_nw_connection_create(
                     }
                 }
             }
-            if (!isUDP) {
+            if (isUDP) {
+                BOOL shouldBlockUDP = NO;
+                if (hasRules) {
+                    if (parsedURL != nil && ps_should_block_url(parsedURL, NULL)) {
+                        shouldBlockUDP = YES;
+                    } else if (host != NULL && ps_should_block_host_cstr(host) != 0) {
+                        shouldBlockUDP = YES;
+                    }
+                }
+                if (!shouldBlockUDP && snap.isBuiltInMITM && hasProxy && port == 443) {
+                    // Force QUIC/HTTP3 over UDP/443 to fail over to TCP/HTTPS so traffic
+                    // traverses LocalMITMProxyServer when MITM or network rules are active.
+                    if (hasRules || snap.mitmAllHosts ||
+                        (host != NULL && ps_host_matches_mitm_scope([NSString stringWithUTF8String:host], snap))) {
+                        shouldBlockUDP = YES;
+                    }
+                }
+                if (shouldBlockUDP) {
+                    PT_DEBUG_TRACE("network", "blocked UDP/QUIC nw_connection host=%s port=%u",
+                                   host != NULL ? host : "<null>", (unsigned)port);
+                    effectiveEndpoint = nw_endpoint_create_host("0.0.0.0", "1");
+                }
+            } else if (hasProxy) {
                 nw_parameters_t copied = nw_parameters_copy(parameters);
                 if (copied != nil) {
                     ps_apply_nw_proxy_if_needed(copied, snap);
@@ -1262,7 +1781,7 @@ static NW_RETURNS_RETAINED nw_connection_t pt_nw_connection_create(
             }
         }
     }
-    return nw_connection_create(endpoint, effectiveParams);
+    return nw_connection_create(effectiveEndpoint, effectiveParams);
 }
 
 static NSMutableDictionary *ps_copy_merged_proxy_dictionary(CFDictionaryRef orig, PSNetworkRuleSnapshot *snap) {
@@ -1508,10 +2027,20 @@ static CFArrayRef pt_CFNetworkCopyProxiesForURL(CFURLRef url, CFDictionaryRef pr
     return orig;
 }
 
+PT_INTERPOSE(pt_SecTrustCreateWithCertificates, SecTrustCreateWithCertificates)
+PT_INTERPOSE(pt_SecTrustSetAnchorCertificates, SecTrustSetAnchorCertificates)
+PT_INTERPOSE(pt_SecTrustSetAnchorCertificatesOnly, SecTrustSetAnchorCertificatesOnly)
+PT_INTERPOSE(pt_SecTrustGetTrustResult, SecTrustGetTrustResult)
+PT_INTERPOSE(pt_SecTrustCopyKey, SecTrustCopyKey)
+PT_INTERPOSE(pt_SecTrustCopyCertificateChain, SecTrustCopyCertificateChain)
+PT_INTERPOSE(pt_SecTrustCopyResult, SecTrustCopyResult)
 PT_INTERPOSE(pt_SecTrustEvaluateWithError, SecTrustEvaluateWithError)
 PT_INTERPOSE(pt_SecTrustEvaluateAsyncWithError, SecTrustEvaluateAsyncWithError)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+PT_INTERPOSE(pt_SecTrustCopyPublicKey, SecTrustCopyPublicKey)
+PT_INTERPOSE(pt_SecTrustGetCertificateCount, SecTrustGetCertificateCount)
+PT_INTERPOSE(pt_SecTrustGetCertificateAtIndex, SecTrustGetCertificateAtIndex)
 PT_INTERPOSE(pt_SecTrustEvaluate, SecTrustEvaluate)
 PT_INTERPOSE(pt_SecTrustEvaluateAsync, SecTrustEvaluateAsync)
 #pragma clang diagnostic pop

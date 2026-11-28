@@ -18,7 +18,7 @@ public class EditorMouseEventAdapter: MouseEventAdapter {
     ]
 
     public static func getMouseButtonName(_ id: Int) -> String {
-        return id < EditorMouseEventAdapter.buttonName.count ?
+        return id >= 0 && id < EditorMouseEventAdapter.buttonName.count ?
         EditorMouseEventAdapter.buttonName[id] :
         "MBtn\(id)"
     }

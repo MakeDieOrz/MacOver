@@ -7,6 +7,14 @@ import CoreGraphics
 import Foundation
 import Synchronization
 
+#if targetEnvironment(macCatalyst)
+@_silgen_name("pt_enter_internal_scope")
+private func pt_coord_enter_internal_scope()
+
+@_silgen_name("pt_leave_internal_scope")
+private func pt_coord_leave_internal_scope()
+#endif
+
 private typealias SharedStrictDeviceDisplaySpec = StrictDeviceDisplaySpec
 
 public enum PTCoordinateMath {
@@ -56,12 +64,15 @@ public enum PTCoordinateMath {
         }
         point.y *= rate
         point.y = viewRect.height - point.y
-        if !point.y.isFinite || point.y < 0 {
+        if !point.y.isFinite || point.y < 0 || point.y > viewRect.height {
             return nil
         }
         point.x -= (windowFrame.width - viewRect.width / rate) / 2
         point.x *= rate
-        guard point.x.isFinite, point.y.isFinite else {
+        guard point.x.isFinite,
+              point.y.isFinite,
+              point.x >= 0,
+              point.x <= viewRect.width else {
             return nil
         }
         return point
@@ -372,18 +383,140 @@ public enum PTWindowGeometryMath {
             self.isIPad = shared.isIPad
         }
 
+        private static let cachedHostIOSMajor: Int = {
+            #if targetEnvironment(macCatalyst)
+            pt_coord_enter_internal_scope()
+            defer { pt_coord_leave_internal_scope() }
+            #endif
+            if let plist = NSDictionary(contentsOfFile: "/System/Library/CoreServices/SystemVersion.plist"),
+               let rawSupport = plist["iOSSupportVersion"] as? String {
+                let trimmed = rawSupport.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let majorToken = trimmed.split(separator: ".").first,
+                   let major = Int(majorToken),
+                   major >= 13 {
+                    return major
+                }
+            }
+            let osMajor = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+            if osMajor >= 26 {
+                return osMajor
+            }
+            if osMajor >= 11 {
+                return osMajor + 3
+            }
+            return 18
+        }()
+
+        public static func currentHostIOSMajor() -> Int {
+            cachedHostIOSMajor
+        }
+
+        public static func supportedIOSMajorRange(for rawModel: String) -> ClosedRange<Int>? {
+            let trimmed = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            switch trimmed {
+            case "iPad6,7":
+                return 9...16
+            case "iPad8,6":
+                return 12...18
+            case "iPad13,8":
+                return 14...99
+            case "iPad14,5":
+                return 16...99
+            case "iPad16,6":
+                return 17...99
+            case "iPad17,3":
+                return 26...99
+            case "iPhone12,5":
+                return 13...99
+            case "iPhone14,3":
+                return 15...99
+            case "iPhone15,3":
+                return 16...99
+            case "iPhone16,2":
+                return 17...99
+            case "iPhone17,2":
+                return 18...99
+            case "iPhone18,2":
+                return 26...99
+            default:
+                if trimmed.hasPrefix("iPhone18,") || trimmed.hasPrefix("iPad17,") {
+                    return 26...99
+                }
+                return nil
+            }
+        }
+
         public static func normalizedReportedIOSVersion(_ raw: String?) -> String {
             ReportedIOSVersionMode(rawSetting: raw).rawValue
         }
 
+        public static func effectiveIOSMajor(
+            forNormalizedReportedIOSVersion normalized: String,
+            hostIOSMajor: Int? = nil
+        ) -> Int {
+            switch normalized {
+            case ReportedIOSVersionMode.compat13_7.rawValue:
+                return 13
+            case ReportedIOSVersionMode.compat18_3.rawValue:
+                return 18
+            default:
+                return hostIOSMajor ?? currentHostIOSMajor()
+            }
+        }
+
         public static func effectiveModel(
             for rawModel: String,
-            normalizedReportedIOSVersion: String
+            normalizedReportedIOSVersion: String,
+            hostIOSMajor: Int? = nil
         ) -> String {
-            ReportedIOSVersionMode.effectiveDeviceModel(
-                rawModel,
-                for: ReportedIOSVersionMode(rawSetting: normalizedReportedIOSVersion)
+            let trimmed = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            let base = trimmed.isEmpty ? "iPad13,8" : trimmed
+            let targetMajor = effectiveIOSMajor(
+                forNormalizedReportedIOSVersion: normalizedReportedIOSVersion,
+                hostIOSMajor: hostIOSMajor
             )
+            if targetMajor <= 0 {
+                return base
+            }
+
+            let isIPhone = base.hasPrefix("iPhone")
+            guard let bounds = supportedIOSMajorRange(for: base) else {
+                if targetMajor <= 13 {
+                    return isIPhone ? "iPhone12,5" : "iPad8,6"
+                }
+                return base
+            }
+            if bounds.contains(targetMajor) {
+                return base
+            }
+
+            if targetMajor < bounds.lowerBound {
+                if isIPhone {
+                    if targetMajor >= 26 { return "iPhone18,2" }
+                    if targetMajor >= 18 { return "iPhone17,2" }
+                    if targetMajor >= 17 { return "iPhone16,2" }
+                    if targetMajor >= 16 { return "iPhone15,3" }
+                    if targetMajor >= 15 { return "iPhone14,3" }
+                    return "iPhone12,5"
+                }
+                if targetMajor >= 26 { return "iPad17,3" }
+                if targetMajor >= 17 { return "iPad16,6" }
+                if targetMajor >= 16 { return "iPad14,5" }
+                if targetMajor >= 14 { return "iPad13,8" }
+                if targetMajor >= 12 { return "iPad8,6" }
+                if targetMajor >= 9 { return "iPad6,7" }
+                return "iPad8,6"
+            }
+
+            // targetMajor > bounds.upperBound (EOL hardware)
+            if isIPhone {
+                if targetMajor >= 18 { return "iPhone17,2" }
+                if targetMajor >= 17 { return "iPhone16,2" }
+                if targetMajor >= 16 { return "iPhone15,3" }
+                if targetMajor >= 15 { return "iPhone14,3" }
+                return "iPhone12,5"
+            }
+            return targetMajor >= 14 ? "iPad13,8" : "iPad8,6"
         }
 
         public static func resolve(forModel rawModel: String) -> StrictDeviceDisplaySpec {
@@ -520,6 +653,25 @@ public enum PTWindowGeometryMath {
         className.contains("TextEffectsWindow")
             || className.contains("RemoteKeyboardWindow")
             || className.contains("InputWindow")
+    }
+
+    /// Associated tag value stored on `PlaySettings.internalOverlayTagKeyAddress` for internal
+    /// overlay windows that host interactive guest app content (e.g. `PTCustomInputWindow` for
+    /// custom `inputView` / `inputAccessoryView` secure keyboards) and must participate in
+    /// touch routing while staying hidden from primary/key window selection and guest enumeration.
+    public static let interactiveInputHostOverlayTagValue: Int = 2
+
+    public static func isExcludedFromTouchRouting(
+        isChromeOverlayWindow: Bool,
+        internalOverlayTagValue: Int?
+    ) -> Bool {
+        if isChromeOverlayWindow {
+            return true
+        }
+        guard let tagValue = internalOverlayTagValue else {
+            return false
+        }
+        return tagValue != interactiveInputHostOverlayTagValue
     }
 
     public static func isPointInTitleBar(

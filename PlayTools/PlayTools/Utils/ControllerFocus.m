@@ -16,8 +16,10 @@ __attribute__((visibility("hidden")))
 @implementation BackgroundControllerLoader
 + (void)load {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!pt_is_compat13_7_active() &&
-            [GCController respondsToSelector:@selector(setShouldMonitorBackgroundEvents:)]) {
+        if (pt_is_compat13_7_active()) {
+            return;
+        }
+        if ([GCController respondsToSelector:@selector(setShouldMonitorBackgroundEvents:)]) {
             [GCController setShouldMonitorBackgroundEvents:YES];
         }
     });

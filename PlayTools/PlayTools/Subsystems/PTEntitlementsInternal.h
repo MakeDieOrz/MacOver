@@ -43,6 +43,7 @@ __attribute__((visibility("hidden"))) int pt_csops_audittoken_with_caller(pid_t 
 __attribute__((visibility("hidden"))) int pt_ptrace_with_caller(int request, pid_t pid, caddr_t addr, int data, const void *caller);
 __attribute__((visibility("hidden"))) int pt_mac_syscall_with_caller(const char *policy, int call, void *arg, const void *caller, BOOL *out_handled);
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_macos_mach_service(const char *name);
+__attribute__((visibility("hidden"))) void pt_init_linkedit_cs_blob_cloaking(void);
 
 #ifdef __cplusplus
 }

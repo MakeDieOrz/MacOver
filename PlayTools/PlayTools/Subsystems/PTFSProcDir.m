@@ -6,7 +6,133 @@
 #import "PTFSInternal.h"
 #import "PTSystemSpooferInternal.h"
 #import "PTDyldInternal.h"
+#import "PTNetworkInternal.h"
+#import "PTRegistration.h"
 #import "PTKernelABI.h"
+
+static BOOL pt_ipv4_is_loopback_be(uint32_t addr_be) {
+    return (ntohl(addr_be) & 0xFF000000U) == 0x7F000000U;
+}
+
+static BOOL pt_ipv6_is_loopback_addr(const struct in6_addr *addr6) {
+    if (addr6 == NULL) {
+        return NO;
+    }
+    if (IN6_IS_ADDR_LOOPBACK(addr6)) {
+        return YES;
+    }
+    if (IN6_IS_ADDR_V4MAPPED(addr6)) {
+        uint32_t v4be = 0;
+        memcpy(&v4be, &addr6->s6_addr[12], sizeof(v4be));
+        return pt_ipv4_is_loopback_be(v4be);
+    }
+    return NO;
+}
+
+// Returns -1 to hide/drop socket, 1 if rewritten in place, 0 to keep unchanged.
+static int pt_sanitize_inet_socket_fdinfo(int fd_or_fileport, BOOL is_fileport, pt_socket_fdinfo_t *sfi) {
+    if (sfi == NULL) {
+        return 0;
+    }
+    if (!is_fileport && pt_is_hidden_fd(fd_or_fileport)) {
+        return -1;
+    }
+    if (sfi->psi.soi_family != AF_INET && sfi->psi.soi_family != AF_INET6) {
+        return 0;
+    }
+    if (sfi->psi.soi_kind != SOCKINFO_IN && sfi->psi.soi_kind != SOCKINFO_TCP) {
+        return 0;
+    }
+    pt_in_sockinfo_t *ini = (sfi->psi.soi_kind == SOCKINFO_TCP)
+        ? &sfi->psi.soi_proto.pri_tcp.tcpsi_ini
+        : &sfi->psi.soi_proto.pri_in;
+
+    uint16_t fport_host = ntohs((uint16_t)ini->insi_fport);
+    BOOL is_v4 = ((ini->insi_vflag & INI_IPV4) != 0) ||
+                 (sfi->psi.soi_family == AF_INET && (ini->insi_vflag & INI_IPV6) == 0);
+    BOOL is_v6 = ((ini->insi_vflag & INI_IPV6) != 0) ||
+                 (sfi->psi.soi_family == AF_INET6 && !is_v4);
+
+    BOOL matches_hidden_loopback = NO;
+    BOOL matches_hidden_proxy = NO;
+    if (is_v4) {
+        uint32_t faddr_be = ini->insi_faddr.ina_46.i46a_addr4.s_addr;
+        if (pt_ipv4_is_loopback_be(faddr_be) && pt_is_hidden_loopback_port(fport_host)) {
+            matches_hidden_loopback = YES;
+        }
+        if (ps_is_hidden_proxy_ipv4_peer(faddr_be, fport_host)) {
+            matches_hidden_proxy = YES;
+        }
+    } else if (is_v6) {
+        if (pt_ipv6_is_loopback_addr(&ini->insi_faddr.ina_6) && pt_is_hidden_loopback_port(fport_host)) {
+            matches_hidden_loopback = YES;
+        }
+        if (ps_is_hidden_proxy_ipv6_peer(&ini->insi_faddr.ina_6, fport_host)) {
+            matches_hidden_proxy = YES;
+        }
+    }
+
+    if (matches_hidden_loopback) {
+        return -1;
+    }
+    struct sockaddr_storage orig_peer;
+    socklen_t orig_len = 0;
+    BOOL have_peer = NO;
+    if (!is_fileport) {
+        have_peer = pt_network_lookup_mitm_peer(fd_or_fileport, &orig_peer, &orig_len);
+    }
+    if (!have_peer && matches_hidden_proxy) {
+        have_peer = pt_network_get_or_synth_mitm_peer(
+            is_fileport ? -1 : fd_or_fileport,
+            is_v6 ? AF_INET6 : AF_INET,
+            !is_fileport,
+            &orig_peer,
+            &orig_len);
+    }
+    if (have_peer) {
+        if (orig_peer.ss_family == AF_INET && orig_len >= (socklen_t)sizeof(struct sockaddr_in)) {
+            struct sockaddr_in sin;
+            memcpy(&sin, &orig_peer, sizeof(sin));
+            sfi->psi.soi_family = AF_INET;
+            ini->insi_fport = (int)sin.sin_port;
+            ini->insi_vflag = INI_IPV4;
+            memset(&ini->insi_faddr, 0, sizeof(ini->insi_faddr));
+            ini->insi_faddr.ina_46.i46a_addr4 = sin.sin_addr;
+            if (pt_ipv4_is_loopback_be(ini->insi_laddr.ina_46.i46a_addr4.s_addr)) {
+                struct sockaddr_storage local_ss;
+                socklen_t local_len = 0;
+                if (pt_network_get_spoofed_local_ip_for_proxied_socket(AF_INET, &local_ss, &local_len) &&
+                    local_ss.ss_family == AF_INET) {
+                    struct sockaddr_in lsin;
+                    memcpy(&lsin, &local_ss, sizeof(lsin));
+                    memset(&ini->insi_laddr, 0, sizeof(ini->insi_laddr));
+                    ini->insi_laddr.ina_46.i46a_addr4 = lsin.sin_addr;
+                }
+            }
+            return 1;
+        }
+        if (orig_peer.ss_family == AF_INET6 && orig_len >= (socklen_t)sizeof(struct sockaddr_in6)) {
+            struct sockaddr_in6 sin6;
+            memcpy(&sin6, &orig_peer, sizeof(sin6));
+            sfi->psi.soi_family = AF_INET6;
+            ini->insi_fport = (int)sin6.sin6_port;
+            ini->insi_vflag = INI_IPV6;
+            ini->insi_faddr.ina_6 = sin6.sin6_addr;
+            if (pt_ipv6_is_loopback_addr(&ini->insi_laddr.ina_6)) {
+                struct sockaddr_storage local_ss;
+                socklen_t local_len = 0;
+                if (pt_network_get_spoofed_local_ip_for_proxied_socket(AF_INET6, &local_ss, &local_len) &&
+                    local_ss.ss_family == AF_INET6) {
+                    struct sockaddr_in6 lsin6;
+                    memcpy(&lsin6, &local_ss, sizeof(lsin6));
+                    ini->insi_laddr.ina_6 = lsin6.sin6_addr;
+                }
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
 
 __attribute__((visibility("hidden"))) BOOL pt_is_sensitive_unix_socket_path(const char *sun_path, const void *caller) {
     if (sun_path == NULL || sun_path[0] == '\0') {
@@ -129,6 +255,13 @@ static int pt_sanitize_proc_fd_or_fileport_buffer(int ret,
                                                    void *buffer,
                                                    const void *caller,
                                                    BOOL raw_syscall_abi) {
+    if (!is_fileport && pt_is_hidden_fd(fd_or_fileport)) {
+        if (buffer != NULL && ret > 0) {
+            memset(buffer, 0, (size_t)ret);
+        }
+        errno = EBADF;
+        return raw_syscall_abi ? -1 : 0;
+    }
     if (buffer != NULL) {
         if (flavor == PROC_PIDFDVNODEINFO &&
             (size_t)ret >= sizeof(struct vnode_fdinfo)) {
@@ -137,9 +270,11 @@ static int pt_sanitize_proc_fd_or_fileport_buffer(int ret,
                 struct vnode_fdinfowithpath vp;
                 memset(&vp, 0, sizeof(vp));
                 int vret = proc_pidfileportinfo(pid, (uint32_t)fd_or_fileport, PROC_PIDFDVNODEPATHINFO, &vp, (int)sizeof(vp));
-                if (vret > 0 && (size_t)vret >= sizeof(vp) &&
-                    pt_is_sensitive_host_fd_path(vp.pvip.vip_path, caller)) {
-                    sensitive = YES;
+                if (vret > 0 && (size_t)vret >= sizeof(vp)) {
+                    vp.pvip.vip_path[sizeof(vp.pvip.vip_path) - 1U] = '\0';
+                    if (pt_is_sensitive_host_fd_path(vp.pvip.vip_path, caller)) {
+                        sensitive = YES;
+                    }
                 }
             } else {
                 sensitive = pt_fd_is_sensitive(fd_or_fileport, caller);
@@ -155,18 +290,21 @@ static int pt_sanitize_proc_fd_or_fileport_buffer(int ret,
             memcpy(buffer, &info, sizeof(info));
         } else if (flavor == PROC_PIDFDVNODEPATHINFO &&
                    (size_t)ret >= sizeof(struct vnode_fdinfowithpath)) {
-            struct vnode_fdinfowithpath *info = (struct vnode_fdinfowithpath *)buffer;
-            if (pt_is_sensitive_host_fd_path(info->pvip.vip_path, caller)) {
-                memset(info, 0, sizeof(struct vnode_fdinfowithpath));
+            struct vnode_fdinfowithpath vp;
+            memcpy(&vp, buffer, sizeof(vp));
+            vp.pvip.vip_path[sizeof(vp.pvip.vip_path) - 1U] = '\0';
+            if (pt_is_sensitive_host_fd_path(vp.pvip.vip_path, caller)) {
+                memset(buffer, 0, sizeof(vp));
                 errno = EBADF;
                 return raw_syscall_abi ? -1 : 0;
             }
             char vout[PATH_MAX];
-            const char *virt = pt_virtualize_path_for_app(info->pvip.vip_path, vout, sizeof(vout), YES);
-            if (virt != info->pvip.vip_path) {
-                strlcpy(info->pvip.vip_path, virt, sizeof(info->pvip.vip_path));
+            const char *virt = pt_virtualize_path_for_app(vp.pvip.vip_path, vout, sizeof(vout), YES);
+            if (virt != vp.pvip.vip_path) {
+                strlcpy(vp.pvip.vip_path, virt, sizeof(vp.pvip.vip_path));
             }
-            pt_sanitize_vinfo_stat_in_place(&info->pvip.vip_vi.vi_stat);
+            pt_sanitize_vinfo_stat_in_place(&vp.pvip.vip_vi.vi_stat);
+            memcpy(buffer, &vp, sizeof(vp));
         } else if (flavor == PROC_PIDFDPSEMINFO &&
                    (size_t)ret >= sizeof(struct psem_fdinfo)) {
             struct psem_fdinfo info;
@@ -196,6 +334,11 @@ static int pt_sanitize_proc_fd_or_fileport_buffer(int ret,
                    (size_t)ret >= sizeof(pt_socket_fdinfo_t)) {
             pt_socket_fdinfo_t sfi;
             memcpy(&sfi, buffer, sizeof(sfi));
+            if (!is_fileport && pt_is_hidden_fd(fd_or_fileport)) {
+                memset(buffer, 0, sizeof(pt_socket_fdinfo_t));
+                errno = EBADF;
+                return raw_syscall_abi ? -1 : 0;
+            }
             if (sfi.psi.soi_family == AF_UNIX || sfi.psi.soi_kind == SOCKINFO_UN) {
                 BOOL drop_a = pt_sanitize_sockaddr_un_in_place(&sfi.psi.soi_proto.pri_un.unsi_addr.ua_sun, caller);
                 BOOL drop_c = pt_sanitize_sockaddr_un_in_place(&sfi.psi.soi_proto.pri_un.unsi_caddr.ua_sun, caller);
@@ -205,6 +348,16 @@ static int pt_sanitize_proc_fd_or_fileport_buffer(int ret,
                     return raw_syscall_abi ? -1 : 0;
                 }
                 memcpy(buffer, &sfi, sizeof(sfi));
+            } else if (sfi.psi.soi_family == AF_INET || sfi.psi.soi_family == AF_INET6) {
+                int inet_rc = pt_sanitize_inet_socket_fdinfo(fd_or_fileport, is_fileport, &sfi);
+                if (inet_rc < 0) {
+                    memset(buffer, 0, sizeof(pt_socket_fdinfo_t));
+                    errno = EBADF;
+                    return raw_syscall_abi ? -1 : 0;
+                }
+                if (inet_rc > 0) {
+                    memcpy(buffer, &sfi, sizeof(sfi));
+                }
             }
         }
     }
@@ -221,6 +374,10 @@ static int pt_fs_proc_pidfdinfo_ex(int pid,
     BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
     if (!is_sys && pid != 0 && pid != getpid()) {
         errno = ESRCH;
+        return raw_syscall_abi ? -1 : 0;
+    }
+    if (!is_sys && pt_is_hidden_fd(fd)) {
+        errno = EBADF;
         return raw_syscall_abi ? -1 : 0;
     }
     int saved_errno = errno;
@@ -320,7 +477,7 @@ static void pt_sanitize_vnode_vip_path(char *vip_path, size_t cap, const void *c
     if (virt != vip_path) {
         strlcpy(vip_path, virt, cap);
     } else {
-        const char *san = pt_sanitize_image_path_for_app(vip_path);
+        const char *san = pt_sanitize_image_path_for_cstr(vip_path);
         if (san != vip_path) {
             strlcpy(vip_path, san, cap);
         }
@@ -346,7 +503,7 @@ static int pt_proc_regionfilename(int pid, uint64_t address, void *buffer, uint3
         }
         char vout[PATH_MAX];
         const char *virt = pt_virtualize_path_for_app(pbuf, vout, sizeof(vout), YES);
-        const char *san = (virt != pbuf) ? virt : pt_sanitize_image_path_for_app(pbuf);
+        const char *san = (virt != pbuf) ? virt : pt_sanitize_image_path_for_cstr(pbuf);
         if (san != pbuf) {
             size_t n = strlcpy(pbuf, san, (size_t)buffersize);
             return (n < (size_t)buffersize) ? (int)n : (int)(buffersize - 1);
@@ -494,6 +651,9 @@ static int pt_fs_proc_pidinfo_ex(int pid,
                 struct proc_fdinfo *fds = (struct proc_fdinfo *)buffer;
                 int kept = 0;
                 for (int i = 0; i < count; i++) {
+                    if (pt_is_hidden_fd(fds[i].proc_fd)) {
+                        continue;
+                    }
                     if (fds[i].proc_fdtype == PROX_FDTYPE_VNODE) {
                         struct vnode_fdinfowithpath vfi;
                         int vret = proc_pidfdinfo(self_pid, fds[i].proc_fd, PROC_PIDFDVNODEPATHINFO, &vfi, (int)sizeof(vfi));
@@ -505,18 +665,21 @@ static int pt_fs_proc_pidinfo_ex(int pid,
                         pt_socket_fdinfo_t sfi;
                         memset(&sfi, 0, sizeof(sfi));
                         int sret = proc_pidfdinfo(self_pid, fds[i].proc_fd, PROC_PIDFDSOCKETINFO, &sfi, (int)sizeof(sfi));
-                        if (sret > 0 && (size_t)sret >= sizeof(sfi) &&
-                            (sfi.psi.soi_family == AF_UNIX || sfi.psi.soi_kind == SOCKINFO_UN)) {
-                            char pa[sizeof(sfi.psi.soi_proto.pri_un.unsi_addr.ua_sun.sun_path) + 1];
-                            char pc[sizeof(sfi.psi.soi_proto.pri_un.unsi_caddr.ua_sun.sun_path) + 1];
-                            size_t la = strnlen(sfi.psi.soi_proto.pri_un.unsi_addr.ua_sun.sun_path, sizeof(pa) - 1U);
-                            size_t lc = strnlen(sfi.psi.soi_proto.pri_un.unsi_caddr.ua_sun.sun_path, sizeof(pc) - 1U);
-                            memcpy(pa, sfi.psi.soi_proto.pri_un.unsi_addr.ua_sun.sun_path, la);
-                            pa[la] = '\0';
-                            memcpy(pc, sfi.psi.soi_proto.pri_un.unsi_caddr.ua_sun.sun_path, lc);
-                            pc[lc] = '\0';
-                            if (pt_is_sensitive_unix_socket_path(pa, caller) ||
-                                pt_is_sensitive_unix_socket_path(pc, caller)) {
+                        if (sret > 0 && (size_t)sret >= sizeof(sfi)) {
+                            if (sfi.psi.soi_family == AF_UNIX || sfi.psi.soi_kind == SOCKINFO_UN) {
+                                char pa[sizeof(sfi.psi.soi_proto.pri_un.unsi_addr.ua_sun.sun_path) + 1];
+                                char pc[sizeof(sfi.psi.soi_proto.pri_un.unsi_caddr.ua_sun.sun_path) + 1];
+                                size_t la = strnlen(sfi.psi.soi_proto.pri_un.unsi_addr.ua_sun.sun_path, sizeof(pa) - 1U);
+                                size_t lc = strnlen(sfi.psi.soi_proto.pri_un.unsi_caddr.ua_sun.sun_path, sizeof(pc) - 1U);
+                                memcpy(pa, sfi.psi.soi_proto.pri_un.unsi_addr.ua_sun.sun_path, la);
+                                pa[la] = '\0';
+                                memcpy(pc, sfi.psi.soi_proto.pri_un.unsi_caddr.ua_sun.sun_path, lc);
+                                pc[lc] = '\0';
+                                if (pt_is_sensitive_unix_socket_path(pa, caller) ||
+                                    pt_is_sensitive_unix_socket_path(pc, caller)) {
+                                    continue;
+                                }
+                            } else if (pt_sanitize_inet_socket_fdinfo(fds[i].proc_fd, NO, &sfi) < 0) {
                                 continue;
                             }
                         }
@@ -547,18 +710,21 @@ static int pt_fs_proc_pidinfo_ex(int pid,
                         pt_socket_fdinfo_t sfi;
                         memset(&sfi, 0, sizeof(sfi));
                         int sret = proc_pidfileportinfo(self_pid, ports[i].proc_fileport, PROC_PIDFDSOCKETINFO, &sfi, (int)sizeof(sfi));
-                        if (sret > 0 && (size_t)sret >= sizeof(sfi) &&
-                            (sfi.psi.soi_family == AF_UNIX || sfi.psi.soi_kind == SOCKINFO_UN)) {
-                            char pa[sizeof(sfi.psi.soi_proto.pri_un.unsi_addr.ua_sun.sun_path) + 1];
-                            char pc[sizeof(sfi.psi.soi_proto.pri_un.unsi_caddr.ua_sun.sun_path) + 1];
-                            size_t la = strnlen(sfi.psi.soi_proto.pri_un.unsi_addr.ua_sun.sun_path, sizeof(pa) - 1U);
-                            size_t lc = strnlen(sfi.psi.soi_proto.pri_un.unsi_caddr.ua_sun.sun_path, sizeof(pc) - 1U);
-                            memcpy(pa, sfi.psi.soi_proto.pri_un.unsi_addr.ua_sun.sun_path, la);
-                            pa[la] = '\0';
-                            memcpy(pc, sfi.psi.soi_proto.pri_un.unsi_caddr.ua_sun.sun_path, lc);
-                            pc[lc] = '\0';
-                            if (pt_is_sensitive_unix_socket_path(pa, caller) ||
-                                pt_is_sensitive_unix_socket_path(pc, caller)) {
+                        if (sret > 0 && (size_t)sret >= sizeof(sfi)) {
+                            if (sfi.psi.soi_family == AF_UNIX || sfi.psi.soi_kind == SOCKINFO_UN) {
+                                char pa[sizeof(sfi.psi.soi_proto.pri_un.unsi_addr.ua_sun.sun_path) + 1];
+                                char pc[sizeof(sfi.psi.soi_proto.pri_un.unsi_caddr.ua_sun.sun_path) + 1];
+                                size_t la = strnlen(sfi.psi.soi_proto.pri_un.unsi_addr.ua_sun.sun_path, sizeof(pa) - 1U);
+                                size_t lc = strnlen(sfi.psi.soi_proto.pri_un.unsi_caddr.ua_sun.sun_path, sizeof(pc) - 1U);
+                                memcpy(pa, sfi.psi.soi_proto.pri_un.unsi_addr.ua_sun.sun_path, la);
+                                pa[la] = '\0';
+                                memcpy(pc, sfi.psi.soi_proto.pri_un.unsi_caddr.ua_sun.sun_path, lc);
+                                pc[lc] = '\0';
+                                if (pt_is_sensitive_unix_socket_path(pa, caller) ||
+                                    pt_is_sensitive_unix_socket_path(pc, caller)) {
+                                    continue;
+                                }
+                            } else if (pt_sanitize_inet_socket_fdinfo((int)ports[i].proc_fileport, YES, &sfi) < 0) {
                                 continue;
                             }
                         }
@@ -724,13 +890,19 @@ static int pt_fs_proc_pidinfo_ex(int pid,
                 pbuf[buffersize - 1] = '\0';
                 char vout[PATH_MAX];
                 const char *virt = pt_virtualize_path_for_app(pbuf, vout, sizeof(vout), YES);
-                if (virt != pbuf) {
-                    strlcpy(pbuf, virt, (size_t)buffersize);
-                }
-                if (pt_is_sensitive_host_fd_path(pbuf, caller)) {
+                const char *effective = (virt != NULL) ? virt : pbuf;
+                if (pt_is_sensitive_host_fd_path(effective, caller)) {
                     pbuf[0] = '\0';
                     errno = ESRCH;
                     return raw_syscall_abi ? -1 : 0;
+                }
+                if (virt != NULL && virt != pbuf) {
+                    if (strlen(virt) >= (size_t)buffersize) {
+                        pbuf[0] = '\0';
+                        errno = ENOMEM;
+                        return raw_syscall_abi ? -1 : 0;
+                    }
+                    strlcpy(pbuf, virt, (size_t)buffersize);
                 }
                 errno = saved_errno;
                 return 0;
@@ -849,14 +1021,22 @@ static int pt_proc_pidpath_audittoken(audit_token_t *audittoken, void *buffer, u
         pbuf[buffersize - 1U] = '\0';
         char vout[PATH_MAX];
         const char *virt = pt_virtualize_path_for_app(pbuf, vout, sizeof(vout), YES);
-        const char *san = (virt != pbuf) ? virt : pt_sanitize_image_path_for_app(pbuf);
-        if (san != pbuf) {
-            strlcpy(pbuf, san, (size_t)buffersize);
-        }
-        if (pt_is_sensitive_host_fd_path(pbuf, caller)) {
+        const char *san = (virt != pbuf) ? virt : pt_sanitize_image_path_for_cstr(pbuf);
+        const char *effective = (san != NULL) ? san : pbuf;
+        if (pt_is_sensitive_host_fd_path(effective, caller)) {
             pbuf[0] = '\0';
             errno = ESRCH;
             return 0;
+        }
+        if (san != NULL && san != pbuf) {
+            size_t slen = strlen(san);
+            if (slen >= (size_t)buffersize) {
+                pbuf[0] = '\0';
+                errno = ENOMEM;
+                return 0;
+            }
+            memcpy(pbuf, san, slen + 1U);
+            return (int)slen;
         }
         return (int)strlen(pbuf);
     }
@@ -1195,6 +1375,10 @@ extern ssize_t pt_orig_getdirentries64(int fd, void *buf, size_t bufsize, off_t 
 __attribute__((visibility("hidden")))
 ssize_t pt_fs_getdirentries64_syscall_with_caller(int fd, void *buf, size_t bufsize, off_t *position, const void *caller) {
     BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
+    if (!is_sys && pt_is_hidden_fd(fd)) {
+        errno = EBADF;
+        return -1;
+    }
     if (is_sys || !pt_is_bypass_enabled()) {
         return pt_orig_getdirentries64(fd, buf, bufsize, position);
     }
@@ -1269,6 +1453,10 @@ __attribute__((visibility("hidden")))
 ssize_t pt_fs_getdirentries_syscall_with_caller(int fd, void *buf, size_t bufsize, long *basep, const void *caller) {
     int cap_bytes = (bufsize > (size_t)INT_MAX) ? INT_MAX : (int)bufsize;
     BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
+    if (!is_sys && pt_is_hidden_fd(fd)) {
+        errno = EBADF;
+        return -1;
+    }
     if (is_sys || !pt_is_bypass_enabled()) {
         return (ssize_t)pt_orig_getdirentries(fd, (char *)buf, cap_bytes, basep);
     }

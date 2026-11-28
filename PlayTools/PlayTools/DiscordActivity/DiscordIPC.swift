@@ -111,7 +111,7 @@ final class DiscordIPCClient: Sendable {
     private let socketPaths: [String]
     private let lock = PTUnfairLock()
     private let ioLock = PTUnfairLock()
-    private let readQueue = DispatchQueue(label: "app.makedie.PlayTools.DiscordIPC", qos: .utility)
+    private let readQueue = DispatchQueue(label: "com.apple.ipc.transport.read", qos: .utility)
     nonisolated(unsafe) private var fd: Int32 = -1
     nonisolated(unsafe) private var readSource: DispatchSourceRead?
 
@@ -145,6 +145,16 @@ final class DiscordIPCClient: Sendable {
                 continue
             }
 
+            // Bound subsequent DispatchSourceRead recv waits so partial frames cannot stall readQueue for 2s.
+            var readTimeout = timeval(tv_sec: 0, tv_usec: 250_000)
+            _ = Darwin.setsockopt(
+                connectedFD,
+                SOL_SOCKET,
+                SO_RCVTIMEO,
+                &readTimeout,
+                socklen_t(MemoryLayout<timeval>.size)
+            )
+
             let source = DispatchSource.makeReadSource(fileDescriptor: connectedFD, queue: readQueue)
             let socketIOLock = self.ioLock
             source.setEventHandler { [weak self] in
@@ -165,7 +175,7 @@ final class DiscordIPCClient: Sendable {
             }
             source.setCancelHandler {
                 socketIOLock.withLock {
-                    Darwin.close(connectedFD)
+                    _ = Darwin.close(connectedFD)
                 }
             }
 
@@ -270,19 +280,14 @@ final class DiscordIPCClient: Sendable {
     }
 
     private static func isUnixSocket(at path: String) -> Bool {
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
-              let type = attrs[.type] as? FileAttributeType else {
+        var st = Darwin.stat()
+        guard Darwin.lstat(path, &st) == 0 else {
             return false
         }
-        if type == .typeSocket {
-            return true
+        guard (st.st_mode & S_IFMT) == S_IFSOCK else {
+            return false
         }
-        if type == .typeSymbolicLink {
-            let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
-            let resolvedAttrs = try? FileManager.default.attributesOfItem(atPath: resolved)
-            return (resolvedAttrs?[.type] as? FileAttributeType) == .typeSocket
-        }
-        return false
+        return st.st_uid == Darwin.geteuid()
     }
 
     private static func completeHandshake(fd: Int32) -> Bool {
@@ -301,6 +306,7 @@ final class DiscordIPCClient: Sendable {
     }
 
     private static func openUnixSocket(at path: String) -> Int32? {
+        guard isUnixSocket(at: path) else { return nil }
         var addr = sockaddr_un()
         let maxPathLen = MemoryLayout.size(ofValue: addr.sun_path)
         let utf8 = path.utf8CString
@@ -329,6 +335,13 @@ final class DiscordIPCClient: Sendable {
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(sock, $0, addrLen) }
         }
         guard rc == 0 else {
+            Darwin.close(sock)
+            return nil
+        }
+        var peerUID: uid_t = 0
+        var peerGID: gid_t = 0
+        guard Darwin.getpeereid(sock, &peerUID, &peerGID) == 0,
+              peerUID == Darwin.geteuid() else {
             Darwin.close(sock)
             return nil
         }
@@ -409,6 +422,11 @@ final class DiscordIPC: Sendable {
     private static let defaultAppID = ""
 
     func initialize() {
+        guard !PTSafeMode.isActive,
+              !PlaySettings.shared.strictEmulationMode,
+              !PlaySettings.shared.bypass else {
+            return
+        }
         let custom = PlaySettings.shared.discordActivity
         guard custom.enable else { return }
 
@@ -524,7 +542,13 @@ final class DiscordIPC: Sendable {
         }
 
         do {
-            let (data, _) = try await URLSession.shared.data(for: URLRequest(url: url))
+            let config = URLSessionConfiguration.ephemeral
+            config.protocolClasses = []
+            config.timeoutIntervalForRequest = 5
+            config.timeoutIntervalForResource = 5
+            let session = URLSession(configuration: config)
+            defer { session.finishTasksAndInvalidate() }
+            let (data, _) = try await session.data(for: URLRequest(url: url))
             let jsonResult = try JSONDecoder().decode(ITunesResponse.self, from: data)
             if jsonResult.resultCount > 0, let first = jsonResult.results.first {
                 return first.artworkUrl512 ?? first.artworkUrl100

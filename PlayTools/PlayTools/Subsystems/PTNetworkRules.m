@@ -4,6 +4,7 @@
 //
 
 #import "PSInternal.h"
+#include <arpa/inet.h>
 #include <time.h>
 
 __attribute__((visibility("hidden")))
@@ -22,11 +23,192 @@ static _Atomic time_t s_net_last_check = 0;
 static _Atomic int s_net_fast_state = PS_NET_FAST_UNINIT;
 __attribute__((visibility("hidden"))) _Atomic bool s_net_mock200_cached = true;
 static _Atomic bool s_tls_custom_ca_active = false;
+static _Atomic uint16_t s_hidden_proxy_port = 0;
+static _Atomic bool s_hidden_proxy_is_loopback = false;
+static _Atomic bool s_hidden_proxy_has_ipv4 = false;
+static _Atomic uint32_t s_hidden_proxy_ipv4_be = 0;
+static _Atomic bool s_hidden_proxy_has_ipv6 = false;
+static os_unfair_lock s_hidden_proxy_v6_lock = OS_UNFAIR_LOCK_INIT;
+static struct in6_addr s_hidden_proxy_ipv6;
 static time_t s_net_last_mtime = 0;
 static long s_net_last_mtimensec = 0;
 static time_t s_certs_last_mtime = 0;
 static long s_certs_last_mtimensec = 0;
 static BOOL s_certs_last_exists = NO;
+
+static void ps_update_hidden_proxy_cache(PSNetworkRuleSnapshot *snap) {
+    if (snap == nil || !snap.hideProxyFromApp || snap.proxyPort <= 0 || snap.proxyPort > 65535 ||
+        snap.proxyHost.length == 0) {
+        atomic_store_explicit(&s_hidden_proxy_port, 0, memory_order_release);
+        atomic_store_explicit(&s_hidden_proxy_is_loopback, false, memory_order_release);
+        atomic_store_explicit(&s_hidden_proxy_has_ipv4, false, memory_order_release);
+        atomic_store_explicit(&s_hidden_proxy_ipv4_be, 0, memory_order_release);
+        atomic_store_explicit(&s_hidden_proxy_has_ipv6, false, memory_order_release);
+        return;
+    }
+    const char *host = [snap.proxyHost UTF8String];
+    bool isLoopback = false;
+    bool hasV4 = false;
+    uint32_t v4be = 0;
+    bool hasV6 = false;
+    struct in6_addr v6;
+    memset(&v6, 0, sizeof(v6));
+    if (host != NULL) {
+        if (strcasecmp(host, "localhost") == 0 || strcmp(host, "127.0.0.1") == 0 || strcmp(host, "::1") == 0) {
+            isLoopback = true;
+            hasV4 = true;
+            v4be = htonl(INADDR_LOOPBACK);
+        } else {
+            struct in_addr a4;
+            if (inet_pton(AF_INET, host, &a4) == 1) {
+                hasV4 = true;
+                v4be = a4.s_addr;
+                if ((ntohl(v4be) & 0xFF000000U) == 0x7F000000U) {
+                    isLoopback = true;
+                }
+            } else if (inet_pton(AF_INET6, host, &v6) == 1) {
+                hasV6 = true;
+                if (IN6_IS_ADDR_LOOPBACK(&v6)) {
+                    isLoopback = true;
+                }
+            }
+        }
+    }
+    if (hasV6) {
+        os_unfair_lock_lock(&s_hidden_proxy_v6_lock);
+        s_hidden_proxy_ipv6 = v6;
+        os_unfair_lock_unlock(&s_hidden_proxy_v6_lock);
+    }
+    atomic_store_explicit(&s_hidden_proxy_is_loopback, isLoopback, memory_order_relaxed);
+    atomic_store_explicit(&s_hidden_proxy_has_ipv4, hasV4, memory_order_relaxed);
+    atomic_store_explicit(&s_hidden_proxy_ipv4_be, v4be, memory_order_relaxed);
+    atomic_store_explicit(&s_hidden_proxy_has_ipv6, hasV6, memory_order_relaxed);
+    atomic_store_explicit(&s_hidden_proxy_port, (uint16_t)snap.proxyPort, memory_order_release);
+}
+
+__attribute__((visibility("hidden")))
+BOOL ps_is_hidden_proxy_ipv4_peer(uint32_t addr_be, uint16_t port_host) {
+    uint16_t proxy_port = atomic_load_explicit(&s_hidden_proxy_port, memory_order_acquire);
+    if (proxy_port == 0 || port_host != proxy_port) {
+        return NO;
+    }
+    if (atomic_load_explicit(&s_hidden_proxy_is_loopback, memory_order_relaxed) &&
+        (ntohl(addr_be) & 0xFF000000U) == 0x7F000000U) {
+        return YES;
+    }
+    if (atomic_load_explicit(&s_hidden_proxy_has_ipv4, memory_order_relaxed) &&
+        atomic_load_explicit(&s_hidden_proxy_ipv4_be, memory_order_relaxed) == addr_be) {
+        return YES;
+    }
+    return NO;
+}
+
+__attribute__((visibility("hidden")))
+BOOL ps_is_hidden_proxy_ipv6_peer(const struct in6_addr *addr6, uint16_t port_host) {
+    if (addr6 == NULL) {
+        return NO;
+    }
+    uint16_t proxy_port = atomic_load_explicit(&s_hidden_proxy_port, memory_order_acquire);
+    if (proxy_port == 0 || port_host != proxy_port) {
+        return NO;
+    }
+    if (atomic_load_explicit(&s_hidden_proxy_is_loopback, memory_order_relaxed)) {
+        if (IN6_IS_ADDR_LOOPBACK(addr6)) {
+            return YES;
+        }
+        if (IN6_IS_ADDR_V4MAPPED(addr6)) {
+            uint32_t v4be = 0;
+            memcpy(&v4be, &addr6->s6_addr[12], sizeof(v4be));
+            if ((ntohl(v4be) & 0xFF000000U) == 0x7F000000U) {
+                return YES;
+            }
+        }
+    }
+    if (atomic_load_explicit(&s_hidden_proxy_has_ipv4, memory_order_relaxed) && IN6_IS_ADDR_V4MAPPED(addr6)) {
+        uint32_t v4be = 0;
+        memcpy(&v4be, &addr6->s6_addr[12], sizeof(v4be));
+        if (v4be == atomic_load_explicit(&s_hidden_proxy_ipv4_be, memory_order_relaxed)) {
+            return YES;
+        }
+    }
+    if (atomic_load_explicit(&s_hidden_proxy_has_ipv6, memory_order_relaxed)) {
+        struct in6_addr target;
+        os_unfair_lock_lock(&s_hidden_proxy_v6_lock);
+        target = s_hidden_proxy_ipv6;
+        os_unfair_lock_unlock(&s_hidden_proxy_v6_lock);
+        if (memcmp(addr6, &target, sizeof(target)) == 0) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+__attribute__((visibility("hidden")))
+BOOL ps_is_hidden_proxy_sockaddr(const struct sockaddr *sa, socklen_t sa_len) {
+    if (sa == NULL) {
+        return NO;
+    }
+    if (sa->sa_family == AF_INET && sa_len >= (socklen_t)sizeof(struct sockaddr_in)) {
+        struct sockaddr_in sin;
+        memcpy(&sin, sa, sizeof(sin));
+        return ps_is_hidden_proxy_ipv4_peer(sin.sin_addr.s_addr, ntohs(sin.sin_port));
+    }
+    if (sa->sa_family == AF_INET6 && sa_len >= (socklen_t)sizeof(struct sockaddr_in6)) {
+        struct sockaddr_in6 sin6;
+        memcpy(&sin6, sa, sizeof(sin6));
+        return ps_is_hidden_proxy_ipv6_peer(&sin6.sin6_addr, ntohs(sin6.sin6_port));
+    }
+    return NO;
+}
+
+static NSString *ps_app_runtime_certs_path(NSString *plistPath) {
+    const char *explicitCerts = pt_raw_getenv("PLAYTOOLS_CERTS_PATH");
+    if (explicitCerts != NULL && explicitCerts[0] == '/') {
+        return [NSString stringWithUTF8String:explicitCerts];
+    }
+
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+    if (bundleID.length == 0 && plistPath.length > 0) {
+        NSString *last = plistPath.lastPathComponent;
+        if ([last hasSuffix:@".plist"] && last.length > 6) {
+            bundleID = [last substringToIndex:(last.length - 6)];
+        }
+    }
+
+    const char *overridePlist = pt_raw_getenv("PLAYTOOLS_SETTINGS_PLIST");
+    BOOL hasPlistOverride = (overridePlist != NULL && overridePlist[0] == '/');
+    if (hasPlistOverride && plistPath.length > 0) {
+        // Check canonical sibling Certificates/<bundleID>/runtime.certs relative to MacOver container root first,
+        // falling back to legacy <plistPath>.certs for test fixtures that override PLAYTOOLS_SETTINGS_PLIST.
+        if (bundleID.length > 0) {
+            NSRange macoverRange = [plistPath rangeOfString:@"/Library/Containers/app.makedie.MacOver/"];
+            if (macoverRange.location != NSNotFound) {
+                NSString *macoverBase = [plistPath substringToIndex:(macoverRange.location + macoverRange.length)];
+                NSString *canonical = [NSString stringWithFormat:@"%@Certificates/%@/runtime.certs", macoverBase, bundleID];
+                struct stat st;
+                if (stat([canonical fileSystemRepresentation], &st) == 0) {
+                    return canonical;
+                }
+            }
+        }
+        return [plistPath stringByAppendingString:@".certs"];
+    }
+
+    if (bundleID.length > 0) {
+        NSString *root = nil;
+        const char *hostUserRoot = pt_get_host_user_root_cstr();
+        if (hostUserRoot != NULL && hostUserRoot[0] == '/') {
+            root = [NSString stringWithUTF8String:hostUserRoot];
+        } else {
+            root = [PlaySettings resolveHostUserRoot];
+        }
+        if (root.length > 0) {
+            return [NSString stringWithFormat:@"%@/Library/Containers/app.makedie.MacOver/Certificates/%@/runtime.certs",
+                    root, bundleID];
+        }
+    }
+    return @"";
+}
 
 static NSString *ps_lowercase_cstr_nsstring(const char *str, size_t len) {
     if (str == NULL || len == 0) return @"";
@@ -767,11 +949,11 @@ __attribute__((visibility("hidden"))) PSNetworkRuleSnapshot *ps_get_network_snap
             if (plistPath.length == 0) {
                 return current;
             }
-            NSString *certsPath = [plistPath stringByAppendingString:@".certs"];
+            NSString *certsPath = ps_app_runtime_certs_path(plistPath);
             struct stat st;
             struct stat certsSt;
             BOOL plistExists = (stat([plistPath fileSystemRepresentation], &st) == 0);
-            BOOL certsExists = (stat([certsPath fileSystemRepresentation], &certsSt) == 0);
+            BOOL certsExists = (certsPath.length > 0 && stat([certsPath fileSystemRepresentation], &certsSt) == 0);
 
             if (!plistExists) {
                 if (current == nil) {
@@ -847,6 +1029,7 @@ __attribute__((visibility("hidden"))) PSNetworkRuleSnapshot *ps_get_network_snap
         BOOL isBuiltInMITM = [proxyMode isEqualToString:@"builtInMITM"];
 
         next.enableCustomCertificates = [dict[@"enableCustomCertificates"] boolValue] || isBuiltInMITM;
+        next.isBuiltInMITM = isBuiltInMITM;
         NSNumber *mitmAllNum = dict[@"mitmAllHosts"];
         next.mitmAllHosts = (mitmAllNum != nil) ? [mitmAllNum boolValue] : YES;
         next.mitmAllowPinningBypass = [dict[@"mitmAllowPinningBypass"] boolValue];
@@ -1216,6 +1399,7 @@ __attribute__((visibility("hidden"))) PSNetworkRuleSnapshot *ps_get_network_snap
             s_certs_last_mtimensec = 0;
         }
         s_net_rule_snapshot = next;
+        ps_update_hidden_proxy_cache(next);
         atomic_store_explicit(&s_net_mock200_cached, next.mock200 ? true : false, memory_order_relaxed);
         atomic_store_explicit(&s_tls_custom_ca_active,
                               next.customCertificates.count > 0 ? true : false,
@@ -1273,20 +1457,6 @@ static NSString *ps_extract_trust_hostname(SecTrustRef trust) {
         }
         CFRelease(policies);
     }
-    CFArrayRef chain = SecTrustCopyCertificateChain(trust);
-    if (chain != NULL) {
-        if (CFArrayGetCount(chain) > 0) {
-            SecCertificateRef leaf = (SecCertificateRef)CFArrayGetValueAtIndex(chain, 0);
-            if (leaf != NULL) {
-                NSString *summary = CFBridgingRelease(SecCertificateCopySubjectSummary(leaf));
-                if ([summary isKindOfClass:[NSString class]] && summary.length > 0) {
-                    CFRelease(chain);
-                    return summary;
-                }
-            }
-        }
-        CFRelease(chain);
-    }
     return nil;
 }
 
@@ -1313,6 +1483,9 @@ __attribute__((visibility("hidden"))) BOOL ps_should_apply_custom_ca_for_trust(S
     if (trust == NULL || snap == nil || snap.customCertificates.count == 0 || [PTSafeMode isActive]) {
         return NO;
     }
+    if (!snap.mitmAllowPinningBypass && ps_trust_state_is_anchors_only(trust)) {
+        return NO;
+    }
     if (snap.mitmAllHosts) {
         return YES;
     }
@@ -1320,10 +1493,151 @@ __attribute__((visibility("hidden"))) BOOL ps_should_apply_custom_ca_for_trust(S
     return ps_host_matches_mitm_scope(host, snap);
 }
 
+__attribute__((visibility("hidden")))
+@interface PSTrustCustomState : NSObject
+@property (nonatomic, assign) BOOL anchorsOnly;
+@property (nonatomic, assign) BOOL hasSyntheticResult;
+@property (nonatomic, assign) SecTrustResultType syntheticResult;
+@property (nonatomic, strong, nullable) id evaluatedClone;
+@end
+
+@implementation PSTrustCustomState
+@end
+
+static os_unfair_lock s_trust_state_lock = OS_UNFAIR_LOCK_INIT;
+static const char s_ptTrustCustomStateKey = 0;
+
+static PSTrustCustomState *ps_trust_state_get_locked(SecTrustRef trust, BOOL createIfMissing) {
+    if (trust == NULL) {
+        return nil;
+    }
+    id trustObj = (__bridge id)trust;
+    PSTrustCustomState *state = objc_getAssociatedObject(trustObj, &s_ptTrustCustomStateKey);
+    if (state == nil && createIfMissing) {
+        state = [[PSTrustCustomState alloc] init];
+        state.syntheticResult = kSecTrustResultInvalid;
+        objc_setAssociatedObject(trustObj, &s_ptTrustCustomStateKey, state, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return state;
+}
+
+__attribute__((visibility("hidden"))) void ps_trust_state_reset(SecTrustRef trust) {
+    if (trust == NULL) return;
+    os_unfair_lock_lock(&s_trust_state_lock);
+    objc_setAssociatedObject((__bridge id)trust, &s_ptTrustCustomStateKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    os_unfair_lock_unlock(&s_trust_state_lock);
+}
+
+__attribute__((visibility("hidden"))) void ps_trust_state_set_anchors_only(SecTrustRef trust, BOOL anchorsOnly) {
+    if (trust == NULL) return;
+    os_unfair_lock_lock(&s_trust_state_lock);
+    PSTrustCustomState *state = ps_trust_state_get_locked(trust, YES);
+    state.anchorsOnly = anchorsOnly;
+    state.hasSyntheticResult = NO;
+    state.syntheticResult = kSecTrustResultInvalid;
+    state.evaluatedClone = nil;
+    os_unfair_lock_unlock(&s_trust_state_lock);
+}
+
+__attribute__((visibility("hidden"))) void ps_trust_state_clear_synthetic_result(SecTrustRef trust) {
+    if (trust == NULL) return;
+    os_unfair_lock_lock(&s_trust_state_lock);
+    PSTrustCustomState *state = ps_trust_state_get_locked(trust, NO);
+    if (state != nil) {
+        state.hasSyntheticResult = NO;
+        state.syntheticResult = kSecTrustResultInvalid;
+        state.evaluatedClone = nil;
+    }
+    os_unfair_lock_unlock(&s_trust_state_lock);
+}
+
+__attribute__((visibility("hidden"))) void ps_trust_state_set_synthetic_result(
+    SecTrustRef trust,
+    SecTrustResultType result,
+    SecTrustRef evaluatedClone
+) {
+    if (trust == NULL) return;
+    os_unfair_lock_lock(&s_trust_state_lock);
+    PSTrustCustomState *state = ps_trust_state_get_locked(trust, YES);
+    state.hasSyntheticResult = YES;
+    state.syntheticResult = result;
+    state.evaluatedClone = (evaluatedClone != NULL) ? (__bridge id)evaluatedClone : nil;
+    os_unfair_lock_unlock(&s_trust_state_lock);
+}
+
+__attribute__((visibility("hidden"))) BOOL ps_trust_state_is_anchors_only(SecTrustRef trust) {
+    if (trust == NULL) return NO;
+    os_unfair_lock_lock(&s_trust_state_lock);
+    PSTrustCustomState *state = ps_trust_state_get_locked(trust, NO);
+    BOOL res = (state != nil) ? state.anchorsOnly : NO;
+    os_unfair_lock_unlock(&s_trust_state_lock);
+    return res;
+}
+
+__attribute__((visibility("hidden"))) BOOL ps_trust_state_get_synthetic_result(SecTrustRef trust, SecTrustResultType *outResult) {
+    if (trust == NULL) return NO;
+    os_unfair_lock_lock(&s_trust_state_lock);
+    PSTrustCustomState *state = ps_trust_state_get_locked(trust, NO);
+    BOOL hasRes = (state != nil && state.hasSyntheticResult);
+    SecTrustResultType val = hasRes ? state.syntheticResult : kSecTrustResultInvalid;
+    os_unfair_lock_unlock(&s_trust_state_lock);
+    if (hasRes && outResult != NULL) {
+        *outResult = val;
+    }
+    return hasRes;
+}
+
+__attribute__((visibility("hidden"))) SecTrustRef ps_trust_state_copy_evaluated_clone(SecTrustRef trust) {
+    if (trust == NULL) return NULL;
+    os_unfair_lock_lock(&s_trust_state_lock);
+    PSTrustCustomState *state = ps_trust_state_get_locked(trust, NO);
+    SecTrustRef clone = NULL;
+    if (state != nil && state.hasSyntheticResult && state.evaluatedClone != nil) {
+        clone = (__bridge SecTrustRef)state.evaluatedClone;
+        CFRetain(clone);
+    }
+    os_unfair_lock_unlock(&s_trust_state_lock);
+    return clone;
+}
+
 __attribute__((visibility("hidden"))) BOOL ps_evaluate_trust_with_custom_anchors(SecTrustRef trust, PSNetworkRuleSnapshot *snap, CFErrorRef *outError) {
     if (trust == NULL || snap == nil || snap.customCertificates.count == 0) {
         return NO;
     }
+    CFArrayRef chain = SecTrustCopyCertificateChain(trust);
+    if (chain == NULL || CFArrayGetCount(chain) == 0) {
+        if (chain != NULL) CFRelease(chain);
+        return NO;
+    }
+    CFArrayRef policies = NULL;
+    if (SecTrustCopyPolicies(trust, &policies) != errSecSuccess || policies == NULL) {
+        if (policies != NULL) CFRelease(policies);
+        CFRelease(chain);
+        return NO;
+    }
+
+    SecTrustRef clonedTrust = NULL;
+    OSStatus createStatus = SecTrustCreateWithCertificates(chain, policies, &clonedTrust);
+    CFRelease(chain);
+    CFRelease(policies);
+    if (createStatus != errSecSuccess || clonedTrust == NULL) {
+        if (clonedTrust != NULL) CFRelease(clonedTrust);
+        return NO;
+    }
+
+    CFAbsoluteTime verifyTime = SecTrustGetVerifyTime(trust);
+    if (verifyTime != 0.0) {
+        CFDateRef verifyDate = CFDateCreate(kCFAllocatorDefault, verifyTime);
+        if (verifyDate != NULL) {
+            (void)SecTrustSetVerifyDate(clonedTrust, verifyDate);
+            CFRelease(verifyDate);
+        }
+    }
+    Boolean fetchAllowed = false;
+    if (SecTrustGetNetworkFetchAllowed(trust, &fetchAllowed) == errSecSuccess) {
+        (void)SecTrustSetNetworkFetchAllowed(clonedTrust, fetchAllowed);
+    }
+
     CFArrayRef existingCustomAnchors = NULL;
     BOOL hadExistingCustom = (SecTrustCopyCustomAnchorCertificates(trust, &existingCustomAnchors) == errSecSuccess &&
                               existingCustomAnchors != NULL);
@@ -1331,35 +1645,29 @@ __attribute__((visibility("hidden"))) BOOL ps_evaluate_trust_with_custom_anchors
     NSMutableArray *merged = [NSMutableArray arrayWithArray:snap.customCertificates];
     if (hadExistingCustom) {
         [merged addObjectsFromArray:(__bridge NSArray *)existingCustomAnchors];
+        CFRelease(existingCustomAnchors);
     }
 
-    OSStatus setStatus = SecTrustSetAnchorCertificates(trust, (__bridge CFArrayRef)merged);
-    if (setStatus != errSecSuccess) {
-        if (existingCustomAnchors != NULL) {
-            CFRelease(existingCustomAnchors);
-        }
+    if (SecTrustSetAnchorCertificates(clonedTrust, (__bridge CFArrayRef)merged) != errSecSuccess) {
+        CFRelease(clonedTrust);
         return NO;
     }
-    SecTrustSetAnchorCertificatesOnly(trust, false);
+    BOOL preserveAnchorsOnly = (hadExistingCustom && ps_trust_state_is_anchors_only(trust));
+    (void)SecTrustSetAnchorCertificatesOnly(clonedTrust, preserveAnchorsOnly ? true : false);
 
     CFErrorRef evalErr = NULL;
-    bool ok = SecTrustEvaluateWithError(trust, &evalErr);
+    bool ok = SecTrustEvaluateWithError(clonedTrust, &evalErr);
     if (ok) {
         if (evalErr != NULL) CFRelease(evalErr);
-        if (existingCustomAnchors != NULL) CFRelease(existingCustomAnchors);
+        SecTrustResultType clonedRes = kSecTrustResultUnspecified;
+        (void)SecTrustGetTrustResult(clonedTrust, &clonedRes);
+        ps_trust_state_set_synthetic_result(trust, clonedRes, clonedTrust);
+        CFRelease(clonedTrust);
         if (outError != NULL) *outError = NULL;
         return YES;
     }
 
-    // Restore original custom anchor state on failure.
-    if (hadExistingCustom) {
-        SecTrustSetAnchorCertificates(trust, existingCustomAnchors);
-    } else {
-        SecTrustSetAnchorCertificates(trust, NULL);
-    }
-    if (existingCustomAnchors != NULL) {
-        CFRelease(existingCustomAnchors);
-    }
+    CFRelease(clonedTrust);
     if (outError != NULL) {
         *outError = evalErr;
     } else if (evalErr != NULL) {

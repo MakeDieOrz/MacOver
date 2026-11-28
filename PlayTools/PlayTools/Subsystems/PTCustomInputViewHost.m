@@ -25,14 +25,21 @@ static const CGFloat kPTMaxTrayHeightRatio = 0.65;
 static const NSTimeInterval kPTShowAnimationDuration = 0.22;
 static const NSTimeInterval kPTHideAnimationDuration = 0.16;
 
-static void pt_tag_internal_overlay_object(id obj) {
+static const NSInteger kPTInternalOverlayTagDefault = 1;
+static const NSInteger kPTInternalOverlayTagInteractiveInputHost = 2;
+
+static void pt_tag_internal_overlay_object_with_kind(id obj, NSInteger kind) {
     if (obj == nil) {
         return;
     }
     const void *tagKey = (const void *)(uintptr_t)[PlaySettings pm_internalOverlayTagKeyAddress];
     if (tagKey != NULL) {
-        objc_setAssociatedObject(obj, tagKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(obj, tagKey, @(kind), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
+}
+
+static void pt_tag_internal_overlay_object(id obj) {
+    pt_tag_internal_overlay_object_with_kind(obj, kPTInternalOverlayTagDefault);
 }
 
 static BOOL pt_is_tagged_internal_overlay(id obj) {
@@ -103,7 +110,21 @@ static UIWindow *pt_resolve_window_for_responder(UIResponder *responder) {
     return [PlayScreen.shared activeTouchWindow];
 }
 
-static UIView *pt_resolve_custom_input_view(UIResponder *responder) {
+static BOOL pt_is_text_input_responder(UIResponder *responder) {
+    if (responder == nil) {
+        return NO;
+    }
+    return [responder conformsToProtocol:@protocol(UITextInput)] ||
+           [responder conformsToProtocol:@protocol(UIKeyInput)] ||
+           [responder isKindOfClass:[UITextField class]] ||
+           [responder isKindOfClass:[UITextView class]] ||
+           [responder isKindOfClass:[UISearchBar class]];
+}
+
+static UIView *pt_resolve_custom_input_view(UIResponder *responder, UIInputViewController * __autoreleasing *outInputVC) {
+    if (outInputVC != NULL) {
+        *outInputVC = nil;
+    }
     if (responder == nil || [responder isKindOfClass:[UIApplication class]]) {
         return nil;
     }
@@ -111,19 +132,30 @@ static UIView *pt_resolve_custom_input_view(UIResponder *responder) {
     if ([responder respondsToSelector:@selector(inputView)]) {
         v = [responder inputView];
     }
-    if (v == nil && [responder respondsToSelector:@selector(inputViewController)]) {
+    if (v == nil && pt_is_text_input_responder(responder) && [responder respondsToSelector:@selector(inputViewController)]) {
         UIInputViewController *ivc = [responder inputViewController];
         if ([ivc isKindOfClass:[UIViewController class]]) {
             v = ivc.view;
+            if (outInputVC != NULL && v != nil) {
+                *outInputVC = ivc;
+            }
         }
     }
     if (![v isKindOfClass:[UIView class]] || pt_is_system_keyboard_view(v)) {
+        if (outInputVC != NULL) {
+            *outInputVC = nil;
+        }
         return nil;
     }
     return v;
 }
 
-static UIView *pt_resolve_custom_accessory_view(UIResponder *responder, UIView *inputView) {
+static UIView *pt_resolve_custom_accessory_view(UIResponder *responder,
+                                                UIView *inputView,
+                                                UIInputViewController * __autoreleasing *outAccessoryVC) {
+    if (outAccessoryVC != NULL) {
+        *outAccessoryVC = nil;
+    }
     if (responder == nil || inputView == nil) {
         return nil;
     }
@@ -131,25 +163,34 @@ static UIView *pt_resolve_custom_accessory_view(UIResponder *responder, UIView *
     if ([responder respondsToSelector:@selector(inputAccessoryView)]) {
         acc = [responder inputAccessoryView];
     }
-    if (acc == nil && [responder respondsToSelector:@selector(inputAccessoryViewController)]) {
+    if (acc == nil && pt_is_text_input_responder(responder) && [responder respondsToSelector:@selector(inputAccessoryViewController)]) {
         UIInputViewController *avc = [responder inputAccessoryViewController];
         if ([avc isKindOfClass:[UIViewController class]]) {
             acc = avc.view;
+            if (outAccessoryVC != NULL && acc != nil) {
+                *outAccessoryVC = avc;
+            }
         }
     }
     if (![acc isKindOfClass:[UIView class]] || pt_is_system_keyboard_view(acc)) {
+        if (outAccessoryVC != NULL) {
+            *outAccessoryVC = nil;
+        }
         return nil;
     }
     // Some custom keyboards embed their accessory toolbar directly inside their
     // custom inputView. Never reparent it out of inputView.
     if (acc == inputView || [acc isDescendantOfView:inputView] || [inputView isDescendantOfView:acc]) {
+        if (outAccessoryVC != NULL) {
+            *outAccessoryVC = nil;
+        }
         return nil;
     }
     return acc;
 }
 
 static BOOL pt_responder_has_custom_input(UIResponder *responder) {
-    return pt_resolve_custom_input_view(responder) != nil;
+    return pt_resolve_custom_input_view(responder, NULL) != nil;
 }
 
 static CGFloat pt_measure_view_height(UIView *view,
@@ -206,6 +247,7 @@ __attribute__((visibility("hidden")))
         self.opaque = NO;
         self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         pt_tag_internal_overlay_object(self);
+        pt_tag_internal_overlay_object(self.layer);
 
         _dockView = [[UIView alloc] initWithFrame:CGRectZero];
         _dockView.hidden = YES;
@@ -217,6 +259,7 @@ __attribute__((visibility("hidden")))
         _dockView.layer.shadowOffset = CGSizeMake(0.0, -2.0);
         _dockView.layer.shadowRadius = 6.0;
         pt_tag_internal_overlay_object(_dockView);
+        pt_tag_internal_overlay_object(_dockView.layer);
         [self addSubview:_dockView];
 
         _accessorySlotView = [[UIView alloc] initWithFrame:CGRectZero];
@@ -224,6 +267,7 @@ __attribute__((visibility("hidden")))
         _accessorySlotView.clipsToBounds = YES;
         _accessorySlotView.autoresizesSubviews = NO;
         pt_tag_internal_overlay_object(_accessorySlotView);
+        pt_tag_internal_overlay_object(_accessorySlotView.layer);
         [_dockView addSubview:_accessorySlotView];
 
         _inputSlotView = [[UIView alloc] initWithFrame:CGRectZero];
@@ -231,15 +275,38 @@ __attribute__((visibility("hidden")))
         _inputSlotView.clipsToBounds = NO;
         _inputSlotView.autoresizesSubviews = NO;
         pt_tag_internal_overlay_object(_inputSlotView);
+        pt_tag_internal_overlay_object(_inputSlotView.layer);
         [_dockView addSubview:_inputSlotView];
 
         _topHairlineView = [[UIView alloc] initWithFrame:CGRectZero];
         _topHairlineView.backgroundColor = [UIColor separatorColor];
         _topHairlineView.userInteractionEnabled = NO;
         pt_tag_internal_overlay_object(_topHairlineView);
+        pt_tag_internal_overlay_object(_topHairlineView.layer);
         [_dockView addSubview:_topHairlineView];
     }
     return self;
+}
+
+- (Class)class {
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return [UIView class];
+    }
+    return [super class];
+}
+
+- (NSString *)description {
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return [NSString stringWithFormat:@"<UIInputSetContainerView: %p; frame = %@>", self, NSStringFromCGRect(self.frame)];
+    }
+    return [super description];
+}
+
+- (NSString *)debugDescription {
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return [NSString stringWithFormat:@"<UIInputSetContainerView: %p; frame = %@>", self, NSStringFromCGRect(self.frame)];
+    }
+    return [super debugDescription];
 }
 
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
@@ -309,6 +376,27 @@ __attribute__((visibility("hidden")))
     return UIStatusBarStyleDefault;
 }
 
+- (Class)class {
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return [UIViewController class];
+    }
+    return [super class];
+}
+
+- (NSString *)description {
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return [NSString stringWithFormat:@"<UIInputWindowController: %p>", self];
+    }
+    return [super description];
+}
+
+- (NSString *)debugDescription {
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return [NSString stringWithFormat:@"<UIInputWindowController: %p>", self];
+    }
+    return [super debugDescription];
+}
+
 @end
 
 __attribute__((visibility("hidden")))
@@ -317,6 +405,27 @@ __attribute__((visibility("hidden")))
 @end
 
 @implementation PTCustomInputWindow
+
+- (Class)class {
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return [UIWindow class];
+    }
+    return [super class];
+}
+
+- (NSString *)description {
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return [NSString stringWithFormat:@"<UIRemoteKeyboardWindow: %p; frame = %@>", self, NSStringFromCGRect(self.frame)];
+    }
+    return [super description];
+}
+
+- (NSString *)debugDescription {
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return [NSString stringWithFormat:@"<UIRemoteKeyboardWindow: %p; frame = %@>", self, NSStringFromCGRect(self.frame)];
+    }
+    return [super debugDescription];
+}
 
 - (BOOL)_canBecomeKeyWindow {
     return NO;
@@ -397,6 +506,8 @@ static void pt_notify_container_did_layout(PTCustomInputHostContainerView *conta
     __weak UIWindow *_targetWindow;
     __weak UIView *_hostedInputView;
     __weak UIView *_hostedAccessoryView;
+    __weak UIInputViewController *_hostedInputVC;
+    __weak UIInputViewController *_hostedAccessoryVC;
 
     NSMutableArray<NSLayoutConstraint *> *_inputPinnedConstraints;
     NSMutableArray<NSLayoutConstraint *> *_accessoryPinnedConstraints;
@@ -487,8 +598,10 @@ static void pt_notify_container_did_layout(PTCustomInputHostContainerView *conta
 
     _overlayRootVC = [[PTCustomInputRootViewController alloc] init];
     _overlayRootVC.targetAppWindow = targetWindow;
+    pt_tag_internal_overlay_object(_overlayRootVC);
     (void)_overlayRootVC.view;
     pt_tag_internal_overlay_object(_overlayRootVC.view);
+    pt_tag_internal_overlay_object(_overlayRootVC.view.layer);
 
     _overlayWindow = [[PTCustomInputWindow alloc] initWithWindowScene:scene];
     _overlayWindow.backgroundColor = [UIColor clearColor];
@@ -497,7 +610,8 @@ static void pt_notify_container_did_layout(PTCustomInputHostContainerView *conta
     _overlayWindow.userInteractionEnabled = YES;
     _overlayWindow.rootViewController = _overlayRootVC;
     _overlayWindow.hostContainerView = _overlayRootVC.hostContainerView;
-    pt_tag_internal_overlay_object(_overlayWindow);
+    pt_tag_internal_overlay_object_with_kind(_overlayWindow, kPTInternalOverlayTagInteractiveInputHost);
+    pt_tag_internal_overlay_object(_overlayWindow.layer);
 }
 
 - (void)ensureFallbackContainerInWindow:(UIWindow *)targetWindow {
@@ -513,12 +627,18 @@ static void pt_notify_container_did_layout(PTCustomInputHostContainerView *conta
 }
 
 - (void)detachView:(UIView * __weak *)viewIvar
+            hostVC:(UIInputViewController * __weak *)vcIvar
         savedState:(PTSavedHostedViewState *)savedState
        constraints:(NSMutableArray<NSLayoutConstraint *> *)constraints {
     UIView *v = *viewIvar;
+    UIInputViewController *vc = (vcIvar != NULL) ? *vcIvar : nil;
     if (constraints.count > 0) {
         [NSLayoutConstraint deactivateConstraints:constraints];
         [constraints removeAllObjects];
+    }
+    BOOL detachVC = (vc != nil && _overlayRootVC != nil && vc.parentViewController == _overlayRootVC);
+    if (detachVC) {
+        [vc willMoveToParentViewController:nil];
     }
     if (v != nil) {
         PTCustomInputHostContainerView *container = [self activeContainerView];
@@ -546,11 +666,18 @@ static void pt_notify_container_did_layout(PTCustomInputHostContainerView *conta
             v.translatesAutoresizingMaskIntoConstraints = savedState->translatesAutoresizingMaskIntoConstraints;
         }
     }
+    if (detachVC) {
+        [vc removeFromParentViewController];
+    }
     *viewIvar = nil;
+    if (vcIvar != NULL) {
+        *vcIvar = nil;
+    }
     savedState->valid = NO;
 }
 
 - (void)attachHostedView:(UIView *)view
+                  hostVC:(UIInputViewController *)vc
                   toSlot:(UIView *)slotView
               savedState:(PTSavedHostedViewState *)savedState {
     if (view == nil || slotView == nil) {
@@ -562,9 +689,18 @@ static void pt_notify_container_did_layout(PTCustomInputHostContainerView *conta
     savedState->translatesAutoresizingMaskIntoConstraints = view.translatesAutoresizingMaskIntoConstraints;
     savedState->originalBoundsSize = view.bounds.size;
 
+    BOOL addChild = (vc != nil && _overlayRootVC != nil &&
+                     _overlayWindow != nil && !_overlayWindow.isHidden &&
+                     vc.parentViewController == nil);
+    if (addChild) {
+        [_overlayRootVC addChildViewController:vc];
+    }
     if (view.superview != slotView) {
         [view removeFromSuperview];
         [slotView addSubview:view];
+    }
+    if (addChild) {
+        [vc didMoveToParentViewController:_overlayRootVC];
     }
 }
 
@@ -716,7 +852,8 @@ static void pt_notify_container_did_layout(PTCustomInputHostContainerView *conta
 }
 
 - (void)presentResponder:(UIResponder *)responder {
-    UIView *inputView = pt_resolve_custom_input_view(responder);
+    UIInputViewController *inputVC = nil;
+    UIView *inputView = pt_resolve_custom_input_view(responder, &inputVC);
     if (inputView == nil) {
         [self dismissIfActive];
         return;
@@ -734,7 +871,8 @@ static void pt_notify_container_did_layout(PTCustomInputHostContainerView *conta
         return;
     }
 
-    UIView *accessoryView = pt_resolve_custom_accessory_view(responder, inputView);
+    UIInputViewController *accessoryVC = nil;
+    UIView *accessoryView = pt_resolve_custom_accessory_view(responder, inputView, &accessoryVC);
 
     BOOL wasVisible = _isKeyboardVisible;
     CGRect prevPostedFrame = _lastPostedKeyboardFrame;
@@ -781,10 +919,10 @@ static void pt_notify_container_did_layout(PTCustomInputHostContainerView *conta
                             (accessoryView != nil && accessoryView.superview != container.accessorySlotView));
 
     if (needInputReattach) {
-        [self detachView:&_hostedInputView savedState:&_savedInputState constraints:_inputPinnedConstraints];
+        [self detachView:&_hostedInputView hostVC:&_hostedInputVC savedState:&_savedInputState constraints:_inputPinnedConstraints];
     }
     if (needAccReattach) {
-        [self detachView:&_hostedAccessoryView savedState:&_savedAccessoryState constraints:_accessoryPinnedConstraints];
+        [self detachView:&_hostedAccessoryView hostVC:&_hostedAccessoryVC savedState:&_savedAccessoryState constraints:_accessoryPinnedConstraints];
     }
 
     _activeResponder = responder;
@@ -792,11 +930,13 @@ static void pt_notify_container_did_layout(PTCustomInputHostContainerView *conta
 
     if (needInputReattach) {
         _hostedInputView = inputView;
-        [self attachHostedView:inputView toSlot:container.inputSlotView savedState:&_savedInputState];
+        _hostedInputVC = inputVC;
+        [self attachHostedView:inputView hostVC:inputVC toSlot:container.inputSlotView savedState:&_savedInputState];
     }
     if (needAccReattach && accessoryView != nil) {
         _hostedAccessoryView = accessoryView;
-        [self attachHostedView:accessoryView toSlot:container.accessorySlotView savedState:&_savedAccessoryState];
+        _hostedAccessoryVC = accessoryVC;
+        [self attachHostedView:accessoryView hostVC:accessoryVC toSlot:container.accessorySlotView savedState:&_savedAccessoryState];
     }
 
     _isLayingOut = YES;
@@ -882,17 +1022,17 @@ static void pt_notify_container_did_layout(PTCustomInputHostContainerView *conta
 
     _isKeyboardVisible = YES;
     _lastPostedKeyboardFrame = endScreenFrame;
+    _animationToken++;
     uint64_t animToken = _animationToken;
-    if (shouldAnimateShow) {
-        _animationToken++;
-        animToken = _animationToken;
-    }
 
     if (!wasVisible) {
         NSDictionary *info = [self keyboardUserInfoWithBeginFrame:beginScreenFrame
                                                         endFrame:endScreenFrame
                                                         duration:duration];
         [self postNotificationName:UIKeyboardWillShowNotification userInfo:info];
+        if (_animationToken != animToken || !_isKeyboardVisible) {
+            return;
+        }
         [self postNotificationName:UIKeyboardWillChangeFrameNotification userInfo:info];
     } else if (!CGRectEqualToRect(prevPostedFrame, endScreenFrame)) {
         NSDictionary *info = [self keyboardUserInfoWithBeginFrame:beginScreenFrame
@@ -901,12 +1041,21 @@ static void pt_notify_container_did_layout(PTCustomInputHostContainerView *conta
         [self postNotificationName:UIKeyboardWillChangeFrameNotification userInfo:info];
     }
 
+    // Re-check after synchronous WillShow/WillChangeFrame observers (which may resignFirstResponder).
+    if (_animationToken != animToken || !_isKeyboardVisible) {
+        return;
+    }
+
     if (shouldAnimateShow) {
         __weak typeof(self) weakSelf = self;
         [UIView animateWithDuration:duration
                               delay:0.0
                             options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState
                          animations:^{
+                             PTCustomInputViewHost *animSelf = weakSelf;
+                             if (animSelf == nil || animSelf->_animationToken != animToken || !animSelf->_isKeyboardVisible) {
+                                 return;
+                             }
                              container.dockView.frame = finalDockFrame;
                          }
                          completion:^(BOOL finished) {
@@ -927,6 +1076,9 @@ static void pt_notify_container_did_layout(PTCustomInputHostContainerView *conta
                                                              duration:0.0];
         if (!wasVisible) {
             [self postNotificationName:UIKeyboardDidShowNotification userInfo:doneInfo];
+            if (_animationToken != animToken || !_isKeyboardVisible) {
+                return;
+            }
             [self postNotificationName:UIKeyboardDidChangeFrameNotification userInfo:doneInfo];
         } else if (!CGRectEqualToRect(prevPostedFrame, endScreenFrame)) {
             [self postNotificationName:UIKeyboardDidChangeFrameNotification userInfo:doneInfo];
@@ -968,7 +1120,13 @@ static void pt_notify_container_did_layout(PTCustomInputHostContainerView *conta
                                                             endFrame:endScreenFrame
                                                             duration:duration];
         [self postNotificationName:UIKeyboardWillHideNotification userInfo:hideInfo];
+        if (_animationToken != animToken || _isKeyboardVisible) {
+            return;
+        }
         [self postNotificationName:UIKeyboardWillChangeFrameNotification userInfo:hideInfo];
+        if (_animationToken != animToken || _isKeyboardVisible) {
+            return;
+        }
     }
 
     BOOL emitDidHide = (wasVisible || resumingAnimatedDismiss);
@@ -977,8 +1135,8 @@ static void pt_notify_container_did_layout(PTCustomInputHostContainerView *conta
         host->_isAnimatingDismiss = NO;
         host->_pendingHideBeginFrame = CGRectZero;
         host->_pendingHideEndFrame = CGRectZero;
-        [host detachView:&host->_hostedInputView savedState:&host->_savedInputState constraints:host->_inputPinnedConstraints];
-        [host detachView:&host->_hostedAccessoryView savedState:&host->_savedAccessoryState constraints:host->_accessoryPinnedConstraints];
+        [host detachView:&host->_hostedInputView hostVC:&host->_hostedInputVC savedState:&host->_savedInputState constraints:host->_inputPinnedConstraints];
+        [host detachView:&host->_hostedAccessoryView hostVC:&host->_hostedAccessoryVC savedState:&host->_savedAccessoryState constraints:host->_accessoryPinnedConstraints];
         if (host->_overlayRootVC != nil) {
             host->_overlayRootVC.hostContainerView.dockView.hidden = YES;
             host->_overlayRootVC.targetAppWindow = nil;
@@ -1211,6 +1369,39 @@ static void pt_notify_container_did_layout(PTCustomInputHostContainerView *conta
 
 @end
 
+static void ps_register_custom_input_class_overrides(Class cls) {
+    if (cls == Nil) {
+        return;
+    }
+    Class superCls = class_getSuperclass(cls);
+    if (superCls == Nil) {
+        return;
+    }
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
+    if (methods == NULL) {
+        return;
+    }
+    IMP fallbackSuperIMP = class_getMethodImplementation(superCls, @selector(description));
+    for (unsigned int i = 0; i < count; i++) {
+        SEL sel = method_getName(methods[i]);
+        IMP hookIMP = method_getImplementation(methods[i]);
+        if (sel == NULL || hookIMP == NULL) {
+            continue;
+        }
+        Method superMethod = class_getInstanceMethod(superCls, sel);
+        IMP superIMP = (superMethod != NULL) ? method_getImplementation(superMethod) : fallbackSuperIMP;
+        if (superIMP != NULL && superIMP != hookIMP) {
+            const void *rawOrig = pt_lookup_swizzled_raw_orig_imp((const void *)superIMP);
+            if (rawOrig != NULL) {
+                superIMP = (IMP)rawOrig;
+            }
+            pt_register_swizzled_imp((const void *)hookIMP, (const void *)superIMP);
+        }
+    }
+    free(methods);
+}
+
 __attribute__((visibility("hidden"))) void ps_install_custom_input_view_host(void) {
     const char *disableEnv = pt_raw_getenv("PLAYTOOLS_DISABLE_CUSTOM_INPUT_HOST");
     if (disableEnv != NULL && strcmp(disableEnv, "1") == 0) {
@@ -1223,6 +1414,9 @@ __attribute__((visibility("hidden"))) void ps_install_custom_input_view_host(voi
         pt_register_hidden_class("PTCustomInputRootViewController");
         pt_register_hidden_class("PTCustomInputHostContainerView");
         pt_register_hidden_class("PTCustomInputViewHost");
+        ps_register_custom_input_class_overrides([PTCustomInputWindow class]);
+        ps_register_custom_input_class_overrides([PTCustomInputRootViewController class]);
+        ps_register_custom_input_class_overrides([PTCustomInputHostContainerView class]);
 
         Class responderCls = objc_getClass("UIResponder");
         if (responderCls != Nil) {

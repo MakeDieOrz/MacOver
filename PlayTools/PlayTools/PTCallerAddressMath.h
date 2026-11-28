@@ -75,9 +75,17 @@ static inline bool pt_caller_addr_cache_match(uint64_t entry, uint64_t addr, uin
     return true;
 }
 
-uint64_t pt_active_user_addr_strip_mask(void);
-void pt_configure_user_va_bits(uint8_t va_bits);
-void pt_init_user_va_bits_from_kernel(void);
+#ifndef PT_INTERNAL_VISIBILITY
+#ifdef DEBUG
+#define PT_INTERNAL_VISIBILITY
+#else
+#define PT_INTERNAL_VISIBILITY __attribute__((visibility("hidden")))
+#endif
+#endif
+
+PT_INTERNAL_VISIBILITY uint64_t pt_active_user_addr_strip_mask(void);
+PT_INTERNAL_VISIBILITY void pt_configure_user_va_bits(uint8_t va_bits);
+PT_INTERNAL_VISIBILITY void pt_init_user_va_bits_from_kernel(void);
 
 static inline uintptr_t pt_strip_high_bits_addr_with_width(uintptr_t raw_addr, uint8_t va_bits) {
     uint64_t mask = (va_bits >= 52U) ? PT_USER_ADDR_LVA_STRIP_MASK : PT_USER_ADDR_STRIP_MASK;
@@ -160,18 +168,20 @@ static inline bool pt_wrapper_cache_match(uint64_t entry, uint64_t compound_key,
     return true;
 }
 
-bool pt_is_wrapper_library_path(const char *fname);
-uint8_t pt_classify_caller_image_path(const char *fname, bool *out_cacheable);
-bool pt_is_nonsensitive_app_or_tmp_path(const char *norm_path, const char *bundle_dir, size_t bundle_len,
-                                        const char *data_dir, size_t data_len);
+PT_INTERNAL_VISIBILITY bool pt_is_wrapper_library_path(const char *fname);
+PT_INTERNAL_VISIBILITY uint8_t pt_classify_caller_image_path(const char *fname, bool *out_cacheable);
+PT_INTERNAL_VISIBILITY bool pt_is_nonsensitive_app_or_tmp_path(const char *norm_path, const char *bundle_dir,
+                                                               size_t bundle_len, const char *data_dir,
+                                                               size_t data_len);
 
-void pt_enter_internal_scope(void);
-void pt_leave_internal_scope(void);
-bool pt_is_in_internal_scope(void);
+PT_INTERNAL_VISIBILITY void pt_enter_internal_scope(void);
+PT_INTERNAL_VISIBILITY void pt_leave_internal_scope(void);
+PT_INTERNAL_VISIBILITY bool pt_is_in_internal_scope(void);
 
-bool pt_classify_bounded_frame_kinds_ex(const uint8_t *frame_kinds, size_t count, bool initial_seen_wrapper,
-                                        bool *out_cacheable_3frame);
-bool pt_classify_bounded_frame_kinds(const uint8_t *frame_kinds, size_t count, bool initial_seen_wrapper);
+PT_INTERNAL_VISIBILITY bool pt_classify_bounded_frame_kinds_ex(const uint8_t *frame_kinds, size_t count,
+                                                               bool initial_seen_wrapper, bool *out_cacheable_3frame);
+PT_INTERNAL_VISIBILITY bool pt_classify_bounded_frame_kinds(const uint8_t *frame_kinds, size_t count,
+                                                            bool initial_seen_wrapper);
 
 #ifdef __cplusplus
 }

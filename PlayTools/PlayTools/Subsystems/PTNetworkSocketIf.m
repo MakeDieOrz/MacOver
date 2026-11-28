@@ -5,6 +5,7 @@
 
 #import "PSInternal.h"
 #import "PTDetectionRules.h"
+#import "PTRegistration.h"
 #import "PTSystemSpooferInternal.h"
 #include <ctype.h>
 #include <ifaddrs.h>
@@ -24,13 +25,19 @@ static BOOL pt_should_block_cfstring_host(CFStringRef hostRef) {
     return (cstr != NULL && ps_should_block_host_cstr(cstr) != 0);
 }
 
+static void pt_mitm_record_recent_dns_from_addrinfo(const struct addrinfo *res);
+
 static int pt_getaddrinfo(const char *hostname, const char *servname,
                           const struct addrinfo *hints, struct addrinfo **res) {
     if (hostname != NULL && ps_should_block_host_cstr(hostname)) {
         PT_DEBUG_TRACE("network", "blocked getaddrinfo host=%s", hostname);
         return EAI_NONAME;
     }
-    return getaddrinfo(hostname, servname, hints, res);
+    int rc = getaddrinfo(hostname, servname, hints, res);
+    if (rc == 0 && res != NULL && *res != NULL) {
+        pt_mitm_record_recent_dns_from_addrinfo(*res);
+    }
+    return rc;
 }
 
 static struct hostent *pt_gethostbyname(const char *name) {
@@ -88,8 +95,17 @@ static NW_RETURNS_RETAINED nw_endpoint_t pt_nw_endpoint_create_host(const char *
         return NULL;
     }
     if (ps_should_block_host_cstr(hostname)) {
-        PT_DEBUG_TRACE("network", "blocked nw_endpoint host=%s port=%s", hostname, port);
-        return nw_endpoint_create_host("0.0.0.0", "1");
+        PSNetworkRuleSnapshot *snap = ps_get_network_rules();
+        // Defer HTTP/HTTPS ports (including alternate 8080/8443) to LocalMITMProxyServer
+        // for TCP connections; UDP/QUIC blocking is enforced in pt_nw_connection_create.
+        BOOL deferToMITM = (snap != nil && snap.isBuiltInMITM && snap.proxyPort > 0 &&
+                            (strcmp(port, "80") == 0 || strcmp(port, "443") == 0 ||
+                             strcmp(port, "8080") == 0 || strcmp(port, "8443") == 0 ||
+                             strcasecmp(port, "http") == 0 || strcasecmp(port, "https") == 0));
+        if (!deferToMITM) {
+            PT_DEBUG_TRACE("network", "blocked nw_endpoint host=%s port=%s", hostname, port);
+            return nw_endpoint_create_host("0.0.0.0", "1");
+        }
     }
     return nw_endpoint_create_host(hostname, port);
 }
@@ -150,6 +166,418 @@ static os_unfair_lock s_unix_rel_sock_lock = OS_UNFAIR_LOCK_INIT;
 static pt_unix_rel_sock_entry_t s_unix_rel_sock_table[PT_UNIX_REL_SOCK_SLOTS];
 static uint64_t s_unix_rel_sock_seq = 0;
 static _Atomic int s_unix_sock_tracked_count = 0;
+
+#define PT_MITM_PEER_SLOTS 256U
+
+typedef struct {
+    BOOL in_use;
+    int fd;
+    uint64_t sock_ino;
+    uint64_t seq;
+    struct sockaddr_storage orig_peer;
+    socklen_t orig_len;
+} pt_mitm_peer_entry_t;
+
+static os_unfair_lock s_mitm_peer_lock = OS_UNFAIR_LOCK_INIT;
+static pt_mitm_peer_entry_t s_mitm_peer_table[PT_MITM_PEER_SLOTS];
+static uint64_t s_mitm_peer_seq = 0;
+static _Atomic int s_mitm_peer_tracked_count = 0;
+
+static BOOL s_recent_dns_has_v4 = NO;
+static struct sockaddr_in s_recent_dns_v4;
+static uint64_t s_recent_dns_v4_ns = 0;
+static BOOL s_recent_dns_has_v6 = NO;
+static struct sockaddr_in6 s_recent_dns_v6;
+static uint64_t s_recent_dns_v6_ns = 0;
+
+static os_unfair_lock s_spoofed_local_ip_lock = OS_UNFAIR_LOCK_INIT;
+static uint64_t s_spoofed_local_ip_ts_ns = 0;
+static BOOL s_spoofed_local_has_v4 = NO;
+static struct in_addr s_spoofed_local_v4;
+static BOOL s_spoofed_local_has_v6 = NO;
+static struct in6_addr s_spoofed_local_v6;
+
+static uint64_t pt_net_monotonic_ns(void);
+static uint64_t pt_unix_sock_ino(int fd);
+
+static void pt_mitm_record_recent_dns_from_addrinfo(const struct addrinfo *res) {
+    if (res == NULL) {
+        return;
+    }
+    BOOL found_v4 = NO;
+    struct sockaddr_in v4;
+    memset(&v4, 0, sizeof(v4));
+    BOOL found_v6 = NO;
+    struct sockaddr_in6 v6;
+    memset(&v6, 0, sizeof(v6));
+    for (const struct addrinfo *cur = res; cur != NULL && (!found_v4 || !found_v6); cur = cur->ai_next) {
+        if (cur->ai_addr == NULL) {
+            continue;
+        }
+        if (!found_v4 && cur->ai_family == AF_INET && cur->ai_addrlen >= (socklen_t)sizeof(struct sockaddr_in)) {
+            struct sockaddr_in sin;
+            memcpy(&sin, cur->ai_addr, sizeof(sin));
+            uint32_t ip = ntohl(sin.sin_addr.s_addr);
+            if (ip != 0U && (ip & 0xFF000000U) != 0x7F000000U &&
+                !ps_is_hidden_proxy_sockaddr(cur->ai_addr, cur->ai_addrlen)) {
+                sin.sin_len = (uint8_t)sizeof(sin);
+                if (sin.sin_port == 0) {
+                    sin.sin_port = htons(443);
+                }
+                v4 = sin;
+                found_v4 = YES;
+            }
+        } else if (!found_v6 && cur->ai_family == AF_INET6 && cur->ai_addrlen >= (socklen_t)sizeof(struct sockaddr_in6)) {
+            struct sockaddr_in6 sin6;
+            memcpy(&sin6, cur->ai_addr, sizeof(sin6));
+            if (!IN6_IS_ADDR_UNSPECIFIED(&sin6.sin6_addr) &&
+                !IN6_IS_ADDR_LOOPBACK(&sin6.sin6_addr) &&
+                !ps_is_hidden_proxy_sockaddr(cur->ai_addr, cur->ai_addrlen)) {
+                sin6.sin6_len = (uint8_t)sizeof(sin6);
+                if (sin6.sin6_port == 0) {
+                    sin6.sin6_port = htons(443);
+                }
+                v6 = sin6;
+                found_v6 = YES;
+            }
+        }
+    }
+    if (!found_v4 && !found_v6) {
+        return;
+    }
+    uint64_t now_ns = pt_net_monotonic_ns();
+    os_unfair_lock_lock(&s_mitm_peer_lock);
+    if (found_v4) {
+        s_recent_dns_v4 = v4;
+        s_recent_dns_v4_ns = now_ns;
+        s_recent_dns_has_v4 = YES;
+    }
+    if (found_v6) {
+        s_recent_dns_v6 = v6;
+        s_recent_dns_v6_ns = now_ns;
+        s_recent_dns_has_v6 = YES;
+    }
+    os_unfair_lock_unlock(&s_mitm_peer_lock);
+}
+
+__attribute__((visibility("hidden")))
+void pt_network_record_mitm_peer(int fd, const struct sockaddr *peer, socklen_t len) {
+    if (fd < 0 || peer == NULL || len == 0 || (size_t)len > sizeof(struct sockaddr_storage)) {
+        return;
+    }
+    uint64_t ino = pt_unix_sock_ino(fd);
+    os_unfair_lock_lock(&s_mitm_peer_lock);
+    pt_mitm_peer_entry_t *existing = NULL;
+    pt_mitm_peer_entry_t *free_slot = NULL;
+    pt_mitm_peer_entry_t *oldest_slot = &s_mitm_peer_table[0];
+    for (size_t i = 0; i < PT_MITM_PEER_SLOTS; i++) {
+        pt_mitm_peer_entry_t *e = &s_mitm_peer_table[i];
+        if (!e->in_use) {
+            if (free_slot == NULL) {
+                free_slot = e;
+            }
+            continue;
+        }
+        if (e->fd == fd) {
+            existing = e;
+            break;
+        }
+        if (e->seq < oldest_slot->seq) {
+            oldest_slot = e;
+        }
+    }
+    pt_mitm_peer_entry_t *dst = (existing != NULL) ? existing : ((free_slot != NULL) ? free_slot : oldest_slot);
+    BOOL was_in_use = dst->in_use;
+    memset(dst, 0, sizeof(*dst));
+    dst->in_use = YES;
+    dst->fd = fd;
+    dst->sock_ino = ino;
+    dst->seq = ++s_mitm_peer_seq;
+    memcpy(&dst->orig_peer, peer, (size_t)len);
+    dst->orig_len = len;
+    if (!was_in_use) {
+        atomic_fetch_add_explicit(&s_mitm_peer_tracked_count, 1, memory_order_release);
+    }
+    os_unfair_lock_unlock(&s_mitm_peer_lock);
+}
+
+__attribute__((visibility("hidden")))
+BOOL pt_network_get_or_synth_mitm_peer(int fd,
+                                       int family,
+                                       BOOL record_in_table,
+                                       struct sockaddr_storage *out_addr,
+                                       socklen_t *out_len) {
+    if (out_addr == NULL || out_len == NULL) {
+        return NO;
+    }
+    if (fd >= 0 && pt_network_lookup_mitm_peer(fd, out_addr, out_len)) {
+        return YES;
+    }
+    struct sockaddr_storage synth;
+    memset(&synth, 0, sizeof(synth));
+    socklen_t synth_len = 0;
+    uint64_t now_ns = pt_net_monotonic_ns();
+    const uint64_t kRecentDnsTTLNs = 30000000000ULL;
+
+    os_unfair_lock_lock(&s_mitm_peer_lock);
+    if (family == AF_INET6) {
+        if (s_recent_dns_has_v6 &&
+            (now_ns == 0 || (now_ns >= s_recent_dns_v6_ns && (now_ns - s_recent_dns_v6_ns) < kRecentDnsTTLNs))) {
+            memcpy(&synth, &s_recent_dns_v6, sizeof(s_recent_dns_v6));
+            synth_len = (socklen_t)sizeof(struct sockaddr_in6);
+        }
+    } else {
+        if (s_recent_dns_has_v4 &&
+            (now_ns == 0 || (now_ns >= s_recent_dns_v4_ns && (now_ns - s_recent_dns_v4_ns) < kRecentDnsTTLNs))) {
+            memcpy(&synth, &s_recent_dns_v4, sizeof(s_recent_dns_v4));
+            synth_len = (socklen_t)sizeof(struct sockaddr_in);
+        }
+    }
+    os_unfair_lock_unlock(&s_mitm_peer_lock);
+
+    if (synth_len == 0) {
+        if (family == AF_INET6) {
+            struct sockaddr_in6 sin6;
+            memset(&sin6, 0, sizeof(sin6));
+            sin6.sin6_len = (uint8_t)sizeof(sin6);
+            sin6.sin6_family = AF_INET6;
+            sin6.sin6_port = htons(443);
+            (void)inet_pton(AF_INET6, "2620:149:a44::10", &sin6.sin6_addr);
+            memcpy(&synth, &sin6, sizeof(sin6));
+            synth_len = (socklen_t)sizeof(sin6);
+        } else {
+            struct sockaddr_in sin;
+            memset(&sin, 0, sizeof(sin));
+            sin.sin_len = (uint8_t)sizeof(sin);
+            sin.sin_family = AF_INET;
+            sin.sin_port = htons(443);
+            sin.sin_addr.s_addr = htonl(0x11FD900AU); // 17.253.144.10
+            memcpy(&synth, &sin, sizeof(sin));
+            synth_len = (socklen_t)sizeof(sin);
+        }
+    }
+    if (record_in_table && fd >= 0) {
+        pt_network_record_mitm_peer(fd, (const struct sockaddr *)&synth, synth_len);
+    }
+    *out_addr = synth;
+    *out_len = synth_len;
+    return YES;
+}
+
+__attribute__((visibility("hidden")))
+BOOL pt_network_get_spoofed_local_ip_for_proxied_socket(int family,
+                                                        struct sockaddr_storage *out_addr,
+                                                        socklen_t *out_len) {
+    if (out_addr == NULL || out_len == NULL) {
+        return NO;
+    }
+    uint64_t now_ns = pt_net_monotonic_ns();
+    BOOL need_refresh = NO;
+    BOOL have_v4 = NO;
+    struct in_addr v4;
+    memset(&v4, 0, sizeof(v4));
+    BOOL have_v6 = NO;
+    struct in6_addr v6;
+    memset(&v6, 0, sizeof(v6));
+
+    os_unfair_lock_lock(&s_spoofed_local_ip_lock);
+    if (s_spoofed_local_ip_ts_ns == 0 ||
+        (now_ns != 0 && now_ns >= s_spoofed_local_ip_ts_ns &&
+         (now_ns - s_spoofed_local_ip_ts_ns) >= 5000000000ULL)) {
+        need_refresh = YES;
+    } else {
+        have_v4 = s_spoofed_local_has_v4;
+        v4 = s_spoofed_local_v4;
+        have_v6 = s_spoofed_local_has_v6;
+        v6 = s_spoofed_local_v6;
+    }
+    os_unfair_lock_unlock(&s_spoofed_local_ip_lock);
+
+    static _Thread_local int tls_refreshing_local_ip = 0;
+    if (need_refresh && tls_refreshing_local_ip == 0) {
+        tls_refreshing_local_ip = 1;
+        int saved_errno = errno;
+        struct ifaddrs *iflist = NULL;
+        if (getifaddrs(&iflist) == 0 && iflist != NULL) {
+            for (int pass = 0; pass < 2; pass++) {
+                for (struct ifaddrs *cur = iflist; cur != NULL; cur = cur->ifa_next) {
+                    if (cur->ifa_name == NULL || cur->ifa_addr == NULL) {
+                        continue;
+                    }
+                    if ((cur->ifa_flags & (IFF_UP | IFF_RUNNING)) != (IFF_UP | IFF_RUNNING) ||
+                        (cur->ifa_flags & IFF_LOOPBACK) != 0) {
+                        continue;
+                    }
+                    if (pass == 0 && strcmp(cur->ifa_name, "en0") != 0) {
+                        continue;
+                    }
+                    if (pass == 1 && pt_is_hidden_network_ifname(cur->ifa_name)) {
+                        continue;
+                    }
+                    if (!have_v4 && cur->ifa_addr->sa_family == AF_INET) {
+                        const struct sockaddr_in *sin = (const struct sockaddr_in *)cur->ifa_addr;
+                        uint32_t ip = ntohl(sin->sin_addr.s_addr);
+                        if (ip != 0U && (ip & 0xFF000000U) != 0x7F000000U && (ip & 0xFFFF0000U) != 0xA9FE0000U) {
+                            v4 = sin->sin_addr;
+                            have_v4 = YES;
+                        }
+                    } else if (!have_v6 && cur->ifa_addr->sa_family == AF_INET6) {
+                        const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)cur->ifa_addr;
+                        if (!IN6_IS_ADDR_UNSPECIFIED(&sin6->sin6_addr) &&
+                            !IN6_IS_ADDR_LOOPBACK(&sin6->sin6_addr) &&
+                            !IN6_IS_ADDR_LINKLOCAL(&sin6->sin6_addr)) {
+                            v6 = sin6->sin6_addr;
+                            have_v6 = YES;
+                        }
+                    }
+                }
+            }
+            freeifaddrs(iflist);
+        }
+        errno = saved_errno;
+        os_unfair_lock_lock(&s_spoofed_local_ip_lock);
+        s_spoofed_local_has_v4 = have_v4;
+        if (have_v4) s_spoofed_local_v4 = v4;
+        s_spoofed_local_has_v6 = have_v6;
+        if (have_v6) s_spoofed_local_v6 = v6;
+        s_spoofed_local_ip_ts_ns = (now_ns != 0) ? now_ns : 1ULL;
+        os_unfair_lock_unlock(&s_spoofed_local_ip_lock);
+        tls_refreshing_local_ip = 0;
+    }
+
+    memset(out_addr, 0, sizeof(*out_addr));
+    if (family == AF_INET6) {
+        struct sockaddr_in6 sin6;
+        memset(&sin6, 0, sizeof(sin6));
+        sin6.sin6_len = (uint8_t)sizeof(sin6);
+        sin6.sin6_family = AF_INET6;
+        if (have_v6) {
+            sin6.sin6_addr = v6;
+        } else {
+            (void)inet_pton(AF_INET6, "fd00::2", &sin6.sin6_addr);
+        }
+        memcpy(out_addr, &sin6, sizeof(sin6));
+        *out_len = (socklen_t)sizeof(sin6);
+        return YES;
+    }
+    struct sockaddr_in sin;
+    memset(&sin, 0, sizeof(sin));
+    sin.sin_len = (uint8_t)sizeof(sin);
+    sin.sin_family = AF_INET;
+    sin.sin_addr.s_addr = have_v4 ? v4.s_addr : htonl(0xC0A80164U); // 192.168.1.100
+    memcpy(out_addr, &sin, sizeof(sin));
+    *out_len = (socklen_t)sizeof(sin);
+    return YES;
+}
+
+static void pt_mitm_peer_forget_fd(int fd) {
+    if (fd < 0 || atomic_load_explicit(&s_mitm_peer_tracked_count, memory_order_acquire) <= 0) {
+        return;
+    }
+    os_unfair_lock_lock(&s_mitm_peer_lock);
+    for (size_t i = 0; i < PT_MITM_PEER_SLOTS; i++) {
+        if (s_mitm_peer_table[i].in_use && s_mitm_peer_table[i].fd == fd) {
+            memset(&s_mitm_peer_table[i], 0, sizeof(s_mitm_peer_table[i]));
+            atomic_fetch_sub_explicit(&s_mitm_peer_tracked_count, 1, memory_order_release);
+        }
+    }
+    os_unfair_lock_unlock(&s_mitm_peer_lock);
+}
+
+static void pt_mitm_peer_dup_fd(int oldfd, int newfd) {
+    if (oldfd < 0 || newfd < 0 || oldfd == newfd ||
+        atomic_load_explicit(&s_mitm_peer_tracked_count, memory_order_acquire) <= 0) {
+        return;
+    }
+    os_unfair_lock_lock(&s_mitm_peer_lock);
+    pt_mitm_peer_entry_t *src = NULL;
+    pt_mitm_peer_entry_t *stale_new = NULL;
+    pt_mitm_peer_entry_t *free_slot = NULL;
+    pt_mitm_peer_entry_t *oldest_slot = &s_mitm_peer_table[0];
+    for (size_t i = 0; i < PT_MITM_PEER_SLOTS; i++) {
+        pt_mitm_peer_entry_t *e = &s_mitm_peer_table[i];
+        if (!e->in_use) {
+            if (free_slot == NULL) {
+                free_slot = e;
+            }
+            continue;
+        }
+        if (e->fd == oldfd) {
+            src = e;
+        } else if (e->fd == newfd) {
+            stale_new = e;
+        }
+        if (e->seq < oldest_slot->seq) {
+            oldest_slot = e;
+        }
+    }
+    if (src != NULL) {
+        pt_mitm_peer_entry_t *dst = (stale_new != NULL) ? stale_new : ((free_slot != NULL) ? free_slot : oldest_slot);
+        BOOL was_in_use = dst->in_use;
+        *dst = *src;
+        dst->in_use = YES;
+        dst->fd = newfd;
+        dst->seq = ++s_mitm_peer_seq;
+        if (!was_in_use) {
+            atomic_fetch_add_explicit(&s_mitm_peer_tracked_count, 1, memory_order_release);
+        }
+    } else if (stale_new != NULL) {
+        memset(stale_new, 0, sizeof(*stale_new));
+        atomic_fetch_sub_explicit(&s_mitm_peer_tracked_count, 1, memory_order_release);
+    }
+    os_unfair_lock_unlock(&s_mitm_peer_lock);
+}
+
+__attribute__((visibility("hidden")))
+BOOL pt_network_lookup_mitm_peer(int fd, struct sockaddr_storage *out_addr, socklen_t *out_len) {
+    if (fd < 0 || out_addr == NULL || out_len == NULL ||
+        atomic_load_explicit(&s_mitm_peer_tracked_count, memory_order_acquire) <= 0) {
+        return NO;
+    }
+    uint64_t ino = pt_unix_sock_ino(fd);
+    BOOL found = NO;
+    os_unfair_lock_lock(&s_mitm_peer_lock);
+    for (size_t i = 0; i < PT_MITM_PEER_SLOTS; i++) {
+        pt_mitm_peer_entry_t *e = &s_mitm_peer_table[i];
+        if (e->in_use && e->fd == fd) {
+            if (ino != 0 && e->sock_ino != 0 && e->sock_ino != ino) {
+                memset(e, 0, sizeof(*e));
+                atomic_fetch_sub_explicit(&s_mitm_peer_tracked_count, 1, memory_order_release);
+            } else {
+                *out_addr = e->orig_peer;
+                *out_len = e->orig_len;
+                found = YES;
+            }
+            break;
+        }
+    }
+    os_unfair_lock_unlock(&s_mitm_peer_lock);
+    return found;
+}
+
+static BOOL pt_sockaddr_is_hidden_loopback_peer(const struct sockaddr *sa, socklen_t sa_len) {
+    if (sa == NULL) {
+        return NO;
+    }
+    if (sa->sa_family == AF_INET && sa_len >= (socklen_t)sizeof(struct sockaddr_in)) {
+        struct sockaddr_in sin;
+        memcpy(&sin, sa, sizeof(sin));
+        return ((ntohl(sin.sin_addr.s_addr) & 0xFF000000U) == 0x7F000000U) &&
+               pt_is_hidden_loopback_port(ntohs(sin.sin_port));
+    }
+    if (sa->sa_family == AF_INET6 && sa_len >= (socklen_t)sizeof(struct sockaddr_in6)) {
+        struct sockaddr_in6 sin6;
+        memcpy(&sin6, sa, sizeof(sin6));
+        BOOL is_lo = IN6_IS_ADDR_LOOPBACK(&sin6.sin6_addr);
+        if (!is_lo && IN6_IS_ADDR_V4MAPPED(&sin6.sin6_addr)) {
+            uint32_t v4be = 0;
+            memcpy(&v4be, &sin6.sin6_addr.s6_addr[12], sizeof(v4be));
+            is_lo = ((ntohl(v4be) & 0xFF000000U) == 0x7F000000U);
+        }
+        return is_lo && pt_is_hidden_loopback_port(ntohs(sin6.sin6_port));
+    }
+    return NO;
+}
 
 static uint64_t pt_unix_sock_ino(int fd) {
     struct stat st;
@@ -274,6 +702,7 @@ void pt_network_notify_fd_dup(int oldfd, int newfd) {
     if (oldfd < 0 || newfd < 0 || oldfd == newfd) {
         return;
     }
+    pt_mitm_peer_dup_fd(oldfd, newfd);
     if (atomic_load_explicit(&s_unix_sock_tracked_count, memory_order_acquire) <= 0) {
         return;
     }
@@ -722,6 +1151,17 @@ static void pt_virtualize_unix_sockaddr_out(int socket_fd,
         virt = pt_virtualize_path_for_app(raw_path, vbuf, sizeof(vbuf), NO);
     }
     if (virt == NULL || strcmp(virt, raw_path) == 0) {
+        if (pt_is_sensitive_unix_socket_path(raw_path, caller)) {
+            memset(un->sun_path, 0, avail);
+            un->sun_len = (unsigned char)offsetof(struct sockaddr_un, sun_path);
+            *address_len = (socklen_t)offsetof(struct sockaddr_un, sun_path);
+        }
+        return;
+    }
+    if (pt_is_sensitive_unix_socket_path(virt, caller)) {
+        memset(un->sun_path, 0, avail);
+        un->sun_len = (unsigned char)offsetof(struct sockaddr_un, sun_path);
+        *address_len = (socklen_t)offsetof(struct sockaddr_un, sun_path);
         return;
     }
     size_t vlen = strlen(virt);
@@ -739,12 +1179,110 @@ static void pt_virtualize_unix_sockaddr_out(int socket_fd,
     }
 }
 
+static BOOL pt_msghdr_contains_hidden_fd(const struct msghdr *message) {
+    if (message == NULL || message->msg_control == NULL ||
+        !pt_is_valid_user_pointer(message->msg_control) ||
+        message->msg_controllen < (socklen_t)sizeof(struct cmsghdr)) {
+        return NO;
+    }
+    const unsigned char *ctrl_base = (const unsigned char *)message->msg_control;
+    const unsigned char *ctrl_end = ctrl_base + (size_t)message->msg_controllen;
+    const unsigned char *ptr = ctrl_base;
+    const size_t data_hdr_len = (size_t)CMSG_LEN(0);
+    while ((size_t)(ctrl_end - ptr) >= sizeof(struct cmsghdr)) {
+        struct cmsghdr hdr;
+        memcpy(&hdr, ptr, sizeof(hdr));
+        if (hdr.cmsg_len < (socklen_t)sizeof(struct cmsghdr) ||
+            (size_t)hdr.cmsg_len > (size_t)(ctrl_end - ptr)) {
+            break;
+        }
+        if (hdr.cmsg_level == SOL_SOCKET && hdr.cmsg_type == SCM_RIGHTS &&
+            (size_t)hdr.cmsg_len >= data_hdr_len + sizeof(int)) {
+            size_t data_bytes = (size_t)hdr.cmsg_len - data_hdr_len;
+            size_t fd_count = data_bytes / sizeof(int);
+            const unsigned char *data = ptr + data_hdr_len;
+            for (size_t i = 0; i < fd_count; i++) {
+                int passed_fd = -1;
+                memcpy(&passed_fd, data + i * sizeof(int), sizeof(int));
+                if (pt_is_hidden_fd(passed_fd)) {
+                    return YES;
+                }
+            }
+        }
+        size_t step = (size_t)__DARWIN_ALIGN32((uint32_t)hdr.cmsg_len);
+        if (step < sizeof(struct cmsghdr) || step > (size_t)(ctrl_end - ptr)) {
+            break;
+        }
+        ptr += step;
+    }
+    return NO;
+}
+
+static void pt_rewrite_loopback_local_sockaddr_in_place(struct sockaddr *address, socklen_t len) {
+    if (address == NULL) {
+        return;
+    }
+    if (address->sa_family == AF_INET && len >= (socklen_t)sizeof(struct sockaddr_in)) {
+        struct sockaddr_in sin;
+        memcpy(&sin, address, sizeof(sin));
+        if ((ntohl(sin.sin_addr.s_addr) & 0xFF000000U) == 0x7F000000U) {
+            struct sockaddr_storage local_ss;
+            socklen_t local_len = 0;
+            if (pt_network_get_spoofed_local_ip_for_proxied_socket(AF_INET, &local_ss, &local_len) &&
+                local_ss.ss_family == AF_INET) {
+                struct sockaddr_in lsin;
+                memcpy(&lsin, &local_ss, sizeof(lsin));
+                sin.sin_addr = lsin.sin_addr;
+                memcpy(address, &sin, sizeof(sin));
+            }
+        }
+    } else if (address->sa_family == AF_INET6 && len >= (socklen_t)sizeof(struct sockaddr_in6)) {
+        struct sockaddr_in6 sin6;
+        memcpy(&sin6, address, sizeof(sin6));
+        BOOL is_lo = IN6_IS_ADDR_LOOPBACK(&sin6.sin6_addr);
+        if (!is_lo && IN6_IS_ADDR_V4MAPPED(&sin6.sin6_addr)) {
+            uint32_t v4be = 0;
+            memcpy(&v4be, &sin6.sin6_addr.s6_addr[12], sizeof(v4be));
+            is_lo = ((ntohl(v4be) & 0xFF000000U) == 0x7F000000U);
+        }
+        if (is_lo) {
+            struct sockaddr_storage local_ss;
+            socklen_t local_len = 0;
+            if (pt_network_get_spoofed_local_ip_for_proxied_socket(AF_INET6, &local_ss, &local_len) &&
+                local_ss.ss_family == AF_INET6) {
+                struct sockaddr_in6 lsin6;
+                memcpy(&lsin6, &local_ss, sizeof(lsin6));
+                sin6.sin6_addr = lsin6.sin6_addr;
+                memcpy(address, &sin6, sizeof(sin6));
+            }
+        }
+    }
+}
+
+static void pt_maybe_track_proxied_connect(int socket, const struct sockaddr *addr, socklen_t addr_len) {
+    if (socket < 0 || addr == NULL ||
+        (addr->sa_family != AF_INET && addr->sa_family != AF_INET6) ||
+        pt_is_hidden_fd(socket) ||
+        pt_sockaddr_is_hidden_loopback_peer(addr, addr_len)) {
+        return;
+    }
+    if (ps_is_hidden_proxy_sockaddr(addr, addr_len)) {
+        struct sockaddr_storage synth_ss;
+        socklen_t synth_len = 0;
+        (void)pt_network_get_or_synth_mitm_peer(socket, addr->sa_family, YES, &synth_ss, &synth_len);
+    }
+}
+
 __attribute__((visibility("hidden")))
 int pt_network_bind_with_caller(int socket,
                                 const struct sockaddr *address,
                                 socklen_t address_len,
                                 int raw_syscall_num,
                                 const void *caller) {
+    if (pt_is_hidden_fd(socket) && !ps_is_effective_system_or_playtools_caller(caller)) {
+        errno = EBADF;
+        return -1;
+    }
     struct sockaddr_un mapped;
     socklen_t mapped_len = address_len;
     pt_unix_fchdir_guard_t guard;
@@ -780,6 +1318,10 @@ int pt_network_connect_with_caller(int socket,
                                    socklen_t address_len,
                                    int raw_syscall_num,
                                    const void *caller) {
+    if (pt_is_hidden_fd(socket) && !ps_is_effective_system_or_playtools_caller(caller)) {
+        errno = EBADF;
+        return -1;
+    }
     struct sockaddr_un mapped;
     socklen_t mapped_len = address_len;
     pt_unix_fchdir_guard_t guard;
@@ -798,8 +1340,12 @@ int pt_network_connect_with_caller(int socket,
         : connect(socket, use_addr, use_len);
     int saved_err = errno;
     pt_end_unix_fchdir(&guard);
-    if ((ret == 0 || (ret < 0 && saved_err == EINPROGRESS)) && virt_buf[0] != '\0') {
-        pt_unix_record_sock_path(socket, YES, leaf_buf, virt_buf);
+    if (ret == 0 || (ret < 0 && saved_err == EINPROGRESS)) {
+        if (virt_buf[0] != '\0') {
+            pt_unix_record_sock_path(socket, YES, leaf_buf, virt_buf);
+        } else {
+            pt_maybe_track_proxied_connect(socket, use_addr, use_len);
+        }
     }
     errno = saved_err;
     return ret;
@@ -810,11 +1356,128 @@ static int pt_connect(int socket, const struct sockaddr *address, socklen_t addr
 }
 
 __attribute__((visibility("hidden")))
+int pt_network_connectx_with_caller(int socket,
+                                    const sa_endpoints_t *endpoints,
+                                    sae_associd_t associd,
+                                    unsigned int flags,
+                                    const struct iovec *iov,
+                                    unsigned int iovcnt,
+                                    size_t *len,
+                                    sae_connid_t *connid,
+                                    int raw_syscall_num,
+                                    const void *caller) {
+    if (pt_is_hidden_fd(socket) && !ps_is_effective_system_or_playtools_caller(caller)) {
+        errno = EBADF;
+        return -1;
+    }
+    struct sockaddr_un dst_mapped;
+    socklen_t dst_mapped_len = 0;
+    pt_unix_fchdir_guard_t dst_guard;
+    memset(&dst_guard, 0, sizeof(dst_guard));
+    dst_guard.dirfd = -1;
+    dst_guard.saved_fd = -1;
+    char dst_leaf[sizeof(dst_mapped.sun_path)] = {0};
+    char dst_virt[sizeof(dst_mapped.sun_path)] = {0};
+
+    struct sockaddr_un src_mapped;
+    socklen_t src_mapped_len = 0;
+    pt_unix_fchdir_guard_t src_guard;
+    memset(&src_guard, 0, sizeof(src_guard));
+    src_guard.dirfd = -1;
+    src_guard.saved_fd = -1;
+    char src_leaf[sizeof(src_mapped.sun_path)] = {0};
+    char src_virt[sizeof(src_mapped.sun_path)] = {0};
+
+    sa_endpoints_t local_ep;
+    const sa_endpoints_t *use_ep = endpoints;
+    if (endpoints != NULL) {
+        local_ep = *endpoints;
+        int dst_prep = 0;
+        if (endpoints->sae_dstaddr != NULL && endpoints->sae_dstaddrlen > 0) {
+            dst_mapped_len = endpoints->sae_dstaddrlen;
+            dst_prep = pt_prepare_unix_sockaddr(endpoints->sae_dstaddr, endpoints->sae_dstaddrlen, caller,
+                                                &dst_mapped, &dst_mapped_len, &dst_guard,
+                                                dst_leaf, sizeof(dst_leaf), dst_virt, sizeof(dst_virt));
+            if (dst_prep < 0) {
+                return -1;
+            }
+            if (dst_prep > 0) {
+                local_ep.sae_dstaddr = (const struct sockaddr *)&dst_mapped;
+                local_ep.sae_dstaddrlen = dst_mapped_len;
+                use_ep = &local_ep;
+            }
+        }
+        int src_prep = 0;
+        if (endpoints->sae_srcaddr != NULL && endpoints->sae_srcaddrlen > 0) {
+            src_mapped_len = endpoints->sae_srcaddrlen;
+            src_prep = pt_prepare_unix_sockaddr(endpoints->sae_srcaddr, endpoints->sae_srcaddrlen, caller,
+                                                &src_mapped, &src_mapped_len,
+                                                dst_guard.active ? NULL : &src_guard,
+                                                src_leaf, sizeof(src_leaf), src_virt, sizeof(src_virt));
+            if (src_prep < 0) {
+                int saved_err = errno;
+                pt_end_unix_fchdir(&dst_guard);
+                errno = saved_err;
+                return -1;
+            }
+            if (src_prep > 0) {
+                local_ep.sae_srcaddr = (const struct sockaddr *)&src_mapped;
+                local_ep.sae_srcaddrlen = src_mapped_len;
+                use_ep = &local_ep;
+            }
+        }
+    }
+
+    int ret = (raw_syscall_num >= 0)
+        ? (int)pt_orig_syscall(raw_syscall_num,
+                               (uintptr_t)socket,
+                               (uintptr_t)use_ep,
+                               (uintptr_t)associd,
+                               (uintptr_t)flags,
+                               (uintptr_t)iov,
+                               (uintptr_t)iovcnt,
+                               (uintptr_t)len,
+                               (uintptr_t)connid)
+        : connectx(socket, use_ep, associd, flags, iov, iovcnt, len, connid);
+    int saved_err = errno;
+    pt_end_unix_fchdir(&src_guard);
+    pt_end_unix_fchdir(&dst_guard);
+    if (ret == 0 || (ret < 0 && saved_err == EINPROGRESS)) {
+        if (dst_virt[0] != '\0') {
+            pt_unix_record_sock_path(socket, YES, dst_leaf, dst_virt);
+        } else if (endpoints != NULL && endpoints->sae_dstaddr != NULL) {
+            pt_maybe_track_proxied_connect(socket, endpoints->sae_dstaddr, endpoints->sae_dstaddrlen);
+        }
+        if (src_virt[0] != '\0') {
+            pt_unix_record_sock_path(socket, NO, src_leaf, src_virt);
+        }
+    }
+    errno = saved_err;
+    return ret;
+}
+
+static int pt_connectx(int socket,
+                       const sa_endpoints_t *endpoints,
+                       sae_associd_t associd,
+                       unsigned int flags,
+                       const struct iovec *iov,
+                       unsigned int iovcnt,
+                       size_t *len,
+                       sae_connid_t *connid) {
+    return pt_network_connectx_with_caller(socket, endpoints, associd, flags, iov, iovcnt, len, connid,
+                                           -1, __builtin_return_address(0));
+}
+
+__attribute__((visibility("hidden")))
 int pt_network_accept_with_caller(int socket,
                                   struct sockaddr * __restrict address,
                                   socklen_t * __restrict address_len,
                                   int raw_syscall_num,
                                   const void *caller) {
+    if (pt_is_hidden_fd(socket) && !ps_is_effective_system_or_playtools_caller(caller)) {
+        errno = EBADF;
+        return -1;
+    }
     socklen_t caller_cap = (address_len != NULL) ? *address_len : 0;
     int ret = (raw_syscall_num >= 0)
         ? (int)pt_orig_syscall(raw_syscall_num, (uintptr_t)socket, (uintptr_t)address, (uintptr_t)address_len, 0, 0, 0, 0, 0)
@@ -841,6 +1504,10 @@ ssize_t pt_network_sendto_with_caller(int socket,
                                       socklen_t dest_len,
                                       int raw_syscall_num,
                                       const void *caller) {
+    if (pt_is_hidden_fd(socket) && !ps_is_effective_system_or_playtools_caller(caller)) {
+        errno = EBADF;
+        return -1;
+    }
     struct sockaddr_un mapped;
     socklen_t mapped_len = dest_len;
     pt_unix_fchdir_guard_t guard;
@@ -870,6 +1537,191 @@ static ssize_t pt_sendto(int socket,
     return pt_network_sendto_with_caller(socket, buffer, length, flags, dest_addr, dest_len, -1, __builtin_return_address(0));
 }
 
+extern ssize_t pt_orig_sendmsg_nocancel(int, const struct msghdr *, int) __asm__("_sendmsg$NOCANCEL") __attribute__((weak_import));
+extern ssize_t pt_orig_recvfrom_nocancel(int, void *, size_t, int, struct sockaddr *, socklen_t *) __asm__("_recvfrom$NOCANCEL") __attribute__((weak_import));
+extern ssize_t pt_orig_recvmsg_nocancel(int, struct msghdr *, int) __asm__("_recvmsg$NOCANCEL") __attribute__((weak_import));
+
+static ssize_t pt_network_sendmsg_impl(int socket,
+                                       const struct msghdr *message,
+                                       int flags,
+                                       int raw_syscall_num,
+                                       BOOL nocancel,
+                                       const void *caller) {
+    BOOL is_sys = ps_is_effective_system_or_playtools_caller(caller);
+    if (!is_sys && (pt_is_hidden_fd(socket) || pt_msghdr_contains_hidden_fd(message))) {
+        errno = EBADF;
+        return -1;
+    }
+    struct sockaddr_un mapped;
+    socklen_t mapped_len = 0;
+    pt_unix_fchdir_guard_t guard;
+    memset(&guard, 0, sizeof(guard));
+    guard.dirfd = -1;
+    guard.saved_fd = -1;
+    struct msghdr local_msg;
+    const struct msghdr *use_msg = message;
+    if (message != NULL && message->msg_name != NULL && message->msg_namelen > 0) {
+        mapped_len = message->msg_namelen;
+        int prep = pt_prepare_unix_sockaddr((const struct sockaddr *)message->msg_name,
+                                            message->msg_namelen,
+                                            caller,
+                                            &mapped,
+                                            &mapped_len,
+                                            &guard,
+                                            NULL, 0, NULL, 0);
+        if (prep < 0) {
+            return -1;
+        }
+        if (prep > 0) {
+            local_msg = *message;
+            local_msg.msg_name = &mapped;
+            local_msg.msg_namelen = mapped_len;
+            use_msg = &local_msg;
+        }
+    }
+    ssize_t ret;
+    if (raw_syscall_num >= 0) {
+        ret = (ssize_t)pt_orig_syscall(raw_syscall_num, (uintptr_t)socket, (uintptr_t)use_msg, (uintptr_t)flags, 0, 0, 0, 0, 0);
+    } else if (nocancel && &pt_orig_sendmsg_nocancel != NULL) {
+        ret = pt_orig_sendmsg_nocancel(socket, use_msg, flags);
+    } else {
+        ret = sendmsg(socket, use_msg, flags);
+    }
+    int saved_err = errno;
+    pt_end_unix_fchdir(&guard);
+    errno = saved_err;
+    return ret;
+}
+
+__attribute__((visibility("hidden")))
+ssize_t pt_network_sendmsg_with_caller(int socket,
+                                       const struct msghdr *message,
+                                       int flags,
+                                       int raw_syscall_num,
+                                       const void *caller) {
+    return pt_network_sendmsg_impl(socket, message, flags, raw_syscall_num, NO, caller);
+}
+
+static ssize_t pt_sendmsg(int socket, const struct msghdr *message, int flags) {
+    return pt_network_sendmsg_impl(socket, message, flags, -1, NO, __builtin_return_address(0));
+}
+
+static ssize_t pt_sendmsg_nocancel(int socket, const struct msghdr *message, int flags) {
+    return pt_network_sendmsg_impl(socket, message, flags, -1, YES, __builtin_return_address(0));
+}
+
+static ssize_t pt_network_recvfrom_impl(int socket,
+                                        void * __restrict buffer,
+                                        size_t length,
+                                        int flags,
+                                        struct sockaddr * __restrict address,
+                                        socklen_t * __restrict address_len,
+                                        int raw_syscall_num,
+                                        BOOL nocancel,
+                                        const void *caller) {
+    if (pt_is_hidden_fd(socket) && !ps_is_effective_system_or_playtools_caller(caller)) {
+        errno = EBADF;
+        return -1;
+    }
+    socklen_t caller_cap = (address_len != NULL) ? *address_len : 0;
+    ssize_t ret;
+    if (raw_syscall_num >= 0) {
+        ret = (ssize_t)pt_orig_syscall(raw_syscall_num,
+                                       (uintptr_t)socket,
+                                       (uintptr_t)buffer,
+                                       (uintptr_t)length,
+                                       (uintptr_t)flags,
+                                       (uintptr_t)address,
+                                       (uintptr_t)address_len,
+                                       0, 0);
+    } else if (nocancel && &pt_orig_recvfrom_nocancel != NULL) {
+        ret = pt_orig_recvfrom_nocancel(socket, buffer, length, flags, address, address_len);
+    } else {
+        ret = recvfrom(socket, buffer, length, flags, address, address_len);
+    }
+    if (ret >= 0 && address != NULL && address_len != NULL) {
+        pt_virtualize_unix_sockaddr_out(socket, YES, address, address_len, caller_cap, caller);
+    }
+    return ret;
+}
+
+__attribute__((visibility("hidden")))
+ssize_t pt_network_recvfrom_with_caller(int socket,
+                                        void * __restrict buffer,
+                                        size_t length,
+                                        int flags,
+                                        struct sockaddr * __restrict address,
+                                        socklen_t * __restrict address_len,
+                                        int raw_syscall_num,
+                                        const void *caller) {
+    return pt_network_recvfrom_impl(socket, buffer, length, flags, address, address_len, raw_syscall_num, NO, caller);
+}
+
+static ssize_t pt_recvfrom(int socket,
+                           void * __restrict buffer,
+                           size_t length,
+                           int flags,
+                           struct sockaddr * __restrict address,
+                           socklen_t * __restrict address_len) {
+    return pt_network_recvfrom_impl(socket, buffer, length, flags, address, address_len, -1, NO, __builtin_return_address(0));
+}
+
+static ssize_t pt_recvfrom_nocancel(int socket,
+                                    void * __restrict buffer,
+                                    size_t length,
+                                    int flags,
+                                    struct sockaddr * __restrict address,
+                                    socklen_t * __restrict address_len) {
+    return pt_network_recvfrom_impl(socket, buffer, length, flags, address, address_len, -1, YES, __builtin_return_address(0));
+}
+
+static ssize_t pt_network_recvmsg_impl(int socket,
+                                       struct msghdr *message,
+                                       int flags,
+                                       int raw_syscall_num,
+                                       BOOL nocancel,
+                                       const void *caller) {
+    if (pt_is_hidden_fd(socket) && !ps_is_effective_system_or_playtools_caller(caller)) {
+        errno = EBADF;
+        return -1;
+    }
+    socklen_t caller_cap = (message != NULL && message->msg_name != NULL) ? message->msg_namelen : 0;
+    ssize_t ret;
+    if (raw_syscall_num >= 0) {
+        ret = (ssize_t)pt_orig_syscall(raw_syscall_num, (uintptr_t)socket, (uintptr_t)message, (uintptr_t)flags, 0, 0, 0, 0, 0);
+    } else if (nocancel && &pt_orig_recvmsg_nocancel != NULL) {
+        ret = pt_orig_recvmsg_nocancel(socket, message, flags);
+    } else {
+        ret = recvmsg(socket, message, flags);
+    }
+    if (ret >= 0 && message != NULL && message->msg_name != NULL && message->msg_namelen > 0) {
+        pt_virtualize_unix_sockaddr_out(socket,
+                                        YES,
+                                        (struct sockaddr *)message->msg_name,
+                                        &message->msg_namelen,
+                                        caller_cap,
+                                        caller);
+    }
+    return ret;
+}
+
+__attribute__((visibility("hidden")))
+ssize_t pt_network_recvmsg_with_caller(int socket,
+                                       struct msghdr *message,
+                                       int flags,
+                                       int raw_syscall_num,
+                                       const void *caller) {
+    return pt_network_recvmsg_impl(socket, message, flags, raw_syscall_num, NO, caller);
+}
+
+static ssize_t pt_recvmsg(int socket, struct msghdr *message, int flags) {
+    return pt_network_recvmsg_impl(socket, message, flags, -1, NO, __builtin_return_address(0));
+}
+
+static ssize_t pt_recvmsg_nocancel(int socket, struct msghdr *message, int flags) {
+    return pt_network_recvmsg_impl(socket, message, flags, -1, YES, __builtin_return_address(0));
+}
+
 __attribute__((visibility("hidden")))
 int pt_network_getsockname_with_caller(int socket,
                                        struct sockaddr * __restrict address,
@@ -880,11 +1732,35 @@ int pt_network_getsockname_with_caller(int socket,
         errno = EFAULT;
         return -1;
     }
+    BOOL is_sys = ps_is_effective_system_or_playtools_caller(caller);
+    if (!is_sys && pt_is_hidden_fd(socket)) {
+        errno = EBADF;
+        return -1;
+    }
+    BOOL cloak = pt_is_bypass_enabled() && !is_sys;
     socklen_t caller_cap = *address_len;
     int ret = (raw_syscall_num >= 0)
         ? (int)pt_orig_syscall(raw_syscall_num, (uintptr_t)socket, (uintptr_t)address, (uintptr_t)address_len, 0, 0, 0, 0, 0)
         : getsockname(socket, address, address_len);
     if (ret == 0) {
+        if (cloak && (address->sa_family == AF_INET || address->sa_family == AF_INET6)) {
+            struct sockaddr_storage peer_ss;
+            socklen_t peer_len = (socklen_t)sizeof(peer_ss);
+            if (getpeername(socket, (struct sockaddr *)&peer_ss, &peer_len) == 0) {
+                if (pt_sockaddr_is_hidden_loopback_peer((const struct sockaddr *)&peer_ss, peer_len)) {
+                    if (caller_cap > 0) {
+                        memset(address, 0, caller_cap);
+                    }
+                    errno = EBADF;
+                    return -1;
+                }
+                if (ps_is_hidden_proxy_sockaddr((const struct sockaddr *)&peer_ss, peer_len)) {
+                    // Proxied app socket: synthesize non-loopback local IP instead of failing with EBADF.
+                    pt_rewrite_loopback_local_sockaddr_in_place(address, MIN(*address_len, caller_cap));
+                    return 0;
+                }
+            }
+        }
         pt_virtualize_unix_sockaddr_out(socket, NO, address, address_len, caller_cap, caller);
     }
     return ret;
@@ -904,11 +1780,41 @@ int pt_network_getpeername_with_caller(int socket,
         errno = EFAULT;
         return -1;
     }
+    BOOL is_sys = ps_is_effective_system_or_playtools_caller(caller);
+    if (!is_sys && pt_is_hidden_fd(socket)) {
+        errno = EBADF;
+        return -1;
+    }
+    BOOL cloak = pt_is_bypass_enabled() && !is_sys;
     socklen_t caller_cap = *address_len;
     int ret = (raw_syscall_num >= 0)
         ? (int)pt_orig_syscall(raw_syscall_num, (uintptr_t)socket, (uintptr_t)address, (uintptr_t)address_len, 0, 0, 0, 0, 0)
         : getpeername(socket, address, address_len);
     if (ret == 0) {
+        if (cloak && (address->sa_family == AF_INET || address->sa_family == AF_INET6)) {
+            socklen_t out_len = *address_len;
+            if (pt_sockaddr_is_hidden_loopback_peer(address, out_len)) {
+                if (caller_cap > 0) {
+                    memset(address, 0, caller_cap);
+                }
+                errno = EBADF;
+                return -1;
+            }
+            struct sockaddr_storage mapped_ss;
+            socklen_t mapped_len = 0;
+            BOOL has_peer = pt_network_lookup_mitm_peer(socket, &mapped_ss, &mapped_len);
+            if (!has_peer && ps_is_hidden_proxy_sockaddr(address, out_len)) {
+                has_peer = pt_network_get_or_synth_mitm_peer(socket, address->sa_family, YES, &mapped_ss, &mapped_len);
+            }
+            if (has_peer && mapped_len > 0) {
+                socklen_t copy_len = (caller_cap < mapped_len) ? caller_cap : mapped_len;
+                if (copy_len > 0) {
+                    memcpy(address, &mapped_ss, copy_len);
+                }
+                *address_len = mapped_len;
+                return 0;
+            }
+        }
         pt_virtualize_unix_sockaddr_out(socket, YES, address, address_len, caller_cap, caller);
     }
     return ret;
@@ -923,19 +1829,34 @@ void pt_network_notify_fd_close(int fd) {
     if (fd >= 0 && atomic_load_explicit(&s_unix_sock_tracked_count, memory_order_acquire) > 0) {
         pt_unix_forget_fd(fd);
     }
+    if (fd >= 0) {
+        pt_mitm_peer_forget_fd(fd);
+    }
 }
 
 static int pt_close(int fd) {
+    if (pt_is_hidden_fd(fd) && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        errno = EBADF;
+        return -1;
+    }
     pt_network_notify_fd_close(fd);
     return close(fd);
 }
 
 static int pt_close_nocancel(int fd) {
+    if (pt_is_hidden_fd(fd) && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        errno = EBADF;
+        return -1;
+    }
     pt_network_notify_fd_close(fd);
     return pt_orig_close_nocancel(fd);
 }
 
 static int pt_dup(int fd) {
+    if (pt_is_hidden_fd(fd) && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        errno = EBADF;
+        return -1;
+    }
     int ret = dup(fd);
     if (ret >= 0) {
         pt_network_notify_fd_dup(fd, ret);
@@ -944,6 +1865,11 @@ static int pt_dup(int fd) {
 }
 
 static int pt_dup2(int fd, int fd2) {
+    if ((pt_is_hidden_fd(fd) || pt_is_hidden_fd(fd2)) &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        errno = EBADF;
+        return -1;
+    }
     int ret = dup2(fd, fd2);
     if (ret >= 0) {
         pt_network_notify_fd_dup(fd, ret);
@@ -1706,8 +2632,15 @@ PT_INTERPOSE(pt_SCNetworkReachabilityCreateWithName, SCNetworkReachabilityCreate
 #pragma clang diagnostic pop
 PT_INTERPOSE(pt_bind, bind)
 PT_INTERPOSE(pt_connect, connect)
+PT_INTERPOSE(pt_connectx, connectx)
 PT_INTERPOSE(pt_accept, accept)
 PT_INTERPOSE(pt_sendto, sendto)
+PT_INTERPOSE(pt_sendmsg, sendmsg)
+PT_INTERPOSE_WEAK_NAMED(pt_sendmsg_nocancel, pt_orig_sendmsg_nocancel, "sendmsg$NOCANCEL")
+PT_INTERPOSE(pt_recvfrom, recvfrom)
+PT_INTERPOSE_WEAK_NAMED(pt_recvfrom_nocancel, pt_orig_recvfrom_nocancel, "recvfrom$NOCANCEL")
+PT_INTERPOSE(pt_recvmsg, recvmsg)
+PT_INTERPOSE_WEAK_NAMED(pt_recvmsg_nocancel, pt_orig_recvmsg_nocancel, "recvmsg$NOCANCEL")
 PT_INTERPOSE(pt_getsockname, getsockname)
 PT_INTERPOSE(pt_getpeername, getpeername)
 PT_INTERPOSE(pt_close, close)

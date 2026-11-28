@@ -342,16 +342,33 @@ static BOOL pt_get_spoofed_portrait_pixel_size(id screenOrNil,
     if (s <= 0.0) {
         s = 2.0;
     }
-    // Prefer the active device profile's physical portrait resolution (e.g. 1242x2688 @ 3x
-    // for iPhone12,5; 2048x2732 @ 2x for iPad13,8) for app-facing pixel queries under bypass.
-    // Logical point coordinate spaces (`UIScreen.bounds` / `fixedCoordinateSpace.bounds`) use
-    // `pt_resolve_effective_screen_bounds` so window layout and touch mapping stay aligned.
     double w = 0.0, h = 0.0, spoofS = s;
     pt_get_spoofed_screen_native_bounds(&w, &h, &spoofS);
+    BOOL hasProfileCeiling = (w > 0.0 && h > 0.0);
+    double hwMin = hasProfileCeiling ? MIN(w, h) : 0.0;
+    double hwMax = hasProfileCeiling ? MAX(w, h) : 0.0;
+
     CGRect b = pt_resolve_effective_screen_bounds(screenOrNil);
-    if (w > 0.0 && h > 0.0) {
-        double pMin = MIN(w, h);
-        double pMax = MAX(w, h);
+    // In non-strict bypass modes (resizable or custom window size), derive portrait pixel
+    // dimensions from `b * s` so `portrait(bounds) * scale == nativeBounds` holds whenever the
+    // logical window fits within the spoofed iOS hardware ceiling. If the window exceeds the
+    // physical device ceiling (e.g. 1920x1080 @ 2x on iPad13,8 2048x2732), fall through to the
+    // aspect-preserving profile-capped resolution so nativeBounds never exceeds the hardware max.
+    if (![[PlaySettings shared] strictEmulationMode] &&
+        b.size.width > 1.0 && b.size.height > 1.0) {
+        double minPt = MIN((double)b.size.width, (double)b.size.height);
+        double maxPt = MAX((double)b.size.width, (double)b.size.height);
+        double candMin = round(minPt * s);
+        double candMax = round(maxPt * s);
+        if (!hasProfileCeiling || (candMin <= hwMin && candMax <= hwMax)) {
+            if (out_px_w) *out_px_w = candMin;
+            if (out_px_h) *out_px_h = candMax;
+            return YES;
+        }
+    }
+    if (hasProfileCeiling) {
+        double pMin = hwMin;
+        double pMax = hwMax;
         if (b.size.width > 1.0 && b.size.height > 1.0) {
             double bMin = MIN((double)b.size.width, (double)b.size.height);
             double bMax = MAX((double)b.size.width, (double)b.size.height);
@@ -364,6 +381,18 @@ static BOOL pt_get_spoofed_portrait_pixel_size(id screenOrNil,
                     pMax = round(pMin * bAspect);
                 }
             }
+        }
+        double ptMin = round(pMin / s);
+        double ptMax = round(pMax / s);
+        if (ptMin >= 1.0 && ptMax >= 1.0) {
+            if (ptMin * s > hwMin) {
+                ptMin = floor(hwMin / s);
+            }
+            if (ptMax * s > hwMax) {
+                ptMax = floor(hwMax / s);
+            }
+            pMin = ptMin * s;
+            pMax = ptMax * s;
         }
         if (out_px_w) *out_px_w = pMin;
         if (out_px_h) *out_px_h = pMax;
@@ -880,7 +909,9 @@ static GCMouse *(*s_orig_GCMouse_current)(id, SEL) = NULL;
 static NSArray *(*s_orig_GCMouse_mice)(id, SEL) = NULL;
 
 static GCMouse *pt_hook_GCMouse_current(id self, SEL _cmd) {
-    if (pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+    if (([PTSafeMode isActive] ||
+         ![[PlaySettings shared] disableBuiltinMouse] ||
+         pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) &&
         s_orig_GCMouse_current != NULL) {
         return s_orig_GCMouse_current(self, _cmd);
     }
@@ -888,7 +919,9 @@ static GCMouse *pt_hook_GCMouse_current(id self, SEL _cmd) {
 }
 
 static NSArray *pt_hook_GCMouse_mice(id self, SEL _cmd) {
-    if (pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+    if (([PTSafeMode isActive] ||
+         ![[PlaySettings shared] disableBuiltinMouse] ||
+         pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) &&
         s_orig_GCMouse_mice != NULL) {
         return s_orig_GCMouse_mice(self, _cmd);
     }
@@ -1118,7 +1151,7 @@ static Class pt_resolve_frontboard_frame_class(Class sceneCoreCls, Class sceneCl
         pt_replace_instance_imp(objc_getClass("CMMotionManager"), @selector(init), (IMP)pt_hook_CMMotionManager_init, (IMP *)&s_orig_CMMotionManager_init);
     }
 
-    if ([[PlaySettings shared] disableBuiltinMouse]) {
+    if ([[PlaySettings shared] disableBuiltinMouse] && !safeModeActive && ![PTSafeMode isActive]) {
         pt_replace_class_imp(objc_getClass("GCMouse"), @selector(current), (IMP)pt_hook_GCMouse_current, (IMP *)&s_orig_GCMouse_current);
         pt_replace_class_imp(objc_getClass("GCMouse"), @selector(mice), (IMP)pt_hook_GCMouse_mice, (IMP *)&s_orig_GCMouse_mice);
     }

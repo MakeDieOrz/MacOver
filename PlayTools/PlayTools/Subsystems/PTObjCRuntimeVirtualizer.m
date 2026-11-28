@@ -14,9 +14,233 @@ extern const void *pt_orig_objc_getMetaClass(const char *name) __asm__("_objc_ge
 extern const void *pt_orig_objc_getRequiredClass(const char *name) __asm__("_objc_getRequiredClass");
 extern const void *pt_orig_NSClassFromString(CFStringRef aClassName) __asm__("_NSClassFromString");
 
+static void pt_try_sanitize_mach_header_page0_in_place(const struct mach_header *mh);
+
+static BOOL pt_is_hidden_playtools_class_name(const char *name) {
+    if (name == NULL || name[0] == '\0') {
+        return NO;
+    }
+    if (PT_HAS_PREFIX_LIT(name, "_TtC9PlayTools") ||
+        PT_HAS_PREFIX_LIT(name, "_TtCC9PlayTools") ||
+        PT_HAS_PREFIX_LIT(name, "_TtGC9PlayTools") ||
+        PT_HAS_PREFIX_LIT(name, "PlayTools.") ||
+        strstr(name, "9PlayTools") != NULL ||
+        strstr(name, "PlayTools") != NULL ||
+        strstr(name, "PlayCover") != NULL ||
+        strstr(name, "MacOver") != NULL ||
+        PT_HAS_PREFIX_LIT(name, "AKInterface") ||
+        PT_HAS_PREFIX_LIT(name, "PlayShadow") ||
+        PT_HAS_PREFIX_LIT(name, "PSSwizzleHooks") ||
+        PT_HAS_PREFIX_LIT(name, "PSNotifFilterProxy")) {
+        return YES;
+    }
+    return NO;
+}
+
+static BOOL pt_parse_agx_gpu_class_name(const char *name,
+                                        size_t *out_prefix_len,
+                                        const char **out_suffix) {
+    if (name == NULL || name[0] != 'A' || name[1] != 'G' || name[2] != 'X') {
+        return NO;
+    }
+    size_t prefix_len = 0;
+    const char *p = NULL;
+    if (name[3] == 'G' && isdigit((unsigned char)name[4])) {
+        prefix_len = 3; // "AGX"
+        p = name + 4;
+    } else if (strncmp(name + 3, "MetalG", 6) == 0 && isdigit((unsigned char)name[9])) {
+        prefix_len = 8; // "AGXMetal"
+        p = name + 9;
+    } else {
+        return NO;
+    }
+    while (isdigit((unsigned char)*p)) {
+        p++;
+    }
+    // Consume optional single-letter SoC variant suffix (e.g. G14GDevice -> 'G', G14S -> 'S')
+    // without eating the first letter of a CamelCase suffix (e.g. G14Device -> 'D' followed by 'e').
+    if (isupper((unsigned char)*p) && (p[1] == '\0' || isupper((unsigned char)p[1]))) {
+        p++;
+    }
+    if (out_prefix_len != NULL) {
+        *out_prefix_len = prefix_len;
+    }
+    if (out_suffix != NULL) {
+        *out_suffix = p;
+    }
+    return YES;
+}
+
+#define PT_AGX_VIRT_CACHE_CAP 1024U
+typedef struct {
+    Class cls;
+    const char *raw_name;
+    char *virt_name;
+    const char *gpu_gen;
+} pt_agx_virt_entry_t;
+
+static os_unfair_lock s_agx_virt_lock = OS_UNFAIR_LOCK_INIT;
+static pt_agx_virt_entry_t s_agx_virt_cache[PT_AGX_VIRT_CACHE_CAP];
+static size_t s_agx_virt_count = 0;
+
+static const char *pt_virtualize_agx_class_name(const char *raw_name, Class cls) {
+    size_t prefix_len = 0;
+    const char *suffix = NULL;
+    if (!pt_parse_agx_gpu_class_name(raw_name, &prefix_len, &suffix)) {
+        return raw_name;
+    }
+    const pt_device_profile_t *profile = pt_get_active_device_profile();
+    const char *gpu_gen = (profile != NULL && profile->gpu_gen != NULL && profile->gpu_gen[0] != '\0')
+        ? profile->gpu_gen
+        : "G13G";
+
+    os_unfair_lock_lock(&s_agx_virt_lock);
+    for (size_t i = 0; i < s_agx_virt_count; i++) {
+        if (((cls != Nil && s_agx_virt_cache[i].cls == cls) ||
+             (s_agx_virt_cache[i].raw_name != NULL && strcmp(s_agx_virt_cache[i].raw_name, raw_name) == 0)) &&
+            s_agx_virt_cache[i].gpu_gen != NULL && strcmp(s_agx_virt_cache[i].gpu_gen, gpu_gen) == 0) {
+            const char *res = s_agx_virt_cache[i].virt_name;
+            os_unfair_lock_unlock(&s_agx_virt_lock);
+            return res;
+        }
+    }
+    os_unfair_lock_unlock(&s_agx_virt_lock);
+
+    char built[256];
+    int n = snprintf(built, sizeof(built), "%.*s%s%s",
+                     (int)prefix_len, raw_name, gpu_gen, (suffix != NULL) ? suffix : "");
+    if (n <= 0 || (size_t)n >= sizeof(built)) {
+        return raw_name;
+    }
+    char *dup = strdup(built);
+    if (dup == NULL) {
+        return raw_name;
+    }
+    os_unfair_lock_lock(&s_agx_virt_lock);
+    for (size_t i = 0; i < s_agx_virt_count; i++) {
+        if (((cls != Nil && s_agx_virt_cache[i].cls == cls) ||
+             (s_agx_virt_cache[i].raw_name != NULL && strcmp(s_agx_virt_cache[i].raw_name, raw_name) == 0)) &&
+            s_agx_virt_cache[i].gpu_gen != NULL && strcmp(s_agx_virt_cache[i].gpu_gen, gpu_gen) == 0) {
+            const char *res = s_agx_virt_cache[i].virt_name;
+            os_unfair_lock_unlock(&s_agx_virt_lock);
+            free(dup);
+            return res;
+        }
+    }
+    if (s_agx_virt_count < PT_AGX_VIRT_CACHE_CAP) {
+        s_agx_virt_cache[s_agx_virt_count++] = (pt_agx_virt_entry_t){
+            .cls = cls,
+            .raw_name = raw_name,
+            .virt_name = dup,
+            .gpu_gen = gpu_gen,
+        };
+        os_unfair_lock_unlock(&s_agx_virt_lock);
+        return dup;
+    }
+    os_unfair_lock_unlock(&s_agx_virt_lock);
+    free(dup);
+    return raw_name;
+}
+
+static Class pt_lookup_virtualized_agx_class(const char *virt_name) {
+    if (virt_name == NULL || !pt_parse_agx_gpu_class_name(virt_name, NULL, NULL)) {
+        return Nil;
+    }
+    const pt_device_profile_t *profile = pt_get_active_device_profile();
+    const char *gpu_gen = (profile != NULL && profile->gpu_gen != NULL && profile->gpu_gen[0] != '\0')
+        ? profile->gpu_gen
+        : "G13G";
+    Class found = Nil;
+    os_unfair_lock_lock(&s_agx_virt_lock);
+    for (size_t i = 0; i < s_agx_virt_count; i++) {
+        if (s_agx_virt_cache[i].cls != Nil &&
+            s_agx_virt_cache[i].virt_name != NULL &&
+            s_agx_virt_cache[i].gpu_gen != NULL &&
+            strcmp(s_agx_virt_cache[i].gpu_gen, gpu_gen) == 0 &&
+            strcmp(s_agx_virt_cache[i].virt_name, virt_name) == 0) {
+            found = s_agx_virt_cache[i].cls;
+            break;
+        }
+    }
+    os_unfair_lock_unlock(&s_agx_virt_lock);
+    return found;
+}
+
+static Class pt_visible_superclass_for_hidden_class(Class cls) {
+    Class cur = (cls != Nil) ? class_getSuperclass(cls) : Nil;
+    for (int hops = 0; hops < 16 && cur != Nil; hops++) {
+        const char *sname = class_getName(cur);
+        if (sname != NULL &&
+            !pt_is_hidden_playtools_class_name(sname) &&
+            !pt_is_registered_hidden_class(sname) &&
+            !pt_is_class_in_hidden_image(cur)) {
+            return cur;
+        }
+        cur = class_getSuperclass(cur);
+    }
+    return [NSObject class];
+}
+
+static BOOL pt_is_hidden_objc_protocol_name_extended(const char *pname) {
+    if (pname == NULL || pname[0] == '\0') {
+        return NO;
+    }
+    if (pt_is_hidden_objc_protocol_name(pname)) {
+        return YES;
+    }
+    if (PT_HAS_PREFIX_LIT(pname, "_UINS") ||
+        PT_HAS_PREFIX_LIT(pname, "UINS") ||
+        PT_HAS_PREFIX_LIT(pname, "PSExternalSwizzle") ||
+        PT_HAS_PREFIX_LIT(pname, "PSPlayShadow") ||
+        PT_HAS_PREFIX_LIT(pname, "_TtP9PlayTools") ||
+        strstr(pname, "9PlayTools") != NULL ||
+        strstr(pname, "PlayTools") != NULL ||
+        strstr(pname, "PlayCover") != NULL ||
+        strstr(pname, "MacOver") != NULL ||
+        PT_HAS_PREFIX_LIT(pname, "NSAccessibility") ||
+        strcmp(pname, "NSTextInputClient") == 0 ||
+        strcmp(pname, "NSValidatedUserInterfaceItem") == 0 ||
+        strcmp(pname, "NSUserInterfaceValidations") == 0 ||
+        strcmp(pname, "NSMenuItemValidation") == 0 ||
+        strcmp(pname, "NSToolbarItemValidation") == 0 ||
+        strcmp(pname, "NSServicesMenuRequestor") == 0) {
+        return YES;
+    }
+    return NO;
+}
+
+static BOOL pt_should_hide_objc_protocol(__unsafe_unretained Protocol *proto, const char *pname) {
+    if (pname == NULL && proto != nil) {
+        pname = protocol_getName(proto);
+    }
+    if (pname != NULL && pt_is_hidden_objc_protocol_name_extended(pname)) {
+        return YES;
+    }
+    if (proto != nil) {
+        const void *paddr = (__bridge const void *)proto;
+        const struct mach_header *mh = dyld_image_header_containing_address(paddr);
+        if (mh != NULL && pt_is_hidden_dyld_image_header(mh)) {
+            return YES;
+        }
+        const char *img = dyld_image_path_containing_address(paddr);
+        if (img != NULL && pt_should_hide_dyld_image(img)) {
+            pt_ensure_bundle_path_map();
+            if (s_real_app_bundle_len == 0 ||
+                pt_match_prefix_modulo_private(img, s_real_app_bundle_dir, s_real_app_bundle_len) == NULL) {
+                return YES;
+            }
+        }
+    }
+    return NO;
+}
+
 static BOOL pt_should_hide_resolved_objc_class_with_image(const char *name, Class cls, const char *preloaded_img) {
     if (name != NULL && strcmp(name, "NSMenuToolbarItem") == 0) {
         return NO;
+    }
+    if (name != NULL && (pt_is_hidden_playtools_class_name(name) ||
+                         pt_parse_agx_gpu_class_name(name, NULL, NULL))) {
+        return YES;
     }
     if (preloaded_img != NULL) {
         if (pt_is_post13_7_hidden_framework_path(preloaded_img)) {
@@ -80,6 +304,14 @@ __attribute__((visibility("hidden"))) BOOL pt_should_hide_resolved_objc_class(co
 static const void *pt_objc_getClass(const char *name) {
     if (name != NULL && pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        Class agxVirt = pt_lookup_virtualized_agx_class(name);
+        if (agxVirt != Nil) {
+            return (__bridge const void *)agxVirt;
+        }
+        if (pt_is_hidden_playtools_class_name(name) || pt_parse_agx_gpu_class_name(name, NULL, NULL)) {
+            PT_DEBUG_TRACE("dyld", "hid class=%s", name);
+            return NULL;
+        }
         if (pt_is_hidden_objc_class(name)) {
             if (name[0] == 'N' && name[1] == 'S') {
                 const void *cls = pt_orig_objc_getClass(name);
@@ -103,6 +335,14 @@ static const void *pt_objc_getClass(const char *name) {
 static const void *pt_objc_lookUpClass(const char *name) {
     if (name != NULL && pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        Class agxVirt = pt_lookup_virtualized_agx_class(name);
+        if (agxVirt != Nil) {
+            return (__bridge const void *)agxVirt;
+        }
+        if (pt_is_hidden_playtools_class_name(name) || pt_parse_agx_gpu_class_name(name, NULL, NULL)) {
+            PT_DEBUG_TRACE("dyld", "hid class=%s", name);
+            return NULL;
+        }
         if (pt_is_hidden_objc_class(name)) {
             if (name[0] == 'N' && name[1] == 'S') {
                 const void *cls = pt_orig_objc_lookUpClass(name);
@@ -126,6 +366,14 @@ static const void *pt_objc_lookUpClass(const char *name) {
 static const void *pt_objc_getMetaClass(const char *name) {
     if (name != NULL && pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        Class agxVirt = pt_lookup_virtualized_agx_class(name);
+        if (agxVirt != Nil) {
+            return (__bridge const void *)object_getClass((id)agxVirt);
+        }
+        if (pt_is_hidden_playtools_class_name(name) || pt_parse_agx_gpu_class_name(name, NULL, NULL)) {
+            PT_DEBUG_TRACE("dyld", "hid metaclass=%s", name);
+            return NULL;
+        }
         if (pt_is_hidden_objc_class(name)) {
             if (name[0] == 'N' && name[1] == 'S') {
                 const void *cls = pt_orig_objc_lookUpClass(name);
@@ -148,6 +396,14 @@ static const void *pt_objc_getMetaClass(const char *name) {
 static const void *pt_objc_getRequiredClass(const char *name) {
     if (name != NULL && pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        Class agxVirt = pt_lookup_virtualized_agx_class(name);
+        if (agxVirt != Nil) {
+            return (__bridge const void *)agxVirt;
+        }
+        if (pt_is_hidden_playtools_class_name(name) || pt_parse_agx_gpu_class_name(name, NULL, NULL)) {
+            PT_DEBUG_TRACE("dyld", "hid required class=%s", name);
+            return NULL;
+        }
         if (pt_is_hidden_objc_class(name)) {
             if (name[0] == 'N' && name[1] == 'S') {
                 const void *cls = pt_orig_objc_lookUpClass(name);
@@ -167,31 +423,76 @@ static const void *pt_objc_getRequiredClass(const char *name) {
     return pt_orig_objc_getRequiredClass(name);
 }
 
-static const void *pt_NSClassFromString(CFStringRef aClassName) {
-    if (aClassName != NULL && pt_is_bypass_enabled()) {
-        char buf[256];
-        const char *cstr = CFStringGetCStringPtr(aClassName, kCFStringEncodingUTF8);
-        if (cstr == NULL && CFStringGetCString(aClassName, buf, sizeof(buf), kCFStringEncodingUTF8)) {
-            cstr = buf;
+static const char *pt_copy_cfstring_utf8_for_lookup(CFStringRef str,
+                                                    char stack_buf[256],
+                                                    char **out_heap_buf) {
+    *out_heap_buf = NULL;
+    if (str == NULL) {
+        return NULL;
+    }
+    const char *cstr = CFStringGetCStringPtr(str, kCFStringEncodingUTF8);
+    if (cstr != NULL) {
+        return cstr;
+    }
+    if (CFStringGetCString(str, stack_buf, 256, kCFStringEncodingUTF8)) {
+        return stack_buf;
+    }
+    CFIndex max_sz = CFStringGetMaximumSizeForEncoding(CFStringGetLength(str), kCFStringEncodingUTF8) + 1;
+    if (max_sz > 256 && max_sz <= 65536) {
+        char *heap = (char *)malloc((size_t)max_sz);
+        if (heap != NULL) {
+            if (CFStringGetCString(str, heap, max_sz, kCFStringEncodingUTF8)) {
+                *out_heap_buf = heap;
+                return heap;
+            }
+            free(heap);
         }
-        if (cstr != NULL && !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    }
+    return NULL;
+}
+
+static const void *pt_NSClassFromString(CFStringRef aClassName) {
+    if (aClassName != NULL && pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        char buf[256];
+        char *heap_buf = NULL;
+        const char *cstr = pt_copy_cfstring_utf8_for_lookup(aClassName, buf, &heap_buf);
+        if (cstr != NULL) {
+            Class agxVirt = pt_lookup_virtualized_agx_class(cstr);
+            if (agxVirt != Nil) {
+                free(heap_buf);
+                return (__bridge const void *)agxVirt;
+            }
+            if (pt_is_hidden_playtools_class_name(cstr) || pt_parse_agx_gpu_class_name(cstr, NULL, NULL)) {
+                PT_DEBUG_TRACE("dyld", "hid class=%s", cstr);
+                free(heap_buf);
+                return NULL;
+            }
             if (pt_is_hidden_objc_class(cstr)) {
                 if (cstr[0] == 'N' && cstr[1] == 'S') {
                     const void *cls = pt_orig_NSClassFromString(aClassName);
                     if (cls != NULL && !pt_should_hide_resolved_objc_class(cstr, (__bridge Class)cls)) {
+                        free(heap_buf);
                         return cls;
                     }
                 }
                 PT_DEBUG_TRACE("dyld", "hid class=%s", cstr);
+                free(heap_buf);
                 return NULL;
             }
-            const void *cls = pt_orig_NSClassFromString(aClassName);
-            if (cls != NULL && pt_should_hide_resolved_objc_class(cstr, (__bridge Class)cls)) {
-                PT_DEBUG_TRACE("dyld", "hid resolved class=%s", cstr);
-                return NULL;
-            }
-            return cls;
         }
+        const void *cls = pt_orig_NSClassFromString(aClassName);
+        if (cls != NULL) {
+            const char *resolved_name = class_getName((__bridge Class)cls);
+            const char *check_name = (resolved_name != NULL && resolved_name[0] != '\0') ? resolved_name : cstr;
+            if (pt_should_hide_resolved_objc_class(check_name, (__bridge Class)cls)) {
+                PT_DEBUG_TRACE("dyld", "hid resolved class=%s", check_name != NULL ? check_name : "(null)");
+                free(heap_buf);
+                return NULL;
+            }
+        }
+        free(heap_buf);
+        return cls;
     }
     return pt_orig_NSClassFromString(aClassName);
 }
@@ -256,6 +557,13 @@ static const char **pt_objc_copyImageNames(unsigned int *outCount) {
             }
         }
         free((void *)ht);
+        if (writeIdx == 0) {
+            free((void *)names);
+            if (outCount != NULL) {
+                *outCount = 0;
+            }
+            return NULL;
+        }
         names[writeIdx] = NULL;
         if (outCount != NULL) {
             *outCount = writeIdx;
@@ -290,33 +598,42 @@ static const char *pt_class_getImageName(Class cls) {
     return class_getImageName(cls);
 }
 
-static Protocol *pt_objc_getProtocol(const char *name) {
+static const void *pt_objc_getProtocol(const char *name) {
     if (name == NULL) {
         return NULL;
     }
-    if (pt_is_hidden_objc_protocol_name(name) &&
-        pt_is_bypass_enabled() &&
-        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+    BOOL appCaller = (pt_is_bypass_enabled() &&
+                      !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
+    if (appCaller && pt_is_hidden_objc_protocol_name_extended(name)) {
         return NULL;
     }
-    return objc_getProtocol(name);
+    Protocol * __unsafe_unretained proto = objc_getProtocol(name);
+    if (appCaller && proto != nil && pt_should_hide_objc_protocol(proto, name)) {
+        return NULL;
+    }
+    return (__bridge const void *)proto;
 }
 
-extern Protocol *pt_orig_NSProtocolFromString(NSString *namestr) __asm__("_NSProtocolFromString");
+extern const void *pt_orig_NSProtocolFromString(__unsafe_unretained NSString *namestr) __asm__("_NSProtocolFromString");
 
-static Protocol *pt_NSProtocolFromString(NSString *namestr) {
-    if (namestr != nil && pt_is_bypass_enabled()) {
+static const void *pt_NSProtocolFromString(__unsafe_unretained NSString *namestr) {
+    if (namestr != nil && pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         char buf[256];
-        const char *cstr = CFStringGetCStringPtr((__bridge CFStringRef)namestr, kCFStringEncodingUTF8);
-        if (cstr == NULL &&
-            CFStringGetCString((__bridge CFStringRef)namestr, buf, sizeof(buf), kCFStringEncodingUTF8)) {
-            cstr = buf;
+        char *heap_buf = NULL;
+        const char *cstr = pt_copy_cfstring_utf8_for_lookup((__bridge CFStringRef)namestr, buf, &heap_buf);
+        if (cstr != NULL && pt_is_hidden_objc_protocol_name_extended(cstr)) {
+            free(heap_buf);
+            return NULL;
         }
-        if (cstr != NULL &&
-            pt_is_hidden_objc_protocol_name(cstr) &&
-            !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-            return nil;
+        const void *protoPtr = pt_orig_NSProtocolFromString(namestr);
+        Protocol * __unsafe_unretained proto = (__bridge Protocol *)protoPtr;
+        if (proto != nil && pt_should_hide_objc_protocol(proto, cstr)) {
+            free(heap_buf);
+            return NULL;
         }
+        free(heap_buf);
+        return protoPtr;
     }
     return pt_orig_NSProtocolFromString(namestr);
 }
@@ -328,12 +645,18 @@ static Protocol * __unsafe_unretained *pt_objc_copyProtocolList(unsigned int *ou
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         unsigned int writeIdx = 0;
         for (unsigned int i = 0; i < count; i++) {
-            Protocol *p = protos[i];
-            const char *pname = (p != NULL) ? protocol_getName(p) : NULL;
-            if (pname != NULL && pt_is_hidden_objc_protocol_name(pname)) {
+            Protocol * __unsafe_unretained p = protos[i];
+            if (p != nil && pt_should_hide_objc_protocol(p, NULL)) {
                 continue;
             }
             protos[writeIdx++] = p;
+        }
+        if (writeIdx == 0) {
+            free(protos);
+            if (outCount != NULL) {
+                *outCount = 0;
+            }
+            return NULL;
         }
         protos[writeIdx] = NULL;
         if (outCount != NULL) {
@@ -376,6 +699,7 @@ static BOOL pt_is_hidden_mtl_device_selector_name(const char *sname, BOOL includ
             strcmp(sname, "supportsRenderDynamicLibraries") == 0 ||
             strcmp(sname, "supportsPullModelInterpolation") == 0 ||
             strcmp(sname, "supportsShaderBarycentricCoordinates") == 0 ||
+            strcmp(sname, "areBarycentricCoordsSupported") == 0 ||
             strcmp(sname, "supportsQueryTextureLOD") == 0 ||
             strcmp(sname, "supportsCounterSampling:") == 0 ||
             strcmp(sname, "counterSets") == 0 ||
@@ -415,9 +739,52 @@ static BOOL pt_is_hidden_mtl_device_property_name(const char *pname, BOOL includ
             strcmp(pname, "supportsFunctionPointersFromRender") == 0 ||
             strcmp(pname, "supportsPullModelInterpolation") == 0 ||
             strcmp(pname, "supportsShaderBarycentricCoordinates") == 0 ||
+            strcmp(pname, "barycentricCoordsSupported") == 0 ||
             strcmp(pname, "supportsQueryTextureLOD") == 0 ||
             strcmp(pname, "counterSets") == 0 ||
             strcmp(pname, "sparseTileSizeInBytes") == 0) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static BOOL pt_is_hidden_protocol_property_name(const char *protoName, const char *pname) {
+    if (pname == NULL || pname[0] == '\0') {
+        return NO;
+    }
+    BOOL compat13 = pt_is_compat13_7_active();
+    if (strstr(pname, "macCatalyst") != NULL ||
+        strstr(pname, "iOSAppOnMac") != NULL ||
+        strstr(pname, "iOSAppOnVision") != NULL) {
+        return YES;
+    }
+    if (protoName == NULL || protoName[0] == '\0') {
+        return NO;
+    }
+    if (strcmp(protoName, "MTLDevice") == 0) {
+        return pt_is_hidden_mtl_device_property_name(pname, compat13);
+    }
+    if (strstr(protoName, "WindowScene") != NULL) {
+        if (strcmp(pname, "titlebar") == 0) {
+            return YES;
+        }
+        if (compat13 && strcmp(pname, "sizeRestrictions") == 0) {
+            return YES;
+        }
+    }
+    if (strstr(protoName, "ProcessInfo") != NULL) {
+        if (strcmp(pname, "macCatalystVersion") == 0 ||
+            strcmp(pname, "automaticTerminationSupportEnabled") == 0 ||
+            strcmp(pname, "userName") == 0 ||
+            strcmp(pname, "fullUserName") == 0) {
+            return YES;
+        }
+    }
+    if (compat13 && strstr(protoName, "Control") != NULL) {
+        if (strcmp(pname, "showsMenuAsPrimaryAction") == 0 ||
+            strcmp(pname, "contextMenuInteraction") == 0 ||
+            strcmp(pname, "contextMenuInteractionEnabled") == 0) {
             return YES;
         }
     }
@@ -437,12 +804,18 @@ static Protocol * __unsafe_unretained *pt_class_copyProtocolList(Class cls, unsi
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         unsigned int writeIdx = 0;
         for (unsigned int i = 0; i < count; i++) {
-            Protocol *p = protos[i];
-            const char *pname = (p != NULL) ? protocol_getName(p) : NULL;
-            if (pname != NULL && pt_is_hidden_objc_protocol_name(pname)) {
+            Protocol * __unsafe_unretained p = protos[i];
+            if (p != nil && pt_should_hide_objc_protocol(p, NULL)) {
                 continue;
             }
             protos[writeIdx++] = p;
+        }
+        if (writeIdx == 0) {
+            free(protos);
+            if (outCount != NULL) {
+                *outCount = 0;
+            }
+            return NULL;
         }
         protos[writeIdx] = NULL;
         if (outCount != NULL) {
@@ -456,59 +829,60 @@ static Protocol * __unsafe_unretained *pt_class_copyProtocolList(Class cls, unsi
     return protos;
 }
 
-static BOOL pt_class_conformsToProtocol(Class cls, Protocol *protocol) {
+static BOOL pt_class_conformsToProtocol(Class cls, __unsafe_unretained Protocol *protocol) {
     if (cls == Nil || protocol == nil) {
         return NO;
     }
     if (pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        const char *pname = protocol_getName(protocol);
-        if (pname != NULL && pt_is_hidden_objc_protocol_name(pname)) {
+        if (pt_should_hide_objc_protocol(protocol, NULL)) {
             return NO;
         }
     }
     return class_conformsToProtocol(cls, protocol);
 }
 
-static BOOL pt_protocol_conformsToProtocol(Protocol *proto, Protocol *other) {
+static BOOL pt_protocol_conformsToProtocol(__unsafe_unretained Protocol *proto, __unsafe_unretained Protocol *other) {
     if (proto == nil || other == nil) {
         return NO;
     }
     if (pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        const char *n1 = protocol_getName(proto);
-        const char *n2 = protocol_getName(other);
-        if ((n1 != NULL && pt_is_hidden_objc_protocol_name(n1)) ||
-            (n2 != NULL && pt_is_hidden_objc_protocol_name(n2))) {
+        if (pt_should_hide_objc_protocol(proto, NULL) ||
+            pt_should_hide_objc_protocol(other, NULL)) {
             return NO;
         }
     }
     return protocol_conformsToProtocol(proto, other);
 }
 
-static objc_property_t *pt_filter_protocol_properties(Protocol *proto,
+static objc_property_t *pt_filter_protocol_properties(__unsafe_unretained Protocol *proto,
                                                       objc_property_t *props,
                                                       unsigned int count,
                                                       unsigned int *outCount) {
     if (props != NULL && count > 0) {
         const char *protoName = protocol_getName(proto);
-        if (protoName != NULL && strcmp(protoName, "MTLDevice") == 0) {
-            BOOL compat13 = pt_is_compat13_7_active();
-            unsigned int writeIdx = 0;
-            for (unsigned int i = 0; i < count; i++) {
-                objc_property_t p = props[i];
-                const char *pname = (p != NULL) ? property_getName(p) : NULL;
-                if (pname != NULL && pt_is_hidden_mtl_device_property_name(pname, compat13)) {
-                    continue;
-                }
-                props[writeIdx++] = p;
+        unsigned int writeIdx = 0;
+        for (unsigned int i = 0; i < count; i++) {
+            objc_property_t p = props[i];
+            const char *pname = (p != NULL) ? property_getName(p) : NULL;
+            if (pname != NULL && pt_is_hidden_protocol_property_name(protoName, pname)) {
+                continue;
             }
-            props[writeIdx] = NULL;
-            if (outCount != NULL) {
-                *outCount = writeIdx;
-            }
-            return props;
+            props[writeIdx++] = p;
         }
+        if (writeIdx == 0) {
+            free(props);
+            if (outCount != NULL) {
+                *outCount = 0;
+            }
+            return NULL;
+        }
+        props[writeIdx] = NULL;
+        if (outCount != NULL) {
+            *outCount = writeIdx;
+        }
+        return props;
     }
     if (outCount != NULL) {
         *outCount = count;
@@ -516,7 +890,7 @@ static objc_property_t *pt_filter_protocol_properties(Protocol *proto,
     return props;
 }
 
-static objc_property_t *pt_protocol_copyPropertyList(Protocol *proto, unsigned int *outCount) {
+static objc_property_t *pt_protocol_copyPropertyList(__unsafe_unretained Protocol *proto, unsigned int *outCount) {
     if (proto == nil) {
         if (outCount != NULL) {
             *outCount = 0;
@@ -525,8 +899,7 @@ static objc_property_t *pt_protocol_copyPropertyList(Protocol *proto, unsigned i
     }
     const void *caller = __builtin_return_address(0);
     BOOL appCaller = (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller));
-    const char *protoName = appCaller ? protocol_getName(proto) : NULL;
-    if (appCaller && protoName != NULL && pt_is_hidden_objc_protocol_name(protoName)) {
+    if (appCaller && pt_should_hide_objc_protocol(proto, NULL)) {
         if (outCount != NULL) {
             *outCount = 0;
         }
@@ -543,13 +916,13 @@ static objc_property_t *pt_protocol_copyPropertyList(Protocol *proto, unsigned i
     return props;
 }
 
-extern objc_property_t *pt_orig_protocol_copyPropertyList2(Protocol *proto,
+extern objc_property_t *pt_orig_protocol_copyPropertyList2(__unsafe_unretained Protocol *proto,
                                                            unsigned int *outCount,
                                                            BOOL isRequiredProperty,
                                                            BOOL isInstanceProperty)
     __asm__("_protocol_copyPropertyList2") __attribute__((weak_import));
 
-static objc_property_t *pt_protocol_copyPropertyList2(Protocol *proto,
+static objc_property_t *pt_protocol_copyPropertyList2(__unsafe_unretained Protocol *proto,
                                                       unsigned int *outCount,
                                                       BOOL isRequiredProperty,
                                                       BOOL isInstanceProperty) {
@@ -561,8 +934,7 @@ static objc_property_t *pt_protocol_copyPropertyList2(Protocol *proto,
     }
     const void *caller = __builtin_return_address(0);
     BOOL appCaller = (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller));
-    const char *protoName = appCaller ? protocol_getName(proto) : NULL;
-    if (appCaller && protoName != NULL && pt_is_hidden_objc_protocol_name(protoName)) {
+    if (appCaller && pt_should_hide_objc_protocol(proto, NULL)) {
         if (outCount != NULL) {
             *outCount = 0;
         }
@@ -570,7 +942,7 @@ static objc_property_t *pt_protocol_copyPropertyList2(Protocol *proto,
     }
     unsigned int count = 0;
     objc_property_t *props = pt_orig_protocol_copyPropertyList2(proto, &count, isRequiredProperty, isInstanceProperty);
-    if (appCaller && isInstanceProperty) {
+    if (appCaller) {
         return pt_filter_protocol_properties(proto, props, count, outCount);
     }
     if (outCount != NULL) {
@@ -579,7 +951,7 @@ static objc_property_t *pt_protocol_copyPropertyList2(Protocol *proto,
     return props;
 }
 
-static objc_property_t pt_protocol_getProperty(Protocol *proto,
+static objc_property_t pt_protocol_getProperty(__unsafe_unretained Protocol *proto,
                                                const char *name,
                                                BOOL isRequiredProperty,
                                                BOOL isInstanceProperty) {
@@ -589,18 +961,17 @@ static objc_property_t pt_protocol_getProperty(Protocol *proto,
     const void *caller = __builtin_return_address(0);
     if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller)) {
         const char *protoName = protocol_getName(proto);
-        if (protoName != NULL && pt_is_hidden_objc_protocol_name(protoName)) {
+        if (pt_should_hide_objc_protocol(proto, protoName)) {
             return NULL;
         }
-        if (isInstanceProperty && protoName != NULL && strcmp(protoName, "MTLDevice") == 0 &&
-            pt_is_hidden_mtl_device_property_name(name, pt_is_compat13_7_active())) {
+        if (pt_is_hidden_protocol_property_name(protoName, name)) {
             return NULL;
         }
     }
     return protocol_getProperty(proto, name, isRequiredProperty, isInstanceProperty);
 }
 
-static struct objc_method_description pt_protocol_getMethodDescription(Protocol *proto,
+static struct objc_method_description pt_protocol_getMethodDescription(__unsafe_unretained Protocol *proto,
                                                                        SEL aSel,
                                                                        BOOL isRequiredMethod,
                                                                        BOOL isInstanceMethod) {
@@ -611,7 +982,7 @@ static struct objc_method_description pt_protocol_getMethodDescription(Protocol 
     const void *caller = __builtin_return_address(0);
     if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller)) {
         const char *protoName = protocol_getName(proto);
-        if (protoName != NULL && pt_is_hidden_objc_protocol_name(protoName)) {
+        if (pt_should_hide_objc_protocol(proto, protoName)) {
             return empty;
         }
         if (isInstanceMethod && protoName != NULL && strcmp(protoName, "MTLDevice") == 0) {
@@ -624,7 +995,7 @@ static struct objc_method_description pt_protocol_getMethodDescription(Protocol 
     return protocol_getMethodDescription(proto, aSel, isRequiredMethod, isInstanceMethod);
 }
 
-static Protocol * __unsafe_unretained *pt_protocol_copyProtocolList(Protocol *proto, unsigned int *outCount) {
+static Protocol * __unsafe_unretained *pt_protocol_copyProtocolList(__unsafe_unretained Protocol *proto, unsigned int *outCount) {
     if (proto == nil) {
         if (outCount != NULL) {
             *outCount = 0;
@@ -633,26 +1004,29 @@ static Protocol * __unsafe_unretained *pt_protocol_copyProtocolList(Protocol *pr
     }
     const void *caller = __builtin_return_address(0);
     BOOL appCaller = (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller));
-    if (appCaller) {
-        const char *protoName = protocol_getName(proto);
-        if (protoName != NULL && pt_is_hidden_objc_protocol_name(protoName)) {
-            if (outCount != NULL) {
-                *outCount = 0;
-            }
-            return NULL;
+    if (appCaller && pt_should_hide_objc_protocol(proto, NULL)) {
+        if (outCount != NULL) {
+            *outCount = 0;
         }
+        return NULL;
     }
     unsigned int count = 0;
     Protocol * __unsafe_unretained *protos = protocol_copyProtocolList(proto, &count);
     if (appCaller && protos != NULL && count > 0) {
         unsigned int writeIdx = 0;
         for (unsigned int i = 0; i < count; i++) {
-            Protocol *p = protos[i];
-            const char *pname = (p != NULL) ? protocol_getName(p) : NULL;
-            if (pname != NULL && pt_is_hidden_objc_protocol_name(pname)) {
+            Protocol * __unsafe_unretained p = protos[i];
+            if (p != nil && pt_should_hide_objc_protocol(p, NULL)) {
                 continue;
             }
             protos[writeIdx++] = p;
+        }
+        if (writeIdx == 0) {
+            free(protos);
+            if (outCount != NULL) {
+                *outCount = 0;
+            }
+            return NULL;
         }
         protos[writeIdx] = NULL;
         if (outCount != NULL) {
@@ -666,7 +1040,7 @@ static Protocol * __unsafe_unretained *pt_protocol_copyProtocolList(Protocol *pr
     return protos;
 }
 
-static struct objc_method_description *pt_protocol_copyMethodDescriptionList(Protocol *proto,
+static struct objc_method_description *pt_protocol_copyMethodDescriptionList(__unsafe_unretained Protocol *proto,
                                                                              BOOL isRequiredMethod,
                                                                              BOOL isInstanceMethod,
                                                                              unsigned int *outCount) {
@@ -679,7 +1053,7 @@ static struct objc_method_description *pt_protocol_copyMethodDescriptionList(Pro
     const void *caller = __builtin_return_address(0);
     BOOL appCaller = (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller));
     const char *protoName = appCaller ? protocol_getName(proto) : NULL;
-    if (appCaller && protoName != NULL && pt_is_hidden_objc_protocol_name(protoName)) {
+    if (appCaller && pt_should_hide_objc_protocol(proto, protoName)) {
         if (outCount != NULL) {
             *outCount = 0;
         }
@@ -773,12 +1147,16 @@ __attribute__((noinline))
 static void pt_dyld_for_each_objc_protocol_filtered(
     const char *protocolName,
     void (^callback)(void *protocolPtr, bool isLoaded, bool *stop)) {
-    if (protocolName != NULL && pt_is_hidden_objc_protocol_name(protocolName)) {
+    if (protocolName != NULL && pt_is_hidden_objc_protocol_name_extended(protocolName)) {
         return;
     }
     pt_orig_sym_dyld_for_each_objc_protocol(protocolName, ^(void *protocolPtr, bool isLoaded, bool *stop) {
         const char *img = (protocolPtr != NULL) ? dyld_image_path_containing_address(protocolPtr) : NULL;
         if (img != NULL && pt_should_hide_dyld_image(img)) {
+            return;
+        }
+        if (isLoaded && protocolPtr != NULL &&
+            pt_should_hide_objc_protocol((__bridge Protocol *)protocolPtr, protocolName)) {
             return;
         }
         callback(protocolPtr, isLoaded, stop);
@@ -825,11 +1203,8 @@ static void pt_objc_enumerateClasses_filtered(
             return;
         }
     }
-    if (conformingTo != nil) {
-        const char *pname = protocol_getName(conformingTo);
-        if (pname != NULL && pt_is_hidden_objc_protocol_name(pname)) {
-            return;
-        }
+    if (conformingTo != nil && pt_should_hide_objc_protocol(conformingTo, NULL)) {
+        return;
     }
     if (subclassing != Nil && pt_should_hide_resolved_objc_class(class_getName(subclassing), subclassing)) {
         return;
@@ -1056,6 +1431,10 @@ static const char **pt_objc_copy_merged_class_names_for_path(const char *image, 
 
     if (names != NULL) {
         unsigned int writeIdx = pt_filter_class_names_in_place(names, count);
+        if (writeIdx == 0) {
+            free((void *)names);
+            names = NULL;
+        }
         if (outCount != NULL) {
             *outCount = writeIdx;
         }
@@ -1203,7 +1582,12 @@ static Class *pt_objc_copyClassesForImage(const char *image, unsigned int *outCo
                 }
                 classes[writeIdx++] = cls;
             }
-            classes[writeIdx] = Nil;
+            if (writeIdx == 0) {
+                free(classes);
+                classes = NULL;
+            } else {
+                classes[writeIdx] = Nil;
+            }
             if (outCount != NULL) {
                 *outCount = writeIdx;
             }
@@ -1237,6 +1621,13 @@ static Class *pt_objc_copyRealizedClassList(unsigned int *outCount) {
             }
             classes[writeIdx++] = cls;
         }
+        if (writeIdx == 0) {
+            free(classes);
+            if (outCount != NULL) {
+                *outCount = 0;
+            }
+            return NULL;
+        }
         classes[writeIdx] = Nil;
         if (outCount != NULL) {
             *outCount = writeIdx;
@@ -1257,7 +1648,7 @@ static const struct mach_header **pt_objc_copyImageHeaders(unsigned int *outCoun
         if (outCount != NULL) {
             *outCount = 0;
         }
-        return (const struct mach_header **)calloc(1, sizeof(const struct mach_header *));
+        return NULL;
     }
     const void *caller = __builtin_return_address(0);
     if (pt_is_bypass_enabled() && !pt_is_effective_system_or_playtools_caller(caller)) {
@@ -1265,7 +1656,7 @@ static const struct mach_header **pt_objc_copyImageHeaders(unsigned int *outCoun
             if (outCount != NULL) {
                 *outCount = 0;
             }
-            return (const struct mach_header **)calloc(1, sizeof(const struct mach_header *));
+            return NULL;
         }
         unsigned int count = 0;
         const struct mach_header **headers = pt_orig_objc_copyImageHeaders(&count);
@@ -1280,9 +1671,15 @@ static const struct mach_header **pt_objc_copyImageHeaders(unsigned int *outCoun
                 if (img != NULL && pt_should_hide_dyld_image(img)) {
                     continue;
                 }
+                pt_try_sanitize_mach_header_page0_in_place(mh);
                 headers[writeIdx++] = mh;
             }
-            headers[writeIdx] = NULL;
+            if (writeIdx == 0) {
+                free(headers);
+                headers = NULL;
+            } else {
+                headers[writeIdx] = NULL;
+            }
             if (outCount != NULL) {
                 *outCount = writeIdx;
             }
@@ -1334,6 +1731,10 @@ static const char **pt_objc_copyClassNamesForImageHeader(const void *mh, unsigne
         const char **names = pt_orig_objc_copyClassNamesForImageHeader((const void *)real_mh, &count);
         if (names != NULL) {
             unsigned int writeIdx = pt_filter_class_names_in_place(names, count);
+            if (writeIdx == 0) {
+                free((void *)names);
+                names = NULL;
+            }
             if (outCount != NULL) {
                 *outCount = writeIdx;
             }
@@ -1357,6 +1758,13 @@ static Class *pt_objc_copy_class_list_for_caller(unsigned int *outCount, const v
                 continue;
             }
             classes[writeIdx++] = cls;
+        }
+        if (writeIdx == 0) {
+            free(classes);
+            if (outCount != NULL) {
+                *outCount = 0;
+            }
+            return NULL;
         }
         classes[writeIdx] = Nil;
         if (outCount != NULL) {
@@ -1507,6 +1915,10 @@ static BOOL pt_is_hidden_post13_7_method(Class cls, SEL sel, BOOL isClassMethod)
             strcmp(sname, "setPreserveInvariance:") == 0) {
             return pt_class_is_or_inherits_from(cls, "MTLCompileOptions");
         }
+        if (strcmp(sname, "preferredFrameRateRange") == 0 ||
+            strcmp(sname, "setPreferredFrameRateRange:") == 0) {
+            return pt_class_is_or_inherits_from(cls, "CADisplayLink");
+        }
     } else {
         if (strcmp(sname, "buttonWithType:primaryAction:") == 0 ||
             strcmp(sname, "systemButtonWithPrimaryAction:") == 0) {
@@ -1580,6 +1992,9 @@ static BOOL pt_is_hidden_objc_property(Class cls, const char *pname) {
     if (strcmp(pname, "libraryType") == 0 ||
         strcmp(pname, "preserveInvariance") == 0) {
         return pt_class_is_or_inherits_from(cls, "MTLCompileOptions");
+    }
+    if (strcmp(pname, "preferredFrameRateRange") == 0) {
+        return pt_class_is_or_inherits_from(cls, "CADisplayLink");
     }
     return NO;
 }
@@ -1707,9 +2122,9 @@ static IMP pt_class_getMethodImplementation(Class cls, SEL name) {
     return imp;
 }
 
-extern IMP pt_orig_object_getMethodImplementation(id obj, SEL name) __asm__("_object_getMethodImplementation") __attribute__((weak_import));
+extern IMP pt_orig_object_getMethodImplementation(__unsafe_unretained id obj, SEL name) __asm__("_object_getMethodImplementation") __attribute__((weak_import));
 
-static IMP pt_object_getMethodImplementation(id obj, SEL name) {
+static IMP pt_object_getMethodImplementation(__unsafe_unretained id obj, SEL name) {
     if (obj == nil || !pt_is_valid_user_pointer((const void *)name)) {
         return (&pt_orig_object_getMethodImplementation != NULL) ? pt_orig_object_getMethodImplementation(obj, name) : NULL;
     }
@@ -1765,6 +2180,13 @@ static Method *pt_class_copyMethodList(Class cls, unsigned int *outCount) {
             }
             methods[writeIdx++] = m;
         }
+        if (writeIdx == 0) {
+            free(methods);
+            if (outCount != NULL) {
+                *outCount = 0;
+            }
+            return NULL;
+        }
         methods[writeIdx] = NULL;
         if (outCount != NULL) {
             *outCount = writeIdx;
@@ -1775,6 +2197,291 @@ static Method *pt_class_copyMethodList(Class cls, unsigned int *outCount) {
         *outCount = count;
     }
     return methods;
+}
+
+#define PT_PROTECTED_METHOD_CAP 1024U
+typedef struct {
+    Method method;
+    IMP hook_imp;
+    IMP orig_imp;
+} pt_protected_method_entry_t;
+
+static os_unfair_lock s_protected_methods_lock = OS_UNFAIR_LOCK_INIT;
+static pt_protected_method_entry_t s_protected_methods[PT_PROTECTED_METHOD_CAP];
+static size_t s_protected_methods_count = 0;
+
+static void pt_record_protected_method(Method m, IMP hook_imp, IMP orig_imp) {
+    if (m == NULL || hook_imp == NULL || orig_imp == NULL) {
+        return;
+    }
+    os_unfair_lock_lock(&s_protected_methods_lock);
+    for (size_t i = 0; i < s_protected_methods_count; i++) {
+        if (s_protected_methods[i].method == m) {
+            s_protected_methods[i].hook_imp = hook_imp;
+            s_protected_methods[i].orig_imp = orig_imp;
+            os_unfair_lock_unlock(&s_protected_methods_lock);
+            return;
+        }
+    }
+    if (s_protected_methods_count < PT_PROTECTED_METHOD_CAP) {
+        s_protected_methods[s_protected_methods_count++] = (pt_protected_method_entry_t){
+            .method = m,
+            .hook_imp = hook_imp,
+            .orig_imp = orig_imp,
+        };
+    }
+    os_unfair_lock_unlock(&s_protected_methods_lock);
+}
+
+static BOOL pt_lookup_protected_method(Method m, IMP *out_hook, IMP *out_orig) {
+    if (m == NULL) {
+        return NO;
+    }
+    BOOL found = NO;
+    os_unfair_lock_lock(&s_protected_methods_lock);
+    for (size_t i = 0; i < s_protected_methods_count; i++) {
+        if (s_protected_methods[i].method == m) {
+            if (out_hook != NULL) *out_hook = s_protected_methods[i].hook_imp;
+            if (out_orig != NULL) *out_orig = s_protected_methods[i].orig_imp;
+            found = YES;
+            break;
+        }
+    }
+    os_unfair_lock_unlock(&s_protected_methods_lock);
+    return found;
+}
+
+static IMP pt_method_setImplementation(Method m, IMP imp) {
+    if (m == NULL || imp == NULL) {
+        return NULL;
+    }
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        SEL sel = method_getName(m);
+        if (sel != NULL && pt_is_playtools_injected_method(m, sel)) {
+            return NULL;
+        }
+        IMP cur = method_getImplementation(m);
+        const void *cloaked_orig = (cur != NULL) ? pt_lookup_swizzled_raw_orig_imp((const void *)cur) : NULL;
+        if (cloaked_orig != NULL) {
+            pt_record_protected_method(m, cur, (IMP)cloaked_orig);
+            if (pt_strip_code_ptr((const void *)imp) == pt_strip_code_ptr(cloaked_orig)) {
+                return (IMP)cloaked_orig;
+            }
+            (void)method_setImplementation(m, imp);
+            return cur;
+        }
+        IMP saved_hook = NULL;
+        IMP saved_orig = NULL;
+        if (pt_lookup_protected_method(m, &saved_hook, &saved_orig) &&
+            saved_hook != NULL &&
+            pt_strip_code_ptr((const void *)imp) == pt_strip_code_ptr((const void *)saved_orig)) {
+            return method_setImplementation(m, saved_hook);
+        }
+    }
+    return method_setImplementation(m, imp);
+}
+
+static IMP pt_class_replaceMethod(Class cls, SEL name, IMP imp, const char *types) {
+    if (imp == NULL ||
+        !pt_is_valid_user_pointer((__bridge const void *)cls) ||
+        !pt_is_valid_user_pointer((const void *)name)) {
+        return NULL;
+    }
+    if (pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        Method m = class_getInstanceMethod(cls, name);
+        if (m != NULL && pt_is_playtools_injected_method(m, name)) {
+            return NULL;
+        }
+        Class superCls = class_getSuperclass(cls);
+        Method superM = (superCls != Nil) ? class_getInstanceMethod(superCls, name) : NULL;
+        if (m != NULL && m != superM) {
+            IMP cur = method_getImplementation(m);
+            const void *cloaked_orig = (cur != NULL) ? pt_lookup_swizzled_raw_orig_imp((const void *)cur) : NULL;
+            if (cloaked_orig != NULL) {
+                pt_record_protected_method(m, cur, (IMP)cloaked_orig);
+                if (pt_strip_code_ptr((const void *)imp) == pt_strip_code_ptr(cloaked_orig)) {
+                    return (IMP)cloaked_orig;
+                }
+                (void)class_replaceMethod(cls, name, imp, types);
+                return cur;
+            }
+            IMP saved_hook = NULL;
+            IMP saved_orig = NULL;
+            if (pt_lookup_protected_method(m, &saved_hook, &saved_orig) &&
+                saved_hook != NULL &&
+                pt_strip_code_ptr((const void *)imp) == pt_strip_code_ptr((const void *)saved_orig)) {
+                return class_replaceMethod(cls, name, saved_hook, types);
+            }
+        }
+    }
+    return class_replaceMethod(cls, name, imp, types);
+}
+
+static void pt_method_exchangeImplementations(Method m1, Method m2) {
+    if (m1 == NULL || m2 == NULL) {
+        return;
+    }
+    IMP imp1 = NULL;
+    IMP imp2 = NULL;
+    const void *orig1 = NULL;
+    const void *orig2 = NULL;
+    BOOL appCaller = (pt_is_bypass_enabled() &&
+                      !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
+    if (appCaller) {
+        SEL s1 = method_getName(m1);
+        SEL s2 = method_getName(m2);
+        if ((s1 != NULL && pt_is_playtools_injected_method(m1, s1)) ||
+            (s2 != NULL && pt_is_playtools_injected_method(m2, s2))) {
+            return;
+        }
+        imp1 = method_getImplementation(m1);
+        imp2 = method_getImplementation(m2);
+        orig1 = (imp1 != NULL) ? pt_lookup_swizzled_raw_orig_imp((const void *)imp1) : NULL;
+        orig2 = (imp2 != NULL) ? pt_lookup_swizzled_raw_orig_imp((const void *)imp2) : NULL;
+        if (orig1 != NULL) {
+            pt_record_protected_method(m1, imp1, (IMP)orig1);
+            if (imp2 != NULL && pt_strip_code_ptr((const void *)imp2) == pt_strip_code_ptr(orig1)) {
+                return;
+            }
+        }
+        if (orig2 != NULL) {
+            pt_record_protected_method(m2, imp2, (IMP)orig2);
+            if (imp1 != NULL && pt_strip_code_ptr((const void *)imp1) == pt_strip_code_ptr(orig2)) {
+                return;
+            }
+        }
+    }
+    method_exchangeImplementations(m1, m2);
+    if (appCaller) {
+        if (orig1 != NULL && imp1 != NULL) {
+            pt_record_protected_method(m2, imp1, (IMP)orig1);
+        }
+        if (orig2 != NULL && imp2 != NULL) {
+            pt_record_protected_method(m1, imp2, (IMP)orig2);
+        }
+    }
+}
+
+static BOOL pt_is_hidden_objc_ivar_type_str(const char *s) {
+    if (s == NULL || s[0] == '\0') {
+        return NO;
+    }
+    return (strstr(s, "UINS") != NULL ||
+            strstr(s, "NSWindow") != NULL ||
+            strstr(s, "NSView") != NULL ||
+            strstr(s, "NSApplication") != NULL ||
+            strstr(s, "NSMenu") != NULL ||
+            strstr(s, "NSToolbar") != NULL ||
+            strstr(s, "NSTouchBar") != NULL ||
+            strstr(s, "NSCursor") != NULL ||
+            strstr(s, "PlayTools") != NULL ||
+            strstr(s, "PlayCover") != NULL ||
+            strstr(s, "MacOver") != NULL ||
+            strstr(s, "AGXG") != NULL);
+}
+
+static BOOL pt_is_hidden_objc_ivar(Ivar ivar, const char *ivarName) {
+    const char *name = (ivarName != NULL) ? ivarName : ((ivar != NULL) ? ivar_getName(ivar) : NULL);
+    if (name != NULL &&
+        (strstr(name, "UINS") != NULL ||
+         strstr(name, "_uins") != NULL ||
+         strstr(name, "NSWindow") != NULL ||
+         strstr(name, "NSMenu") != NULL ||
+         strstr(name, "NSToolbar") != NULL ||
+         strstr(name, "NSTouchBar") != NULL ||
+         strstr(name, "NSCursor") != NULL ||
+         strstr(name, "PlayTools") != NULL ||
+         strstr(name, "PlayCover") != NULL ||
+         strstr(name, "MacOver") != NULL ||
+         strstr(name, "MacCatalyst") != NULL ||
+         strstr(name, "macCatalyst") != NULL ||
+         strstr(name, "iOSAppOnMac") != NULL)) {
+        return YES;
+    }
+    const char *enc = (ivar != NULL) ? ivar_getTypeEncoding(ivar) : NULL;
+    if (enc != NULL && pt_is_hidden_objc_ivar_type_str(enc)) {
+        return YES;
+    }
+    return NO;
+}
+
+static Ivar *pt_class_copyIvarList(Class cls, unsigned int *outCount) {
+    if (!pt_is_valid_user_pointer((__bridge const void *)cls)) {
+        if (outCount != NULL) {
+            *outCount = 0;
+        }
+        return NULL;
+    }
+    unsigned int count = 0;
+    Ivar *ivars = class_copyIvarList(cls, &count);
+    if (ivars != NULL && count > 0 && pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        unsigned int writeIdx = 0;
+        for (unsigned int i = 0; i < count; i++) {
+            Ivar iv = ivars[i];
+            if (iv != NULL && pt_is_hidden_objc_ivar(iv, NULL)) {
+                continue;
+            }
+            ivars[writeIdx++] = iv;
+        }
+        if (writeIdx == 0) {
+            free(ivars);
+            if (outCount != NULL) {
+                *outCount = 0;
+            }
+            return NULL;
+        }
+        ivars[writeIdx] = NULL;
+        if (outCount != NULL) {
+            *outCount = writeIdx;
+        }
+        return ivars;
+    }
+    if (outCount != NULL) {
+        *outCount = count;
+    }
+    return ivars;
+}
+
+static Ivar pt_class_getInstanceVariable(Class cls, const char *name) {
+    if (!pt_is_valid_user_pointer((__bridge const void *)cls) ||
+        !pt_is_valid_user_pointer(name)) {
+        return NULL;
+    }
+    Ivar iv = class_getInstanceVariable(cls, name);
+    if (iv != NULL && pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_is_hidden_objc_ivar(iv, name)) {
+        return NULL;
+    }
+    return iv;
+}
+
+static Ivar pt_class_getClassVariable(Class cls, const char *name) {
+    if (!pt_is_valid_user_pointer((__bridge const void *)cls) ||
+        !pt_is_valid_user_pointer(name)) {
+        return NULL;
+    }
+    Ivar iv = class_getClassVariable(cls, name);
+    if (iv != NULL && pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_is_hidden_objc_ivar(iv, name)) {
+        return NULL;
+    }
+    return iv;
+}
+
+static const char *pt_ivar_getTypeEncoding(Ivar v) {
+    const char *enc = ivar_getTypeEncoding(v);
+    if (enc != NULL && enc[0] == '@' &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_is_hidden_objc_ivar_type_str(enc)) {
+        return "@";
+    }
+    return enc;
 }
 
 static BOOL pt_class_respondsToSelector(Class cls, SEL sel) {
@@ -1841,6 +2548,13 @@ static objc_property_t *pt_class_copyPropertyList(Class cls, unsigned int *outCo
             }
             props[writeIdx++] = p;
         }
+        if (writeIdx == 0) {
+            free(props);
+            if (outCount != NULL) {
+                *outCount = 0;
+            }
+            return NULL;
+        }
         props[writeIdx] = NULL;
         if (outCount != NULL) {
             *outCount = writeIdx;
@@ -1853,28 +2567,159 @@ static objc_property_t *pt_class_copyPropertyList(Class cls, unsigned int *outCo
     return props;
 }
 
-static const char *pt_class_getName(Class cls) {
-    const char *orig = class_getName(cls);
-    if (orig != NULL &&
-        orig[0] == '_' &&
+static inline BOOL pt_is_fast_cloakable_class_name(const char *cname) {
+    if (cname == NULL || cname[0] == '\0') {
+        return NO;
+    }
+    char c0 = cname[0];
+    if (c0 == '_') {
+        if (cname[1] == 'N' && strcmp(cname, "_NSSwiftProcessInfo") == 0) {
+            return pt_is_compat13_7_active();
+        }
+        if (cname[1] == 'T' && cname[2] == 't') {
+            return (strstr(cname, "9PlayTools") != NULL ||
+                    strstr(cname, "PlayTools") != NULL ||
+                    strstr(cname, "PlayCover") != NULL);
+        }
+        return NO;
+    }
+    if (c0 == 'A') {
+        return (cname[1] == 'G' && cname[2] == 'X') || PT_HAS_PREFIX_LIT(cname, "AKInterface");
+    }
+    if (c0 == 'P') {
+        return (PT_HAS_PREFIX_LIT(cname, "PlayTools") ||
+                PT_HAS_PREFIX_LIT(cname, "PlayCover") ||
+                PT_HAS_PREFIX_LIT(cname, "PlayShadow") ||
+                PT_HAS_PREFIX_LIT(cname, "PS") ||
+                PT_HAS_PREFIX_LIT(cname, "PT"));
+    }
+    if (c0 == 'M') {
+        return PT_HAS_PREFIX_LIT(cname, "MacOver");
+    }
+    return NO;
+}
+
+static const char *pt_cloak_class_name_for_app(Class cls, const char *orig) {
+    if (orig == NULL || !pt_is_fast_cloakable_class_name(orig)) {
+        return orig;
+    }
+    if (orig[0] == '_' && orig[1] == 'N' &&
         pt_is_compat13_7_active() &&
-        pt_is_bypass_enabled() &&
-        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
         strcmp(orig, "_NSSwiftProcessInfo") == 0) {
         return "NSProcessInfo";
+    }
+    if (orig[0] == 'A' && orig[1] == 'G' && orig[2] == 'X' &&
+        pt_parse_agx_gpu_class_name(orig, NULL, NULL)) {
+        return pt_virtualize_agx_class_name(orig, cls);
+    }
+    if (pt_is_hidden_playtools_class_name(orig) ||
+        pt_is_registered_hidden_class(orig) ||
+        (cls != Nil && pt_is_class_in_hidden_image(cls))) {
+        Class vis = pt_visible_superclass_for_hidden_class(cls);
+        const char *vname = (vis != Nil) ? class_getName(vis) : "NSObject";
+        return (vname != NULL) ? vname : "NSObject";
     }
     return orig;
 }
 
-static const char *pt_object_getClassName(id obj) {
+static _Atomic(const void *) s_cached_swift_pi_cls_ptr = NULL;
+static _Atomic(const void *) s_cached_ns_pi_cls_ptr = NULL;
+
+static Class pt_visible_superclass_without_name_lookup(Class cls) {
+    Class cur = (cls != Nil) ? class_getSuperclass(cls) : Nil;
+    for (int hops = 0; hops < 16 && cur != Nil; hops++) {
+        if (!pt_is_address_in_playtools((__bridge const void *)cur)) {
+            return cur;
+        }
+        cur = class_getSuperclass(cur);
+    }
+    const void *nsObj = pt_orig_objc_lookUpClass("NSObject");
+    return (nsObj != NULL) ? (__bridge Class)nsObj : cls;
+}
+
+static const void *pt_object_getClass(__unsafe_unretained id obj) {
+    if (obj == nil) {
+        return NULL;
+    }
+    Class cls = object_getClass(obj);
+    if (cls == Nil ||
+        !atomic_load_explicit(&s_libsystem_ready, memory_order_acquire) ||
+        !pt_is_bypass_enabled()) {
+        return (__bridge const void *)cls;
+    }
+    // Check immediate caller BEFORE touching class_getName(cls): libswiftCore's
+    // _swift_initClassMetadataImpl (under /usr/lib/swift) calls object_getClass on
+    // partially-initialized generic Swift metadata where class_getName crashes in
+    // objc_class::installMangledNameForLazilyNamedClass. For libswiftCore / wrapper
+    // callers (e.g. Swift type(of:)), use pointer/address checks only (zero class_getName).
+    const void *caller = __builtin_return_address(0);
+    if (pt_is_system_or_playtools_caller(caller)) {
+        const void *cls_ptr = (__bridge const void *)cls;
+        const void *swift_pi = atomic_load_explicit(&s_cached_swift_pi_cls_ptr, memory_order_acquire);
+        BOOL is_swift_pi = (swift_pi != NULL && cls_ptr == swift_pi && pt_is_compat13_7_active());
+        BOOL is_pt_cls = (!is_swift_pi && pt_is_address_in_playtools(cls_ptr));
+        if (is_swift_pi || is_pt_cls) {
+            if (!pt_is_effective_system_or_playtools_caller(caller)) {
+                if (is_swift_pi) {
+                    const void *ns_pi = atomic_load_explicit(&s_cached_ns_pi_cls_ptr, memory_order_acquire);
+                    return (ns_pi != NULL) ? ns_pi : cls_ptr;
+                }
+                if (class_isMetaClass(cls)) {
+                    Class vis = pt_visible_superclass_without_name_lookup((__bridge Class)(__bridge const void *)obj);
+                    return (__bridge const void *)((vis != Nil) ? object_getClass((__bridge id)(__bridge const void *)vis) : cls);
+                }
+                return (__bridge const void *)pt_visible_superclass_without_name_lookup(cls);
+            }
+        }
+        return cls_ptr;
+    }
+    const char *cname = class_getName(cls);
+    if (cname == NULL || !pt_is_fast_cloakable_class_name(cname)) {
+        return (__bridge const void *)cls;
+    }
+    if (cname[0] == 'A' && cname[1] == 'G' && cname[2] == 'X') {
+        // Record AGX class virtualization mapping so NSClassFromString stays consistent.
+        if (pt_parse_agx_gpu_class_name(cname, NULL, NULL)) {
+            (void)pt_virtualize_agx_class_name(cname, cls);
+        }
+        return (__bridge const void *)cls;
+    }
+    if (cname[0] == '_' && cname[1] == 'N' &&
+        pt_is_compat13_7_active() &&
+        strcmp(cname, "_NSSwiftProcessInfo") == 0) {
+        return (__bridge const void *)[NSProcessInfo class];
+    }
+    if (pt_is_hidden_playtools_class_name(cname) ||
+        pt_is_registered_hidden_class(cname) ||
+        pt_is_class_in_hidden_image(cls)) {
+        if (class_isMetaClass(cls)) {
+            Class vis = pt_visible_superclass_for_hidden_class((__bridge Class)(__bridge const void *)obj);
+            return (__bridge const void *)((vis != Nil) ? object_getClass((__bridge id)(__bridge const void *)vis) : cls);
+        }
+        return (__bridge const void *)pt_visible_superclass_for_hidden_class(cls);
+    }
+    return (__bridge const void *)cls;
+}
+
+static const char *pt_class_getName(Class cls) {
+    const char *orig = class_getName(cls);
+    if (orig != NULL &&
+        pt_is_fast_cloakable_class_name(orig) &&
+        pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return pt_cloak_class_name_for_app(cls, orig);
+    }
+    return orig;
+}
+
+static const char *pt_object_getClassName(__unsafe_unretained id obj) {
     const char *orig = object_getClassName(obj);
     if (orig != NULL &&
-        orig[0] == '_' &&
-        pt_is_compat13_7_active() &&
+        pt_is_fast_cloakable_class_name(orig) &&
         pt_is_bypass_enabled() &&
-        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
-        strcmp(orig, "_NSSwiftProcessInfo") == 0) {
-        return "NSProcessInfo";
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        Class cls = (obj != nil) ? object_getClass(obj) : Nil;
+        return pt_cloak_class_name_for_app(cls, orig);
     }
     return orig;
 }
@@ -1883,12 +2728,17 @@ extern NSString *pt_orig_NSStringFromClass(Class aClass) __asm__("_NSStringFromC
 
 static NSString *pt_NSStringFromClass(Class aClass) {
     if (aClass != Nil &&
-        pt_is_compat13_7_active() &&
         pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
         const char *raw = class_getName(aClass);
-        if (raw != NULL && raw[0] == '_' && strcmp(raw, "_NSSwiftProcessInfo") == 0) {
-            return @"NSProcessInfo";
+        if (raw != NULL && pt_is_fast_cloakable_class_name(raw)) {
+            const char *cloaked = pt_cloak_class_name_for_app(aClass, raw);
+            if (cloaked != NULL && cloaked != raw) {
+                NSString *s = [NSString stringWithUTF8String:cloaked];
+                if (s != nil) {
+                    return s;
+                }
+            }
         }
     }
     return pt_orig_NSStringFromClass(aClass);
@@ -2567,6 +3417,187 @@ static char *pt_getsectdatafromheader_64(const struct mach_header_64 *mhp,
 }
 #pragma clang diagnostic pop
 
+typedef struct {
+    uintptr_t start;
+    uintptr_t end;
+} pt_sanitized_cow_range_t;
+
+static os_unfair_lock s_inplace_mh_lock = OS_UNFAIR_LOCK_INIT;
+static const struct mach_header **s_inplace_mh_checked = NULL;
+static size_t s_inplace_mh_checked_count = 0;
+static size_t s_inplace_mh_checked_cap = 0;
+static os_unfair_lock s_sanitized_cow_ranges_lock = OS_UNFAIR_LOCK_INIT;
+static pt_sanitized_cow_range_t *s_sanitized_cow_ranges = NULL;
+static size_t s_sanitized_cow_range_count = 0;
+static size_t s_sanitized_cow_range_cap = 0;
+static _Atomic size_t s_sanitized_cow_range_count_atomic = 0;
+
+static void pt_record_sanitized_mach_header_cow_range(uintptr_t start, size_t len) {
+    if (start == 0U || len == 0U || start + len <= start) {
+        return;
+    }
+    uintptr_t end = start + (uintptr_t)len;
+    os_unfair_lock_lock(&s_sanitized_cow_ranges_lock);
+    for (size_t i = 0; i < s_sanitized_cow_range_count; i++) {
+        if (s_sanitized_cow_ranges[i].start == start && s_sanitized_cow_ranges[i].end == end) {
+            os_unfair_lock_unlock(&s_sanitized_cow_ranges_lock);
+            return;
+        }
+    }
+    if (s_sanitized_cow_range_count >= s_sanitized_cow_range_cap && s_sanitized_cow_range_cap < 16384U) {
+        size_t new_cap = (s_sanitized_cow_range_cap == 0U) ? 64U : (s_sanitized_cow_range_cap * 2U);
+        if (new_cap > 16384U) {
+            new_cap = 16384U;
+        }
+        pt_sanitized_cow_range_t *grown =
+            (pt_sanitized_cow_range_t *)realloc(s_sanitized_cow_ranges, new_cap * sizeof(pt_sanitized_cow_range_t));
+        if (grown != NULL) {
+            s_sanitized_cow_ranges = grown;
+            s_sanitized_cow_range_cap = new_cap;
+        }
+    }
+    if (s_sanitized_cow_range_count < s_sanitized_cow_range_cap) {
+        s_sanitized_cow_ranges[s_sanitized_cow_range_count++] = (pt_sanitized_cow_range_t){
+            .start = start,
+            .end = end,
+        };
+        atomic_store_explicit(&s_sanitized_cow_range_count_atomic,
+                              s_sanitized_cow_range_count,
+                              memory_order_release);
+    }
+    os_unfair_lock_unlock(&s_sanitized_cow_ranges_lock);
+}
+
+__attribute__((visibility("hidden")))
+BOOL pt_is_sanitized_mach_header_cow_range(uintptr_t cur_addr, uintptr_t cur_size) {
+    if (cur_addr == 0U ||
+        atomic_load_explicit(&s_sanitized_cow_range_count_atomic, memory_order_acquire) == 0U) {
+        return NO;
+    }
+    uintptr_t cur_end = (cur_size > 0U && cur_addr + cur_size > cur_addr) ? (cur_addr + cur_size) : (cur_addr + 1U);
+    BOOL hit = NO;
+    os_unfair_lock_lock(&s_sanitized_cow_ranges_lock);
+    for (size_t i = 0; i < s_sanitized_cow_range_count; i++) {
+        if (cur_addr < s_sanitized_cow_ranges[i].end && cur_end > s_sanitized_cow_ranges[i].start) {
+            hit = YES;
+            break;
+        }
+    }
+    os_unfair_lock_unlock(&s_sanitized_cow_ranges_lock);
+    return hit;
+}
+
+static void pt_try_sanitize_mach_header_page0_in_place(const struct mach_header *mh) {
+    if (mh == NULL || !pt_is_bypass_enabled() || !pt_is_valid_user_pointer((const void *)mh)) {
+        return;
+    }
+    if (mh->magic != MH_MAGIC_64) {
+        return;
+    }
+    const struct mach_header_64 *mh64 = (const struct mach_header_64 *)mh;
+    // Never mutate shared-cache images in place.
+    if ((mh64->flags & 0x80000000U) != 0U) {
+        return;
+    }
+    os_unfair_lock_lock(&s_inplace_mh_lock);
+    for (size_t i = 0; i < s_inplace_mh_checked_count; i++) {
+        if (s_inplace_mh_checked[i] == mh) {
+            os_unfair_lock_unlock(&s_inplace_mh_lock);
+            return;
+        }
+    }
+    if (s_inplace_mh_checked_count >= s_inplace_mh_checked_cap) {
+        size_t new_cap = (s_inplace_mh_checked_cap == 0U) ? 64U : (s_inplace_mh_checked_cap * 2U);
+        if (new_cap <= 16384U) {
+            const struct mach_header **grown =
+                (const struct mach_header **)realloc(s_inplace_mh_checked, new_cap * sizeof(const struct mach_header *));
+            if (grown != NULL) {
+                s_inplace_mh_checked = grown;
+                s_inplace_mh_checked_cap = new_cap;
+            }
+        }
+    }
+    if (s_inplace_mh_checked_count < s_inplace_mh_checked_cap) {
+        s_inplace_mh_checked[s_inplace_mh_checked_count++] = mh;
+    }
+    os_unfair_lock_unlock(&s_inplace_mh_lock);
+
+    if (pt_is_hidden_dyld_image_header(mh)) {
+        return;
+    }
+    const char *img = pt_dyld_lookup_image_name_for_mh(mh);
+    if (img != NULL && pt_should_hide_dyld_image(img)) {
+        return;
+    }
+    if (!pt_mach_header_64_needs_shadow(mh64)) {
+        return;
+    }
+    size_t total = sizeof(struct mach_header_64) + (size_t)mh64->sizeofcmds;
+    vm_size_t page_sz = (vm_page_size > 0) ? (vm_size_t)vm_page_size : 16384U;
+    size_t page_end = (total + (size_t)page_sz - 1U) & ~((size_t)page_sz - 1U);
+    if (page_end == 0U || page_end > (256U * 1024U)) {
+        return;
+    }
+    // W^X safety guard: NEVER change page protections on any page that shares executable
+    // instructions (__TEXT,__text / __stubs / __auth_stubs) to avoid SIGBUS on concurrent fetch.
+    BOOL has_exec_in_header_pages = NO;
+    const uint8_t *lc_ptr = (const uint8_t *)mh64 + sizeof(struct mach_header_64);
+    size_t lc_off = 0;
+    for (uint32_t i = 0; i < mh64->ncmds && lc_off + sizeof(struct load_command) <= mh64->sizeofcmds; i++) {
+        const struct load_command *lc = (const struct load_command *)(lc_ptr + lc_off);
+        if (lc->cmdsize < sizeof(struct load_command) || lc_off + lc->cmdsize > mh64->sizeofcmds) {
+            return;
+        }
+        if (lc->cmd == LC_SEGMENT_64 && lc->cmdsize >= sizeof(struct segment_command_64)) {
+            const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+            if (strncmp(seg->segname, "__TEXT", 16) == 0 &&
+                seg->nsects <= (lc->cmdsize - sizeof(struct segment_command_64)) / sizeof(struct section_64)) {
+                const struct section_64 *sects = (const struct section_64 *)(seg + 1);
+                for (uint32_t s = 0; s < seg->nsects; s++) {
+                    if (sects[s].size == 0) {
+                        continue;
+                    }
+                    BOOL is_exec = ((sects[s].flags & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)) != 0U ||
+                                    strncmp(sects[s].sectname, "__text", 16) == 0 ||
+                                    strncmp(sects[s].sectname, "__stubs", 16) == 0 ||
+                                    strncmp(sects[s].sectname, "__auth_stubs", 16) == 0);
+                    if (is_exec && (size_t)sects[s].offset < page_end) {
+                        has_exec_in_header_pages = YES;
+                        break;
+                    }
+                }
+            }
+        }
+        if (has_exec_in_header_pages) {
+            return;
+        }
+        lc_off += lc->cmdsize;
+    }
+
+    uint8_t *scratch = (uint8_t *)calloc(1, total);
+    if (scratch == NULL) {
+        return;
+    }
+    size_t san_len = 0;
+    if (pt_build_sanitized_mach_header_copy(mh64, scratch, total, &san_len) && san_len <= total) {
+        kern_return_t kr = vm_protect(mach_task_self(),
+                                      (vm_address_t)(uintptr_t)mh64,
+                                      (vm_size_t)page_end,
+                                      FALSE,
+                                      VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+        if (kr == KERN_SUCCESS) {
+            pt_record_sanitized_mach_header_cow_range((uintptr_t)mh64, page_end);
+            memcpy((void *)mh64, scratch, total);
+            (void)vm_protect(mach_task_self(),
+                             (vm_address_t)(uintptr_t)mh64,
+                             (vm_size_t)page_end,
+                             FALSE,
+                             VM_PROT_READ | VM_PROT_EXECUTE);
+        }
+    }
+    free(scratch);
+}
+
 static const struct mach_header *pt_dyld_get_image_header(uint32_t image_index) {
     if (pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
@@ -2574,7 +3605,11 @@ static const struct mach_header *pt_dyld_get_image_header(uint32_t image_index) 
         if (!pt_dyld_virtual_to_real_index(image_index, &real_idx)) {
             return NULL;
         }
-        return _dyld_get_image_header(real_idx);
+        const struct mach_header *mh = _dyld_get_image_header(real_idx);
+        if (mh != NULL) {
+            pt_try_sanitize_mach_header_page0_in_place(mh);
+        }
+        return mh;
     }
     return _dyld_get_image_header(image_index);
 }
@@ -2612,8 +3647,9 @@ static pt_app_dyld_listener_t s_app_dyld_listeners[PT_MAX_APP_DYLD_CALLBACKS];
 static uint32_t s_app_dyld_add_callback_count = 0;
 static pt_dyld_image_callback_t s_app_dyld_remove_callbacks[PT_MAX_APP_DYLD_CALLBACKS];
 static uint32_t s_app_dyld_remove_callback_count = 0;
-static const struct mach_header *s_hidden_dyld_headers[256];
-static uint32_t s_hidden_dyld_header_count = 0;
+static const struct mach_header **s_hidden_dyld_headers = NULL;
+static size_t s_hidden_dyld_header_count = 0;
+static size_t s_hidden_dyld_header_cap = 0;
 static pt_visible_dyld_image_t *s_visible_dyld_images = NULL;
 static size_t s_visible_dyld_count = 0;
 static size_t s_visible_dyld_cap = 0;
@@ -2675,18 +3711,37 @@ static void pt_master_dyld_add_image_callback(const struct mach_header *mh, intp
     // Look up image name before taking s_app_dyld_mutex to avoid ABBA lock inversion with dyld.
     const char *name = pt_dyld_lookup_image_name_for_mh(mh);
     BOOL is_hidden = ((name != NULL && pt_should_hide_dyld_image(name)) || pt_is_hidden_dyld_image_header(mh));
+    if (!is_hidden && mh != NULL && pt_is_bypass_enabled()) {
+        pt_try_sanitize_mach_header_page0_in_place(mh);
+    }
 
     pthread_mutex_lock(&s_app_dyld_mutex);
     if (is_hidden) {
         BOOL found = NO;
-        for (uint32_t i = 0; i < s_hidden_dyld_header_count; i++) {
+        for (size_t i = 0; i < s_hidden_dyld_header_count; i++) {
             if (s_hidden_dyld_headers[i] == mh) {
                 found = YES;
                 break;
             }
         }
-        if (!found && s_hidden_dyld_header_count < 256) {
-            s_hidden_dyld_headers[s_hidden_dyld_header_count++] = mh;
+        if (!found) {
+            if (s_hidden_dyld_header_count >= s_hidden_dyld_header_cap &&
+                s_hidden_dyld_header_cap < 65536U) {
+                size_t new_cap = (s_hidden_dyld_header_cap == 0U) ? 256U : (s_hidden_dyld_header_cap * 2U);
+                if (new_cap > 65536U) {
+                    new_cap = 65536U;
+                }
+                const struct mach_header **grown =
+                    (const struct mach_header **)realloc(s_hidden_dyld_headers,
+                                                         new_cap * sizeof(const struct mach_header *));
+                if (grown != NULL) {
+                    s_hidden_dyld_headers = grown;
+                    s_hidden_dyld_header_cap = new_cap;
+                }
+            }
+            if (s_hidden_dyld_header_count < s_hidden_dyld_header_cap) {
+                s_hidden_dyld_headers[s_hidden_dyld_header_count++] = mh;
+            }
         }
         pthread_mutex_unlock(&s_app_dyld_mutex);
         return;
@@ -2750,7 +3805,7 @@ static void pt_master_dyld_remove_image_callback(const struct mach_header *mh, i
     const char *name = pt_dyld_lookup_image_name_for_mh(mh);
     BOOL is_hidden = ((name != NULL && pt_should_hide_dyld_image(name)) || pt_is_hidden_dyld_image_header(mh));
     pthread_mutex_lock(&s_app_dyld_mutex);
-    for (uint32_t i = 0; i < s_hidden_dyld_header_count; i++) {
+    for (size_t i = 0; i < s_hidden_dyld_header_count; i++) {
         if (s_hidden_dyld_headers[i] == mh) {
             is_hidden = YES;
             s_hidden_dyld_headers[i] = s_hidden_dyld_headers[--s_hidden_dyld_header_count];
@@ -2929,6 +3984,7 @@ static const struct mach_header *pt_dyld_image_header_containing_address(const v
             }
             return fb_hdr;
         }
+        pt_try_sanitize_mach_header_page0_in_place(hdr);
     }
     return hdr;
 }
@@ -2987,34 +4043,30 @@ static int pt_dladdr(const void *addr, Dl_info *info) {
 }
 
 
-static BOOL (*s_orig_nsobject_respondsToSelector)(id, SEL, SEL) = NULL;
-static BOOL (*s_orig_nsobject_instancesRespondToSelector)(id, SEL, SEL) = NULL;
-static id (*s_orig_nsobject_methodSignatureForSelector)(id, SEL, SEL) = NULL;
-static id (*s_orig_nsobject_instanceMethodSignatureForSelector)(id, SEL, SEL) = NULL;
-static IMP (*s_orig_nsobject_methodForSelector)(id, SEL, SEL) = NULL;
-static IMP (*s_orig_nsobject_instanceMethodForSelector)(id, SEL, SEL) = NULL;
-static BOOL (*s_orig_nsobject_conformsToProtocol_inst)(id, SEL, Protocol *) = NULL;
-static BOOL (*s_orig_nsobject_conformsToProtocol_cls)(id, SEL, Protocol *) = NULL;
+static BOOL (*s_orig_nsobject_respondsToSelector)(__unsafe_unretained id, SEL, SEL) = NULL;
+static BOOL (*s_orig_nsobject_instancesRespondToSelector)(__unsafe_unretained id, SEL, SEL) = NULL;
+static id (*s_orig_nsobject_methodSignatureForSelector)(__unsafe_unretained id, SEL, SEL) = NULL;
+static id (*s_orig_nsobject_instanceMethodSignatureForSelector)(__unsafe_unretained id, SEL, SEL) = NULL;
+static IMP (*s_orig_nsobject_methodForSelector)(__unsafe_unretained id, SEL, SEL) = NULL;
+static IMP (*s_orig_nsobject_instanceMethodForSelector)(__unsafe_unretained id, SEL, SEL) = NULL;
+static BOOL (*s_orig_nsobject_conformsToProtocol_inst)(__unsafe_unretained id, SEL, __unsafe_unretained Protocol *) = NULL;
+static BOOL (*s_orig_nsobject_conformsToProtocol_cls)(__unsafe_unretained id, SEL, __unsafe_unretained Protocol *) = NULL;
 static IMP s_nsobject_notFoundIMP = NULL;
 
-static BOOL ps_hook_nsobject_conformsToProtocol_inst(id self, SEL _cmd, Protocol *proto) {
-    if (proto != nil && pt_is_bypass_enabled()) {
-        const char *pname = protocol_getName(proto);
-        if (pname != NULL && pt_is_hidden_objc_protocol_name(pname) &&
-            !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-            return NO;
-        }
+static BOOL ps_hook_nsobject_conformsToProtocol_inst(__unsafe_unretained id self, SEL _cmd, __unsafe_unretained Protocol *proto) {
+    if (proto != nil && pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_should_hide_objc_protocol(proto, NULL)) {
+        return NO;
     }
     return s_orig_nsobject_conformsToProtocol_inst ? s_orig_nsobject_conformsToProtocol_inst(self, _cmd, proto) : NO;
 }
 
-static BOOL ps_hook_nsobject_conformsToProtocol_cls(id self, SEL _cmd, Protocol *proto) {
-    if (proto != nil && pt_is_bypass_enabled()) {
-        const char *pname = protocol_getName(proto);
-        if (pname != NULL && pt_is_hidden_objc_protocol_name(pname) &&
-            !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-            return NO;
-        }
+static BOOL ps_hook_nsobject_conformsToProtocol_cls(__unsafe_unretained id self, SEL _cmd, __unsafe_unretained Protocol *proto) {
+    if (proto != nil && pt_is_bypass_enabled() &&
+        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        pt_should_hide_objc_protocol(proto, NULL)) {
+        return NO;
     }
     return s_orig_nsobject_conformsToProtocol_cls ? s_orig_nsobject_conformsToProtocol_cls(self, _cmd, proto) : NO;
 }
@@ -3037,7 +4089,7 @@ static inline BOOL ps_should_hide_selector_for_target_class(Class targetCls, SEL
     return !pt_is_effective_system_or_playtools_caller(caller);
 }
 
-static BOOL ps_hook_nsobject_respondsToSelector(id self, SEL _cmd, SEL aSelector) {
+static BOOL ps_hook_nsobject_respondsToSelector(__unsafe_unretained id self, SEL _cmd, SEL aSelector) {
     if (!pt_is_valid_user_pointer((const void *)aSelector)) {
         return NO;
     }
@@ -3048,18 +4100,18 @@ static BOOL ps_hook_nsobject_respondsToSelector(id self, SEL _cmd, SEL aSelector
     return orig;
 }
 
-static BOOL ps_hook_nsobject_instancesRespondToSelector(id self, SEL _cmd, SEL aSelector) {
+static BOOL ps_hook_nsobject_instancesRespondToSelector(__unsafe_unretained id self, SEL _cmd, SEL aSelector) {
     if (!pt_is_valid_user_pointer((const void *)aSelector)) {
         return NO;
     }
     BOOL orig = s_orig_nsobject_instancesRespondToSelector ? s_orig_nsobject_instancesRespondToSelector(self, _cmd, aSelector) : NO;
-    if (orig && ps_should_hide_selector_for_target_class((Class)self, aSelector, __builtin_return_address(0))) {
+    if (orig && ps_should_hide_selector_for_target_class((__bridge Class)(__bridge const void *)self, aSelector, __builtin_return_address(0))) {
         return NO;
     }
     return orig;
 }
 
-static id ps_hook_nsobject_methodSignatureForSelector(id self, SEL _cmd, SEL aSelector) {
+static id ps_hook_nsobject_methodSignatureForSelector(__unsafe_unretained id self, SEL _cmd, SEL aSelector) {
     if (!pt_is_valid_user_pointer((const void *)aSelector)) {
         return nil;
     }
@@ -3069,17 +4121,17 @@ static id ps_hook_nsobject_methodSignatureForSelector(id self, SEL _cmd, SEL aSe
     return s_orig_nsobject_methodSignatureForSelector ? s_orig_nsobject_methodSignatureForSelector(self, _cmd, aSelector) : nil;
 }
 
-static id ps_hook_nsobject_instanceMethodSignatureForSelector(id self, SEL _cmd, SEL aSelector) {
+static id ps_hook_nsobject_instanceMethodSignatureForSelector(__unsafe_unretained id self, SEL _cmd, SEL aSelector) {
     if (!pt_is_valid_user_pointer((const void *)aSelector)) {
         return nil;
     }
-    if (ps_should_hide_selector_for_target_class((Class)self, aSelector, __builtin_return_address(0))) {
+    if (ps_should_hide_selector_for_target_class((__bridge Class)(__bridge const void *)self, aSelector, __builtin_return_address(0))) {
         return nil;
     }
     return s_orig_nsobject_instanceMethodSignatureForSelector ? s_orig_nsobject_instanceMethodSignatureForSelector(self, _cmd, aSelector) : nil;
 }
 
-static IMP ps_hook_nsobject_methodForSelector(id self, SEL _cmd, SEL aSelector) {
+static IMP ps_hook_nsobject_methodForSelector(__unsafe_unretained id self, SEL _cmd, SEL aSelector) {
     const void *caller = __builtin_return_address(0);
     if (pt_is_valid_user_pointer((const void *)aSelector) &&
         ps_should_hide_selector_for_target_class(object_getClass(self), aSelector, caller) &&
@@ -3098,10 +4150,10 @@ static IMP ps_hook_nsobject_methodForSelector(id self, SEL _cmd, SEL aSelector) 
     return imp;
 }
 
-static IMP ps_hook_nsobject_instanceMethodForSelector(id self, SEL _cmd, SEL aSelector) {
+static IMP ps_hook_nsobject_instanceMethodForSelector(__unsafe_unretained id self, SEL _cmd, SEL aSelector) {
     const void *caller = __builtin_return_address(0);
     if (pt_is_valid_user_pointer((const void *)aSelector) &&
-        ps_should_hide_selector_for_target_class((Class)self, aSelector, caller) &&
+        ps_should_hide_selector_for_target_class((__bridge Class)(__bridge const void *)self, aSelector, caller) &&
         s_nsobject_notFoundIMP != NULL) {
         return s_nsobject_notFoundIMP;
     }
@@ -3120,6 +4172,14 @@ static IMP ps_hook_nsobject_instanceMethodForSelector(id self, SEL _cmd, SEL aSe
 __attribute__((visibility("hidden"))) void ps_install_nsobject_reflection_hooks(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
+        const void *swiftPICls = pt_orig_objc_lookUpClass("_NSSwiftProcessInfo");
+        if (swiftPICls != NULL) {
+            atomic_store_explicit(&s_cached_swift_pi_cls_ptr, swiftPICls, memory_order_release);
+        }
+        const void *nsPICls = pt_orig_objc_lookUpClass("NSProcessInfo");
+        if (nsPICls != NULL) {
+            atomic_store_explicit(&s_cached_ns_pi_cls_ptr, nsPICls, memory_order_release);
+        }
         Class nsObjCls = objc_getClass("NSObject");
         if (nsObjCls == Nil) {
             return;
@@ -3227,9 +4287,17 @@ PT_INTERPOSE(pt_method_getImplementation, method_getImplementation)
 PT_INTERPOSE(pt_class_getMethodImplementation, class_getMethodImplementation)
 PT_INTERPOSE_WEAK_NAMED(pt_object_getMethodImplementation, pt_orig_object_getMethodImplementation, "object_getMethodImplementation")
 PT_INTERPOSE(pt_class_copyMethodList, class_copyMethodList)
+PT_INTERPOSE(pt_method_setImplementation, method_setImplementation)
+PT_INTERPOSE(pt_class_replaceMethod, class_replaceMethod)
+PT_INTERPOSE(pt_method_exchangeImplementations, method_exchangeImplementations)
+PT_INTERPOSE(pt_class_copyIvarList, class_copyIvarList)
+PT_INTERPOSE(pt_class_getInstanceVariable, class_getInstanceVariable)
+PT_INTERPOSE(pt_class_getClassVariable, class_getClassVariable)
+PT_INTERPOSE(pt_ivar_getTypeEncoding, ivar_getTypeEncoding)
 PT_INTERPOSE(pt_class_respondsToSelector, class_respondsToSelector)
 PT_INTERPOSE(pt_class_getProperty, class_getProperty)
 PT_INTERPOSE(pt_class_copyPropertyList, class_copyPropertyList)
+PT_INTERPOSE(pt_object_getClass, object_getClass)
 PT_INTERPOSE(pt_class_getName, class_getName)
 PT_INTERPOSE(pt_object_getClassName, object_getClassName)
 #pragma clang diagnostic push

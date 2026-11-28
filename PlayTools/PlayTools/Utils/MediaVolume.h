@@ -9,10 +9,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-@interface NSObject (SwizzleVolume)
-
-- (void)swizzleInstanceMethod:(SEL)origSelector withMethod:(SEL)newSelector;
-
-@end
+// Swizzling is handled via internal C helpers in MediaVolume.m without adding
+// categories onto NSObject.
 
 NS_ASSUME_NONNULL_END

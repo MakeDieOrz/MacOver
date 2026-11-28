@@ -5,6 +5,7 @@ extension PlayToolsGlobalStateScope {
 @Suite(.serialized)
 final class PTPluginContainerTests {
     private let tempDir: URL
+    private let signedDylibTemplateURL: URL
 
     init() throws {
         pt_reset_hidden_registry_for_testing()
@@ -12,11 +13,32 @@ final class PTPluginContainerTests {
             .appendingPathComponent("PTPluginContainerTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         tempDir = dir
+        signedDylibTemplateURL = try Self.buildSignedTestDylibTemplate(in: dir)
     }
 
     deinit {
         pt_reset_hidden_registry_for_testing()
         try? FileManager.default.removeItem(at: tempDir)
+    }
+
+    private static func buildSignedTestDylibTemplate(in dir: URL) throws -> URL {
+        let srcURL = dir.appendingPathComponent("_pt_stub.c")
+        let dylibURL = dir.appendingPathComponent("_pt_stub_template.dylib")
+        try Data("void pt_test_plugin_stub(void) {}\n".utf8).write(to: srcURL)
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/clang")
+        proc.arguments = ["-arch", "arm64", "-dynamiclib", "-o", dylibURL.path, srcURL.path]
+        try proc.run()
+        proc.waitUntilExit()
+        #expect(proc.terminationStatus == 0)
+        return dylibURL
+    }
+
+    private func writeSignedDylib(to destination: URL) throws {
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.removeItem(at: destination)
+        }
+        try FileManager.default.copyItem(at: signedDylibTemplateURL, to: destination)
     }
 
     @Test
@@ -56,7 +78,7 @@ final class PTPluginContainerTests {
         // 1. Subdir manifest plugin with priority 10
         let fastDir = pluginsDir.appendingPathComponent("FastMod", isDirectory: true)
         try FileManager.default.createDirectory(at: fastDir, withIntermediateDirectories: true)
-        try Data().write(to: fastDir.appendingPathComponent("libSampleFastPlugin.dylib"))
+        try writeSignedDylib(to: fastDir.appendingPathComponent("libSampleFastPlugin.dylib"))
         let fastManifest = """
         {
           "manifestVersion": "1.0",
@@ -73,7 +95,7 @@ final class PTPluginContainerTests {
         try Data(fastManifest.utf8).write(to: fastDir.appendingPathComponent("PluginManifest.json"))
 
         // 2. Sidecar manifest plugin with priority 200 (runs after legacy=100)
-        try Data().write(to: pluginsDir.appendingPathComponent("SlowHelper.dylib"))
+        try writeSignedDylib(to: pluginsDir.appendingPathComponent("SlowHelper.dylib"))
         let slowManifest = """
         {
           "manifestVersion": "1.0",
@@ -89,12 +111,12 @@ final class PTPluginContainerTests {
         try Data(slowManifest.utf8).write(to: pluginsDir.appendingPathComponent("SlowHelper.manifest.json"))
 
         // 3. Bare legacy dylib (priority 100, synthesized manifest)
-        try Data().write(to: pluginsDir.appendingPathComponent("SampleLegacyPlugin.dylib"))
+        try writeSignedDylib(to: pluginsDir.appendingPathComponent("SampleLegacyPlugin.dylib"))
 
         // 4. Target bundle mismatch (skipped)
         let otherDir = pluginsDir.appendingPathComponent("OtherOnly", isDirectory: true)
         try FileManager.default.createDirectory(at: otherDir, withIntermediateDirectories: true)
-        try Data().write(to: otherDir.appendingPathComponent("OtherOnly.dylib"))
+        try writeSignedDylib(to: otherDir.appendingPathComponent("OtherOnly.dylib"))
         try Data("""
         {
           "manifestVersion": "1.0",
@@ -147,10 +169,12 @@ final class PTPluginContainerTests {
         """.utf8).write(to: badSchemaDir.appendingPathComponent("PluginManifest.json"))
 
         var openedPaths: [String] = []
+        var openedModes: [Int32] = []
         var pendingError: String?
         let container = PTPluginContainer(
-            dlopenHandler: { path, _ in
+            dlopenHandler: { path, mode in
                 openedPaths.append(URL(fileURLWithPath: path).lastPathComponent)
+                openedModes.append(mode)
                 if path.hasSuffix("SlowHelper.dylib") {
                     pendingError = "dlopen(\(path)): symbol not found _missing_sym"
                     return nil
@@ -173,12 +197,13 @@ final class PTPluginContainerTests {
             diagnosticLogURL: logURL
         )
 
-        // Execution order: priority 10 (libSampleFastPlugin) -> legacy 100 (SampleLegacyPlugin) -> priority 200 (SlowHelper)
+        // Execution order: priority 10 (libSampleFastPlugin) -> legacy 100 -> priority 200 (SlowHelper)
         #expect(openedPaths == [
             "libSampleFastPlugin.dylib",
             "SampleLegacyPlugin.dylib",
             "SlowHelper.dylib"
         ])
+        #expect(openedModes.allSatisfy { $0 == (RTLD_NOW | RTLD_LOCAL) })
 
         // Dynamic anti-detection registration includes lib-stripped "SampleFastPlugin" & synthesized legacy module
         #expect(pt_is_registered_hidden_module("SampleFastPlugin"))
@@ -193,9 +218,10 @@ final class PTPluginContainerTests {
         #expect(records.contains {
             $0.identifier == "legacy.SampleLegacyPlugin" && $0.status == .loaded && $0.isLegacySynthesized
         })
+        let resolvedSlowPath = pluginsDir.appendingPathComponent("SlowHelper.dylib").resolvingSymlinksInPath().path
         #expect(records.contains {
             $0.identifier == "com.example.slow" &&
-            $0.status == .failed("dlopen(\(pluginsDir.appendingPathComponent("SlowHelper.dylib").path)): symbol not found _missing_sym")
+            $0.status == .failed("dlopen(\(resolvedSlowPath)): symbol not found _missing_sym")
         })
         #expect(records.contains {
             $0.identifier == "com.example.other" && $0.status == .skippedBundleMismatch
@@ -295,7 +321,7 @@ final class PTPluginContainerTests {
 
         for (index, item) in cases.enumerated() {
             let dylibName = "CompatPlugin\(index).dylib"
-            try Data().write(to: pluginsDir.appendingPathComponent(dylibName))
+            try writeSignedDylib(to: pluginsDir.appendingPathComponent(dylibName))
             let manifest = """
             {
               "manifestVersion": "1.0",
@@ -337,6 +363,181 @@ final class PTPluginContainerTests {
                 Issue.record("Expected \(item.id) (\(item.minVer)) to fail validation on 1.0.2, got \(record.status)")
             }
         }
+    }
+
+    @Test
+    func directPluginDirectoryManifestLoadsWithRTLDLocal() throws {
+        let bridgeDir = tempDir.appendingPathComponent("BuiltInPlugins/CoverUseBridge", isDirectory: true)
+        try FileManager.default.createDirectory(at: bridgeDir, withIntermediateDirectories: true)
+        try writeSignedDylib(to: bridgeDir.appendingPathComponent("CoverUseBridge.dylib"))
+        let manifest = """
+        {
+          "manifestVersion": "1.0",
+          "identifier": "app.makedie.macover.coverusebridge",
+          "name": "CoverUseBridge",
+          "version": "1.0.10",
+          "minPlayToolsVersion": "1.0.0",
+          "targetBundleIdentifiers": ["*"],
+          "loadPriority": 10,
+          "entrypoint": "CoverUseBridge.dylib"
+        }
+        """
+        try Data(manifest.utf8).write(to: bridgeDir.appendingPathComponent("PluginManifest.json"))
+
+        var openedPath: String?
+        var openedMode: Int32 = 0
+        let container = PTPluginContainer(
+            dlopenHandler: { path, mode in
+                openedPath = path
+                openedMode = mode
+                return UnsafeMutableRawPointer(bitPattern: 0xBEEF_1010)
+            },
+            dlerrorHandler: { nil }
+        )
+
+        let records = container.loadPlugins(
+            in: bridgeDir,
+            currentBundleIdentifier: "com.example.app",
+            currentPlayToolsVersion: "1.0.9",
+            isSafeModeActive: false,
+            appendToRecords: true
+        )
+        #expect(records.count == 1)
+        #expect(records.first?.status == .loaded)
+        #expect(records.first?.isLegacySynthesized == false)
+        let resolvedBridgePath = bridgeDir
+            .appendingPathComponent("CoverUseBridge.dylib")
+            .resolvingSymlinksInPath()
+            .path
+        #expect(openedPath == resolvedBridgePath)
+        #expect(openedMode == (RTLD_NOW | RTLD_LOCAL))
+        #expect(pt_is_registered_hidden_module("CoverUseBridge.dylib"))
+    }
+
+    @Test
+    func rejectsSymlinkEscapeUnsignedAndTamperedDylibs() throws {
+        let pluginsDir = tempDir.appendingPathComponent("SecurityPlugins", isDirectory: true)
+        try FileManager.default.createDirectory(at: pluginsDir, withIntermediateDirectories: true)
+
+        // 1. Symlink escaping plugin root
+        let outsideDylib = tempDir.appendingPathComponent("OutsideSigned.dylib")
+        try writeSignedDylib(to: outsideDylib)
+        let symlinkDylib = pluginsDir.appendingPathComponent("Escaped.dylib")
+        try FileManager.default.createSymbolicLink(at: symlinkDylib, withDestinationURL: outsideDylib)
+        try Data("""
+        {
+          "manifestVersion": "1.0",
+          "identifier": "com.example.symlink",
+          "name": "Symlink",
+          "version": "1.0.0",
+          "entrypoint": "Escaped.dylib"
+        }
+        """.utf8).write(to: pluginsDir.appendingPathComponent("Escaped.manifest.json"))
+
+        // 2. Bare symlink dylib (must be skipped at discovery)
+        let bareSymlink = pluginsDir.appendingPathComponent("BareEscape.dylib")
+        try FileManager.default.createSymbolicLink(at: bareSymlink, withDestinationURL: outsideDylib)
+
+        // 3. Unsigned / empty dylib
+        try Data("not-a-macho".utf8).write(to: pluginsDir.appendingPathComponent("Unsigned.dylib"))
+        try Data("""
+        {
+          "manifestVersion": "1.0",
+          "identifier": "com.example.unsigned",
+          "name": "Unsigned",
+          "version": "1.0.0",
+          "entrypoint": "Unsigned.dylib"
+        }
+        """.utf8).write(to: pluginsDir.appendingPathComponent("Unsigned.manifest.json"))
+
+        // 4. Tampered dylib (valid ad-hoc binary with corrupted tail bytes)
+        let tamperedURL = pluginsDir.appendingPathComponent("Tampered.dylib")
+        var tamperedBytes = try Data(contentsOf: signedDylibTemplateURL)
+        if !tamperedBytes.isEmpty {
+            tamperedBytes[tamperedBytes.count / 2] ^= 0xFF
+        }
+        try tamperedBytes.write(to: tamperedURL)
+        try Data("""
+        {
+          "manifestVersion": "1.0",
+          "identifier": "com.example.tampered",
+          "name": "Tampered",
+          "version": "1.0.0",
+          "entrypoint": "Tampered.dylib"
+        }
+        """.utf8).write(to: pluginsDir.appendingPathComponent("Tampered.manifest.json"))
+
+        // 5. Valid ad-hoc signed dylib
+        try writeSignedDylib(to: pluginsDir.appendingPathComponent("Valid.dylib"))
+        try Data("""
+        {
+          "manifestVersion": "1.0",
+          "identifier": "com.example.valid",
+          "name": "Valid",
+          "version": "1.0.0",
+          "entrypoint": "Valid.dylib"
+        }
+        """.utf8).write(to: pluginsDir.appendingPathComponent("Valid.manifest.json"))
+
+        var opened: [String] = []
+        let container = PTPluginContainer(
+            dlopenHandler: { path, _ in
+                opened.append(URL(fileURLWithPath: path).lastPathComponent)
+                return UnsafeMutableRawPointer(bitPattern: 0x1234_5678)
+            },
+            dlerrorHandler: { nil }
+        )
+
+        let records = container.loadPlugins(
+            in: pluginsDir,
+            currentBundleIdentifier: "com.example.app",
+            currentPlayToolsVersion: "5.0.0",
+            isSafeModeActive: false
+        )
+
+        #expect(opened == ["Valid.dylib"])
+        #expect(records.contains { $0.identifier == "com.example.valid" && $0.status == .loaded })
+        for rejectedID in ["com.example.symlink", "com.example.unsigned", "com.example.tampered"] {
+            let rec = try #require(records.first { $0.identifier == rejectedID })
+            if case .validationFailed = rec.status {
+                // Expected
+            } else {
+                Issue.record("Expected \(rejectedID) to fail validation, got \(rec.status)")
+            }
+        }
+        #expect(!records.contains { $0.identifier == "legacy.BareEscape" })
+    }
+
+    @Test
+    func safeModeIgnoresLiveOtherPIDStaleOrForeignBundleBreadcrumbs() throws {
+        let stateDir = tempDir.appendingPathComponent("SafeModePID", isDirectory: true)
+        try FileManager.default.createDirectory(at: stateDir, withIntermediateDirectories: true)
+        let safeMode = PTSafeMode(stateDirectory: stateDir, bundleIdentifier: "com.example.target")
+
+        // 1. Different bundle ID breadcrumb -> should NOT trigger Safe Mode
+        let now = Date().timeIntervalSince1970
+        let otherBundle = "bundleIdentifier=com.example.other\npid=999999\nstartedAt=\(now)\n"
+        try Data(otherBundle.utf8).write(to: safeMode.breadcrumbURL)
+        #expect(!safeMode.evaluateAndBeginLaunch(environment: [:], stabilityWindow: 5.0))
+        #expect(!safeMode.isSafeModeActive)
+
+        // 2. Live other process (PID 1 launchd) -> should NOT trigger Safe Mode
+        let liveOther = "bundleIdentifier=com.example.target\npid=1\nstartedAt=\(now)\n"
+        try Data(liveOther.utf8).write(to: safeMode.breadcrumbURL)
+        #expect(!safeMode.evaluateAndBeginLaunch(environment: [:], stabilityWindow: 5.0))
+        #expect(!safeMode.isSafeModeActive)
+
+        // 3. Stale breadcrumb older than maxBreadcrumbAge -> should NOT trigger Safe Mode
+        let stale = "bundleIdentifier=com.example.target\npid=999999\nstartedAt=\(now - 900.0)\n"
+        try Data(stale.utf8).write(to: safeMode.breadcrumbURL)
+        #expect(!safeMode.evaluateAndBeginLaunch(environment: [:], stabilityWindow: 5.0))
+        #expect(!safeMode.isSafeModeActive)
+
+        // 4. Fresh dead-PID breadcrumb for same bundle -> DOES trigger Safe Mode
+        let crashed = "bundleIdentifier=com.example.target\npid=999999\nstartedAt=\(now)\n"
+        try Data(crashed.utf8).write(to: safeMode.breadcrumbURL)
+        #expect(safeMode.evaluateAndBeginLaunch(environment: [:], stabilityWindow: 5.0))
+        #expect(safeMode.isSafeModeActive)
     }
 }
 }

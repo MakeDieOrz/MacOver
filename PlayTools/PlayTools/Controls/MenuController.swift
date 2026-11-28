@@ -7,21 +7,30 @@
 
 import UIKit
 
-class RotateViewController: UIViewController {
-    static let orientationList: [UIInterfaceOrientation] = [
-        .landscapeLeft, .portrait, .landscapeRight, .portraitUpsideDown]
-    static var orientationTraverser = 0
+@MainActor
+private enum PTRotationGeometry {
+    static let orientationMasks: [UIInterfaceOrientationMask] = [
+        .landscapeLeft,
+        .portrait,
+        .landscapeRight,
+        .portraitUpsideDown
+    ]
 
-    static func rotate(deviceOrientation: Int) {
-        orientationTraverser = deviceOrientation
+    static func mask(forIndex index: Int) -> UIInterfaceOrientationMask {
+        let normalized = ((index % orientationMasks.count) + orientationMasks.count) % orientationMasks.count
+        return orientationMasks[normalized]
     }
 
-    override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation {
-        RotateViewController.orientationList[
-            RotateViewController.orientationTraverser % RotateViewController.orientationList.count]
+    static func apply(rotationIndex: Int, to windowScene: UIWindowScene) {
+        let orientationMask = mask(forIndex: rotationIndex)
+        if #available(iOS 16.0, macCatalyst 16.0, *) {
+            let preferences = UIWindowScene.GeometryPreferences.iOS(interfaceOrientations: orientationMask)
+            windowScene.requestGeometryUpdate(preferences) { _ in }
+            for window in windowScene.windows where !PlayScreen.isInternalOverlayWindow(window) {
+                window.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+            }
+        }
     }
-    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .all }
-    override var modalPresentationStyle: UIModalPresentationStyle { get {.fullScreen} set {} }
 }
 
 extension UIApplication {
@@ -54,15 +63,22 @@ extension UIApplication {
 
     @objc(pm_menu_rotateView:)
     func rotateView(_ sender: AnyObject) {
+        guard let dict = sender.propertyList as? [String: Any],
+              let index = dict["rotationIndex"] as? Int else {
+            return
+        }
+        let normalized = ((index % 4) + 4) % 4
+        if AKInterface.shared?.isSequoiaOrNewer == true {
+            let isPortrait = (normalized == 1 || normalized == 3)
+            let targetSize = CGSize(
+                width: PlaySettings.shared.windowSizeWidth,
+                height: PlaySettings.shared.windowSizeHeight
+            )
+            AKInterface.shared?.setWindowOrientation?(portrait: isPortrait, targetSize: targetSize)
+        }
         for scene in connectedScenes {
             guard let windowScene = scene as? UIWindowScene else { continue }
-            for window in windowScene.windows {
-                guard let rootViewController = window.rootViewController else { continue }
-                if let dict = sender.propertyList as? [String: Any],
-                   let index = dict["rotationIndex"] as? Int {
-                    rootViewController.rotateView(sender, deviceOrientation: index)
-                }
-            }
+            PTRotationGeometry.apply(rotationIndex: normalized, to: windowScene)
         }
 
         if !PlaySettings.shared.strictEmulationMode {
@@ -122,18 +138,11 @@ extension UIApplication {
 extension UIViewController {
     @objc(pm_menu_rotateView:deviceOrientation:)
     func rotateView(_ sender: AnyObject, deviceOrientation: Int) {
-        RotateViewController.rotate(deviceOrientation: deviceOrientation)
-        RotateViewController.orientationTraverser %= RotateViewController.orientationList.count
-        guard self.presentedViewController == nil else { return }
-        let viewController = RotateViewController(nibName: nil, bundle: nil)
-        self.present(viewController, animated: true)
-        DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + 1, execute: { [weak self, weak viewController] in
-            guard let self, let viewController,
-                  self.presentedViewController === viewController else {
-                return
-            }
-            self.dismiss(animated: true)
-        })
+        _ = sender
+        guard let windowScene = viewIfLoaded?.window?.windowScene ?? screen.windowScene else {
+            return
+        }
+        PTRotationGeometry.apply(rotationIndex: deviceOrientation, to: windowScene)
     }
 }
 
@@ -177,12 +186,13 @@ class MenuController {
     #if canImport(UIKit.UIMainMenuSystem)
         // Delay to avoid error
         // Cannot set a main menu system configuration while the main menu system is building.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
             MainActor.assumeIsolated {
+                guard let self else { return }
                 let configuration = UIMainMenuSystem.Configuration()
                 configuration.sidebarPreference = .included
-                UIMainMenuSystem.shared.setBuildConfiguration(configuration) { builder in
-                    self.setupMenu(with: builder)
+                UIMainMenuSystem.shared.setBuildConfiguration(configuration) { [weak self] builder in
+                    self?.setupMenu(with: builder)
                 }
             }
         }
@@ -206,13 +216,16 @@ class MenuController {
         let selectors = [
             #selector(UIApplication.markToucherLog(_:))
         ]
-        let arrowKeyChildrenCommands = zip(keyCommands, menuTitle).map { (command, btn) in
-            UIKeyCommand(title: btn,
-                 image: nil,
-                 action: selectors[menuTitle.firstIndex(of: btn)!],
-                 input: command,
-                 modifierFlags: .command,
-                 propertyList: [CommandsList.KeymappingToolbox: btn]
+        let count = min(keyCommands.count, min(menuTitle.count, selectors.count))
+        let arrowKeyChildrenCommands = (0..<count).map { index in
+            let btn = menuTitle[index]
+            return UIKeyCommand(
+                title: btn,
+                image: nil,
+                action: selectors[index],
+                input: keyCommands[index],
+                modifierFlags: .command,
+                propertyList: [CommandsList.KeymappingToolbox: btn]
             )
         }
         return UIMenu(title: "Debug",
@@ -238,13 +251,19 @@ class MenuController {
             "[",                            // Previous keymap
             "]"                             // Next keymap
         ]
-        let arrowKeyChildrenCommands = zip(zip(keyCommands, keymapping), iconsSelctor).map { (arg0, image) in
-            let (command, btn) = arg0
-            return UIKeyCommand(title: btn, image: image,
-                         action: keymappingSelectors[keymapping.firstIndex(of: btn)!],
-                         input: command,
-                         modifierFlags: .command,
-                         propertyList: [CommandsList.KeymappingToolbox: btn]
+        let count = min(
+            min(keyCommands.count, keymapping.count),
+            min(iconsSelctor.count, keymappingSelectors.count)
+        )
+        let arrowKeyChildrenCommands = (0..<count).map { index in
+            let btn = keymapping[index]
+            return UIKeyCommand(
+                title: btn,
+                image: iconsSelctor[index],
+                action: keymappingSelectors[index],
+                input: keyCommands[index],
+                modifierFlags: .command,
+                propertyList: [CommandsList.KeymappingToolbox: btn]
             )
         }
 

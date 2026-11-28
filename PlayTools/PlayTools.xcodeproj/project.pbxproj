@@ -193,6 +193,7 @@
 		B66E65002C936EA100E48FD0 /* PlayedAppleDBConstants.swift in Sources */ = {isa = PBXBuildFile; fileRef = B66E64FF2C936E9800E48FD0 /* PlayedAppleDBConstants.swift */; };
 		D04B12CA2EF6F3DD008FEC14 /* MediaVolume.m in Sources */ = {isa = PBXBuildFile; fileRef = D04B12C92EF6F3DD008FEC14 /* MediaVolume.m */; };
 		EEB248592B81D074000C230A /* PlayedAppleDB.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEB248582B81D074000C230A /* PlayedAppleDB.swift */; };
+		AA71B0102F00005000623C15 /* CoverUseBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = AA71B0022F00005000623C15 /* CoverUseBridge.m */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -381,6 +382,10 @@
 		D04B12C92EF6F3DD008FEC14 /* MediaVolume.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MediaVolume.m; sourceTree = "<group>"; };
 		D04B12CC2EF6F3F9008FEC14 /* MediaVolume.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MediaVolume.h; sourceTree = "<group>"; };
 		EEB248582B81D074000C230A /* PlayedAppleDB.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayedAppleDB.swift; sourceTree = "<group>"; };
+		AA71B0022F00005000623C15 /* CoverUseBridge.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = CoverUseBridge.m; sourceTree = "<group>"; };
+		AA71B0032F00005000623C15 /* CoverUseBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CoverUseBridge.h; sourceTree = "<group>"; };
+		AA71B0042F00005000623C15 /* PluginManifest.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = PluginManifest.json; sourceTree = "<group>"; };
+		AA71B0052F00005000623C15 /* CoverUseBridge.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = CoverUseBridge.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -401,6 +406,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		AA71A0992F00000600623C15 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AA71B0112F00005000623C15 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -618,11 +630,22 @@
 				AA71A0102F00000100623C15 /* Config */,
 				AA71A2102F00000D00623C15 /* SharedSchema */,
 				AA7196DA287A447700623C15 /* PlayTools */,
+				AA71B0062F00005000623C15 /* CoverUseBridge */,
 				AA71A0972F00000600623C15 /* PlayToolsTests */,
 				6E76639928D0FA6F00DE4AF9 /* AKInterface */,
 				AA7196D9287A447700623C15 /* Products */,
 				AA818CB7287ABFB1000BEE9D /* Frameworks */,
 			);
+			sourceTree = "<group>";
+		};
+		AA71B0062F00005000623C15 /* CoverUseBridge */ = {
+			isa = PBXGroup;
+			children = (
+				AA71B0032F00005000623C15 /* CoverUseBridge.h */,
+				AA71B0022F00005000623C15 /* CoverUseBridge.m */,
+				AA71B0042F00005000623C15 /* PluginManifest.json */,
+			);
+			path = CoverUseBridge;
 			sourceTree = "<group>";
 		};
 		AA71A2102F00000D00623C15 /* SharedSchema */ = {
@@ -670,6 +693,7 @@
 			children = (
 				AA7196D8287A447700623C15 /* PlayTools.framework */,
 				6E84A14C28D0F96D00BF7495 /* AKInterface.bundle */,
+				AA71B0052F00005000623C15 /* CoverUseBridge.dylib */,
 				AA71A08D2F00000600623C15 /* PlayToolsTests.xctest */,
 			);
 			name = Products;
@@ -963,6 +987,22 @@
 			productReference = AA71A08D2F00000600623C15 /* PlayToolsTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
+		AA71B0012F00005000623C15 /* CoverUseBridge */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AA71B0132F00005000623C15 /* Build configuration list for PBXNativeTarget "CoverUseBridge" */;
+			buildPhases = (
+				AA71B0122F00005000623C15 /* Sources */,
+				AA71B0112F00005000623C15 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = CoverUseBridge;
+			productName = CoverUseBridge;
+			productReference = AA71B0052F00005000623C15 /* CoverUseBridge.dylib */;
+			productType = "com.apple.product-type.library.dynamic";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -985,6 +1025,9 @@
 					};
 					AA71A09B2F00000600623C15 = {
 						CreatedOnToolsVersion = 14.1;
+					};
+					AA71B0012F00005000623C15 = {
+						CreatedOnToolsVersion = 15.0;
 					};
 				};
 			};
@@ -1023,6 +1066,7 @@
 			targets = (
 				AA7196D7287A447700623C15 /* PlayTools */,
 				6E84A14B28D0F96D00BF7495 /* AKInterface */,
+				AA71B0012F00005000623C15 /* CoverUseBridge */,
 				AA71A0012F00000100623C15 /* PlayTools-Package */,
 				AA71A09B2F00000600623C15 /* PlayToolsTests */,
 			);
@@ -1146,6 +1190,7 @@
 			);
 			inputPaths = (
 				"$(SRCROOT)/PlayTools.xcodeproj/project.pbxproj",
+				"$(SRCROOT)/PlayTools.xcodeproj/xcshareddata/xcschemes/PlayTools.xcscheme",
 				"$(SRCROOT)/../Config/Base.xcconfig",
 				"$(SRCROOT)/../Config/App.xcconfig",
 				"$(SRCROOT)/../Config/Runtime.xcconfig",
@@ -1245,6 +1290,7 @@
 				"$(SRCROOT)/PlayTools/Subsystems/PTArm64StubMath.h",
 				"$(SRCROOT)/PlayTools/Subsystems/PTCodeSignParser.h",
 				"$(SRCROOT)/PlayTools/Subsystems/PTDetectionRules.h",
+				"$(SRCROOT)/PlayTools/Subsystems/PTSFSymbols13Allowlist.h",
 				"$(SRCROOT)/PlayTools/Subsystems/PTCommon.h",
 				"$(SRCROOT)/PlayTools/Subsystems/PTDyldInternal.h",
 				"$(SRCROOT)/PlayTools/Subsystems/PTEntitlementsInternal.h",
@@ -1291,6 +1337,9 @@
 				"$(SRCROOT)/PlayTools/Subsystems/PTSystemSpooferSysctl.m",
 				"$(SRCROOT)/PlayTools/Subsystems/PTWebKitScripts.m",
 				"$(SRCROOT)/PlayTools/Subsystems/PTCustomInputViewHost.m",
+				"$(SRCROOT)/CoverUseBridge/CoverUseBridge.h",
+				"$(SRCROOT)/CoverUseBridge/CoverUseBridge.m",
+				"$(SRCROOT)/CoverUseBridge/PluginManifest.json",
 			);
 			name = "Build PlayTools XCFramework";
 			outputFileListPaths = (
@@ -1299,10 +1348,12 @@
 				"$(BUILT_PRODUCTS_DIR)/PlayTools.xcframework/Info.plist",
 				"$(BUILT_PRODUCTS_DIR)/PlayTools.xcframework/ios-arm64-maccatalyst/PlayTools.framework/Versions/A/PlayTools",
 				"$(BUILT_PRODUCTS_DIR)/PlayTools.xcframework/ios-arm64-maccatalyst/PlayTools.framework/Versions/A/PlugIns/AKInterface.bundle/Contents/MacOS/AKInterface",
+				"$(BUILT_PRODUCTS_DIR)/BuiltInPlugins/CoverUseBridge/CoverUseBridge.dylib",
+				"$(BUILT_PRODUCTS_DIR)/BuiltInPlugins/CoverUseBridge/PluginManifest.json",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/zsh;
-			shellScript = "set -euo pipefail\n\nexport DEVELOPER_DIR=\"${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}\"\nif [ ! -x \"${DEVELOPER_DIR}/usr/bin/xcodebuild\" ]; then\n  export DEVELOPER_DIR=\"/Applications/Xcode.app/Contents/Developer\"\nfi\n\ncase \"${CONFIGURATION:-Release}\" in\n  Nightly) PLAYTOOLS_CFG=\"Release\" ;;\n  *)       PLAYTOOLS_CFG=\"${CONFIGURATION:-Release}\" ;;\nesac\n\nCATALYST_BUILD=\"${TARGET_TEMP_DIR}/PlayToolsCatalyst\"\nXCFRAMEWORK_OUT=\"${BUILT_PRODUCTS_DIR}/PlayTools.xcframework\"\nFRAMEWORK_BUILT=\"${CATALYST_BUILD}/Products/${PLAYTOOLS_CFG}-maccatalyst/PlayTools.framework\"\n\nmkdir -p \"${CATALYST_BUILD}\" \"${BUILT_PRODUCTS_DIR}\"\n\n\"${DEVELOPER_DIR}/usr/bin/xcodebuild\" \\\n  -project \"${SRCROOT}/PlayTools.xcodeproj\" \\\n  -scheme PlayTools \\\n  -configuration \"${PLAYTOOLS_CFG}\" \\\n  -destination 'generic/platform=macOS,variant=Mac Catalyst' \\\n  -derivedDataPath \"${CATALYST_BUILD}/DerivedData\" \\\n  SYMROOT=\"${CATALYST_BUILD}/Products\" \\\n  ARCHS=arm64 \\\n  ONLY_ACTIVE_ARCH=NO \\\n  CODE_SIGN_IDENTITY=- \\\n  CODE_SIGNING_REQUIRED=NO \\\n  CODE_SIGNING_ALLOWED=NO \\\n  build\n\nrm -rf \"${XCFRAMEWORK_OUT}\"\n\"${DEVELOPER_DIR}/usr/bin/xcodebuild\" -create-xcframework \\\n  -allow-internal-distribution \\\n  -framework \"${FRAMEWORK_BUILT}\" \\\n  -output \"${XCFRAMEWORK_OUT}\"\n";
+			shellScript = "set -euo pipefail\n\nexport DEVELOPER_DIR=\"${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}\"\nif [ ! -x \"${DEVELOPER_DIR}/usr/bin/xcodebuild\" ]; then\n  export DEVELOPER_DIR=\"/Applications/Xcode.app/Contents/Developer\"\nfi\n\ncase \"${CONFIGURATION:-Release}\" in\n  Nightly) PLAYTOOLS_CFG=\"Release\" ;;\n  *)       PLAYTOOLS_CFG=\"${CONFIGURATION:-Release}\" ;;\nesac\n\nCATALYST_BUILD=\"${TARGET_TEMP_DIR}/PlayToolsCatalyst\"\nXCFRAMEWORK_OUT=\"${BUILT_PRODUCTS_DIR}/PlayTools.xcframework\"\nFRAMEWORK_BUILT=\"${CATALYST_BUILD}/Products/${PLAYTOOLS_CFG}-maccatalyst/PlayTools.framework\"\nBRIDGE_BUILT=\"${CATALYST_BUILD}/Products/${PLAYTOOLS_CFG}-maccatalyst/CoverUseBridge.dylib\"\nBRIDGE_OUT_DIR=\"${BUILT_PRODUCTS_DIR}/BuiltInPlugins/CoverUseBridge\"\n\nmkdir -p \"${CATALYST_BUILD}\" \"${BUILT_PRODUCTS_DIR}\" \"${BRIDGE_OUT_DIR}\"\n\n\"${DEVELOPER_DIR}/usr/bin/xcodebuild\" \\\n  -project \"${SRCROOT}/PlayTools.xcodeproj\" \\\n  -scheme PlayTools \\\n  -configuration \"${PLAYTOOLS_CFG}\" \\\n  -destination 'generic/platform=macOS,variant=Mac Catalyst' \\\n  -derivedDataPath \"${CATALYST_BUILD}/DerivedData\" \\\n  SYMROOT=\"${CATALYST_BUILD}/Products\" \\\n  ARCHS=arm64 \\\n  ONLY_ACTIVE_ARCH=NO \\\n  CODE_SIGN_IDENTITY=- \\\n  CODE_SIGNING_REQUIRED=NO \\\n  CODE_SIGNING_ALLOWED=NO \\\n  build\n\nrm -rf \"${XCFRAMEWORK_OUT}\"\n\"${DEVELOPER_DIR}/usr/bin/xcodebuild\" -create-xcframework \\\n  -allow-internal-distribution \\\n  -framework \"${FRAMEWORK_BUILT}\" \\\n  -output \"${XCFRAMEWORK_OUT}\"\n\nditto \"${BRIDGE_BUILT}\" \"${BRIDGE_OUT_DIR}/CoverUseBridge.dylib\"\nditto \"${SRCROOT}/CoverUseBridge/PluginManifest.json\" \"${BRIDGE_OUT_DIR}/PluginManifest.json\"\ntouch \"${BRIDGE_OUT_DIR}/CoverUseBridge.dylib\" \"${BRIDGE_OUT_DIR}/PluginManifest.json\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -1467,6 +1518,14 @@
 				AA71A1222F00000700623C15 /* PTRegistrationTests.swift in Sources */,
 				AA71A1232F00000700623C15 /* PTPluginContainerTests.swift in Sources */,
 				B127172628817C040025112C /* DiscordIPC.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AA71B0122F00005000623C15 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AA71B0102F00005000623C15 /* CoverUseBridge.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1769,6 +1828,96 @@
 			};
 			name = Nightly;
 		};
+		AA71B0142F00005000623C15 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = AA71A0132F00000100623C15 /* Runtime.xcconfig */;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				EXECUTABLE_EXTENSION = dylib;
+				EXECUTABLE_PREFIX = "";
+				GCC_SYMBOLS_PRIVATE_EXTERN = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				MACH_O_TYPE = mh_dylib;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					UIKit,
+					"-framework",
+					Foundation,
+					"-framework",
+					CoreGraphics,
+					"-framework",
+					QuartzCore,
+				);
+				PRODUCT_NAME = CoverUseBridge;
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
+		AA71B0152F00005000623C15 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = AA71A0132F00000100623C15 /* Runtime.xcconfig */;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				EXECUTABLE_EXTENSION = dylib;
+				EXECUTABLE_PREFIX = "";
+				GCC_SYMBOLS_PRIVATE_EXTERN = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				MACH_O_TYPE = mh_dylib;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					UIKit,
+					"-framework",
+					Foundation,
+					"-framework",
+					CoreGraphics,
+					"-framework",
+					QuartzCore,
+				);
+				PRODUCT_NAME = CoverUseBridge;
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
+		AA71B0162F00005000623C15 /* Nightly */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = AA71A0132F00000100623C15 /* Runtime.xcconfig */;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				EXECUTABLE_EXTENSION = dylib;
+				EXECUTABLE_PREFIX = "";
+				GCC_SYMBOLS_PRIVATE_EXTERN = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				MACH_O_TYPE = mh_dylib;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					UIKit,
+					"-framework",
+					Foundation,
+					"-framework",
+					CoreGraphics,
+					"-framework",
+					QuartzCore,
+				);
+				PRODUCT_NAME = CoverUseBridge;
+				SKIP_INSTALL = YES;
+			};
+			name = Nightly;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -1818,6 +1967,16 @@
 				AA71A09D2F00000600623C15 /* Debug */,
 				AA71A09E2F00000600623C15 /* Release */,
 				AA71A09F2F00000600623C15 /* Nightly */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		AA71B0132F00005000623C15 /* Build configuration list for PBXNativeTarget "CoverUseBridge" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AA71B0142F00005000623C15 /* Debug */,
+				AA71B0152F00005000623C15 /* Release */,
+				AA71B0162F00005000623C15 /* Nightly */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

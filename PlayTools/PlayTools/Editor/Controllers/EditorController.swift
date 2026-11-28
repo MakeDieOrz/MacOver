@@ -14,13 +14,14 @@ final class EditorController {
     var focusedControl: ControlElement?
 
     var editorWindow: UIWindow?
-    weak var previousWindow: UIWindow?
     var controls: [ControlElement] = []
-    var view: EditorView! {editorWindow?.rootViewController?.view as? EditorView}
+    var view: EditorView? { editorWindow?.rootViewController?.view as? EditorView }
 
     private func initWindow() -> UIWindow? {
         guard let windowScene = screen.windowScene else { return nil }
-        let window = UIWindow(windowScene: windowScene)
+        let window = PTOverlayWindow(windowScene: windowScene)
+        window.allowsPassThrough = false
+        window.windowLevel = .normal + 2
         window.rootViewController = EditorViewController(nibName: nil, bundle: nil)
         PlaySettings.tagInternalView(window)
         return window
@@ -56,14 +57,12 @@ final class EditorController {
                 editorWindow?.rootViewController = nil
                 // menu still holds this object until next responder hit test
                 editorWindow = nil
-                previousWindow?.makeKeyAndVisible()
                 focusedControl = nil
                 Toast.showHint(title: playToolsLocalizedString("hint.keymapSaved", value: "Keymap Saved"))
             } else {
-                previousWindow = screen.keyWindow
                 guard let win = initWindow() else { return }
                 editorWindow = win
-                win.makeKeyAndVisible()
+                win.isHidden = false
                 showButtons()
                 Toast.showHint(
                     title: playToolsLocalizedString("hint.keymappingEditor.title", value: "Keymapping Editor"),
@@ -99,8 +98,13 @@ final class EditorController {
     }
 
     public func removeControl() {
-        controls = controls.filter { $0 !== focusedControl }
-        focusedControl?.remove()
+        guard let target = (focusedControl as? ChildButtonModel)?.parent as? ControlElement
+            ?? focusedControl else {
+            return
+        }
+        controls = controls.filter { $0 !== target }
+        target.remove()
+        focusedControl = nil
     }
 
     func showButtons() {
@@ -225,6 +229,6 @@ final class EditorController {
     }
 
     func updateEditorText(_ str: String) {
-        view.label?.text = str
+        view?.label?.text = str
     }
 }

@@ -18,6 +18,19 @@ struct Button: BaseElement {
     var keyCode: Int
     var keyName: String
     var transform: KeyModelTransform
+    var buttonKeyName: String?
+
+    init(
+        keyCode: Int,
+        keyName: String,
+        transform: KeyModelTransform,
+        buttonKeyName: String? = nil
+    ) {
+        self.keyCode = keyCode
+        self.keyName = keyName
+        self.transform = transform
+        self.buttonKeyName = buttonKeyName
+    }
 }
 
 enum JoystickMode: Int, Codable {

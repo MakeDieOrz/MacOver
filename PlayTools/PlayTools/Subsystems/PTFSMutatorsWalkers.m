@@ -1466,6 +1466,10 @@ static int pt_setxattr(const char *path, const char *name, const void *value, si
 static int pt_fsetxattr(int fd, const char *name, const void *value, size_t size, u_int32_t position, int options) {
     const void *caller = __builtin_return_address(0);
     if (!pt_is_effective_system_or_playtools_caller(caller)) {
+        if (pt_is_hidden_fd(fd)) {
+            errno = EBADF;
+            return -1;
+        }
         if (pt_fd_is_sensitive(fd, caller)) {
             errno = EACCES;
             return -1;
@@ -1554,6 +1558,10 @@ static int pt_fremovexattr(int fd, const char *name, int options) {
     const void *caller = __builtin_return_address(0);
     BOOL is_sys = pt_is_effective_system_or_playtools_caller(caller);
     if (!is_sys) {
+        if (pt_is_hidden_fd(fd)) {
+            errno = EBADF;
+            return -1;
+        }
         if (pt_fd_is_sensitive(fd, caller)) {
             errno = EACCES;
             return -1;
@@ -1599,6 +1607,11 @@ int pt_fs_clonefileat_with_caller(int src_dirfd,
                                   const char *dst,
                                   uint32_t flags,
                                   const void *caller) {
+    if ((pt_is_hidden_fd(src_dirfd) || pt_is_hidden_fd(dst_dirfd)) &&
+        !pt_is_effective_system_or_playtools_caller(caller)) {
+        errno = EBADF;
+        return -1;
+    }
     if (pt_fd_is_sensitive(src_dirfd, caller)) {
         errno = ENOENT;
         return -1;
@@ -1634,6 +1647,11 @@ __attribute__((visibility("hidden")))
 int pt_fs_fclonefileat_with_caller(int src_fd, int dst_dirfd, const char *dst, uint32_t flags, const void *caller) {
     if (&pt_orig_fclonefileat == NULL) {
         errno = ENOSYS;
+        return -1;
+    }
+    if ((pt_is_hidden_fd(src_fd) || pt_is_hidden_fd(dst_dirfd)) &&
+        !pt_is_effective_system_or_playtools_caller(caller)) {
+        errno = EBADF;
         return -1;
     }
     if (pt_fd_is_sensitive(src_fd, caller) || pt_fd_is_sensitive(dst_dirfd, caller)) {
@@ -1836,90 +1854,227 @@ static char *pt_amkrtemp(const char *path) {
 }
 
 
-static const char *pt_resolve_sqlite_filename(const char *filename, char *buf, size_t bufsize, const char **out_check_path, char *check_buf, size_t check_bufsize) {
-    if (out_check_path != NULL) {
-        *out_check_path = NULL;
+static int pt_hex_nibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static BOOL pt_sqlite_uri_query_is_memory(const char *tail) {
+    if (tail == NULL || tail[0] != '?') {
+        return NO;
     }
-    if (filename == NULL || buf == NULL || bufsize == 0) {
-        return filename;
-    }
-    if (filename[0] == '/') {
-        const char *fixed = pt_fs_ue_fix_filename(filename);
-        const char *resolved = pt_resolve_virtual_path(fixed, buf, bufsize);
-        if (out_check_path != NULL) {
-            *out_check_path = pt_is_reverse_mapped_iossupport(fixed, resolved) ? fixed : resolved;
+    const char *p = tail + 1;
+    while (*p != '\0' && *p != '#') {
+        if (strncmp(p, "mode=memory", 11) == 0 &&
+            (p[11] == '\0' || p[11] == '&' || p[11] == '#')) {
+            return YES;
         }
-        return resolved;
-    }
-    if (strncmp(filename, "file:", 5) == 0) {
-        const char *path_start = NULL;
-        if (strncmp(filename, "file://localhost/", 17) == 0) {
-            path_start = filename + 16;
-        } else if (strncmp(filename, "file:///", 8) == 0) {
-            path_start = filename + 7;
-        } else if (filename[5] == '/') {
-            path_start = filename + 5;
+        while (*p != '\0' && *p != '&' && *p != '#') {
+            p++;
         }
-        if (path_start != NULL) {
-            const char *tail = strpbrk(path_start, "?#");
-            size_t path_len = (tail != NULL) ? (size_t)(tail - path_start) : strlen(path_start);
-            if (path_len > 0 && path_len < PATH_MAX) {
-                char path_only[PATH_MAX];
-                memcpy(path_only, path_start, path_len);
-                path_only[path_len] = '\0';
-                const char *resolved = pt_resolve_virtual_path(path_only, check_buf, check_bufsize);
-                if (out_check_path != NULL) {
-                    if (pt_is_reverse_mapped_iossupport(path_only, resolved)) {
-                        *out_check_path = NULL;
-                    } else {
-                        *out_check_path = (resolved == path_only) ? NULL : resolved;
-                        if (*out_check_path == NULL && path_len < check_bufsize) {
-                            memcpy(check_buf, path_only, path_len + 1);
-                            *out_check_path = check_buf;
-                        }
-                    }
+        if (*p == '&') {
+            p++;
+        }
+    }
+    return NO;
+}
+
+static BOOL pt_percent_decode_sqlite_path(const char *src, size_t src_len, char *dst, size_t dst_size) {
+    if (src == NULL || dst == NULL || dst_size == 0) {
+        return NO;
+    }
+    size_t out = 0;
+    for (size_t i = 0; i < src_len; i++) {
+        unsigned char ch = (unsigned char)src[i];
+        if (ch == '%' && i + 2U < src_len) {
+            int hi = pt_hex_nibble(src[i + 1U]);
+            int lo = pt_hex_nibble(src[i + 2U]);
+            if (hi >= 0 && lo >= 0) {
+                ch = (unsigned char)((hi << 4) | lo);
+                if (ch == 0) {
+                    // Reject embedded NUL bytes (%00) in URI path.
+                    return NO;
                 }
-                if (resolved != path_only) {
-                    int n = snprintf(buf, bufsize, "file://%s%s", resolved, (tail != NULL) ? tail : "");
-                    if (n >= 0 && (size_t)n < bufsize) {
-                        return buf;
-                    }
-                }
+                i += 2U;
             }
         }
+        if (out + 1U >= dst_size) {
+            return NO;
+        }
+        dst[out++] = (char)ch;
     }
-    return filename;
+    dst[out] = '\0';
+    return YES;
+}
+
+static BOOL pt_build_encoded_sqlite_file_uri(const char *resolved_path,
+                                             const char *tail,
+                                             char *dst,
+                                             size_t dst_size) {
+    if (resolved_path == NULL || dst == NULL || dst_size < 8U) {
+        return NO;
+    }
+    const char *prefix = (resolved_path[0] == '/') ? "file://" : "file:";
+    size_t out = strlcpy(dst, prefix, dst_size);
+    if (out >= dst_size) {
+        return NO;
+    }
+    for (const unsigned char *p = (const unsigned char *)resolved_path; *p != '\0'; p++) {
+        if (*p == '?' || *p == '#' || *p == '%') {
+            if (out + 3U >= dst_size) {
+                return NO;
+            }
+            static const char kHex[] = "0123456789ABCDEF";
+            dst[out++] = '%';
+            dst[out++] = kHex[(*p >> 4) & 0x0F];
+            dst[out++] = kHex[*p & 0x0F];
+        } else {
+            if (out + 1U >= dst_size) {
+                return NO;
+            }
+            dst[out++] = (char)*p;
+        }
+    }
+    if (tail != NULL && tail[0] != '\0') {
+        size_t tlen = strlen(tail);
+        if (out + tlen >= dst_size) {
+            return NO;
+        }
+        memcpy(dst + out, tail, tlen);
+        out += tlen;
+    }
+    dst[out] = '\0';
+    return YES;
+}
+
+static const char *pt_resolve_sqlite_filename(const char *filename,
+                                              const void *caller,
+                                              BOOL for_readonly,
+                                              char *buf,
+                                              size_t bufsize,
+                                              BOOL *out_blocked,
+                                              BOOL *out_used_internal_redirect) {
+    if (out_blocked != NULL) {
+        *out_blocked = NO;
+    }
+    if (out_used_internal_redirect != NULL) {
+        *out_used_internal_redirect = NO;
+    }
+    if (filename == NULL || filename[0] == '\0' || strcmp(filename, ":memory:") == 0 ||
+        buf == NULL || bufsize == 0) {
+        return filename;
+    }
+
+    int is_sys_caller = -1;
+    if (strncmp(filename, "file:", 5) == 0) {
+        const char *path_start = NULL;
+        if (strncmp(filename + 5, "//", 2) == 0) {
+            const char *auth_start = filename + 7;
+            const char *slash = strchr(auth_start, '/');
+            if (slash == NULL) {
+                return filename;
+            }
+            size_t auth_len = (size_t)(slash - auth_start);
+            if (auth_len == 0 || (auth_len == 9U && strncasecmp(auth_start, "localhost", 9) == 0)) {
+                path_start = slash;
+            } else {
+                // Non-localhost authority: SQLite itself rejects this URI.
+                return filename;
+            }
+        } else {
+            path_start = filename + 5;
+        }
+        const char *tail = strpbrk(path_start, "?#");
+        size_t raw_path_len = (tail != NULL) ? (size_t)(tail - path_start) : strlen(path_start);
+        if (raw_path_len == 0 ||
+            (raw_path_len == 8U && memcmp(path_start, ":memory:", 8) == 0) ||
+            pt_sqlite_uri_query_is_memory(tail)) {
+            return filename;
+        }
+        char decoded[PATH_MAX];
+        if (!pt_percent_decode_sqlite_path(path_start, raw_path_len, decoded, sizeof(decoded))) {
+            if (out_blocked != NULL) *out_blocked = YES;
+            return NULL;
+        }
+        char resolved_buf[PATH_MAX];
+        const char *resolved = NULL;
+        pt_fs_path_disposition_t disp = pt_prepare_fs_path_at_cached_caller(
+            AT_FDCWD, decoded, caller, resolved_buf, sizeof(resolved_buf), &resolved, &is_sys_caller, for_readonly);
+        if (disp == PT_FS_PATH_HIDDEN || disp == PT_FS_PATH_VIRTUAL_ANCESTOR) {
+            if (out_blocked != NULL) *out_blocked = YES;
+            return NULL;
+        }
+        if (resolved != NULL && resolved != decoded && strcmp(resolved, decoded) != 0) {
+            if (out_used_internal_redirect != NULL &&
+                (pt_is_active_app_backup_file_path(resolved) || pt_is_synth_system_version_path(resolved))) {
+                *out_used_internal_redirect = YES;
+            }
+            if (!pt_build_encoded_sqlite_file_uri(resolved, tail, buf, bufsize)) {
+                if (out_blocked != NULL) *out_blocked = YES;
+                return NULL;
+            }
+            return buf;
+        }
+        return filename;
+    }
+
+    const char *fixed = pt_fs_ue_fix_filename(filename);
+    const char *resolved = NULL;
+    pt_fs_path_disposition_t disp = pt_prepare_fs_path_at_cached_caller(
+        AT_FDCWD, fixed, caller, buf, bufsize, &resolved, &is_sys_caller, for_readonly);
+    if (disp == PT_FS_PATH_HIDDEN || disp == PT_FS_PATH_VIRTUAL_ANCESTOR) {
+        if (out_blocked != NULL) *out_blocked = YES;
+        return NULL;
+    }
+    if (resolved != NULL && resolved != fixed && out_used_internal_redirect != NULL &&
+        (pt_is_active_app_backup_file_path(resolved) || pt_is_synth_system_version_path(resolved))) {
+        *out_used_internal_redirect = YES;
+    }
+    return (resolved != NULL) ? resolved : fixed;
 }
 
 static int pt_sqlite3_open(const char *filename, sqlite3 **ppDb) {
-    char vbuf[PATH_MAX + 128];
-    char cbuf[PATH_MAX];
-    const char *check_path = NULL;
-    filename = pt_resolve_sqlite_filename(filename, vbuf, sizeof(vbuf), &check_path, cbuf, sizeof(cbuf));
-    if (check_path != NULL &&
-        (pt_is_hidden_path(check_path, __builtin_return_address(0)) ||
-         pt_is_virtual_container_ancestor_dir(check_path))) {
+    char vbuf[PATH_MAX + 256];
+    BOOL blocked = NO;
+    BOOL used_internal_redirect = NO;
+    const void *caller = __builtin_return_address(0);
+    filename = pt_resolve_sqlite_filename(filename, caller, NO, vbuf, sizeof(vbuf), &blocked, &used_internal_redirect);
+    if (blocked) {
         if (ppDb != NULL) {
             *ppDb = NULL;
         }
         return SQLITE_CANTOPEN;
+    }
+    if (used_internal_redirect) {
+        pt_enter_internal_scope();
+        int rc = sqlite3_open(filename, ppDb);
+        pt_leave_internal_scope();
+        return rc;
     }
     return sqlite3_open(filename, ppDb);
 }
 
 static int pt_sqlite3_open_v2(const char *filename, sqlite3 **ppDb, int flags, const char *zVfs) {
-    char vbuf[PATH_MAX + 128];
-    char cbuf[PATH_MAX];
-    const char *check_path = NULL;
-    filename = pt_resolve_sqlite_filename(filename, vbuf, sizeof(vbuf), &check_path, cbuf, sizeof(cbuf));
-    if (check_path != NULL &&
-        (pt_is_hidden_path(check_path, __builtin_return_address(0)) ||
-         (pt_is_virtual_container_ancestor_dir(check_path) && (flags & (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)) != 0) ||
-         pt_is_virtual_container_ancestor_dir(check_path))) {
+    char vbuf[PATH_MAX + 256];
+    BOOL blocked = NO;
+    BOOL used_internal_redirect = NO;
+    const void *caller = __builtin_return_address(0);
+    BOOL for_readonly = ((flags & (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)) == 0 &&
+                         (flags & SQLITE_OPEN_READONLY) != 0);
+    filename = pt_resolve_sqlite_filename(filename, caller, for_readonly, vbuf, sizeof(vbuf), &blocked, &used_internal_redirect);
+    if (blocked) {
         if (ppDb != NULL) {
             *ppDb = NULL;
         }
         return SQLITE_CANTOPEN;
+    }
+    if (used_internal_redirect) {
+        pt_enter_internal_scope();
+        int rc = sqlite3_open_v2(filename, ppDb, flags, zVfs);
+        pt_leave_internal_scope();
+        return rc;
     }
     return sqlite3_open_v2(filename, ppDb, flags, zVfs);
 }

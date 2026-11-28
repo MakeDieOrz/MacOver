@@ -474,6 +474,143 @@ static int pt_dlopen_preflight_search_rpaths(const struct mach_header *mh,
     return 0;
 }
 
+#define PT_EXPLICIT_FW_HANDLE_INIT_CAP 128U
+#define PT_EXPLICIT_FW_HANDLE_MAX_CAP 4096U
+
+typedef struct {
+    void *handle;
+    char path[PATH_MAX];
+} pt_explicit_fw_handle_entry_t;
+
+static os_unfair_lock s_explicit_fw_handle_lock = OS_UNFAIR_LOCK_INIT;
+static pt_explicit_fw_handle_entry_t *s_explicit_fw_handles = NULL;
+static uint32_t s_explicit_fw_handle_cap = 0;
+static uint32_t s_explicit_fw_handle_next = 0;
+
+static void pt_evict_explicit_framework_handle(void *handle) {
+    if (handle == NULL) {
+        return;
+    }
+    os_unfair_lock_lock(&s_explicit_fw_handle_lock);
+    if (s_explicit_fw_handles != NULL) {
+        for (uint32_t i = 0; i < s_explicit_fw_handle_cap; i++) {
+            if (s_explicit_fw_handles[i].handle == handle) {
+                s_explicit_fw_handles[i].handle = NULL;
+                s_explicit_fw_handles[i].path[0] = '\0';
+            }
+        }
+    }
+    os_unfair_lock_unlock(&s_explicit_fw_handle_lock);
+}
+
+static void pt_record_explicit_framework_handle(void *handle,
+                                                const char *orig_path,
+                                                const char *resolved_path,
+                                                const void *caller) {
+    if (handle == NULL || !pt_is_bypass_enabled() || pt_is_effective_system_or_playtools_caller(caller)) {
+        return;
+    }
+    BOOL is_framework = (orig_path != NULL &&
+                         resolved_path != NULL &&
+                         strstr(resolved_path, ".framework/") != NULL &&
+                         strstr(resolved_path, "/System.framework/") == NULL);
+    os_unfair_lock_lock(&s_explicit_fw_handle_lock);
+    if (!is_framework) {
+        if (s_explicit_fw_handles != NULL) {
+            for (uint32_t i = 0; i < s_explicit_fw_handle_cap; i++) {
+                if (s_explicit_fw_handles[i].handle == handle) {
+                    s_explicit_fw_handles[i].handle = NULL;
+                    s_explicit_fw_handles[i].path[0] = '\0';
+                }
+            }
+        }
+        os_unfair_lock_unlock(&s_explicit_fw_handle_lock);
+        return;
+    }
+    if (s_explicit_fw_handles == NULL) {
+        s_explicit_fw_handles = (pt_explicit_fw_handle_entry_t *)calloc(
+            PT_EXPLICIT_FW_HANDLE_INIT_CAP, sizeof(pt_explicit_fw_handle_entry_t));
+        if (s_explicit_fw_handles == NULL) {
+            os_unfair_lock_unlock(&s_explicit_fw_handle_lock);
+            return;
+        }
+        s_explicit_fw_handle_cap = PT_EXPLICIT_FW_HANDLE_INIT_CAP;
+    }
+    if (s_explicit_fw_handle_cap == 0U) {
+        os_unfair_lock_unlock(&s_explicit_fw_handle_lock);
+        return;
+    }
+    uint32_t free_slot = s_explicit_fw_handle_cap;
+    for (uint32_t i = 0; i < s_explicit_fw_handle_cap; i++) {
+        if (s_explicit_fw_handles[i].handle == handle) {
+            strlcpy(s_explicit_fw_handles[i].path, resolved_path, sizeof(s_explicit_fw_handles[i].path));
+            os_unfair_lock_unlock(&s_explicit_fw_handle_lock);
+            return;
+        }
+        if (s_explicit_fw_handles[i].handle == NULL && free_slot == s_explicit_fw_handle_cap) {
+            free_slot = i;
+        }
+    }
+    if (free_slot == s_explicit_fw_handle_cap && s_explicit_fw_handle_cap < PT_EXPLICIT_FW_HANDLE_MAX_CAP) {
+        uint32_t new_cap = s_explicit_fw_handle_cap * 2U;
+        if (new_cap > PT_EXPLICIT_FW_HANDLE_MAX_CAP) {
+            new_cap = PT_EXPLICIT_FW_HANDLE_MAX_CAP;
+        }
+        if (new_cap > s_explicit_fw_handle_cap) {
+            pt_explicit_fw_handle_entry_t *grown = (pt_explicit_fw_handle_entry_t *)realloc(
+                s_explicit_fw_handles, (size_t)new_cap * sizeof(pt_explicit_fw_handle_entry_t));
+            if (grown != NULL) {
+                memset(grown + s_explicit_fw_handle_cap,
+                       0,
+                       (size_t)(new_cap - s_explicit_fw_handle_cap) * sizeof(pt_explicit_fw_handle_entry_t));
+                s_explicit_fw_handles = grown;
+                free_slot = s_explicit_fw_handle_cap;
+                s_explicit_fw_handle_cap = new_cap;
+            }
+        }
+    }
+    uint32_t cap = s_explicit_fw_handle_cap;
+    if (cap == 0U) {
+        os_unfair_lock_unlock(&s_explicit_fw_handle_lock);
+        return;
+    }
+    uint32_t slot = free_slot;
+    if (slot >= cap) {
+        slot = s_explicit_fw_handle_next % cap;
+        s_explicit_fw_handle_next = (slot + 1U) % cap;
+    }
+    s_explicit_fw_handles[slot].handle = handle;
+    strlcpy(s_explicit_fw_handles[slot].path, resolved_path, sizeof(s_explicit_fw_handles[slot].path));
+    os_unfair_lock_unlock(&s_explicit_fw_handle_lock);
+}
+
+static BOOL pt_lookup_explicit_framework_handle_path(void *handle, char *out_buf, size_t out_cap) {
+    if (handle == NULL || out_buf == NULL || out_cap == 0) {
+        return NO;
+    }
+    BOOL found = NO;
+    os_unfair_lock_lock(&s_explicit_fw_handle_lock);
+    if (s_explicit_fw_handles != NULL) {
+        for (uint32_t i = 0; i < s_explicit_fw_handle_cap; i++) {
+            if (s_explicit_fw_handles[i].handle == handle && s_explicit_fw_handles[i].path[0] != '\0') {
+                strlcpy(out_buf, s_explicit_fw_handles[i].path, out_cap);
+                found = YES;
+                break;
+            }
+        }
+    }
+    os_unfair_lock_unlock(&s_explicit_fw_handle_lock);
+    return found;
+}
+
+static int pt_dlclose(void *handle) {
+    int rc = dlclose(handle);
+    if (rc == 0 && handle != NULL) {
+        pt_evict_explicit_framework_handle(handle);
+    }
+    return rc;
+}
+
 extern void *dlopen_from(const char *path, int mode, void *addressInCaller);
 
 static void *pt_dlopen_from(const char *path, int mode, void *addressInCaller) {
@@ -500,8 +637,11 @@ static void *pt_dlopen_from(const char *path, int mode, void *addressInCaller) {
         return NULL;
     }
     void *handle = dlopen_from(path, mode, addressInCaller != NULL ? addressInCaller : (void *)caller);
-    if (handle != NULL && orig_path != NULL) {
-        ps_notify_dynamic_image_loaded();
+    if (handle != NULL) {
+        pt_record_explicit_framework_handle(handle, orig_path, path, caller);
+        if (orig_path != NULL) {
+            ps_notify_dynamic_image_loaded();
+        }
     }
     return handle;
 }
@@ -530,8 +670,11 @@ static void *pt_dlopen(const char *path, int mode) {
         return NULL;
     }
     void *handle = (caller != NULL) ? dlopen_from(path, mode, (void *)caller) : dlopen(path, mode);
-    if (handle != NULL && orig_path != NULL) {
-        ps_notify_dynamic_image_loaded();
+    if (handle != NULL) {
+        pt_record_explicit_framework_handle(handle, orig_path, path, caller);
+        if (orig_path != NULL) {
+            ps_notify_dynamic_image_loaded();
+        }
     }
     return handle;
 }
@@ -576,8 +719,11 @@ static void *pt_dlopen_audited(const char *path, int mode) {
     } else {
         handle = dlopen(path, mode);
     }
-    if (handle != NULL && orig_path != NULL) {
-        ps_notify_dynamic_image_loaded();
+    if (handle != NULL) {
+        pt_record_explicit_framework_handle(handle, orig_path, path, caller);
+        if (orig_path != NULL) {
+            ps_notify_dynamic_image_loaded();
+        }
     }
     return handle;
 }
@@ -1281,14 +1427,30 @@ __attribute__((visibility("hidden"))) void *pt_route_dlsym_symbol_for_app(const 
     return pt_interpose_registry_lookup(symbol, pt_is_compat13_7_active() ? true : false);
 }
 
+static BOOL pt_is_internal_automation_reg_symbol(const char *symbol) {
+    if (symbol == NULL) {
+        return NO;
+    }
+    return (strcmp(symbol, "pt_register_hidden_fd") == 0 ||
+            strcmp(symbol, "pt_unregister_hidden_fd") == 0 ||
+            strcmp(symbol, "pt_register_hidden_loopback_port") == 0 ||
+            strcmp(symbol, "pt_unregister_hidden_loopback_port") == 0 ||
+            strcmp(symbol, "pt_consume_automation_bootstrap") == 0);
+}
+
 static void *pt_dlsym(void *handle, const char *symbol) {
     if (!atomic_load_explicit(&s_libsystem_ready, memory_order_acquire)) {
         return dlsym(handle, symbol);
     }
     s_tls_dlerror_pending = false;
     const void *caller = __builtin_return_address(0);
-    BOOL app_caller = (pt_is_bypass_enabled() &&
-                       !pt_is_effective_system_or_playtools_caller(caller));
+    BOOL is_sys_or_pt = pt_is_effective_system_or_playtools_caller(caller);
+    if (!is_sys_or_pt && symbol != NULL && pt_is_internal_automation_reg_symbol(symbol)) {
+        PT_DEBUG_TRACE("dyld", "hid internal automation symbol=%s", symbol);
+        pt_set_synthetic_dlerror("symbol not found");
+        return NULL;
+    }
+    BOOL app_caller = (pt_is_bypass_enabled() && !is_sys_or_pt);
     if (app_caller && symbol != NULL) {
         if (strncmp(symbol, "OBJC_CLASS_$_", 13) == 0) {
             const char *clsName = symbol + 13;
@@ -1434,9 +1596,9 @@ static void *pt_dlsym(void *handle, const char *symbol) {
     }
     if (sym != NULL && app_caller) {
         const void *target_sym = pt_resolve_interposed_target(sym);
+        Dl_info sym_info = {0};
+        BOOL has_sym_info = (dladdr(target_sym, &sym_info) != 0 && sym_info.dli_fname != NULL);
         if (target_sym == sym) {
-            Dl_info sym_info;
-            BOOL has_sym_info = (dladdr(target_sym, &sym_info) != 0 && sym_info.dli_fname != NULL);
             BOOL cf_carboncore_bridge = (has_sym_info && handle != NULL && handle != RTLD_DEFAULT &&
                                          handle != RTLD_NEXT && handle != RTLD_MAIN_ONLY && handle != RTLD_SELF &&
                                          pt_is_carboncore_framework_path_cstr(sym_info.dli_fname) &&
@@ -1453,6 +1615,30 @@ static void *pt_dlsym(void *handle, const char *symbol) {
                 PT_DEBUG_TRACE("dyld", "hid dlsym symbol=%s", symbol != NULL ? symbol : "<null>");
                 pt_set_synthetic_dlerror("symbol not found");
                 return NULL;
+            }
+        }
+        if (has_sym_info &&
+            handle != NULL && handle != RTLD_DEFAULT && handle != RTLD_NEXT &&
+            handle != RTLD_MAIN_ONLY && handle != RTLD_SELF &&
+            symbol != NULL &&
+            (strncmp(sym_info.dli_fname, "/usr/lib/system/", 16) == 0 ||
+             strcmp(sym_info.dli_fname, "/usr/lib/libSystem.B.dylib") == 0)) {
+            char opened_path[PATH_MAX];
+            if (pt_lookup_explicit_framework_handle_path(handle, opened_path, sizeof(opened_path))) {
+                void *first_h = dlopen(opened_path, RTLD_LAZY | RTLD_NOLOAD | RTLD_FIRST);
+                void *direct_sym = NULL;
+                if (first_h != NULL) {
+                    direct_sym = dlsym(first_h, symbol);
+                    dlclose(first_h);
+                }
+                if (direct_sym == NULL) {
+                    PT_DEBUG_TRACE("dyld",
+                                   "hid transitive libsystem dlsym handle=%s symbol=%s",
+                                   opened_path,
+                                   symbol);
+                    pt_set_synthetic_dlerror("symbol not found");
+                    return NULL;
+                }
             }
         }
         if (handle != RTLD_DEFAULT && handle != RTLD_NEXT && handle != RTLD_MAIN_ONLY && symbol != NULL) {
@@ -1474,6 +1660,7 @@ PT_INTERPOSE(pt_dlopen, dlopen)
 PT_INTERPOSE(pt_dlopen_audited, dlopen_audited)
 PT_INTERPOSE(pt_dlopen_from, dlopen_from)
 PT_INTERPOSE(pt_dlopen_preflight, dlopen_preflight)
+PT_INTERPOSE(pt_dlclose, dlclose)
 PT_INTERPOSE(pt_dlsym, dlsym)
 PT_INTERPOSE(pt_dlerror, dlerror)
 PT_INTERPOSE_WEAK(pt_swift_getTypeByMangledName, swift_getTypeByMangledName)

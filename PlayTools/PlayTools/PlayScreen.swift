@@ -97,6 +97,117 @@ extension UIScreen {
     }
 }
 
+@objc(PTOverlayViewController)
+final class PTOverlayViewController: UIViewController {
+    override func loadView() {
+        let root = UIView(frame: .zero)
+        root.backgroundColor = .clear
+        root.isOpaque = false
+        PlaySettings.tagInternalView(root)
+        view = root
+    }
+}
+
+@objc(PTOverlayWindow)
+final class PTOverlayWindow: UIWindow {
+    private static let registerHiddenClassesOnce: Void = {
+        for name in [
+            "PTOverlayWindow",
+            "PTOverlayViewController",
+            "_TtC9PlayTools15PTOverlayWindow",
+            "_TtC9PlayTools23PTOverlayViewController",
+            "_TtC9PlayTools20EditorViewController",
+            "_TtC9PlayTools10EditorView",
+            "_TtC9PlayTools14DebugContainer",
+            "_TtC9PlayTools8RingView"
+        ] {
+            name.withCString { pt_register_hidden_class($0) }
+        }
+    }()
+
+    var allowsPassThrough: Bool = true
+
+    override init(windowScene: UIWindowScene) {
+        _ = Self.registerHiddenClassesOnce
+        super.init(windowScene: windowScene)
+        backgroundColor = .clear
+        isOpaque = false
+        PlaySettings.tagInternalView(self)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var canBecomeKey: Bool {
+        false
+    }
+
+    override func makeKey() {
+        // Never hijack keyWindow or emit UIWindowDidBecomeKeyNotification to guest apps.
+    }
+
+    override func makeKeyAndVisible() {
+        isHidden = false
+    }
+
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        let hit = super.hitTest(point, with: event)
+        if allowsPassThrough && (hit == nil || hit === self || hit === rootViewController?.view) {
+            return nil
+        }
+        return hit
+    }
+}
+
+@MainActor
+final class PTOverlayWindowHost {
+    static let shared = PTOverlayWindowHost()
+
+    private var overlayWindow: PTOverlayWindow?
+
+    private init() {}
+
+    private static func overlayBounds(for scene: UIWindowScene) -> CGRect {
+        if #available(macCatalyst 26.0, iOS 26.0, *) {
+            return scene.effectiveGeometry.coordinateSpace.bounds
+        }
+        return scene.screen.bounds
+    }
+
+    func ensureOverlayContainerView() -> UIView? {
+        guard let scene = screen.windowScene else { return nil }
+        let sceneBounds = Self.overlayBounds(for: scene)
+        if let existing = overlayWindow, existing.windowScene === scene {
+            if let rootView = existing.rootViewController?.view {
+                existing.frame = sceneBounds
+                rootView.frame = existing.bounds
+                existing.isHidden = false
+                return rootView
+            }
+        }
+        let window = PTOverlayWindow(windowScene: scene)
+        window.windowLevel = .normal + 1
+        window.allowsPassThrough = true
+        window.frame = sceneBounds
+        let rootVC = PTOverlayViewController(nibName: nil, bundle: nil)
+        window.rootViewController = rootVC
+        rootVC.view.frame = window.bounds
+        window.isHidden = false
+        overlayWindow = window
+        return rootVC.view
+    }
+
+    func hideIfEmpty() {
+        guard let window = overlayWindow else { return }
+        let hasSubviews = !(window.rootViewController?.view.subviews.isEmpty ?? true)
+        if !hasSubviews {
+            window.isHidden = true
+        }
+    }
+}
+
 public final class PlayScreen: NSObject, @unchecked Sendable {
     @objc public static let shared = PlayScreen()
 
@@ -195,7 +306,7 @@ public final class PlayScreen: NSObject, @unchecked Sendable {
         defer { Self.updateCachedScreenRect(Self.resolveActiveScreenBounds(preferredWindow: notificationWindow)) }
         guard let window = notificationWindow,
               !window.isHidden,
-              !Self.isAuxiliaryKeyboardWindow(window),
+              !Self.isAuxiliaryOrInternalWindow(window),
               Self.isValidWindowBounds(window) else {
             return
         }
@@ -241,6 +352,7 @@ public final class PlayScreen: NSObject, @unchecked Sendable {
         let settingsData = PlaySettings.shared.settingsData
         if !isStrict,
            self.resizable,
+           settingsData.resizableAspectRatioType != 0,
            settingsData.resizableAspectRatioWidth > 0,
            settingsData.resizableAspectRatioHeight > 0 {
             akInterface.setWindowAspectRatio?(CGSize(
@@ -340,7 +452,7 @@ public final class PlayScreen: NSObject, @unchecked Sendable {
             guard let windowScene = scene as? UIWindowScene else { continue }
             for win in windowScene.windows where win.isKeyWindow
                 && !win.isHidden
-                && !Self.isAuxiliaryKeyboardWindow(win)
+                && !Self.isAuxiliaryOrInternalWindow(win)
                 && Self.isValidWindowBounds(win) {
                 return win
             }
@@ -359,7 +471,7 @@ public final class PlayScreen: NSObject, @unchecked Sendable {
             guard let windowScene = scene as? UIWindowScene else { continue }
             for win in windowScene.windows where win.isKeyWindow
                 && !win.isHidden
-                && !Self.isAuxiliaryKeyboardWindow(win)
+                && !Self.isAuxiliaryOrInternalWindow(win)
                 && Self.isValidWindowBounds(win) {
                 return win
             }
@@ -411,6 +523,38 @@ public final class PlayScreen: NSObject, @unchecked Sendable {
     }
 
     @MainActor
+    static func isInternalOverlayWindow(_ window: UIWindow) -> Bool {
+        if window is PTOverlayWindow {
+            return true
+        }
+        if let keyPtr = UnsafeRawPointer(bitPattern: PlaySettings.internalOverlayTagKeyAddress),
+           objc_getAssociatedObject(window, keyPtr) != nil {
+            return true
+        }
+        return false
+    }
+
+    @MainActor
+    static func isExcludedFromTouchRouting(_ window: UIWindow) -> Bool {
+        let tagValue: Int?
+        if let keyPtr = UnsafeRawPointer(bitPattern: PlaySettings.internalOverlayTagKeyAddress),
+           let associated = objc_getAssociatedObject(window, keyPtr) {
+            tagValue = (associated as? NSNumber)?.intValue ?? 1
+        } else {
+            tagValue = nil
+        }
+        return PTWindowGeometryMath.isExcludedFromTouchRouting(
+            isChromeOverlayWindow: window is PTOverlayWindow,
+            internalOverlayTagValue: tagValue
+        )
+    }
+
+    @MainActor
+    private static func isAuxiliaryOrInternalWindow(_ window: UIWindow) -> Bool {
+        isAuxiliaryKeyboardWindow(window) || isInternalOverlayWindow(window)
+    }
+
+    @MainActor
     var primaryWindow: UIWindow? {
         var bestNormalApp: UIWindow?
         var bestKeyValidApp: UIWindow?
@@ -426,7 +570,7 @@ public final class PlayScreen: NSObject, @unchecked Sendable {
             guard let ws = scene as? UIWindowScene else { continue }
             let isAppRole = (ws.session.role == .windowApplication)
             for w in ws.windows {
-                let isAux = Self.isAuxiliaryKeyboardWindow(w)
+                let isAux = Self.isAuxiliaryOrInternalWindow(w)
                 if isAppRole {
                     if fallbackApp == nil && !isAux { fallbackApp = w }
                     if w.isHidden || isAux { continue }
@@ -469,7 +613,7 @@ public final class PlayScreen: NSObject, @unchecked Sendable {
         }
 
         for ws in orderedScenes {
-            let windows = ws.windows
+            let windows = ws.windows.filter { !Self.isExcludedFromTouchRouting($0) }
             let candidates = windows.map { win in
                 PTWindowGeometryMath.TouchWindowCandidate(
                     isHidden: win.isHidden,

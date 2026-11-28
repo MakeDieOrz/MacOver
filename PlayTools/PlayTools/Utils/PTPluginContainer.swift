@@ -9,6 +9,35 @@
 import Darwin
 import Foundation
 import MachO
+import Security
+
+private let ptPluginPendingPathsLock = PTUnfairLock()
+nonisolated(unsafe) private var ptPluginPendingPaths = Set<String>()
+nonisolated(unsafe) private var ptPluginDyldCallbackInstalled = false
+
+private func ptPluginContainerDyldAddImageCallback(
+    _ header: UnsafePointer<mach_header>?,
+    _ vmaddrSlide: Int
+) {
+    _ = vmaddrSlide
+    guard let header else { return }
+    var info = Dl_info()
+    guard dladdr(UnsafeRawPointer(header), &info) != 0,
+          let fname = info.dli_fname else {
+        return
+    }
+    if pt_is_registered_hidden_module(fname) {
+        pt_register_hidden_image_header(UnsafeRawPointer(header))
+        return
+    }
+    let pathStr = String(cString: fname)
+    let matchesPending = ptPluginPendingPathsLock.withLock {
+        ptPluginPendingPaths.contains(pathStr)
+    }
+    if matchesPending {
+        pt_register_hidden_image_header(UnsafeRawPointer(header))
+    }
+}
 
 public struct PTSemanticVersion: Comparable, Equatable {
     public let major: Int
@@ -151,9 +180,11 @@ public final class PTPluginContainer: @unchecked Sendable {
 
     public typealias DlopenHandler = (_ path: String, _ mode: Int32) -> UnsafeMutableRawPointer?
     public typealias DlerrorHandler = () -> String?
+    public typealias CodeSignatureValidator = (_ url: URL) -> Bool
 
     private let dlopenHandler: DlopenHandler
     private let dlerrorHandler: DlerrorHandler
+    private let codeSignatureValidator: CodeSignatureValidator
     private let lock = PTUnfairLock()
     private var _loadRecords: [PTPluginLoadRecord] = []
 
@@ -166,14 +197,70 @@ public final class PTPluginContainer: @unchecked Sendable {
         dlerrorHandler: @escaping DlerrorHandler = {
             guard let ptr = dlerror() else { return nil }
             return String(cString: ptr)
+        },
+        codeSignatureValidator: @escaping CodeSignatureValidator = { url in
+            PTPluginContainer.verifyCodeSignature(at: url)
         }
     ) {
         self.dlopenHandler = dlopenHandler
         self.dlerrorHandler = dlerrorHandler
+        self.codeSignatureValidator = codeSignatureValidator
+    }
+
+    private typealias SecStaticCodeCreateWithPathFn = @convention(c) (
+        CFURL,
+        UInt32,
+        UnsafeMutablePointer<UnsafeRawPointer?>
+    ) -> OSStatus
+    private typealias SecStaticCodeCheckValidityFn = @convention(c) (
+        UnsafeRawPointer,
+        UInt32,
+        UnsafeRawPointer?
+    ) -> OSStatus
+
+    /// Verifies static Mach-O / bundle code signature via Security.framework `SecStaticCodeCheckValidity`,
+    /// accepting validly signed or ad-hoc signed binaries while rejecting unsigned or corrupted files.
+    public static func verifyCodeSignature(at url: URL, doNotValidateResources: Bool = false) -> Bool {
+        let rtldDefault = UnsafeMutableRawPointer(bitPattern: -2)
+        guard let createSym = dlsym(rtldDefault, "SecStaticCodeCreateWithPath"),
+              let checkSym = dlsym(rtldDefault, "SecStaticCodeCheckValidity") else {
+            return false
+        }
+        let createFn = unsafeBitCast(createSym, to: SecStaticCodeCreateWithPathFn.self)
+        let checkFn = unsafeBitCast(checkSym, to: SecStaticCodeCheckValidityFn.self)
+
+        var staticCodeRaw: UnsafeRawPointer?
+        let createStatus = createFn(url as CFURL, 0, &staticCodeRaw)
+        guard createStatus == errSecSuccess, let codeRef = staticCodeRaw else {
+            return false
+        }
+        defer {
+            _ = Unmanaged<AnyObject>.fromOpaque(codeRef).takeRetainedValue()
+        }
+        // kSecCSDoNotValidateResources = 0x4; default flags = 0.
+        let checkFlags: UInt32 = doNotValidateResources ? 0x4 : 0
+        return checkFn(codeRef, checkFlags, nil) == errSecSuccess
+    }
+
+    private static func isNonSymlinkRegularFile(atPath path: String) -> Bool {
+        var st = Darwin.stat()
+        guard Darwin.lstat(path, &st) == 0 else { return false }
+        return (st.st_mode & S_IFMT) == S_IFREG
+    }
+
+    private static func ensureDyldAddImageCallbackInstalled() {
+        let shouldInstall = ptPluginPendingPathsLock.withLock { () -> Bool in
+            guard !ptPluginDyldCallbackInstalled else { return false }
+            ptPluginDyldCallbackInstalled = true
+            return true
+        }
+        if shouldInstall {
+            _dyld_register_func_for_add_image(ptPluginContainerDyldAddImageCallback)
+        }
     }
 
     public static func defaultPlayToolsVersion() -> String {
-        (Bundle(for: PTPluginContainer.self).infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.9"
+        (Bundle(for: PTPluginContainer.self).infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.10"
     }
 
     public static func defaultUserPluginsDirectory() -> URL? {
@@ -196,18 +283,69 @@ public final class PTPluginContainer: @unchecked Sendable {
         return false
     }
 
-    public func initialize() {
-        guard let dir = Self.defaultUserPluginsDirectory(), Self.directoryHasEntries(at: dir) else {
-            lock.withLock { _loadRecords = [] }
-            return
+    public static func defaultBuiltInAutomationBridgeDirectory() -> URL {
+        var dirBuf = [CChar](repeating: 0, count: 1024)
+        if pt_copy_automation_bootstrap_bridge_dir(&dirBuf, dirBuf.count) {
+            let str = dirBuf.withUnsafeBufferPointer { buf -> String in
+                guard let base = buf.baseAddress else { return "" }
+                return String(cString: base)
+            }
+            if str.hasPrefix("/") {
+                return URL(fileURLWithPath: str, isDirectory: true)
+            }
         }
+        #if DEBUG
+        if let envPtr = getenv("MACOVER_AUTOMATION_BRIDGE_DIR"),
+           let envPath = String(validatingCString: envPtr),
+           envPath.hasPrefix("/") {
+            return URL(fileURLWithPath: envPath, isDirectory: true)
+        }
+        #endif
+        return URL(fileURLWithPath: PlaySettings.resolveHostUserRoot(), isDirectory: true)
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Containers", isDirectory: true)
+            .appendingPathComponent("app.makedie.MacOver", isDirectory: true)
+            .appendingPathComponent("Frameworks", isDirectory: true)
+            .appendingPathComponent("BuiltInPlugins", isDirectory: true)
+            .appendingPathComponent("CoverUseBridge", isDirectory: true)
+    }
+
+    public func initialize() {
         let bundleID = Bundle.main.bundleIdentifier ?? ""
-        _ = loadPlugins(
-            in: dir,
-            currentBundleIdentifier: bundleID,
-            currentPlayToolsVersion: Self.defaultPlayToolsVersion(),
-            isSafeModeActive: PTSafeMode.isActive
-        )
+        let playToolsVersion = Self.defaultPlayToolsVersion()
+        let safeMode = PTSafeMode.isActive
+
+        var combinedRecords: [PTPluginLoadRecord] = []
+        if let dir = Self.defaultUserPluginsDirectory(), Self.directoryHasEntries(at: dir) {
+            combinedRecords = loadPlugins(
+                in: dir,
+                currentBundleIdentifier: bundleID,
+                currentPlayToolsVersion: playToolsVersion,
+                isSafeModeActive: safeMode
+            )
+        }
+
+        let alreadyLoadedBridge = combinedRecords.contains { record in
+            record.status == .loaded && (
+                record.identifier.localizedCaseInsensitiveContains("coverusebridge")
+                    || record.dylibPath.hasSuffix("/CoverUseBridge.dylib")
+            )
+        }
+        if !safeMode && !alreadyLoadedBridge && pt_has_automation_bootstrap() {
+            let builtInDir = Self.defaultBuiltInAutomationBridgeDirectory()
+            if Self.directoryHasEntries(at: builtInDir) {
+                let extraRecords = loadPlugins(
+                    in: builtInDir,
+                    currentBundleIdentifier: bundleID,
+                    currentPlayToolsVersion: playToolsVersion,
+                    isSafeModeActive: safeMode,
+                    appendToRecords: true
+                )
+                combinedRecords.append(contentsOf: extraRecords)
+            }
+        }
+
+        lock.withLock { _loadRecords = combinedRecords }
     }
 
     @discardableResult
@@ -217,39 +355,66 @@ public final class PTPluginContainer: @unchecked Sendable {
         currentPlayToolsVersion: String = PTPluginContainer.defaultPlayToolsVersion(),
         isSafeModeActive: Bool,
         diagnosticLogURL: URL? = nil,
-        environment: [String: String] = ProcessInfo.processInfo.environment
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        appendToRecords: Bool = false
     ) -> [PTPluginLoadRecord] {
         var records: [PTPluginLoadRecord] = []
         guard let directory else {
-            lock.withLock { _loadRecords = [] }
+            if !appendToRecords {
+                lock.withLock { _loadRecords = [] }
+            }
             return []
         }
 
         let fm = FileManager.default
-        guard let entries = try? fm.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
-        ) else {
-            lock.withLock { _loadRecords = [] }
-            return []
-        }
-
-        let sortedEntries = entries.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        let resolvedDir = directory.resolvingSymlinksInPath().standardizedFileURL
+        let resolvedDirPrefix = resolvedDir.path.hasSuffix("/") ? resolvedDir.path : (resolvedDir.path + "/")
+        let directManifest = directory.appendingPathComponent(Self.manifestFilename)
         var manifestRoots: [(root: URL, manifestURL: URL)] = []
         var bareDylibs: [URL] = []
 
-        for entry in sortedEntries {
-            let isDir = (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-            if isDir {
-                let candidate = entry.appendingPathComponent(Self.manifestFilename)
-                if fm.fileExists(atPath: candidate.path) {
-                    manifestRoots.append((entry, candidate))
+        if Self.isNonSymlinkRegularFile(atPath: directManifest.path) {
+            manifestRoots.append((directory, directManifest))
+        } else {
+            guard let entries = try? fm.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
+                options: [.skipsHiddenFiles]
+            ) else {
+                if !appendToRecords {
+                    lock.withLock { _loadRecords = [] }
                 }
-            } else if entry.pathExtension == "json" && entry.lastPathComponent.hasSuffix(".manifest.json") {
-                manifestRoots.append((directory, entry))
-            } else if entry.pathExtension == "dylib" {
-                bareDylibs.append(entry)
+                return []
+            }
+
+            let sortedEntries = entries.sorted { $0.lastPathComponent < $1.lastPathComponent }
+            for entry in sortedEntries {
+                var entrySt = Darwin.stat()
+                guard Darwin.lstat(entry.path, &entrySt) == 0 else { continue }
+                let entryType = entrySt.st_mode & S_IFMT
+                if entryType == S_IFLNK {
+                    if entry.pathExtension == "dylib" {
+                        PTDiagnosticLogger.log(
+                            "Skipping symlink bare plugin at \(entry.lastPathComponent)",
+                            bundleIdentifier: currentBundleIdentifier,
+                            environment: environment,
+                            explicitLogURL: diagnosticLogURL
+                        )
+                    }
+                    continue
+                }
+                if entryType == S_IFDIR {
+                    let candidate = entry.appendingPathComponent(Self.manifestFilename)
+                    if Self.isNonSymlinkRegularFile(atPath: candidate.path) {
+                        manifestRoots.append((entry, candidate))
+                    }
+                } else if entryType == S_IFREG {
+                    if entry.pathExtension == "json" && entry.lastPathComponent.hasSuffix(".manifest.json") {
+                        manifestRoots.append((directory, entry))
+                    } else if entry.pathExtension == "dylib" {
+                        bareDylibs.append(entry)
+                    }
+                }
             }
         }
 
@@ -269,7 +434,7 @@ public final class PTPluginContainer: @unchecked Sendable {
                 )
                 switch resolution {
                 case .valid(let dylibURL):
-                    claimedPaths.insert(dylibURL.standardizedFileURL.path)
+                    claimedPaths.insert(dylibURL.resolvingSymlinksInPath().standardizedFileURL.path)
                     readyDescriptors.append(PTPluginDescriptor(
                         manifest: manifest,
                         dylibURL: dylibURL,
@@ -281,7 +446,7 @@ public final class PTPluginContainer: @unchecked Sendable {
                         )
                     ))
                 case .bundleMismatch(let dylibURL):
-                    claimedPaths.insert(dylibURL.standardizedFileURL.path)
+                    claimedPaths.insert(dylibURL.resolvingSymlinksInPath().standardizedFileURL.path)
                     records.append(PTPluginLoadRecord(
                         identifier: manifest.identifier,
                         dylibPath: dylibURL.path,
@@ -291,6 +456,9 @@ public final class PTPluginContainer: @unchecked Sendable {
                 case .invalid(let reason):
                     let rawTarget = item.root.appendingPathComponent(manifest.entrypoint).path
                     if !manifest.entrypoint.isEmpty {
+                        claimedPaths.insert(
+                            URL(fileURLWithPath: rawTarget).resolvingSymlinksInPath().standardizedFileURL.path
+                        )
                         claimedPaths.insert(URL(fileURLWithPath: rawTarget).standardizedFileURL.path)
                     }
                     records.append(PTPluginLoadRecord(
@@ -326,7 +494,19 @@ public final class PTPluginContainer: @unchecked Sendable {
         }
 
         for dylibURL in bareDylibs {
-            if claimedPaths.contains(dylibURL.standardizedFileURL.path) {
+            let resolvedDylib = dylibURL.resolvingSymlinksInPath().standardizedFileURL
+            if claimedPaths.contains(resolvedDylib.path) || claimedPaths.contains(dylibURL.standardizedFileURL.path) {
+                continue
+            }
+            guard Self.isNonSymlinkRegularFile(atPath: dylibURL.path),
+                  resolvedDylib.path.hasPrefix(resolvedDirPrefix) else {
+                let stem = dylibURL.deletingPathExtension().lastPathComponent
+                records.append(PTPluginLoadRecord(
+                    identifier: "legacy.\(stem)",
+                    dylibPath: dylibURL.path,
+                    isLegacySynthesized: true,
+                    status: .validationFailed("Bare plugin escapes root or is a symlink")
+                ))
                 continue
             }
             let manifest = synthesizeLegacyManifest(for: dylibURL)
@@ -370,24 +550,63 @@ public final class PTPluginContainer: @unchecked Sendable {
                     explicitLogURL: diagnosticLogURL
                 )
             }
-            lock.withLock { _loadRecords = records }
+            if !appendToRecords {
+                lock.withLock { _loadRecords = records }
+            } else {
+                lock.withLock { _loadRecords.append(contentsOf: records) }
+            }
             return records
         }
 
+        Self.ensureDyldAddImageCallbackInstalled()
+
         for descriptor in readyDescriptors {
+            let resolvedURL = descriptor.dylibURL.resolvingSymlinksInPath().standardizedFileURL
+            guard Self.isNonSymlinkRegularFile(atPath: descriptor.dylibURL.path),
+                  codeSignatureValidator(resolvedURL) else {
+                let reason = "Code signature validation failed for '\(descriptor.dylibURL.lastPathComponent)'"
+                records.append(PTPluginLoadRecord(
+                    identifier: descriptor.manifest.identifier,
+                    dylibPath: descriptor.dylibURL.path,
+                    isLegacySynthesized: descriptor.isLegacySynthesized,
+                    status: .validationFailed(reason)
+                ))
+                PTDiagnosticLogger.log(
+                    "Plugin validation failed [\(descriptor.manifest.identifier)]: \(reason)",
+                    bundleIdentifier: currentBundleIdentifier,
+                    force: true,
+                    environment: environment,
+                    explicitLogURL: diagnosticLogURL
+                )
+                continue
+            }
+
             for fragment in descriptor.registeredFragments {
                 fragment.withCString { cstr in
                     pt_register_hidden_module(cstr)
                 }
             }
 
+            let rawPath = descriptor.dylibURL.path
+            let resolvedPath = resolvedURL.path
+            ptPluginPendingPathsLock.withLock {
+                ptPluginPendingPaths.insert(rawPath)
+                ptPluginPendingPaths.insert(resolvedPath)
+            }
+            defer {
+                ptPluginPendingPathsLock.withLock {
+                    ptPluginPendingPaths.remove(rawPath)
+                    ptPluginPendingPaths.remove(resolvedPath)
+                }
+            }
+
             // Drain any stale dlerror before dlopen.
             _ = dlerrorHandler()
-            if dlopenHandler(descriptor.dylibURL.path, RTLD_NOW) != nil {
-                registerLoadedHeader(matchingPath: descriptor.dylibURL.path)
+            if dlopenHandler(rawPath, RTLD_NOW | RTLD_LOCAL) != nil {
+                registerLoadedHeader(matchingPath: rawPath)
                 records.append(PTPluginLoadRecord(
                     identifier: descriptor.manifest.identifier,
-                    dylibPath: descriptor.dylibURL.path,
+                    dylibPath: rawPath,
                     isLegacySynthesized: descriptor.isLegacySynthesized,
                     status: .loaded
                 ))
@@ -402,13 +621,13 @@ public final class PTPluginContainer: @unchecked Sendable {
                 let errMsg = dlerrorHandler() ?? "unknown dlerror"
                 records.append(PTPluginLoadRecord(
                     identifier: descriptor.manifest.identifier,
-                    dylibPath: descriptor.dylibURL.path,
+                    dylibPath: rawPath,
                     isLegacySynthesized: descriptor.isLegacySynthesized,
                     status: .failed(errMsg)
                 ))
                 PTDiagnosticLogger.log(
                     "Failed to dlopen plugin \(descriptor.manifest.identifier) at "
-                        + "\(descriptor.dylibURL.path): \(errMsg)",
+                        + "\(rawPath): \(errMsg)",
                     bundleIdentifier: currentBundleIdentifier,
                     force: true,
                     environment: environment,
@@ -417,7 +636,11 @@ public final class PTPluginContainer: @unchecked Sendable {
             }
         }
 
-        lock.withLock { _loadRecords = records }
+        if !appendToRecords {
+            lock.withLock { _loadRecords = records }
+        } else {
+            lock.withLock { _loadRecords.append(contentsOf: records) }
+        }
         return records
     }
 
@@ -466,12 +689,10 @@ public final class PTPluginContainer: @unchecked Sendable {
             return .invalid("Unsafe or invalid entrypoint '\(entry)'")
         }
 
-        let rootStd = pluginRoot.standardizedFileURL
-        let candidateURL = rootStd.appendingPathComponent(entry).standardizedFileURL
-        let rootPrefix = rootStd.path.hasSuffix("/") ? rootStd.path : (rootStd.path + "/")
-        guard candidateURL.path.hasPrefix(rootPrefix) else {
-            return .invalid("Entrypoint '\(entry)' escapes plugin root")
-        }
+        let rootResolved = pluginRoot.resolvingSymlinksInPath().standardizedFileURL
+        let rawCandidateURL = pluginRoot.standardizedFileURL.appendingPathComponent(entry)
+        let candidateResolved = rawCandidateURL.resolvingSymlinksInPath().standardizedFileURL
+        let rootPrefix = rootResolved.path.hasSuffix("/") ? rootResolved.path : (rootResolved.path + "/")
 
         guard let minVer = PTSemanticVersion(manifest.minPlayToolsVersion),
               let curVer = PTSemanticVersion(currentPlayToolsVersion) else {
@@ -483,18 +704,23 @@ public final class PTPluginContainer: @unchecked Sendable {
             )
         }
 
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: candidateURL.path, isDirectory: &isDir),
-              !isDir.boolValue else {
-            return .invalid("Entrypoint file missing at \(candidateURL.path)")
+        var st = Darwin.stat()
+        guard Darwin.lstat(rawCandidateURL.path, &st) == 0 else {
+            return .invalid("Entrypoint file missing at \(rawCandidateURL.path)")
+        }
+        guard (st.st_mode & S_IFMT) == S_IFREG else {
+            return .invalid("Entrypoint '\(entry)' must be a non-symlink regular file")
+        }
+        guard candidateResolved.path.hasPrefix(rootPrefix) else {
+            return .invalid("Entrypoint '\(entry)' escapes plugin root")
         }
 
         if !manifest.targetBundleIdentifiers.contains("*") &&
             !manifest.targetBundleIdentifiers.contains(currentBundleIdentifier) {
-            return .bundleMismatch(candidateURL)
+            return .bundleMismatch(rawCandidateURL)
         }
 
-        return .valid(candidateURL)
+        return .valid(rawCandidateURL)
     }
 
     private func synthesizeLegacyManifest(for dylibURL: URL) -> PTPluginManifest {

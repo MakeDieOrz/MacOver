@@ -351,6 +351,59 @@ struct PTCallerAddressMathTests {
                 pt_classify_bounded_frame_kinds_ex($0.baseAddress, $0.count, true, &cacheable)
             }
         )
+        // CRIT-04: Never stop unwinding at PT_CALLER_PLAYTOOLS; app -> swizzled pm_* -> wrapper must resolve to app
+        let appThroughPlayTools: [UInt8] = [
+            UInt8(PT_CALLER_SYS_WRAPPER),
+            UInt8(PT_CALLER_PLAYTOOLS),
+            UInt8(PT_CALLER_APP)
+        ]
+        cacheable = false
+        #expect(
+            !appThroughPlayTools.withUnsafeBufferPointer {
+                pt_classify_bounded_frame_kinds_ex($0.baseAddress, $0.count, true, &cacheable)
+            }
+        )
+        #expect(cacheable)
+
+        let sysThroughPlayTools: [UInt8] = [
+            UInt8(PT_CALLER_SYS_WRAPPER),
+            UInt8(PT_CALLER_PLAYTOOLS),
+            UInt8(PT_CALLER_SYS_NON_WRAPPER)
+        ]
+        cacheable = false
+        #expect(
+            sysThroughPlayTools.withUnsafeBufferPointer {
+                pt_classify_bounded_frame_kinds_ex($0.baseAddress, $0.count, true, &cacheable)
+            }
+        )
+        #expect(cacheable)
+
+        let deepAppThroughPlayTools: [UInt8] = [
+            UInt8(PT_CALLER_SYS_WRAPPER),
+            UInt8(PT_CALLER_SYS_WRAPPER),
+            UInt8(PT_CALLER_PLAYTOOLS),
+            UInt8(PT_CALLER_APP)
+        ]
+        cacheable = true
+        #expect(
+            !deepAppThroughPlayTools.withUnsafeBufferPointer {
+                pt_classify_bounded_frame_kinds_ex($0.baseAddress, $0.count, true, &cacheable)
+            }
+        )
+        #expect(!cacheable)
+
+        let wrappedAppThroughPlayTools: [UInt8] = [
+            UInt8(PT_CALLER_SYS_WRAPPER),
+            UInt8(PT_CALLER_PLAYTOOLS),
+            UInt8(PT_CALLER_SYS_WRAPPER),
+            UInt8(PT_CALLER_APP)
+        ]
+        cacheable = true
+        #expect(
+            !wrappedAppThroughPlayTools.withUnsafeBufferPointer {
+                pt_classify_bounded_frame_kinds_ex($0.baseAddress, $0.count, true, &cacheable)
+            }
+        )
         #expect(!cacheable)
     }
 
@@ -417,6 +470,28 @@ struct PTCallerAddressMathTests {
                     dataPtr, dataLen
                 )
                 #expect(!blockRegisteredModule)
+
+                // MED-02: Runtime artifacts (keymapping state & toucher.log) must never fast-path
+                let blockKeymapState = pt_is_nonsensitive_app_or_tmp_path(
+                    "/var/mobile/Containers/Data/Application/UUID-123/tmp/pm_keymapping_state.plist",
+                    bundlePtr, bundleLen,
+                    dataPtr, dataLen
+                )
+                #expect(!blockKeymapState)
+
+                let blockScopedKeymapState = pt_is_nonsensitive_app_or_tmp_path(
+                    "/var/mobile/Containers/Data/Application/UUID-123/tmp/pm_keymapping_state_com_example_game.plist",
+                    bundlePtr, bundleLen,
+                    dataPtr, dataLen
+                )
+                #expect(!blockScopedKeymapState)
+
+                let blockToucherLog = pt_is_nonsensitive_app_or_tmp_path(
+                    "/var/mobile/Containers/Data/Application/UUID-123/tmp/toucher.log",
+                    bundlePtr, bundleLen,
+                    dataPtr, dataLen
+                )
+                #expect(!blockToucherLog)
             }
         }
 

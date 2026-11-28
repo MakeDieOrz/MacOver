@@ -73,7 +73,170 @@ static BOOL pt_is_spoofed_ioreg_key(CFStringRef key) {
     return NO;
 }
 
-static CFTypeRef pt_create_sanitized_ioreg_cfvalue_if_changed(CFTypeRef val, CFAllocatorRef allocator, int depth) CF_RETURNS_RETAINED;
+static CFTypeRef pt_create_sanitized_ioreg_cfvalue_if_changed(CFTypeRef val, CFStringRef key, CFAllocatorRef allocator, int depth) CF_RETURNS_RETAINED;
+
+static BOOL pt_cstr_contains_macos_token(const char *s) {
+    if (s == NULL || s[0] == '\0') {
+        return NO;
+    }
+    static const char *const kMacTokens[] = {
+        "MacBook",
+        "iMac",
+        "Macmini",
+        "MacPro",
+        "MacStudio",
+        "Macintosh",
+        "MacOS",
+        "macOS",
+        "MacOSX",
+        "MacCatalyst",
+        "Mac-",
+        "VirtualMac",
+        "MacHost",
+        "AppleMac",
+        "MacPlatform",
+        "MacHAL",
+        "MacIO",
+    };
+    for (size_t i = 0; i < sizeof(kMacTokens) / sizeof(kMacTokens[0]); i++) {
+        if (strstr(s, kMacTokens[i]) != NULL) {
+            return YES;
+        }
+    }
+    // Match model-numbered or token-bounded "Mac" (e.g. "Mac14,2", "Mac15,3@0", "Mac")
+    // without false-matching "MacAddress", "Machine", "Macro", or "Mach...".
+    const char *p = s;
+    while ((p = strstr(p, "Mac")) != NULL) {
+        BOOL left_ok = (p == s || !isalnum((unsigned char)p[-1]));
+        unsigned char next = (unsigned char)p[3];
+        BOOL right_ok = (next == '\0' || isdigit(next) || next == '@' || next == ',' ||
+                         next == '-' || next == '/' || next == ':');
+        if (left_ok && right_ok) {
+            return YES;
+        }
+        p += 3;
+    }
+    return NO;
+}
+
+static BOOL pt_ioreg_key_is_string_list_data(CFStringRef key) {
+    if (key == NULL) {
+        return NO;
+    }
+    static NSArray<NSString *> *s_stringListKeys = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        s_stringListKeys = @[
+            @"compatible", @"model", @"name", @"IOName",
+            @"device_type", @"device-type",
+            @"product-name", @"product-description",
+            @"target-type", @"target-sub-type",
+            @"platform-name", @"manufacturer",
+            @"model-number", @"regulatory-model-number", @"region-info"
+        ];
+    });
+    NSString *kstr = (__bridge NSString *)key;
+    for (NSString *cand in s_stringListKeys) {
+        if ([kstr isEqualToString:cand]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static BOOL pt_is_smart_battery_entry(io_registry_entry_t entry) {
+    if (entry == MACH_PORT_NULL) {
+        return NO;
+    }
+    return (IOObjectConformsTo(entry, "IOPMPowerSource") ||
+            IOObjectConformsTo(entry, "AppleSmartBattery")) ? YES : NO;
+}
+
+static NSArray<NSString *> *pt_blocked_battery_ioreg_keys_list(void) {
+    static NSArray<NSString *> *s_keys = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        s_keys = @[
+            @"Serial", @"BatterySerialNumber", @"FirmwareSerialNumber",
+            @"AdapterInfo", @"AdapterDetails", @"AppleRawAdapterDetails",
+            @"PowerTelemetryData", @"ChargerData", @"ChargerConfiguration",
+            @"BestAdapterIndex", @"FedDetails", @"ManufacturerData",
+            @"PermanentFailureStatus", @"BatteryData"
+        ];
+    });
+    return s_keys;
+}
+
+static BOOL pt_is_blocked_battery_ioreg_key(CFStringRef key) {
+    if (key == NULL) {
+        return NO;
+    }
+    NSString *kstr = (__bridge NSString *)key;
+    for (NSString *blocked in pt_blocked_battery_ioreg_keys_list()) {
+        if ([kstr isEqualToString:blocked]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static CFTypeRef pt_spoof_smart_battery_property(CFStringRef key, CFAllocatorRef allocator) CF_RETURNS_RETAINED {
+    if (key == NULL) {
+        return NULL;
+    }
+    int32_t cur_cap = (int32_t)lroundf(pt_get_shared_spoofed_battery_level() * 100.0f);
+    if (cur_cap < 68) cur_cap = 68;
+    if (cur_cap > 87) cur_cap = 87;
+    if (CFStringCompare(key, CFSTR("CurrentCapacity"), 0) == kCFCompareEqualTo) {
+        return CFNumberCreate(allocator, kCFNumberSInt32Type, &cur_cap);
+    }
+    if (CFStringCompare(key, CFSTR("MaxCapacity"), 0) == kCFCompareEqualTo) {
+        int32_t max_cap = 100;
+        return CFNumberCreate(allocator, kCFNumberSInt32Type, &max_cap);
+    }
+    if (CFStringCompare(key, CFSTR("ExternalConnected"), 0) == kCFCompareEqualTo ||
+        CFStringCompare(key, CFSTR("ExternalChargeCapable"), 0) == kCFCompareEqualTo ||
+        CFStringCompare(key, CFSTR("IsCharging"), 0) == kCFCompareEqualTo ||
+        CFStringCompare(key, CFSTR("FullyCharged"), 0) == kCFCompareEqualTo) {
+        return CFRetain(kCFBooleanFalse);
+    }
+    if (CFStringCompare(key, CFSTR("BatteryInstalled"), 0) == kCFCompareEqualTo) {
+        return CFRetain(kCFBooleanTrue);
+    }
+    if (CFStringCompare(key, CFSTR("TimeRemaining"), 0) == kCFCompareEqualTo ||
+        CFStringCompare(key, CFSTR("AvgTimeToEmpty"), 0) == kCFCompareEqualTo ||
+        CFStringCompare(key, CFSTR("InstantTimeToEmpty"), 0) == kCFCompareEqualTo) {
+        int32_t mins = 300;
+        return CFNumberCreate(allocator, kCFNumberSInt32Type, &mins);
+    }
+    if (CFStringCompare(key, CFSTR("AvgTimeToFull"), 0) == kCFCompareEqualTo) {
+        int32_t not_charging = 65535;
+        return CFNumberCreate(allocator, kCFNumberSInt32Type, &not_charging);
+    }
+    return NULL;
+}
+
+static void pt_sanitize_smart_battery_cfproperties_dict(NSMutableDictionary *dict, CFAllocatorRef allocator) {
+    if (dict == nil) {
+        return;
+    }
+    for (NSString *k in pt_blocked_battery_ioreg_keys_list()) {
+        [dict removeObjectForKey:k];
+    }
+    static NSString *const kBatterySpoofKeys[] = {
+        @"CurrentCapacity", @"MaxCapacity", @"ExternalConnected",
+        @"ExternalChargeCapable", @"IsCharging", @"FullyCharged",
+        @"BatteryInstalled", @"TimeRemaining", @"AvgTimeToEmpty",
+        @"InstantTimeToEmpty", @"AvgTimeToFull"
+    };
+    for (size_t i = 0; i < sizeof(kBatterySpoofKeys) / sizeof(kBatterySpoofKeys[0]); i++) {
+        NSString *k = kBatterySpoofKeys[i];
+        CFTypeRef val = pt_spoof_smart_battery_property((__bridge CFStringRef)k, allocator);
+        if (val != NULL) {
+            dict[k] = (__bridge_transfer id)val;
+        }
+    }
+}
 
 static CFTypeRef pt_create_ioreg_cstr_like(const char *cstr, CFTypeRef orig_val, CFAllocatorRef allocator) CF_RETURNS_RETAINED {
     if (cstr == NULL) {
@@ -188,6 +351,9 @@ static CFTypeRef pt_spoof_ioreg_value_for_key(CFStringRef key, CFTypeRef orig_va
         CFStringCompare(key, CFSTR("IOClass"), 0) == kCFCompareEqualTo ||
         CFStringCompare(key, CFSTR("CFBundleIdentifier"), 0) == kCFCompareEqualTo) {
         if (CFGetTypeID(orig_val) == CFDataGetTypeID()) {
+            if (!pt_ioreg_key_is_string_list_data(key)) {
+                return NULL;
+            }
             CFDataRef sanitized_data = pt_sanitize_io_nul_delimited_bytes(
                 CFDataGetBytePtr((CFDataRef)orig_val),
                 (size_t)CFDataGetLength((CFDataRef)orig_val),
@@ -214,7 +380,7 @@ static CFTypeRef pt_spoof_ioreg_value_for_key(CFStringRef key, CFTypeRef orig_va
                     pt_sanitize_io_hardware_name(buf, sizeof(buf));
                 }
             } else if (CFStringCompare(key, CFSTR("CFBundleIdentifier"), 0) == kCFCompareEqualTo) {
-                if (strstr(buf, "Mac") != NULL ||
+                if (pt_cstr_contains_macos_token(buf) ||
                     strstr(buf, "AppleACPI") != NULL ||
                     strstr(buf, "AppleSMC") != NULL ||
                     strstr(buf, "Thunderbolt") != NULL ||
@@ -226,7 +392,7 @@ static CFTypeRef pt_spoof_ioreg_value_for_key(CFStringRef key, CFTypeRef orig_va
                     pt_sanitize_io_hardware_name(buf, sizeof(buf));
                 }
             } else {
-                if (strncmp(buf, "Mac", 3) == 0 || strstr(buf, "MacBook") != NULL || strstr(buf, "iMac") != NULL) {
+                if (pt_cstr_contains_macos_token(buf)) {
                     strlcpy(buf, profile->model, sizeof(buf));
                 } else if (pt_is_hidden_io_class_or_name(NULL, buf)) {
                     strlcpy(buf, "IOService", sizeof(buf));
@@ -250,8 +416,19 @@ static CFTypeRef pt_IORegistryEntryCreateCFProperty(mach_port_t entry, CFStringR
     }
     BOOL app_caller = (pt_is_bypass_enabled() &&
                        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
-    if (key != NULL && app_caller && pt_is_blocked_ioreg_key(key)) {
-        return NULL;
+    if (key != NULL && app_caller) {
+        if (pt_is_blocked_ioreg_key(key)) {
+            return NULL;
+        }
+        if (pt_is_smart_battery_entry(entry)) {
+            if (pt_is_blocked_battery_ioreg_key(key)) {
+                return NULL;
+            }
+            CFTypeRef batt_val = pt_spoof_smart_battery_property(key, allocator);
+            if (batt_val != NULL) {
+                return batt_val;
+            }
+        }
     }
     CFTypeRef orig = IORegistryEntryCreateCFProperty(entry, key, allocator, options);
     if (orig != NULL && app_caller) {
@@ -262,7 +439,7 @@ static CFTypeRef pt_IORegistryEntryCreateCFProperty(mach_port_t entry, CFStringR
                 return spoofed;
             }
         }
-        CFTypeRef sanitized = pt_create_sanitized_ioreg_cfvalue_if_changed(orig, allocator, 0);
+        CFTypeRef sanitized = pt_create_sanitized_ioreg_cfvalue_if_changed(orig, key, allocator, 0);
         if (sanitized != NULL) {
             CFRelease(orig);
             return sanitized;
@@ -278,8 +455,19 @@ static CFTypeRef pt_IORegistryEntrySearchCFProperty(mach_port_t entry, const cha
     }
     BOOL app_caller = (pt_is_bypass_enabled() &&
                        !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0)));
-    if (key != NULL && app_caller && pt_is_blocked_ioreg_key(key)) {
-        return NULL;
+    if (key != NULL && app_caller) {
+        if (pt_is_blocked_ioreg_key(key)) {
+            return NULL;
+        }
+        if (pt_is_smart_battery_entry(entry)) {
+            if (pt_is_blocked_battery_ioreg_key(key)) {
+                return NULL;
+            }
+            CFTypeRef batt_val = pt_spoof_smart_battery_property(key, allocator);
+            if (batt_val != NULL) {
+                return batt_val;
+            }
+        }
     }
     CFTypeRef orig = IORegistryEntrySearchCFProperty(entry, plane, key, allocator, options);
     if (orig != NULL && app_caller) {
@@ -290,7 +478,7 @@ static CFTypeRef pt_IORegistryEntrySearchCFProperty(mach_port_t entry, const cha
                 return spoofed;
             }
         }
-        CFTypeRef sanitized = pt_create_sanitized_ioreg_cfvalue_if_changed(orig, allocator, 0);
+        CFTypeRef sanitized = pt_create_sanitized_ioreg_cfvalue_if_changed(orig, key, allocator, 0);
         if (sanitized != NULL) {
             CFRelease(orig);
             return sanitized;
@@ -322,7 +510,8 @@ static void pt_sanitize_ioreg_cfproperties_dict(NSMutableDictionary *dict, CFAll
         }
         NSString *keyStr = (NSString *)keyObj;
         id cur = dict[keyStr];
-        CFTypeRef repl = pt_create_sanitized_ioreg_cfvalue_if_changed((__bridge CFTypeRef)cur, allocator, 1);
+        CFTypeRef repl = pt_create_sanitized_ioreg_cfvalue_if_changed(
+            (__bridge CFTypeRef)cur, (__bridge CFStringRef)keyStr, allocator, 1);
         if (repl != NULL) {
             dict[keyStr] = (__bridge_transfer id)repl;
         }
@@ -338,7 +527,11 @@ static kern_return_t pt_IORegistryEntryCreateCFProperties(mach_port_t entry, CFM
     if (kr == KERN_SUCCESS && properties != NULL && *properties != NULL &&
         pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        pt_sanitize_ioreg_cfproperties_dict((__bridge NSMutableDictionary *)(*properties), allocator);
+        NSMutableDictionary *propsDict = (__bridge NSMutableDictionary *)(*properties);
+        pt_sanitize_ioreg_cfproperties_dict(propsDict, allocator);
+        if (pt_is_smart_battery_entry(entry)) {
+            pt_sanitize_smart_battery_cfproperties_dict(propsDict, allocator);
+        }
     }
     return kr;
 }
@@ -349,7 +542,7 @@ static BOOL pt_is_hidden_io_path(const char *path) {
     }
     if (strstr(path, "AppleACPIPlatformExpert") != NULL ||
         strstr(path, "AppleSMC") != NULL ||
-        strstr(path, "Mac") != NULL) {
+        pt_cstr_contains_macos_token(path)) {
         return YES;
     }
     const char *p = path;
@@ -489,7 +682,7 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_io_class_or_name(const c
         if (s == NULL || s[0] == '\0') {
             continue;
         }
-        if (strstr(s, "Mac") != NULL ||
+        if (pt_cstr_contains_macos_token(s) ||
             strncmp(s, "AppleSMC", 8) == 0 ||
             strncmp(s, "AppleACPI", 9) == 0 ||
             strncmp(s, "AppleSMBus", 10) == 0 ||
@@ -515,7 +708,6 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_io_class_or_name(const c
             strcmp(s, "IOHIDSystem") == 0 ||
             strncmp(s, "AppleAuthCPDock", 15) == 0 ||
             strncmp(s, "AppleExternalSecondaryAudio", 27) == 0 ||
-            strncmp(s, "AppleSmartBattery", 17) == 0 ||
             strcmp(s, "AppleBacklightDisplay") == 0 ||
             strcmp(s, "IODisplayWrangler") == 0 ||
             strcmp(s, "AGPM") == 0) {
@@ -549,7 +741,7 @@ static BOOL pt_sanitize_io_cstr_token_inplace(char *tok, size_t cap) {
     strlcpy(orig, tok, sizeof(orig));
     if (strncmp(tok, "AppleACPI", 9) == 0) {
         strlcpy(tok, "AppleARMPE", cap);
-    } else if (strstr(tok, "Mac") != NULL || strstr(tok, "AppleSMC") != NULL ||
+    } else if (pt_cstr_contains_macos_token(tok) || strstr(tok, "AppleSMC") != NULL ||
                strstr(tok, "Thunderbolt") != NULL || strcasestr(tok, "PlayTools") != NULL ||
                strcasestr(tok, "PlayCover") != NULL || strcasestr(tok, "MacOver") != NULL) {
         strlcpy(tok, pt_get_active_device_profile()->model, cap);
@@ -618,7 +810,7 @@ __attribute__((visibility("hidden"))) CFDataRef pt_sanitize_io_nul_delimited_byt
     return out;
 }
 
-static CFTypeRef pt_create_sanitized_ioreg_cfvalue_if_changed(CFTypeRef val, CFAllocatorRef allocator, int depth) CF_RETURNS_RETAINED {
+static CFTypeRef pt_create_sanitized_ioreg_cfvalue_if_changed(CFTypeRef val, CFStringRef key, CFAllocatorRef allocator, int depth) CF_RETURNS_RETAINED {
     if (val == NULL || depth > 8) {
         return NULL;
     }
@@ -634,7 +826,7 @@ static CFTypeRef pt_create_sanitized_ioreg_cfvalue_if_changed(CFTypeRef val, CFA
         strlcpy(orig, buf, sizeof(orig));
         if (strcmp(buf, "macOS") == 0) {
             strlcpy(buf, "iPhone OS", sizeof(buf));
-        } else if (strstr(buf, "Mac") != NULL ||
+        } else if (pt_cstr_contains_macos_token(buf) ||
                    strstr(buf, "AppleACPI") != NULL ||
                    strstr(buf, "AppleSMC") != NULL ||
                    strstr(buf, "Thunderbolt") != NULL) {
@@ -648,6 +840,9 @@ static CFTypeRef pt_create_sanitized_ioreg_cfvalue_if_changed(CFTypeRef val, CFA
         return NULL;
     }
     if (tid == CFDataGetTypeID()) {
+        if (!pt_ioreg_key_is_string_list_data(key)) {
+            return NULL;
+        }
         CFIndex dlen = CFDataGetLength((CFDataRef)val);
         if (dlen > 0 && dlen <= 8192) {
             return pt_sanitize_io_nul_delimited_bytes(
@@ -683,7 +878,7 @@ static CFTypeRef pt_create_sanitized_ioreg_cfvalue_if_changed(CFTypeRef val, CFA
                 }
             }
             CFTypeRef childRepl = pt_create_sanitized_ioreg_cfvalue_if_changed(
-                (__bridge CFTypeRef)curVal, allocator, depth + 1);
+                (__bridge CFTypeRef)curVal, kcf, allocator, depth + 1);
             if (childRepl != NULL) {
                 if (mut == nil) mut = [dict mutableCopy];
                 mut[keyStr] = (__bridge_transfer id)childRepl;
@@ -696,7 +891,7 @@ static CFTypeRef pt_create_sanitized_ioreg_cfvalue_if_changed(CFTypeRef val, CFA
         NSMutableArray *mut = nil;
         for (NSUInteger i = 0; i < arr.count; i++) {
             CFTypeRef childRepl = pt_create_sanitized_ioreg_cfvalue_if_changed(
-                (__bridge CFTypeRef)arr[i], allocator, depth + 1);
+                (__bridge CFTypeRef)arr[i], NULL, allocator, depth + 1);
             if (childRepl != NULL) {
                 if (mut == nil) mut = [arr mutableCopy];
                 mut[i] = (__bridge_transfer id)childRepl;
@@ -833,7 +1028,7 @@ static CFStringRef pt_IOObjectCopyBundleIdentifierForClass(CFStringRef classname
         if (CFStringGetCString(bid, buf, (CFIndex)sizeof(buf), kCFStringEncodingUTF8)) {
             char orig_copy[256];
             strlcpy(orig_copy, buf, sizeof(orig_copy));
-            if (strstr(buf, "Mac") != NULL ||
+            if (pt_cstr_contains_macos_token(buf) ||
                 strstr(buf, "AppleACPI") != NULL ||
                 strstr(buf, "AppleSMC") != NULL ||
                 strstr(buf, "Thunderbolt") != NULL ||
@@ -906,7 +1101,7 @@ static kern_return_t pt_IORegistryEntryGetProperty(io_registry_entry_t entry,
                     }
                 }
             }
-        } else {
+        } else if (key != NULL && pt_ioreg_key_is_string_list_data(key)) {
             replData = pt_sanitize_io_nul_delimited_bytes((const uint8_t *)buffer, (size_t)cur_len, kCFAllocatorDefault);
         }
         if (replData != NULL) {
@@ -1405,9 +1600,11 @@ static CFDictionaryRef pt_get_spoofed_iops_battery_dict(void) {
     }
 
     int32_t max_cap = 100;
+    int32_t time_to_empty = 300;
     int32_t neg_one = -1;
     CFNumberRef curNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &cur_cap);
     CFNumberRef maxNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &max_cap);
+    CFNumberRef emptyNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &time_to_empty);
     CFNumberRef negNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &neg_one);
     const void *keys[] = {
         CFSTR("Name"),
@@ -1432,7 +1629,7 @@ static CFDictionaryRef pt_get_spoofed_iops_battery_dict(void) {
         maxNum,
         kCFBooleanFalse,
         kCFBooleanFalse,
-        negNum,
+        emptyNum,
         negNum,
     };
     CFDictionaryRef built = CFDictionaryCreate(kCFAllocatorDefault,
@@ -1443,6 +1640,7 @@ static CFDictionaryRef pt_get_spoofed_iops_battery_dict(void) {
                                                &kCFTypeDictionaryValueCallBacks);
     if (curNum != NULL) CFRelease(curNum);
     if (maxNum != NULL) CFRelease(maxNum);
+    if (emptyNum != NULL) CFRelease(emptyNum);
     if (negNum != NULL) CFRelease(negNum);
     if (built == NULL) {
         return NULL;
@@ -1547,6 +1745,9 @@ extern CFArrayRef IOPSCopyPowerSourcesByType(int type);
 static CFArrayRef pt_IOPSCopyPowerSourcesByType(int type) CF_RETURNS_RETAINED {
     if (pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        if (type != 0) {
+            return CFArrayCreate(kCFAllocatorDefault, NULL, 0, &kCFTypeArrayCallBacks);
+        }
         CFDictionaryRef batt = pt_get_spoofed_iops_battery_dict();
         if (batt != NULL) {
             const void *items[1] = { batt };
@@ -2016,7 +2217,7 @@ __attribute__((visibility("hidden"))) CFTypeRef pt_MGCopyAnswer(CFStringRef ques
     }
     CFTypeRef orig = (MGCopyAnswer != NULL) ? MGCopyAnswer(question, options) : NULL;
     if (app_caller && orig != NULL) {
-        CFTypeRef san = pt_create_sanitized_ioreg_cfvalue_if_changed(orig, kCFAllocatorDefault, 0);
+        CFTypeRef san = pt_create_sanitized_ioreg_cfvalue_if_changed(orig, question, kCFAllocatorDefault, 0);
         if (san != NULL) {
             CFRelease(orig);
             return san;
@@ -2040,7 +2241,7 @@ __attribute__((visibility("hidden"))) CFTypeRef pt_MGCopyAnswerWithError(CFStrin
     if (MGCopyAnswerWithError != NULL) {
         CFTypeRef orig = MGCopyAnswerWithError(question, options, outError);
         if (app_caller && orig != NULL) {
-            CFTypeRef san = pt_create_sanitized_ioreg_cfvalue_if_changed(orig, kCFAllocatorDefault, 0);
+            CFTypeRef san = pt_create_sanitized_ioreg_cfvalue_if_changed(orig, question, kCFAllocatorDefault, 0);
             if (san != NULL) {
                 CFRelease(orig);
                 return san;
@@ -2079,7 +2280,7 @@ __attribute__((visibility("hidden"))) CFDictionaryRef pt_MGCopyMultipleAnswers(C
                 }
             } else if (result[q] != nil) {
                 CFTypeRef san = pt_create_sanitized_ioreg_cfvalue_if_changed(
-                    (__bridge CFTypeRef)result[q], kCFAllocatorDefault, 0);
+                    (__bridge CFTypeRef)result[q], (__bridge CFStringRef)q, kCFAllocatorDefault, 0);
                 if (san != NULL) {
                     result[q] = (__bridge_transfer id)san;
                 }
@@ -2176,7 +2377,7 @@ __attribute__((visibility("hidden"))) CFStringRef pt_MGGetStringAnswer(CFStringR
     }
     CFStringRef orig = (MGGetStringAnswer != NULL) ? MGGetStringAnswer(question) : NULL;
     if (app_caller && orig != NULL) {
-        CFTypeRef san = pt_create_sanitized_ioreg_cfvalue_if_changed(orig, kCFAllocatorDefault, 0);
+        CFTypeRef san = pt_create_sanitized_ioreg_cfvalue_if_changed(orig, question, kCFAllocatorDefault, 0);
         if (san != NULL) {
             CFRelease(orig);
             if (CFGetTypeID(san) == CFStringGetTypeID()) {
@@ -2198,8 +2399,25 @@ __attribute__((visibility("hidden"))) int32_t pt_MGGetProductType(void) {
 }
 
 __attribute__((visibility("hidden"))) bool pt_MGIsQuestionValid(CFStringRef question) {
-    if (pt_is_bypass_enabled() &&
+    if (question != NULL &&
+        pt_is_bypass_enabled() &&
         !pt_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        NSString *key = (__bridge NSString *)question;
+        if (key.length == 22) {
+            NSString *unhashed = pt_mg_obfuscated_key_map()[key];
+            if (unhashed != nil) {
+                key = unhashed;
+            }
+        }
+        // Entitlement-restricted keys that are valid on real iOS even when MGCopyAnswer returns NULL.
+        if ([key isEqualToString:@"UniqueChipID"] ||
+            [key isEqualToString:@"DieId"] ||
+            [key isEqualToString:@"SysCfgDict"]) {
+            return true;
+        }
+        if ([key isEqualToString:@"CompatibleDeviceFallback"]) {
+            return false;
+        }
         CFTypeRef spoofed = NULL;
         if (pt_mg_lookup_spoofed(question, &spoofed)) {
             bool valid = (spoofed != NULL);

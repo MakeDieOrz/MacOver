@@ -67,6 +67,8 @@ __attribute__((visibility("hidden"))) bool pt_is_app_embedded_bundle_path_cstr(c
 __attribute__((visibility("hidden"))) bool pt_is_post13_7_framework_path_cstr(const char *path);
 __attribute__((visibility("hidden"))) bool pt_collapse_macos_framework_versions_in_place_cstr(char *work, size_t cap);
 __attribute__((visibility("hidden"))) bool pt_is_dirty_code_resources_key_cstr(const char *key);
+__attribute__((visibility("hidden"))) bool pt_is_hidden_runtime_artifact_name_cstr(const char *name);
+__attribute__((visibility("hidden"))) bool pt_path_has_hidden_runtime_artifact_cstr(const char *path);
 __attribute__((visibility("hidden"))) bool pt_is_sensitive_unix_socket_token_cstr(const char *sun_path);
 __attribute__((visibility("hidden"))) bool pt_is_icu_age_post_13_7_c(uint8_t major, uint8_t minor);
 

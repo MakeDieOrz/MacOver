@@ -14,7 +14,7 @@ final class PlayInput: Sendable {
     func initialize() {
         Toast.cleanupLegacyUserDefaults()
 
-        if PlaySettings.shared.disableBuiltinMouse {
+        if PlaySettings.shared.disableBuiltinMouse && !PlaySettings.shared.bypass {
             simulateGCMouseDisconnect()
         }
 

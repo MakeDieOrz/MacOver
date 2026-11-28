@@ -126,9 +126,21 @@ public final class ActionDispatcher: Sendable {
         directionPadStorage.register(key: key, handler: handler, priority: priority)
     }
 
+    static public func registerDraggable(
+        key: String,
+        token: ObjectIdentifier,
+        handler: @escaping @Sendable (CGFloat, CGFloat) -> Void
+    ) {
+        directionPadStorage.registerDraggable(key: key, token: token, handler: handler)
+    }
+
     static public func unregister(key: String) {
         // Only draggable can be unregistered
         directionPadStorage.unregisterDraggable(key: key)
+    }
+
+    static public func unregisterDraggable(key: String, token: ObjectIdentifier) {
+        directionPadStorage.unregisterDraggable(key: key, token: token)
     }
 
     // Frontend interfaces
@@ -237,9 +249,15 @@ private struct DirectionPadHandler: Sendable {
     let handle: @Sendable (CGFloat, CGFloat) -> Void
 }
 
+private struct DraggableStackEntry: Sendable {
+    let token: ObjectIdentifier
+    let handle: @Sendable (CGFloat, CGFloat) -> Void
+}
+
 private final class DirectionPadStorage: Sendable {
     private struct Storage: Sendable {
         var handlers: [[DirectionPadHandler]]
+        var draggableStacks: [String: [DraggableStackEntry]] = [:]
         var activePriorityMask: UInt8 = 0
     }
 
@@ -263,6 +281,21 @@ private final class DirectionPadStorage: Sendable {
         state.activePriorityMask = mask
     }
 
+    private func setSlotLocked(
+        _ state: inout Storage,
+        priority: ActionDispatchPriority,
+        key: String,
+        handler: @escaping @Sendable (CGFloat, CGFloat) -> Void
+    ) {
+        let row = priority.rawValue
+        if let existingIndex = state.handlers[row].firstIndex(where: { $0.key == key }) {
+            state.handlers[row][existingIndex] = DirectionPadHandler(key: key, handle: handler)
+        } else if let emptyIndex = state.handlers[row].firstIndex(where: { $0.key.isEmpty }) {
+            state.handlers[row][emptyIndex] = DirectionPadHandler(key: key, handle: handler)
+        }
+        refreshPriorityMaskLocked(&state)
+    }
+
     func clear() {
         storage.withLock { state in
             for p in 0..<state.handlers.count {
@@ -270,6 +303,7 @@ private final class DirectionPadStorage: Sendable {
                     state.handlers[p][idx] = .empty
                 }
             }
+            state.draggableStacks.removeAll(keepingCapacity: true)
             state.activePriorityMask = 0
         }
     }
@@ -280,22 +314,53 @@ private final class DirectionPadStorage: Sendable {
         priority: ActionDispatchPriority
     ) {
         storage.withLock { state in
-            let row = priority.rawValue
-            if let existingIndex = state.handlers[row].firstIndex(where: { $0.key == key }) {
-                state.handlers[row][existingIndex] = DirectionPadHandler(key: key, handle: handler)
-            } else if let emptyIndex = state.handlers[row].firstIndex(where: { $0.key.isEmpty }) {
-                state.handlers[row][emptyIndex] = DirectionPadHandler(key: key, handle: handler)
-            }
-            refreshPriorityMaskLocked(&state)
+            setSlotLocked(&state, priority: priority, key: key, handler: handler)
+        }
+    }
+
+    func registerDraggable(
+        key: String,
+        token: ObjectIdentifier,
+        handler: @escaping @Sendable (CGFloat, CGFloat) -> Void
+    ) {
+        storage.withLock { state in
+            var stack = state.draggableStacks[key] ?? []
+            stack.removeAll { $0.token == token }
+            stack.append(DraggableStackEntry(token: token, handle: handler))
+            state.draggableStacks[key] = stack
+            setSlotLocked(&state, priority: .DRAGGABLE, key: key, handler: handler)
         }
     }
 
     func unregisterDraggable(key: String) {
         storage.withLock { state in
+            state.draggableStacks.removeValue(forKey: key)
             let row = ActionDispatchPriority.DRAGGABLE.rawValue
             if let index = state.handlers[row].firstIndex(where: { $0.key == key }) {
                 state.handlers[row][index] = .empty
                 refreshPriorityMaskLocked(&state)
+            }
+        }
+    }
+
+    func unregisterDraggable(key: String, token: ObjectIdentifier) {
+        storage.withLock { state in
+            var stack = state.draggableStacks[key] ?? []
+            let oldCount = stack.count
+            stack.removeAll { $0.token == token }
+            if stack.count == oldCount {
+                return
+            }
+            if let top = stack.last {
+                state.draggableStacks[key] = stack
+                setSlotLocked(&state, priority: .DRAGGABLE, key: key, handler: top.handle)
+            } else {
+                state.draggableStacks.removeValue(forKey: key)
+                let row = ActionDispatchPriority.DRAGGABLE.rawValue
+                if let index = state.handlers[row].firstIndex(where: { $0.key == key }) {
+                    state.handlers[row][index] = .empty
+                    refreshPriorityMaskLocked(&state)
+                }
             }
         }
     }

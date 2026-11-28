@@ -35,6 +35,35 @@ static uint64_t pt_fnv1a_cstr(const char *s, size_t len) {
     return h;
 }
 
+static BOOL pt_is_valid_app_group_bundle_id(const char *bid) {
+    if (bid == NULL || bid[0] == '\0' || bid[0] == '.') {
+        return NO;
+    }
+    size_t len = strlen(bid);
+    if (len > 255U || strstr(bid, "..") != NULL) {
+        return NO;
+    }
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)bid[i];
+        BOOL ok = ((c >= '0' && c <= '9') ||
+                   (c >= 'A' && c <= 'Z') ||
+                   (c >= 'a' && c <= 'z') ||
+                   c == '.' || c == '-' || c == '_');
+        if (!ok) {
+            return NO;
+        }
+    }
+    if (strcasecmp(bid, "app.makedie") == 0 ||
+        strncasecmp(bid, "app.makedie.", 12) == 0 ||
+        strcasecmp(bid, "io.playcover") == 0 ||
+        strncasecmp(bid, "io.playcover.", 13) == 0 ||
+        strcasecmp(bid, "com.apple") == 0 ||
+        strncasecmp(bid, "com.apple.", 10) == 0) {
+        return NO;
+    }
+    return YES;
+}
+
 static void pt_maybe_init_test_group_root_locked(void) {
     if (s_real_group_containers_root_len > 0) {
         return;
@@ -121,11 +150,33 @@ __attribute__((visibility("hidden"))) BOOL pt_ensure_data_container_map(void) {
 
             if (s_real_group_containers_root_len == 0) {
                 const char *containers_marker = strstr(s_real_data_container_dir, "/Library/Containers/");
-                if (containers_marker != NULL && containers_marker > s_real_data_container_dir) {
-                    size_t prefix_len = (size_t)(containers_marker - s_real_data_container_dir);
-                    int gn = snprintf(s_real_group_containers_root, sizeof(s_real_group_containers_root),
-                                      "%.*s/Library/Group Containers",
-                                      (int)prefix_len, s_real_data_container_dir);
+                char bid[256];
+                bid[0] = '\0';
+                (void)pt_read_main_bundle_id_early(bid, sizeof(bid));
+                if (bid[0] == '\0' && containers_marker != NULL) {
+                    const char *cid_start = containers_marker + 20;
+                    const char *cid_end = strchr(cid_start, '/');
+                    size_t cid_len = (cid_end != NULL) ? (size_t)(cid_end - cid_start) : strlen(cid_start);
+                    if (cid_len > 0 && cid_len < sizeof(bid)) {
+                        memcpy(bid, cid_start, cid_len);
+                        bid[cid_len] = '\0';
+                    }
+                }
+                if (pt_is_valid_app_group_bundle_id(bid)) {
+                    int gn = 0;
+                    if (containers_marker != NULL && containers_marker > s_real_data_container_dir) {
+                        size_t prefix_len = (size_t)(containers_marker - s_real_data_container_dir);
+                        gn = snprintf(s_real_group_containers_root, sizeof(s_real_group_containers_root),
+                                      "%.*s/Library/Containers/app.makedie.MacOver/AppGroups/%s",
+                                      (int)prefix_len, s_real_data_container_dir, bid);
+                    } else {
+                        const char *host_root = pt_get_host_user_root_cstr();
+                        if (host_root != NULL && host_root[0] == '/') {
+                            gn = snprintf(s_real_group_containers_root, sizeof(s_real_group_containers_root),
+                                          "%s/Library/Containers/app.makedie.MacOver/AppGroups/%s",
+                                          host_root, bid);
+                        }
+                    }
                     if (gn > 0 && (size_t)gn < sizeof(s_real_group_containers_root)) {
                         s_real_group_containers_root_len = (size_t)gn;
                     }
@@ -637,6 +688,21 @@ __attribute__((visibility("hidden"))) BOOL pt_is_sensitive_host_fd_path(const ch
         pt_match_prefix_modulo_private(p, s_real_app_bundle_dir, s_real_app_bundle_len) != NULL) {
         return NO;
     }
+    if (atomic_load_explicit(&s_group_map_nonempty, memory_order_acquire)) {
+        BOOL in_registered_group = NO;
+        os_unfair_lock_lock(&s_group_map_lock);
+        for (size_t i = 0; i < s_group_map_count; i++) {
+            if (s_group_map[i].real_len > 0 &&
+                pt_match_prefix_modulo_private(p, s_group_map[i].real_dir, s_group_map[i].real_len) != NULL) {
+                in_registered_group = YES;
+                break;
+            }
+        }
+        os_unfair_lock_unlock(&s_group_map_lock);
+        if (in_registered_group) {
+            return NO;
+        }
+    }
     if (strncasecmp(p, "/Library/Application Support/MacOver", 36) == 0 ||
         strncasecmp(p, "/Library/Application Support/PlayCover", 38) == 0 ||
         strcasestr(p, "/Library/Containers/app.makedie.") != NULL ||
@@ -649,10 +715,6 @@ __attribute__((visibility("hidden"))) BOOL pt_is_sensitive_host_fd_path(const ch
     if (user_root != NULL) {
         size_t ur_len = strlen(user_root);
         if (ur_len > 1 && strncasecmp(p, user_root, ur_len) == 0 && (p[ur_len] == '/' || p[ur_len] == '\0')) {
-            char tmp[PATH_MAX];
-            if (pt_group_try_virtualize_known_or_root(p, tmp, sizeof(tmp), YES) != NULL) {
-                return NO;
-            }
             return YES;
         }
     }
@@ -678,35 +740,39 @@ static inline void pt_img_fast_cache_try_publish(size_t slot, const char *raw_pa
     }
 }
 
-static const char *pt_sanitize_image_path_internal(const char *raw_path, BOOL allow_ptr_cache) {
-    if (raw_path == NULL) {
+#define PT_CSTR_SANITIZE_RING_SLOTS 8U
+static _Thread_local char s_tls_cstr_sanitize_ring[PT_CSTR_SANITIZE_RING_SLOTS][PATH_MAX];
+static _Thread_local size_t s_tls_cstr_sanitize_idx = 0;
+
+static Boolean pt_cstr_cf_equal(const void *v1, const void *v2) {
+    return strcmp((const char *)v1, (const char *)v2) == 0;
+}
+
+static CFHashCode pt_cstr_cf_hash(const void *v) {
+    const char *s = (const char *)v;
+    return (CFHashCode)pt_fnv1a_cstr(s, strlen(s));
+}
+
+static const CFDictionaryKeyCallBacks kPTImagePathCStrKeyCallBacks = {
+    0, NULL, NULL, NULL, pt_cstr_cf_equal, pt_cstr_cf_hash
+};
+
+static const char *pt_copy_to_tls_cstr_ring(const char *src) {
+    if (src == NULL) {
         return NULL;
     }
-    uintptr_t raw_u = (uintptr_t)raw_path;
-    size_t fast_slot = (size_t)(((raw_u >> 3) ^ (raw_u >> 12)) & 255U);
-    if (allow_ptr_cache) {
-        const char *k = atomic_load_explicit(&s_img_fast_keys[fast_slot], memory_order_acquire);
-        if (k == raw_path) {
-            return atomic_load_explicit(&s_img_fast_vals[fast_slot], memory_order_relaxed);
-        }
-    }
+    size_t slot = s_tls_cstr_sanitize_idx;
+    s_tls_cstr_sanitize_idx = (slot + 1U) % PT_CSTR_SANITIZE_RING_SLOTS;
+    char *dst = s_tls_cstr_sanitize_ring[slot];
+    strlcpy(dst, src, PATH_MAX);
+    return dst;
+}
 
-    pt_ensure_bundle_path_map();
-    pt_ensure_data_container_map();
-
-    if (allow_ptr_cache) {
-        os_unfair_lock_lock(&s_image_path_lock);
-        if (s_image_path_ptr_cache != NULL) {
-            const void *cached = CFDictionaryGetValue(s_image_path_ptr_cache, raw_path);
-            if (cached != NULL) {
-                os_unfair_lock_unlock(&s_image_path_lock);
-                pt_img_fast_cache_try_publish(fast_slot, raw_path, (const char *)cached);
-                return (const char *)cached;
-            }
-        }
-        os_unfair_lock_unlock(&s_image_path_lock);
-    }
-
+static const char *pt_compute_sanitized_image_path(const char *raw_path,
+                                                   char *transformed,
+                                                   size_t transformed_cap,
+                                                   BOOL *out_used_buf) {
+    *out_used_buf = NO;
     const char *p = raw_path;
     for (int pass = 0; pass < 4; pass++) {
         if (strncmp(p, "/System/Volumes/Preboot/Cryptexes/OS/", 37) == 0) {
@@ -722,83 +788,131 @@ static const char *pt_sanitize_image_path_internal(const char *raw_path, BOOL al
         }
     }
 
-    char transformed[PATH_MAX];
     const char *candidate = p;
-
     const char *bundle_suf = (s_real_app_bundle_len > 0) ? pt_match_prefix_modulo_private(p, s_real_app_bundle_dir, s_real_app_bundle_len) : NULL;
     const char *data_suf = (bundle_suf == NULL && s_real_data_container_len > 0) ? pt_match_prefix_modulo_private(p, s_real_data_container_dir, s_real_data_container_len) : NULL;
     if (bundle_suf != NULL) {
-        int n = snprintf(transformed, sizeof(transformed), "%s%s",
+        int n = snprintf(transformed, transformed_cap, "%s%s",
                          s_virtual_private_bundle_dir, bundle_suf);
-        if (n >= 0 && (size_t)n < sizeof(transformed)) {
+        if (n >= 0 && (size_t)n < transformed_cap) {
             candidate = transformed;
+            *out_used_buf = YES;
         }
     } else if (data_suf != NULL) {
-        int n = snprintf(transformed, sizeof(transformed), "%s%s",
+        int n = snprintf(transformed, transformed_cap, "%s%s",
                          s_virtual_private_data_dir, data_suf);
-        if (n >= 0 && (size_t)n < sizeof(transformed)) {
+        if (n >= 0 && (size_t)n < transformed_cap) {
             candidate = transformed;
+            *out_used_buf = YES;
         }
     } else if ((strncmp(p, "/System/", 8) == 0 || strncmp(p, "/Library/", 9) == 0)) {
         size_t plen = strlen(p);
-        if (plen < sizeof(transformed)) {
+        if (plen < transformed_cap) {
             char work[PATH_MAX];
-            memcpy(work, p, plen + 1U);
-            if (pt_collapse_macos_framework_versions_in_place(work, sizeof(work))) {
-                memcpy(transformed, work, strlen(work) + 1U);
-                candidate = transformed;
-            }
-        }
-    } else {
-        const char *group_virt = pt_group_try_virtualize_known_or_root(p, transformed, sizeof(transformed), YES);
-        if (group_virt != NULL) {
-            candidate = group_virt;
-        }
-    }
-
-    os_unfair_lock_lock(&s_image_path_lock);
-    if (s_image_path_ptr_cache == NULL) {
-        s_image_path_ptr_cache = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, NULL, NULL);
-        s_image_path_str_cache = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, NULL);
-    }
-    const char *interned = NULL;
-    if (candidate == raw_path && allow_ptr_cache) {
-        interned = raw_path;
-    } else {
-        CFStringRef keyRef = CFStringCreateWithCString(kCFAllocatorDefault, candidate, kCFStringEncodingUTF8);
-        if (keyRef != NULL) {
-            const void *existing = CFDictionaryGetValue(s_image_path_str_cache, keyRef);
-            if (existing != NULL) {
-                interned = (const char *)existing;
-            } else if (CFDictionaryGetCount(s_image_path_str_cache) < 4096) {
-                char *dup = strdup(candidate);
-                if (dup != NULL) {
-                    CFDictionarySetValue(s_image_path_str_cache, keyRef, dup);
-                    interned = dup;
+            if (plen < sizeof(work)) {
+                memcpy(work, p, plen + 1U);
+                if (pt_collapse_macos_framework_versions_in_place(work, sizeof(work))) {
+                    strlcpy(transformed, work, transformed_cap);
+                    candidate = transformed;
+                    *out_used_buf = YES;
                 }
             }
-            CFRelease(keyRef);
         }
-        if (interned == NULL) {
-            interned = allow_ptr_cache ? p : raw_path;
+    } else {
+        const char *group_virt = pt_group_try_virtualize_known_or_root(p, transformed, transformed_cap, YES);
+        if (group_virt != NULL) {
+            candidate = group_virt;
+            *out_used_buf = YES;
         }
     }
-    if (allow_ptr_cache && CFDictionaryGetCount(s_image_path_ptr_cache) < 4096) {
-        CFDictionarySetValue(s_image_path_ptr_cache, raw_path, interned);
-        pt_img_fast_cache_try_publish(fast_slot, raw_path, interned);
-    }
-    os_unfair_lock_unlock(&s_image_path_lock);
-    return interned;
+    return candidate;
 }
 
 __attribute__((visibility("hidden")))
 const char *pt_sanitize_image_path_for_app(const char *raw_path) {
-    return pt_sanitize_image_path_internal(raw_path, YES);
+    if (raw_path == NULL) {
+        return NULL;
+    }
+    uintptr_t raw_u = (uintptr_t)raw_path;
+    size_t fast_slot = (size_t)(((raw_u >> 3) ^ (raw_u >> 12)) & 255U);
+    const char *k = atomic_load_explicit(&s_img_fast_keys[fast_slot], memory_order_acquire);
+    if (k == raw_path) {
+        return atomic_load_explicit(&s_img_fast_vals[fast_slot], memory_order_relaxed);
+    }
+
+    pt_ensure_bundle_path_map();
+    pt_ensure_data_container_map();
+
+    os_unfair_lock_lock(&s_image_path_lock);
+    if (s_image_path_ptr_cache != NULL) {
+        const void *cached = CFDictionaryGetValue(s_image_path_ptr_cache, raw_path);
+        if (cached != NULL) {
+            os_unfair_lock_unlock(&s_image_path_lock);
+            pt_img_fast_cache_try_publish(fast_slot, raw_path, (const char *)cached);
+            return (const char *)cached;
+        }
+    }
+    os_unfair_lock_unlock(&s_image_path_lock);
+
+    char transformed[PATH_MAX];
+    BOOL used_buf = NO;
+    const char *candidate = pt_compute_sanitized_image_path(raw_path, transformed, sizeof(transformed), &used_buf);
+
+    os_unfair_lock_lock(&s_image_path_lock);
+    if (s_image_path_ptr_cache == NULL) {
+        s_image_path_ptr_cache = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, NULL, NULL);
+        s_image_path_str_cache = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kPTImagePathCStrKeyCallBacks, NULL);
+    }
+    const char *interned = NULL;
+    if (!used_buf) {
+        // candidate is either raw_path or a suffix pointer inside immortal raw_path.
+        interned = candidate;
+    } else if (s_image_path_str_cache != NULL) {
+        const void *existing = CFDictionaryGetValue(s_image_path_str_cache, candidate);
+        if (existing != NULL) {
+            interned = (const char *)existing;
+        } else if (CFDictionaryGetCount(s_image_path_str_cache) < 4096) {
+            char *dup = strdup(candidate);
+            if (dup != NULL) {
+                CFDictionarySetValue(s_image_path_str_cache, dup, dup);
+                interned = dup;
+            }
+        }
+    }
+    if (interned != NULL && s_image_path_ptr_cache != NULL &&
+        CFDictionaryGetCount(s_image_path_ptr_cache) < 4096) {
+        CFDictionarySetValue(s_image_path_ptr_cache, raw_path, interned);
+        pt_img_fast_cache_try_publish(fast_slot, raw_path, interned);
+    }
+    os_unfair_lock_unlock(&s_image_path_lock);
+
+    if (interned != NULL) {
+        return interned;
+    }
+    // Cache full or allocation failed: return sanitized path in TLS ring without poisoning pointer caches.
+    return pt_copy_to_tls_cstr_ring(candidate);
 }
 
 __attribute__((visibility("hidden")))
 const char *pt_sanitize_image_path_for_cstr(const char *raw_path) {
-    return pt_sanitize_image_path_internal(raw_path, NO);
+    if (raw_path == NULL) {
+        return NULL;
+    }
+    pt_ensure_bundle_path_map();
+    pt_ensure_data_container_map();
+
+    size_t slot = s_tls_cstr_sanitize_idx;
+    char *slot_buf = s_tls_cstr_sanitize_ring[slot];
+    BOOL used_buf = NO;
+    const char *candidate = pt_compute_sanitized_image_path(raw_path, slot_buf, PATH_MAX, &used_buf);
+    if (candidate == raw_path) {
+        return raw_path;
+    }
+    if (used_buf) {
+        s_tls_cstr_sanitize_idx = (slot + 1U) % PT_CSTR_SANITIZE_RING_SLOTS;
+        return slot_buf;
+    }
+    return pt_copy_to_tls_cstr_ring(candidate);
 }
 
 __attribute__((visibility("hidden")))
@@ -968,7 +1082,13 @@ __attribute__((visibility("hidden"))) const char *pt_fs_ue_fix_filename(const ch
 }
 
 __attribute__((visibility("hidden"))) BOOL pt_fd_is_sensitive(int fd, const void *caller) {
-    if (fd < 0 || !pt_is_bypass_enabled()) {
+    if (fd < 0) {
+        return NO;
+    }
+    if (pt_is_hidden_fd(fd)) {
+        return !pt_is_effective_system_or_playtools_caller(caller);
+    }
+    if (!pt_is_bypass_enabled()) {
         return NO;
     }
     if (pt_is_effective_system_or_playtools_caller(caller)) {
@@ -1018,31 +1138,41 @@ static const char *pt_strip_private_vol_prefix(const char *p) {
     return p;
 }
 
-static void pt_compute_escaped_virtual_ancestor(const char *real_base,
+static BOOL pt_is_true_prefix_ancestor(const char *real_base,
+                                       const char *norm_work,
+                                       size_t *out_common) {
+    const char *rb = pt_strip_private_vol_prefix(real_base);
+    const char *nw = pt_strip_private_vol_prefix(norm_work);
+    if (rb == NULL || nw == NULL || nw[0] != '/' || nw[1] == '\0') {
+        return NO;
+    }
+    size_t i = 0;
+    while (rb[i] != '\0' && nw[i] != '\0' &&
+           tolower((unsigned char)rb[i]) == tolower((unsigned char)nw[i])) {
+        i++;
+    }
+    if (nw[i] == '\0' && (rb[i] == '/' || rb[i] == '\0')) {
+        if (out_common != NULL) {
+            *out_common = i;
+        }
+        return YES;
+    }
+    return NO;
+}
+
+static BOOL pt_compute_escaped_virtual_ancestor(const char *real_base,
                                                 const char *virt_base,
                                                 const char *norm_work,
                                                 char *vbuf,
                                                 size_t vbuf_size) {
+    size_t common = 0;
+    if (!pt_is_true_prefix_ancestor(real_base, norm_work, &common)) {
+        return NO;
+    }
     if (vbuf == NULL || vbuf_size == 0) {
-        return;
+        return YES;
     }
     const char *rb = pt_strip_private_vol_prefix(real_base);
-    const char *nw = pt_strip_private_vol_prefix(norm_work);
-    size_t common = 0;
-    if (rb != NULL && nw != NULL) {
-        size_t i = 0;
-        while (rb[i] != '\0' && nw[i] != '\0' && rb[i] == nw[i]) {
-            if (rb[i] == '/' && i > 0) {
-                common = i;
-            }
-            i++;
-        }
-        if (rb[i] == '\0' && (nw[i] == '/' || nw[i] == '\0')) {
-            common = i;
-        } else if (nw[i] == '\0' && (rb[i] == '/' || rb[i] == '\0')) {
-            common = i;
-        }
-    }
     size_t up_levels = (rb != NULL && common < strlen(rb)) ? pt_count_path_components(rb + common) : 1;
     if (up_levels == 0) {
         up_levels = 1;
@@ -1055,6 +1185,7 @@ static void pt_compute_escaped_virtual_ancestor(const char *real_base,
         }
         *slash = '\0';
     }
+    return YES;
 }
 
 static _Atomic int s_has_ios_sysver_plist = -1;
@@ -1110,7 +1241,30 @@ static BOOL pt_ensure_synthesized_system_version_plist(const char *ver,
         }
     }
 
-    const char *copyright = pt_is_compat13_7_active() ? "1983-2020 Apple Inc." : "1983-2025 Apple Inc.";
+    int copyright_year = 2025;
+    if (pt_is_compat13_7_active()) {
+        copyright_year = 2020;
+    } else {
+        int ver_major = (ver != NULL) ? atoi(ver) : 0;
+        if (ver_major >= 26 && ver_major <= 99) {
+            copyright_year = 2000 + ver_major;
+        } else if (ver_major >= 14 && ver_major <= 25) {
+            copyright_year = 2007 + ver_major;
+        } else if (ver_major > 0 && ver_major <= 13) {
+            copyright_year = 2020;
+        } else {
+            time_t now = time(NULL);
+            struct tm gtm;
+            if (gmtime_r(&now, &gtm) != NULL) {
+                int cur_year = gtm.tm_year + 1900;
+                if (cur_year >= 2025) {
+                    copyright_year = cur_year;
+                }
+            }
+        }
+    }
+    char copyright[32];
+    snprintf(copyright, sizeof(copyright), "1983-%d Apple Inc.", copyright_year);
     char xml[1024];
     int xml_len = snprintf(xml, sizeof(xml),
                            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
@@ -1282,23 +1436,26 @@ static pt_fs_path_disposition_t pt_prepare_fs_path_abs_cached_caller(const char 
                     *inout_is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
                 }
                 if (*inout_is_sys_caller == 0) {
-                    if (vbuf != NULL && vbuf_size > 0) {
-                        if (escaped_data) {
-                            pt_compute_escaped_virtual_ancestor(s_real_data_container_dir,
-                                                                s_virtual_private_data_dir,
-                                                                norm_work, vbuf, vbuf_size);
-                        } else if (escaped_bundle) {
-                            pt_compute_escaped_virtual_ancestor(s_real_app_bundle_dir,
-                                                                s_virtual_private_bundle_dir,
-                                                                norm_work, vbuf, vbuf_size);
-                        } else {
-                            pt_compute_escaped_virtual_ancestor(grp_real,
-                                                                grp_virt,
-                                                                norm_work, vbuf, vbuf_size);
-                        }
-                        *out_path = vbuf;
+                    BOOL is_true_anc = NO;
+                    if (escaped_data) {
+                        is_true_anc = pt_compute_escaped_virtual_ancestor(s_real_data_container_dir,
+                                                                          s_virtual_private_data_dir,
+                                                                          norm_work, vbuf, vbuf_size);
+                    } else if (escaped_bundle) {
+                        is_true_anc = pt_compute_escaped_virtual_ancestor(s_real_app_bundle_dir,
+                                                                          s_virtual_private_bundle_dir,
+                                                                          norm_work, vbuf, vbuf_size);
+                    } else {
+                        is_true_anc = pt_compute_escaped_virtual_ancestor(grp_real,
+                                                                          grp_virt,
+                                                                          norm_work, vbuf, vbuf_size);
                     }
-                    return PT_FS_PATH_VIRTUAL_ANCESTOR;
+                    if (is_true_anc) {
+                        if (vbuf != NULL && vbuf_size > 0) {
+                            *out_path = vbuf;
+                        }
+                        return PT_FS_PATH_VIRTUAL_ANCESTOR;
+                    }
                 }
             }
         }
@@ -1487,22 +1644,29 @@ __attribute__((visibility("hidden"))) pt_fs_path_disposition_t pt_prepare_fs_pat
         return PT_FS_PATH_NORMAL;
     }
     if (cleaned[0] != '/') {
-        if (dirfd == AT_FDCWD) {
-            if (*inout_is_sys_caller < 0) {
-                *inout_is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
-            }
-            if (*inout_is_sys_caller == 1 && strstr(cleaned, "Info.plist") == NULL) {
-                return PT_FS_PATH_NORMAL;
-            }
+        if (*inout_is_sys_caller < 0) {
+            *inout_is_sys_caller = pt_is_effective_system_or_playtools_caller(caller) ? 1 : 0;
+        }
+        if (dirfd == AT_FDCWD && *inout_is_sys_caller == 1 && strstr(cleaned, "Info.plist") == NULL) {
+            return PT_FS_PATH_NORMAL;
+        }
+        if (dirfd >= 0 && dirfd != AT_FDCWD && *inout_is_sys_caller == 0 && pt_is_hidden_fd(dirfd)) {
+            return PT_FS_PATH_HIDDEN;
         }
         static _Thread_local int tls_rel_resolve = 0;
+        BOOL invalid_non_dir_fd = NO;
         if (tls_rel_resolve == 0) {
             tls_rel_resolve = 1;
+            int saved_errno = errno;
             char base_dir[PATH_MAX];
             base_dir[0] = '\0';
             if (dirfd >= 0 && dirfd != AT_FDCWD) {
                 if (fcntl(dirfd, F_GETPATH, base_dir) == -1) {
                     base_dir[0] = '\0';
+                    struct stat dst;
+                    if (fstat(dirfd, &dst) != 0 || !S_ISDIR(dst.st_mode)) {
+                        invalid_non_dir_fd = YES;
+                    }
                 }
             } else {
                 int cfd = pt_orig_open_nocancel(".", O_RDONLY | O_DIRECTORY);
@@ -1515,38 +1679,118 @@ __attribute__((visibility("hidden"))) pt_fs_path_disposition_t pt_prepare_fs_pat
                     }
                     close(cfd);
                 }
+                if (base_dir[0] != '/') {
+                    pt_enter_internal_scope();
+                    if (getcwd(base_dir, sizeof(base_dir)) == NULL) {
+                        base_dir[0] = '\0';
+                    }
+                    pt_leave_internal_scope();
+                }
             }
+            errno = saved_errno;
             if (base_dir[0] == '/') {
                 const char *base_use = base_dir;
                 if (strncasecmp(base_use, "/System/Volumes/Data/", 21) == 0) {
                     base_use += 20;
                 }
-                char rel_abs[PATH_MAX];
-                int n = snprintf(rel_abs, sizeof(rel_abs), "%s/%s",
+                char rel_joined[2 * PATH_MAX];
+                int n = snprintf(rel_joined, sizeof(rel_joined), "%s/%s",
                                  (strcmp(base_use, "/") == 0) ? "" : base_use, cleaned);
-                if (n > 0 && (size_t)n < sizeof(rel_abs)) {
-                    const char *resolved_out = NULL;
-                    pt_fs_path_disposition_t disp = pt_prepare_fs_path_abs_cached_caller(rel_abs,
-                                                                                         caller,
-                                                                                         vbuf,
-                                                                                         vbuf_size,
-                                                                                         &resolved_out,
-                                                                                         inout_is_sys_caller,
-                                                                                         for_readonly);
-                    tls_rel_resolve = 0;
-                    if (disp != PT_FS_PATH_NORMAL) {
-                        if (resolved_out != rel_abs) {
+                if (n > 0 && (size_t)n < sizeof(rel_joined)) {
+                    const char *abs_candidate = NULL;
+                    char rel_norm[2 * PATH_MAX];
+                    if ((size_t)n < PATH_MAX) {
+                        abs_candidate = rel_joined;
+                    } else {
+                        const char *collapsed = pt_normalize_lexical_path(rel_joined, rel_norm, sizeof(rel_norm));
+                        if (collapsed != NULL) {
+                            if (pt_is_bypass_enabled() && *inout_is_sys_caller == 0) {
+                                pt_ensure_bundle_path_map();
+                                pt_ensure_data_container_map();
+                                const char *norm_work = collapsed;
+                                if (strncasecmp(norm_work, "/System/Volumes/Data/", 21) == 0) {
+                                    norm_work += 20;
+                                }
+                                BOOL started_data = (s_real_data_container_len > 0 &&
+                                                     pt_match_prefix_modulo_private(base_use, s_real_data_container_dir, s_real_data_container_len) != NULL);
+                                BOOL started_bundle = (s_real_app_bundle_len > 0 &&
+                                                       pt_match_prefix_modulo_private(base_use, s_real_app_bundle_dir, s_real_app_bundle_len) != NULL);
+                                if (started_data &&
+                                    pt_match_prefix_modulo_private(norm_work, s_real_data_container_dir, s_real_data_container_len) == NULL &&
+                                    pt_compute_escaped_virtual_ancestor(s_real_data_container_dir, s_virtual_private_data_dir, norm_work, vbuf, vbuf_size)) {
+                                    tls_rel_resolve = 0;
+                                    if (vbuf != NULL && vbuf_size > 0) *out_path = vbuf;
+                                    return PT_FS_PATH_VIRTUAL_ANCESTOR;
+                                }
+                                if (started_bundle &&
+                                    pt_match_prefix_modulo_private(norm_work, s_real_app_bundle_dir, s_real_app_bundle_len) == NULL &&
+                                    pt_compute_escaped_virtual_ancestor(s_real_app_bundle_dir, s_virtual_private_bundle_dir, norm_work, vbuf, vbuf_size)) {
+                                    tls_rel_resolve = 0;
+                                    if (vbuf != NULL && vbuf_size > 0) *out_path = vbuf;
+                                    return PT_FS_PATH_VIRTUAL_ANCESTOR;
+                                }
+                                if (!started_data && !started_bundle &&
+                                    atomic_load_explicit(&s_group_map_nonempty, memory_order_acquire)) {
+                                    char grp_real[PATH_MAX];
+                                    char grp_virt[136];
+                                    grp_real[0] = '\0';
+                                    grp_virt[0] = '\0';
+                                    BOOL started_group = NO;
+                                    os_unfair_lock_lock(&s_group_map_lock);
+                                    for (size_t gi = 0; gi < s_group_map_count; gi++) {
+                                        if (s_group_map[gi].real_len > 0 &&
+                                            pt_match_prefix_modulo_private(base_use, s_group_map[gi].real_dir, s_group_map[gi].real_len) != NULL) {
+                                            strlcpy(grp_real, s_group_map[gi].real_dir, sizeof(grp_real));
+                                            strlcpy(grp_virt, s_group_map[gi].virt_priv, sizeof(grp_virt));
+                                            started_group = YES;
+                                            break;
+                                        }
+                                    }
+                                    os_unfair_lock_unlock(&s_group_map_lock);
+                                    if (started_group &&
+                                        pt_match_prefix_modulo_private(norm_work, grp_real, strlen(grp_real)) == NULL &&
+                                        pt_compute_escaped_virtual_ancestor(grp_real, grp_virt, norm_work, vbuf, vbuf_size)) {
+                                        tls_rel_resolve = 0;
+                                        if (vbuf != NULL && vbuf_size > 0) *out_path = vbuf;
+                                        return PT_FS_PATH_VIRTUAL_ANCESTOR;
+                                    }
+                                }
+                            }
+                            if (strlen(collapsed) < PATH_MAX) {
+                                abs_candidate = collapsed;
+                            }
+                        }
+                    }
+                    if (abs_candidate != NULL) {
+                        const char *resolved_out = NULL;
+                        pt_fs_path_disposition_t disp = pt_prepare_fs_path_abs_cached_caller(abs_candidate,
+                                                                                             caller,
+                                                                                             vbuf,
+                                                                                             vbuf_size,
+                                                                                             &resolved_out,
+                                                                                             inout_is_sys_caller,
+                                                                                             for_readonly);
+                        tls_rel_resolve = 0;
+                        if (disp != PT_FS_PATH_NORMAL) {
+                            if (resolved_out != abs_candidate) {
+                                *out_path = resolved_out;
+                            }
+                            return disp;
+                        }
+                        if (resolved_out != abs_candidate) {
                             *out_path = resolved_out;
                         }
-                        return disp;
+                        return PT_FS_PATH_NORMAL;
                     }
-                    if (resolved_out != rel_abs) {
-                        *out_path = resolved_out;
-                    }
-                    return PT_FS_PATH_NORMAL;
                 }
             }
             tls_rel_resolve = 0;
+        }
+        // Fail closed for app callers when a relative path cannot be canonicalized to an
+        // absolute path (e.g. PATH_MAX padding overflow or unreadable CWD), unless dirfd
+        // itself is invalid/non-directory (kernel will reject with EBADF/ENOTDIR).
+        if (!invalid_non_dir_fd && *inout_is_sys_caller == 0 && pt_is_bypass_enabled()) {
+            return PT_FS_PATH_HIDDEN;
         }
     }
     return pt_prepare_fs_path_abs_cached_caller(cleaned, caller, vbuf, vbuf_size, out_path, inout_is_sys_caller, for_readonly);

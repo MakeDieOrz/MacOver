@@ -17,7 +17,12 @@ public enum PTDiagnosticLogger {
     }()
 
     public static func sanitizedBundleID(_ raw: String?) -> String {
-        let base = (raw?.isEmpty == false ? raw! : Bundle.main.bundleIdentifier) ?? "unknown"
+        let base: String
+        if let raw, !raw.isEmpty {
+            base = raw
+        } else {
+            base = Bundle.main.bundleIdentifier ?? "unknown"
+        }
         let mapped = base.map { ch -> Character in
             if ch.isASCII && (ch.isLetter || ch.isNumber || ch == "." || ch == "-" || ch == "_") {
                 return ch
@@ -91,6 +96,7 @@ public enum PTDiagnosticLogger {
     public static let breadcrumbFilename = ".launching_in_progress"
     public static let triggeredMarkerFilename = ".safe_mode_last_triggered"
     public static let defaultStabilityWindow: TimeInterval = 3.0
+    public static let maxBreadcrumbAge: TimeInterval = 300.0
 
     private let lock = PTUnfairLock()
     private let stateDirectoryOverride: URL?
@@ -208,23 +214,51 @@ public enum PTDiagnosticLogger {
         ensureDirectory(stateDir)
 
         if fm.fileExists(atPath: crumbURL.path) {
-            try? fm.removeItem(at: crumbURL)
-            lock.withLock {
-                launchGeneration &+= 1
-                stabilityWorkItem?.cancel()
-                stabilityWorkItem = nil
-                _isSafeModeActive = true
-            }
-            let marker = "reason=post_mortem_breadcrumb\nbundleIdentifier=\(resolvedBundleID)\npid=\(getpid())\n"
-            try? marker.data(using: .utf8)?.write(to: triggeredURL, options: .atomic)
-            PTDiagnosticLogger.log(
-                "Safe Mode triggered post-mortem due to stale launch breadcrumb at \(crumbURL.path)",
-                bundleIdentifier: resolvedBundleID,
-                fallbackDirectory: stateDir,
-                force: true,
-                environment: environment
+            let assessment = assessExistingBreadcrumb(
+                at: crumbURL,
+                currentBundleIdentifier: resolvedBundleID
             )
-            return true
+            switch assessment {
+            case .liveOtherProcess:
+                // Another process is actively launching; do not trigger Safe Mode or remove its breadcrumb.
+                lock.withLock {
+                    launchGeneration &+= 1
+                    stabilityWorkItem?.cancel()
+                    stabilityWorkItem = nil
+                    _isSafeModeActive = false
+                }
+                return false
+            case .differentBundle:
+                // Shared state dir breadcrumb belongs to a different bundle; do not falsely trip Safe Mode.
+                lock.withLock {
+                    launchGeneration &+= 1
+                    stabilityWorkItem?.cancel()
+                    stabilityWorkItem = nil
+                    _isSafeModeActive = false
+                }
+                return false
+            case .stale:
+                // Breadcrumb is older than the crash-loop window; discard cleanly and proceed normally.
+                try? fm.removeItem(at: crumbURL)
+            case .crashedLaunch:
+                try? fm.removeItem(at: crumbURL)
+                lock.withLock {
+                    launchGeneration &+= 1
+                    stabilityWorkItem?.cancel()
+                    stabilityWorkItem = nil
+                    _isSafeModeActive = true
+                }
+                let marker = "reason=post_mortem_breadcrumb\nbundleIdentifier=\(resolvedBundleID)\npid=\(getpid())\n"
+                try? marker.data(using: .utf8)?.write(to: triggeredURL, options: .atomic)
+                PTDiagnosticLogger.log(
+                    "Safe Mode triggered post-mortem due to stale launch breadcrumb at \(crumbURL.path)",
+                    bundleIdentifier: resolvedBundleID,
+                    fallbackDirectory: stateDir,
+                    force: true,
+                    environment: environment
+                )
+                return true
+            }
         }
 
         let generation: UInt64 = lock.withLock {
@@ -255,6 +289,68 @@ public enum PTDiagnosticLogger {
         if !FileManager.default.fileExists(atPath: url.path) {
             try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         }
+    }
+
+    private enum BreadcrumbAssessment {
+        case crashedLaunch
+        case liveOtherProcess
+        case differentBundle
+        case stale
+    }
+
+    private func assessExistingBreadcrumb(
+        at url: URL,
+        currentBundleIdentifier: String
+    ) -> BreadcrumbAssessment {
+        guard let raw = try? String(contentsOf: url, encoding: .utf8) else {
+            return .crashedLaunch
+        }
+        var parsedPID: pid_t?
+        var parsedBundleID: String?
+        var parsedStartedAt: TimeInterval?
+
+        for line in raw.split(whereSeparator: \.isNewline) {
+            guard let eqIdx = line.firstIndex(of: "=") else { continue }
+            let key = String(line[..<eqIdx]).trimmingCharacters(in: .whitespaces)
+            let value = String(line[line.index(after: eqIdx)...]).trimmingCharacters(in: .whitespaces)
+            switch key {
+            case "pid":
+                if let val = Int32(value) {
+                    parsedPID = pid_t(val)
+                }
+            case "bundleIdentifier":
+                parsedBundleID = value
+            case "startedAt":
+                if let ts = TimeInterval(value), ts.isFinite {
+                    parsedStartedAt = ts
+                }
+            default:
+                break
+            }
+        }
+
+        if let crumbBundle = parsedBundleID,
+           !crumbBundle.isEmpty,
+           !currentBundleIdentifier.isEmpty,
+           crumbBundle != currentBundleIdentifier {
+            return .differentBundle
+        }
+
+        let currentPID = getpid()
+        if let pid = parsedPID, pid > 0, pid != currentPID {
+            if Darwin.kill(pid, 0) == 0 || errno == EPERM {
+                return .liveOtherProcess
+            }
+        }
+
+        if let startedAt = parsedStartedAt {
+            let age = Date().timeIntervalSince1970 - startedAt
+            if age < -5.0 || age > Self.maxBreadcrumbAge {
+                return .stale
+            }
+        }
+
+        return .crashedLaunch
     }
 
     private func writeBreadcrumb(to url: URL, bundleIdentifier: String) {

@@ -5,6 +5,7 @@
 //  Created by Ryu-ga on 2/20/24.
 //
 
+import CryptoKit
 import Darwin
 import Foundation
 import Security
@@ -14,6 +15,7 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
     public static let shared = PlayKeychainDB()
 
     private let dbLock = PTUnfairLock()
+    private let databasePathOverride: String?
     private var dbVersion: Int = 2
     private var cachedDB: OpaquePointer?
     private var cachedDBPath: String?
@@ -23,6 +25,9 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
     private var cachedEnvCFHome: String?
     private var cachedEnvHome: String?
     private var cachedResolvedDBPath: String?
+    private var cachedEncryptionKeys: [String: SymmetricKey] = [:]
+    private var cachedLegacyFallbackKeys: [String: SymmetricKey] = [:]
+    private var activeDBPathForDecryption: String?
     private var defaultAccessGroup: String?
 
     func setDefaultAccessGroup(_ group: String?) {
@@ -49,7 +54,13 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
     private static let tagDouble: UInt8 = 0x05
     private static let tagDate: UInt8 = 0x06
     private static let tagPlistContainer: UInt8 = 0x07
+    private static let tagEncryptedData: UInt8 = 0x08
     private static let legacyBplistPrefix: [UInt8] = [0x62, 0x70, 0x6C, 0x69, 0x73, 0x74, 0x30, 0x30]
+
+    private static let encryptedColumns: Set<String> = [
+        kSecValueData as String,
+        internalPrivateKeyColumn
+    ]
 
     private static let rawBinaryColumns: Set<String> = {
         var cols: Set<String> = Set(([
@@ -103,12 +114,50 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
 
     internal static let internalPrivateKeyColumn = "pc_privkey"
     internal static let internalTokenIDColumn = "pc_tokid"
+    private static let internalMatchItemListKey = "__pc_match_item_list"
+    private static let internalInvalidQueryKey = "__pc_invalid_query"
+
+    private static let supportedMatchKeys: Set<String> = [
+        kSecMatchLimit as String,
+        kSecMatchItemList as String
+    ]
+
+    private static let supportedUseContextKeys: Set<String> = [
+        kSecUseDataProtectionKeychain as String,
+        kSecUseAuthenticationContext as String,
+        kSecUseAuthenticationUI as String,
+        "u_OpPrompt" // kSecUseOperationPrompt (avoid Catalyst deprecation warning)
+    ]
+
+    private static let queryMetaKeys: Set<String> = {
+        var keys: Set<String> = [
+            kSecClass as String,
+            kSecReturnData as String,
+            kSecReturnAttributes as String,
+            kSecReturnRef as String,
+            kSecReturnPersistentRef as String,
+            internalMatchItemListKey,
+            internalInvalidQueryKey
+        ]
+        keys.formUnion(supportedMatchKeys)
+        keys.formUnion(supportedUseContextKeys)
+        return keys
+    }()
 
     private static let nonFilterableKeys: Set<String> = [
         kSecAttrAccessControl as String,
         kSecValueRef as String,
         kSecUseDataProtectionKeychain as String,
         internalPrivateKeyColumn
+    ]
+
+    private static let nonUpdatableKeys: Set<String> = [
+        kSecAttrAccessControl as String,
+        kSecValueRef as String,
+        kSecUseDataProtectionKeychain as String,
+        kSecValuePersistentRef as String,
+        kSecAttrCreationDate as String,
+        internalTokenIDColumn
     ]
 
     private static let orderedTableNames: [String] = PlayedAppleDBConstants.primaries.keys
@@ -136,7 +185,48 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
         return map
     }()
 
-    override init() {
+    private struct MatchItemPredicate {
+        let targetTable: String?
+        let attributes: [String: Any]
+        let requiredValueData: Data?
+    }
+
+    private struct FilterPlan {
+        let clause: String
+        let values: [CFTypeRef]
+        let hasEffectiveFilter: Bool
+        let droppedNonMetaFilterKey: Bool
+        let requiredValueData: Data?
+        let matchItemPredicates: [MatchItemPredicate]?
+
+        var needsPostFetchFilter: Bool {
+            requiredValueData != nil || matchItemPredicates != nil
+        }
+
+        var isGuaranteedEmpty: Bool {
+            if let predicates = matchItemPredicates, predicates.isEmpty {
+                return true
+            }
+            return false
+        }
+    }
+
+    private struct PreparedInsert {
+        let tableName: String
+        let primaryColumns: [CFString]
+        let columns: [String]
+        let values: [CFTypeRef]
+        let insertQuery: String
+        let dupCheckSQL: String
+        let primaryBindVals: [CFTypeRef]
+        let hasNullPrimary: Bool
+        let usesDefaultAccessGroup: Bool
+        let needsGeneratedPersistentRef: Bool
+        let resultDict: NSMutableDictionary
+    }
+
+    init(databasePathOverride: String? = nil) {
+        self.databasePathOverride = databasePathOverride
         super.init()
     }
 
@@ -181,6 +271,224 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
         return stmt
     }
 
+    private static let hostHardwareIdentityBytes: Data = {
+        typealias GetHostUUIDFn = @convention(c) (
+            UnsafeMutablePointer<UInt8>?,
+            UnsafePointer<timespec>?
+        ) -> Int32
+        if let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "gethostuuid") {
+            let fn = unsafeBitCast(sym, to: GetHostUUIDFn.self)
+            var uuid = [UInt8](repeating: 0, count: 16)
+            var timeout = timespec(tv_sec: 1, tv_nsec: 0)
+            if fn(&uuid, &timeout) == 0 {
+                return Data(uuid)
+            }
+        }
+        var size = 0
+        if Darwin.sysctlbyname("kern.uuid", nil, &size, nil, 0) == 0, size > 0 {
+            var buf = [UInt8](repeating: 0, count: size)
+            if Darwin.sysctlbyname("kern.uuid", &buf, &size, nil, 0) == 0 {
+                return Data(buf.prefix(size))
+            }
+        }
+        return Data(PlaySettings.resolveHostUserRoot().utf8)
+    }()
+
+    private static let keyFileName = ".playchain_key"
+    private static let keyFileByteCount = 32
+
+    private static func readExactKeyFileNoFollow(atPath path: String) -> Data? {
+        let fd = Darwin.open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { return nil }
+        defer { Darwin.close(fd) }
+        var st = Darwin.stat()
+        guard Darwin.fstat(fd, &st) == 0,
+              (st.st_mode & S_IFMT) == S_IFREG,
+              st.st_size == off_t(keyFileByteCount) else {
+            return nil
+        }
+        _ = Darwin.fchmod(fd, mode_t(0o600))
+        var buf = [UInt8](repeating: 0, count: keyFileByteCount)
+        var offset = 0
+        while offset < keyFileByteCount {
+            let n = buf.withUnsafeMutableBytes { raw -> Int in
+                guard let base = raw.baseAddress else { return -1 }
+                return Darwin.read(fd, base.advanced(by: offset), keyFileByteCount - offset)
+            }
+            if n < 0 {
+                if errno == EINTR { continue }
+                return nil
+            }
+            if n == 0 {
+                return nil
+            }
+            offset += n
+        }
+        return Data(buf)
+    }
+
+    private func loadOrCreatePerUserKeyFileLocked(forDBPath dbPath: String) -> Data? {
+        let playChainDir = (dbPath as NSString).deletingLastPathComponent
+        var dirSt = Darwin.stat()
+        if Darwin.lstat(playChainDir, &dirSt) != 0 {
+            try? FileManager.default.createDirectory(
+                atPath: playChainDir,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: NSNumber(value: 0o700)]
+            )
+            guard Darwin.lstat(playChainDir, &dirSt) == 0 else {
+                return nil
+            }
+        }
+        guard (dirSt.st_mode & S_IFMT) == S_IFDIR else {
+            return nil
+        }
+        if dirSt.st_uid == Darwin.geteuid() {
+            _ = Darwin.chmod(playChainDir, mode_t(0o700))
+        }
+        var resolvedBuf = [CChar](repeating: 0, count: Int(PATH_MAX))
+        let resolvedDir = Darwin.realpath(playChainDir, &resolvedBuf)
+            .map { String(cString: $0) } ?? playChainDir
+        let keyPath = (resolvedDir as NSString).appendingPathComponent(Self.keyFileName)
+
+        if let existing = Self.readExactKeyFileNoFollow(atPath: keyPath) {
+            return existing
+        }
+        var existingSt = Darwin.stat()
+        if Darwin.lstat(keyPath, &existingSt) == 0 {
+            // Do not overwrite symlink or unexpected existing entry.
+            return nil
+        }
+
+        var randomBytes = [UInt8](repeating: 0, count: Self.keyFileByteCount)
+        guard SecRandomCopyBytes(kSecRandomDefault, Self.keyFileByteCount, &randomBytes) == errSecSuccess else {
+            return nil
+        }
+        let tmpPath = (resolvedDir as NSString)
+            .appendingPathComponent("\(Self.keyFileName).tmp.\(Darwin.getpid()).\(UUID().uuidString)")
+        let fd = Darwin.open(tmpPath, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, mode_t(0o600))
+        guard fd >= 0 else {
+            return nil
+        }
+        var writeOK = true
+        var written = 0
+        while written < Self.keyFileByteCount {
+            let n = randomBytes.withUnsafeBytes { raw -> Int in
+                guard let base = raw.baseAddress else { return -1 }
+                return Darwin.write(fd, base.advanced(by: written), Self.keyFileByteCount - written)
+            }
+            if n < 0 {
+                if errno == EINTR { continue }
+                writeOK = false
+                break
+            }
+            written += n
+        }
+        _ = Darwin.fchmod(fd, mode_t(0o600))
+        _ = Darwin.fsync(fd)
+        Darwin.close(fd)
+        guard writeOK else {
+            _ = Darwin.unlink(tmpPath)
+            return nil
+        }
+
+        let linkRC = Darwin.link(tmpPath, keyPath)
+        let linkErr = errno
+        _ = Darwin.unlink(tmpPath)
+        if linkRC == 0 {
+            hardenRegularFileMode0600(atPath: keyPath)
+            return Data(randomBytes)
+        }
+        if linkErr == EEXIST {
+            return Self.readExactKeyFileNoFollow(atPath: keyPath)
+        }
+        return nil
+    }
+
+    private func deriveLegacyDeterministicKey(fileName: String, uid: uid_t) -> SymmetricKey {
+        var material = Data()
+        material.append(Self.hostHardwareIdentityBytes)
+        var uidLE = uid.littleEndian
+        withUnsafeBytes(of: &uidLE) { material.append(contentsOf: $0) }
+        material.append(Data(PlaySettings.resolveHostUserRoot().utf8))
+        material.append(Data(fileName.utf8))
+        return HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: SymmetricKey(data: material),
+            salt: Data("app.makedie.MacOver.PlayChain.v1".utf8),
+            info: Data("AES-256-GCM:\(fileName):uid=\(uid)".utf8),
+            outputByteCount: 32
+        )
+    }
+
+    private func encryptionKeyLocked(forDBPath dbPath: String) -> SymmetricKey {
+        if let cached = cachedEncryptionKeys[dbPath] {
+            return cached
+        }
+        let fileName = (dbPath as NSString).lastPathComponent
+        let uid = Darwin.getuid()
+        let legacyV1 = deriveLegacyDeterministicKey(fileName: fileName, uid: uid)
+
+        if let perUserSecret = loadOrCreatePerUserKeyFileLocked(forDBPath: dbPath) {
+            var material = Data()
+            material.append(perUserSecret)
+            material.append(Self.hostHardwareIdentityBytes)
+            var uidLE = uid.littleEndian
+            withUnsafeBytes(of: &uidLE) { material.append(contentsOf: $0) }
+            material.append(Data(PlaySettings.resolveHostUserRoot().utf8))
+            material.append(Data(fileName.utf8))
+            let derived = HKDF<SHA256>.deriveKey(
+                inputKeyMaterial: SymmetricKey(data: material),
+                salt: Data("app.makedie.MacOver.PlayChain.v2".utf8),
+                info: Data("AES-256-GCM:\(fileName):uid=\(uid)".utf8),
+                outputByteCount: 32
+            )
+            cachedEncryptionKeys[dbPath] = derived
+            cachedLegacyFallbackKeys[dbPath] = legacyV1
+            return derived
+        }
+
+        cachedEncryptionKeys[dbPath] = legacyV1
+        cachedLegacyFallbackKeys.removeValue(forKey: dbPath)
+        return legacyV1
+    }
+
+    private static func encryptSecretBlob(
+        _ plaintext: Data,
+        columnName: String,
+        key: SymmetricKey
+    ) -> Data? {
+        guard let sealed = try? AES.GCM.seal(
+            plaintext,
+            using: key,
+            authenticating: Data(columnName.utf8)
+        ), let combined = sealed.combined else {
+            return nil
+        }
+        var out = Data(capacity: plistBlobMagic.count + 1 + combined.count)
+        out.append(contentsOf: plistBlobMagic)
+        out.append(tagEncryptedData)
+        out.append(combined)
+        return out
+    }
+
+    private static func decryptSecretBlob(
+        bytes: UnsafePointer<UInt8>,
+        length: Int,
+        columnName: String,
+        key: SymmetricKey
+    ) -> Data? {
+        guard length >= 28 else { return nil }
+        let combined = Data(bytes: bytes, count: length)
+        guard let sealedBox = try? AES.GCM.SealedBox(combined: combined) else {
+            return nil
+        }
+        return try? AES.GCM.open(
+            sealedBox,
+            using: key,
+            authenticating: Data(columnName.utf8)
+        )
+    }
+
     private static func boolValue(from raw: Any) -> Bool? {
         let cf = raw as CFTypeRef
         let typeID = CFGetTypeID(cf)
@@ -213,6 +521,30 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
         return isEncodableValue(val)
     }
 
+    private static func validateQueryParameters(_ raw: NSDictionary) -> OSStatus {
+        for (rawKey, val) in raw {
+            guard let key = rawKey as? String else {
+                return errSecParam
+            }
+            if key == (kSecMatchItemList as String) {
+                guard val is [Any] || val is NSArray else {
+                    return errSecParam
+                }
+                continue
+            }
+            if key == "u_ItemList" || key == "keychain" {
+                return errSecParam
+            }
+            if key.hasPrefix("m_"), !supportedMatchKeys.contains(key) {
+                return errSecParam
+            }
+            if key.hasPrefix("u_"), !supportedUseContextKeys.contains(key) {
+                return errSecParam
+            }
+        }
+        return errSecSuccess
+    }
+
     private static func populateCertificateMetadata(from cert: SecCertificate, into dict: NSMutableDictionary) {
         if dict[kSecAttrIssuer] == nil,
            let issuer = SecCertificateCopyNormalizedIssuerSequence(cert) as Data? {
@@ -229,6 +561,11 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
         if dict[kSecAttrLabel] == nil,
            let summary = SecCertificateCopySubjectSummary(cert) as String? {
             dict[kSecAttrLabel as String] = summary
+        }
+        if dict[kSecAttrPublicKeyHash] == nil,
+           let pubKey = SecCertificateCopyKey(cert),
+           let pubData = SecKeyCopyExternalRepresentation(pubKey, nil) as Data? {
+            dict[kSecAttrPublicKeyHash as String] = Data(Insecure.SHA1.hash(data: pubData))
         }
     }
 
@@ -251,6 +588,106 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
         }
     }
 
+    private static func extractReferenceAttributes(
+        from cfRef: CFTypeRef,
+        into dict: NSMutableDictionary,
+        forPersistence: Bool
+    ) -> Bool {
+        let typeID = CFGetTypeID(cfRef)
+        if typeID == SecCertificateGetTypeID() {
+            let cert = unsafeDowncast(cfRef, to: SecCertificate.self)
+            if dict[kSecClass] == nil {
+                dict[kSecClass as String] = kSecClassCertificate
+            }
+            if dict[kSecValueData] == nil {
+                dict[kSecValueData as String] = SecCertificateCopyData(cert) as Data
+            }
+            populateCertificateMetadata(from: cert, into: dict)
+            return true
+        }
+        if typeID == SecKeyGetTypeID() {
+            let key = unsafeDowncast(cfRef, to: SecKey.self)
+            if dict[kSecClass] == nil {
+                dict[kSecClass as String] = kSecClassKey
+            }
+            var extracted = false
+            if dict[kSecValueData] == nil,
+               let extData = SecKeyCopyExternalRepresentation(key, nil) as Data? {
+                dict[kSecValueData as String] = extData
+                extracted = true
+            }
+            if forPersistence, PTPlayChainSecureEnclaveRegistry.isSecureEnclaveKey(key) {
+                dict[internalTokenIDColumn] = kSecAttrTokenIDSecureEnclave as String
+            }
+            if let keyAttrs = SecKeyCopyAttributes(key) as NSDictionary? {
+                if dict[kSecValueData] == nil, let vData = keyAttrs[kSecValueData] as? Data {
+                    dict[kSecValueData as String] = vData
+                    extracted = true
+                }
+                if forPersistence, let keyCols = allowedColumnsByTable[kSecClassKey as String] {
+                    mergeKeyAttributes(from: keyAttrs, into: dict, allowedCols: keyCols)
+                } else {
+                    if dict[kSecAttrKeyType] == nil, let kType = keyAttrs[kSecAttrKeyType] {
+                        dict[kSecAttrKeyType as String] = kType
+                    }
+                    if dict[kSecAttrKeyClass] == nil, let kClass = keyAttrs[kSecAttrKeyClass] {
+                        dict[kSecAttrKeyClass as String] = kClass
+                    }
+                    if dict[kSecAttrApplicationLabel] == nil,
+                       let appLabel = keyAttrs[kSecAttrApplicationLabel] {
+                        dict[kSecAttrApplicationLabel as String] = appLabel
+                    }
+                }
+            }
+            return extracted || dict[kSecValueData] != nil || dict[kSecAttrApplicationLabel] != nil
+        }
+        if typeID == SecIdentityGetTypeID() {
+            let identity = unsafeDowncast(cfRef, to: SecIdentity.self)
+            if dict[kSecClass] == nil {
+                dict[kSecClass as String] = kSecClassIdentity
+            }
+            var extracted = false
+            var certRef: SecCertificate?
+            if SecIdentityCopyCertificate(identity, &certRef) == errSecSuccess, let cert = certRef {
+                if dict[kSecValueData] == nil {
+                    dict[kSecValueData as String] = SecCertificateCopyData(cert) as Data
+                }
+                populateCertificateMetadata(from: cert, into: dict)
+                extracted = true
+            }
+            var privKeyRef: SecKey?
+            if SecIdentityCopyPrivateKey(identity, &privKeyRef) == errSecSuccess, let privKey = privKeyRef {
+                if forPersistence {
+                    if let keyAttrs = SecKeyCopyAttributes(privKey) as NSDictionary?,
+                       let idCols = allowedColumnsByTable[kSecClassIdentity as String] {
+                        mergeKeyAttributes(from: keyAttrs, into: dict, allowedCols: idCols)
+                    }
+                    if let privData = SecKeyCopyExternalRepresentation(privKey, nil) as Data? {
+                        if dict[kSecValueData] == nil {
+                            dict[kSecValueData as String] = privData
+                        }
+                        dict[internalPrivateKeyColumn] = privData
+                        extracted = true
+                    }
+                } else if dict[kSecValueData] == nil,
+                          let privData = SecKeyCopyExternalRepresentation(privKey, nil) as Data? {
+                    dict[kSecValueData as String] = privData
+                    extracted = true
+                }
+            }
+            return extracted
+        }
+        if typeID == CFDataGetTypeID(), let rawData = cfRef as? Data,
+           PTPlayChainPersistentRef.isPersistentRef(rawData) {
+            if let table = PTPlayChainPersistentRef.decodeTableName(from: rawData), dict[kSecClass] == nil {
+                dict[kSecClass as String] = table
+            }
+            dict[kSecValuePersistentRef as String] = rawData
+            return true
+        }
+        return false
+    }
+
     private static func normalizeAttributes(
         _ raw: NSDictionary,
         forPersistence: Bool,
@@ -258,80 +695,56 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
     ) -> NSMutableDictionary {
         let dict = NSMutableDictionary(dictionary: raw)
         if let ref = dict[kSecValueRef] {
-            let cfRef = ref as CFTypeRef
-            let typeID = CFGetTypeID(cfRef)
-            if typeID == SecCertificateGetTypeID() {
-                let cert = unsafeDowncast(cfRef, to: SecCertificate.self)
-                if dict[kSecClass] == nil {
-                    dict[kSecClass as String] = kSecClassCertificate
-                }
-                if dict[kSecValueData] == nil {
-                    dict[kSecValueData as String] = SecCertificateCopyData(cert) as Data
-                }
-                if forPersistence {
-                    populateCertificateMetadata(from: cert, into: dict)
-                }
-            } else if typeID == SecKeyGetTypeID() {
-                let key = unsafeDowncast(cfRef, to: SecKey.self)
-                if dict[kSecClass] == nil {
-                    dict[kSecClass as String] = kSecClassKey
-                }
-                if dict[kSecValueData] == nil,
-                   let extData = SecKeyCopyExternalRepresentation(key, nil) as Data? {
-                    dict[kSecValueData as String] = extData
-                }
-                if forPersistence, PTPlayChainSecureEnclaveRegistry.isSecureEnclaveKey(key) {
-                    dict[internalTokenIDColumn] = kSecAttrTokenIDSecureEnclave as String
-                }
-                if let keyAttrs = SecKeyCopyAttributes(key) as NSDictionary? {
-                    if dict[kSecValueData] == nil, let vData = keyAttrs[kSecValueData] as? Data {
-                        dict[kSecValueData as String] = vData
-                    }
-                    if forPersistence, let keyCols = allowedColumnsByTable[kSecClassKey as String] {
-                        mergeKeyAttributes(from: keyAttrs, into: dict, allowedCols: keyCols)
-                    } else {
-                        if dict[kSecAttrKeyType] == nil, let kType = keyAttrs[kSecAttrKeyType] {
-                            dict[kSecAttrKeyType as String] = kType
-                        }
-                        if dict[kSecAttrKeyClass] == nil, let kClass = keyAttrs[kSecAttrKeyClass] {
-                            dict[kSecAttrKeyClass as String] = kClass
-                        }
-                    }
-                }
-            } else if typeID == SecIdentityGetTypeID() {
-                let identity = unsafeDowncast(cfRef, to: SecIdentity.self)
-                if dict[kSecClass] == nil {
-                    dict[kSecClass as String] = kSecClassIdentity
-                }
-                var certRef: SecCertificate?
-                if SecIdentityCopyCertificate(identity, &certRef) == errSecSuccess, let cert = certRef {
-                    if dict[kSecValueData] == nil {
-                        dict[kSecValueData as String] = SecCertificateCopyData(cert) as Data
-                    }
-                    if forPersistence {
-                        populateCertificateMetadata(from: cert, into: dict)
-                    }
-                }
-                var privKeyRef: SecKey?
-                if SecIdentityCopyPrivateKey(identity, &privKeyRef) == errSecSuccess, let privKey = privKeyRef {
-                    if forPersistence {
-                        if let keyAttrs = SecKeyCopyAttributes(privKey) as NSDictionary?,
-                           let idCols = allowedColumnsByTable[kSecClassIdentity as String] {
-                            mergeKeyAttributes(from: keyAttrs, into: dict, allowedCols: idCols)
-                        }
-                        if let privData = SecKeyCopyExternalRepresentation(privKey, nil) as Data? {
-                            if dict[kSecValueData] == nil {
-                                dict[kSecValueData as String] = privData
-                            }
-                            dict[internalPrivateKeyColumn] = privData
-                        }
-                    } else if dict[kSecValueData] == nil,
-                              let privData = SecKeyCopyExternalRepresentation(privKey, nil) as Data? {
-                        dict[kSecValueData as String] = privData
-                    }
-                }
+            let ok = extractReferenceAttributes(
+                from: ref as CFTypeRef,
+                into: dict,
+                forPersistence: forPersistence
+            )
+            if !ok {
+                dict[internalInvalidQueryKey] = true
             }
             dict.removeObject(forKey: kSecValueRef)
+        }
+
+        if let rawMatchList = dict[kSecMatchItemList] {
+            dict.removeObject(forKey: kSecMatchItemList)
+            if let items = rawMatchList as? [Any] {
+                var extractedPredicates: [MatchItemPredicate] = []
+                extractedPredicates.reserveCapacity(items.count)
+                for item in items {
+                    let itemDict = NSMutableDictionary()
+                    guard extractReferenceAttributes(
+                        from: item as CFTypeRef,
+                        into: itemDict,
+                        forPersistence: false
+                    ) else {
+                        dict[internalInvalidQueryKey] = true
+                        break
+                    }
+                    let targetTable = itemDict[kSecClass] as? String
+                    let requiredData = itemDict[kSecValueData] as? Data
+                    var attrMap: [String: Any] = [:]
+                    for (k, v) in itemDict {
+                        guard let keyStr = k as? String,
+                              keyStr != (kSecClass as String),
+                              keyStr != (kSecValueData as String),
+                              !nonFilterableKeys.contains(keyStr) else {
+                            continue
+                        }
+                        attrMap[keyStr] = v
+                    }
+                    extractedPredicates.append(
+                        MatchItemPredicate(
+                            targetTable: targetTable,
+                            attributes: attrMap,
+                            requiredValueData: requiredData
+                        )
+                    )
+                }
+                dict[internalMatchItemListKey] = extractedPredicates
+            } else {
+                dict[internalInvalidQueryKey] = true
+            }
         }
 
         if populateCertMetadataFromData,
@@ -364,15 +777,33 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
             }
             return orderedTableNames
         }
+        if let predicates = attributes[internalMatchItemListKey] as? [MatchItemPredicate] {
+            var tables: [String] = []
+            var seen = Set<String>()
+            for pred in predicates {
+                if let table = pred.targetTable,
+                   PlayedAppleDBConstants.primaries[table as CFString] != nil,
+                   seen.insert(table).inserted {
+                    tables.append(table)
+                }
+            }
+            if !tables.isEmpty {
+                return tables
+            }
+            if !predicates.isEmpty {
+                return orderedTableNames
+            }
+            return []
+        }
         return []
     }
 
-    private func filterClauseAndValues(
+    private func buildFilterPlan(
         tableName: String,
         primaryColumns: [CFString],
         attributes: NSDictionary,
         defaultAccessGroup: String? = nil
-    ) -> (clause: String, values: [CFTypeRef])? {
+    ) -> FilterPlan? {
         guard let allowedCols = Self.allowedColumnsByTable[tableName] else {
             return nil
         }
@@ -380,13 +811,48 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
         var clauses: [String] = []
         var values: [CFTypeRef] = []
         var seen = Set<String>()
+        var hasEffectiveFilter = false
+        var droppedNonMetaFilterKey = false
+        var requiredValueData: Data?
+
+        let matchPredicates = attributes[Self.internalMatchItemListKey] as? [MatchItemPredicate]
+        if let matchPredicates {
+            hasEffectiveFilter = true
+            let tablePredicates = matchPredicates.filter { pred in
+                pred.targetTable == nil || pred.targetTable == tableName
+            }
+            if tablePredicates.isEmpty {
+                return FilterPlan(
+                    clause: "1 = 0",
+                    values: [],
+                    hasEffectiveFilter: true,
+                    droppedNonMetaFilterKey: false,
+                    requiredValueData: nil,
+                    matchItemPredicates: []
+                )
+            }
+        }
 
         func appendFilter(key: String, attr: Any) {
-            guard !seen.contains(key), allowedCols.contains(key) else {
+            guard !seen.contains(key) else {
+                return
+            }
+            if Self.queryMetaKeys.contains(key) {
+                seen.insert(key)
                 return
             }
             seen.insert(key)
-            guard !Self.nonFilterableKeys.contains(key) else {
+            if key == (kSecValueData as String) {
+                if let data = attr as? Data {
+                    requiredValueData = data
+                    hasEffectiveFilter = true
+                } else {
+                    droppedNonMetaFilterKey = true
+                }
+                return
+            }
+            guard allowedCols.contains(key), !Self.nonFilterableKeys.contains(key) else {
+                droppedNonMetaFilterKey = true
                 return
             }
             if key == (kSecAttrSynchronizable as String) {
@@ -401,6 +867,9 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
                         clauses.append("(\(key) = ? OR \(key) IS NULL)")
                         values.append(false as CFBoolean)
                     }
+                    hasEffectiveFilter = true
+                } else {
+                    droppedNonMetaFilterKey = true
                 }
                 return
             }
@@ -410,13 +879,18 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
                strAttr == defGroup {
                 clauses.append("(\(key) = ? OR \(key) IS NULL)")
                 values.append(strAttr as CFTypeRef)
+                hasEffectiveFilter = true
                 return
             }
             if attr is NSNull {
                 clauses.append("\(key) IS NULL")
+                hasEffectiveFilter = true
             } else if Self.isEncodableForFilter(attr) {
                 clauses.append("\(key) = ?")
                 values.append(attr as CFTypeRef)
+                hasEffectiveFilter = true
+            } else {
+                droppedNonMetaFilterKey = true
             }
         }
 
@@ -434,44 +908,131 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
                 }
             }
         }
-        // Fallback: allow arbitrary valid column keys passed by string name
         for (rawKey, attr) in attributes {
             if let key = rawKey as? String {
                 appendFilter(key: key, attr: attr)
+            } else {
+                droppedNonMetaFilterKey = true
             }
         }
 
-        if clauses.isEmpty {
-            return ("1 = 1", [])
+        let clause = clauses.isEmpty ? "1 = 1" : clauses.joined(separator: " AND ")
+        let filteredPredicates = matchPredicates?.filter { pred in
+            pred.targetTable == nil || pred.targetTable == tableName
         }
-        return (clauses.joined(separator: " AND "), values)
+        return FilterPlan(
+            clause: clause,
+            values: values,
+            hasEffectiveFilter: hasEffectiveFilter,
+            droppedNonMetaFilterKey: droppedNonMetaFilterKey,
+            requiredValueData: requiredValueData,
+            matchItemPredicates: filteredPredicates
+        )
+    }
+
+    private static func valuesEqual(_ lhs: Any?, _ rhs: Any) -> Bool {
+        guard let lhs else {
+            return rhs is NSNull
+        }
+        if let lData = lhs as? Data, let rData = rhs as? Data {
+            return lData == rData
+        }
+        if let lStr = lhs as? String, let rStr = rhs as? String {
+            return lStr == rStr
+        }
+        if let lBool = boolValue(from: lhs), let rBool = boolValue(from: rhs) {
+            return lBool == rBool
+        }
+        if let lNum = lhs as? NSNumber, let rNum = rhs as? NSNumber {
+            return lNum == rNum
+        }
+        if let lDate = lhs as? Date, let rDate = rhs as? Date {
+            return abs(lDate.timeIntervalSince1970 - rDate.timeIntervalSince1970) < 0.0001
+        }
+        return (lhs as AnyObject).isEqual(rhs)
+    }
+
+    private static func rowMatchesPostFilters(_ row: NSDictionary, plan: FilterPlan) -> Bool {
+        if let requiredData = plan.requiredValueData {
+            guard let rowData = row[kSecValueData as String] as? Data, rowData == requiredData else {
+                return false
+            }
+        }
+        if let predicates = plan.matchItemPredicates {
+            guard !predicates.isEmpty else { return false }
+            let matchedAny = predicates.contains { pred in
+                if let expectedData = pred.requiredValueData {
+                    guard let rowData = row[kSecValueData as String] as? Data,
+                          rowData == expectedData else {
+                        return false
+                    }
+                }
+                for (key, expectedVal) in pred.attributes where !valuesEqual(row[key], expectedVal) {
+                    return false
+                }
+                return true
+            }
+            if !matchedAny {
+                return false
+            }
+        }
+        return true
     }
 
     private func bindValues(
         _ values: [CFTypeRef],
+        columns: [String]? = nil,
+        encryptionKey: SymmetricKey? = nil,
         to stmt: OpaquePointer,
         startingAt startIndex: Int32 = 1,
         in sqlite3DB: OpaquePointer,
         context: String
     ) -> Bool {
-        for (offset, value) in values.enumerated()
-        where !encodeData(stmt: stmt, index: startIndex + Int32(offset), value: value) {
-            let errorMessage = String(cString: sqlite3_errmsg(sqlite3DB))
-            PlayKeychain.debugLogger("Failed to \(context) db: \(errorMessage)")
-            return false
+        for (offset, value) in values.enumerated() {
+            let colName = columns.flatMap { offset < $0.count ? $0[offset] : nil }
+            if !encodeData(
+                stmt: stmt,
+                index: startIndex + Int32(offset),
+                value: value,
+                columnName: colName,
+                encryptionKey: encryptionKey
+            ) {
+                let errorMessage = String(cString: sqlite3_errmsg(sqlite3DB))
+                PlayKeychain.debugLogger("Failed to \(context) db: \(errorMessage)")
+                return false
+            }
         }
         return true
     }
 
     func query(_ attributes: NSDictionary) -> [NSMutableDictionary]? {
+        let (status, items) = queryWithStatus(attributes)
+        guard status == errSecSuccess else {
+            return nil
+        }
+        return items
+    }
+
+    func queryWithStatus(_ attributes: NSDictionary) -> (status: OSStatus, items: [NSMutableDictionary]?) {
+        let paramStatus = Self.validateQueryParameters(attributes)
+        guard paramStatus == errSecSuccess else {
+            return (paramStatus, nil)
+        }
         let normalized = Self.normalizeAttributes(
             attributes,
             forPersistence: false,
             populateCertMetadataFromData: false
         )
+        if normalized[Self.internalInvalidQueryKey] != nil {
+            return (errSecParam, nil)
+        }
+        if let predicates = normalized[Self.internalMatchItemListKey] as? [MatchItemPredicate],
+           predicates.isEmpty {
+            return (errSecItemNotFound, nil)
+        }
         let candidateTables = Self.resolveCandidateTables(for: normalized)
         guard !candidateTables.isEmpty else {
-            return nil
+            return (errSecParam, nil)
         }
 
         let matchLimitObj = normalized[kSecMatchLimit]
@@ -485,19 +1046,20 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
         } else if let num = matchLimitObj as? NSNumber {
             explicitLimit = max(1, num.int64Value)
         } else {
-            explicitLimit = 1
+            return (errSecParam, nil)
         }
         let selectLimit = (explicitLimit < 0) ? Int.max : Int(explicitLimit)
 
         let defaultGroup = currentDefaultAccessGroup()
         var dictArr: [NSMutableDictionary] = []
-        guard usingDB({ sqlite3DB in
+        var finalStatus: OSStatus = errSecIO
+        let ok = usingDB { sqlite3DB, dbPath, encKey in
             for tableName in candidateTables {
                 if explicitLimit >= 0 && dictArr.count >= selectLimit {
                     break
                 }
                 guard let primaryColumns = PlayedAppleDBConstants.primaries[tableName as CFString],
-                      let whereInfo = filterClauseAndValues(
+                      let plan = buildFilterPlan(
                           tableName: tableName,
                           primaryColumns: primaryColumns,
                           attributes: normalized,
@@ -505,9 +1067,18 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
                       ) else {
                     continue
                 }
+                if plan.droppedNonMetaFilterKey {
+                    finalStatus = errSecParam
+                    return false
+                }
+                if plan.isGuaranteedEmpty {
+                    continue
+                }
 
-                let remainingLimit: Int64 = (explicitLimit < 0) ? -1 : Int64(selectLimit - dictArr.count)
-                let selectQuery = "SELECT rowid, * FROM \(tableName) WHERE \(whereInfo.clause) LIMIT ?"
+                let remainingLimit: Int64 = (explicitLimit < 0 || plan.needsPostFetchFilter)
+                    ? -1
+                    : Int64(selectLimit - dictArr.count)
+                let selectQuery = "SELECT rowid, * FROM \(tableName) WHERE \(plan.clause) LIMIT ?"
                 var missingPersistentRefs: [(Int64, Data)] = []
 
                 do {
@@ -515,18 +1086,21 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
                         PlayKeychain.debugLogger("Failed query \(selectQuery)")
                         let errMsg = String(cString: sqlite3_errmsg(sqlite3DB))
                         PlayKeychain.debugLogger("Failed to query to db table: \(errMsg)")
+                        finalStatus = errSecIO
                         return false
                     }
                     defer { sqlite3_reset(stmt) }
 
-                    guard bindValues(whereInfo.values, to: stmt, in: sqlite3DB, context: "bind query") else {
+                    guard bindValues(plan.values, to: stmt, in: sqlite3DB, context: "bind query") else {
+                        finalStatus = errSecIO
                         return false
                     }
 
-                    let limitIndex = Int32(whereInfo.values.count + 1)
+                    let limitIndex = Int32(plan.values.count + 1)
                     guard sqlite3_bind_int64(stmt, limitIndex, remainingLimit) == SQLITE_OK else {
                         let errMsg = String(cString: sqlite3_errmsg(sqlite3DB))
                         PlayKeychain.debugLogger("Failed to bind query limit: \(errMsg)")
+                        finalStatus = errSecIO
                         return false
                     }
 
@@ -537,12 +1111,22 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
                         columnNames.append(String(cString: sqlite3_column_name(stmt, index)))
                     }
 
-                    while sqlite3_step(stmt) == SQLITE_ROW && dictArr.count < selectLimit {
+                    var lastStepRc: Int32 = SQLITE_DONE
+                    while dictArr.count < selectLimit {
+                        lastStepRc = sqlite3_step(stmt)
+                        guard lastStepRc == SQLITE_ROW else {
+                            break
+                        }
                         let rowID = sqlite3_column_int64(stmt, 0)
                         let newDict = NSMutableDictionary(capacity: Int(columns) + 2)
                         newDict[kSecClass as String] = tableName
                         for index in 1..<Int(columns) {
-                            if let value = decodeData(stmt: stmt, index: Int32(index), columnName: columnNames[index]) {
+                            if let value = decodeData(
+                                stmt: stmt,
+                                index: Int32(index),
+                                columnName: columnNames[index],
+                                encryptionKey: encKey
+                            ) {
                                 newDict[columnNames[index]] = value
                             }
                         }
@@ -557,33 +1141,298 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
                             newDict[kSecValuePersistentRef as String] = pRef
                             missingPersistentRefs.append((rowID, pRef))
                         }
-                        dictArr.append(newDict)
+                        if !plan.needsPostFetchFilter || Self.rowMatchesPostFilters(newDict, plan: plan) {
+                            dictArr.append(newDict)
+                        }
+                    }
+
+                    if dictArr.count < selectLimit && lastStepRc != SQLITE_DONE {
+                        PlayKeychain.debugLogger("Query step failed with SQLite rc=\(lastStepRc)")
+                        finalStatus = errSecIO
+                        return false
                     }
                 }
 
                 if !missingPersistentRefs.isEmpty {
-                    let backfillSQL = "UPDATE \(tableName) SET \(kSecValuePersistentRef) = ? WHERE rowid = ?"
-                    if let updStmt = preparedStatement(for: backfillSQL, in: sqlite3DB) {
-                        defer { sqlite3_reset(updStmt) }
-                        for (rowID, pRef) in missingPersistentRefs {
-                            sqlite3_reset(updStmt)
-                            sqlite3_clear_bindings(updStmt)
-                            if encodeData(stmt: updStmt, index: 1, value: pRef as CFData),
-                               sqlite3_bind_int64(updStmt, 2, rowID) == SQLITE_OK {
-                                _ = sqlite3_step(updStmt)
-                            }
-                        }
+                    backfillPersistentRefs(
+                        missingPersistentRefs,
+                        tableName: tableName,
+                        in: sqlite3DB,
+                        dbPath: dbPath
+                    )
+                }
+
+                if tableName == (kSecClassIdentity as String), dictArr.count < selectLimit {
+                    let synthStatus = appendSynthesizedIdentities(
+                        into: &dictArr,
+                        limit: selectLimit,
+                        normalizedQuery: normalized,
+                        identityPlan: plan,
+                        defaultAccessGroup: defaultGroup,
+                        sqlite3DB: sqlite3DB,
+                        encryptionKey: encKey
+                    )
+                    if synthStatus != errSecSuccess {
+                        finalStatus = synthStatus
+                        return false
                     }
                 }
             }
 
+            finalStatus = errSecSuccess
             return true
-        }) else { return nil }
-
-        return dictArr
+        }
+        guard ok, finalStatus == errSecSuccess else {
+            return (finalStatus, nil)
+        }
+        return (errSecSuccess, dictArr)
     }
 
-    func insertWithStatus(_ attributes: NSDictionary) -> (status: OSStatus, item: NSMutableDictionary?) {
+    private func backfillPersistentRefs(
+        _ refs: [(Int64, Data)],
+        tableName: String,
+        in sqlite3DB: OpaquePointer,
+        dbPath: String
+    ) {
+        guard sqlite3_exec(sqlite3DB, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else {
+            return
+        }
+        let backfillSQL = "UPDATE \(tableName) SET \(kSecValuePersistentRef) = ? WHERE rowid = ?"
+        var succeeded = true
+        if let updStmt = preparedStatement(for: backfillSQL, in: sqlite3DB) {
+            defer { sqlite3_reset(updStmt) }
+            for (rowID, pRef) in refs {
+                sqlite3_reset(updStmt)
+                sqlite3_clear_bindings(updStmt)
+                if encodeData(stmt: updStmt, index: 1, value: pRef as CFData),
+                   sqlite3_bind_int64(updStmt, 2, rowID) == SQLITE_OK,
+                   sqlite3_step(updStmt) == SQLITE_DONE {
+                    continue
+                }
+                succeeded = false
+                break
+            }
+        } else {
+            succeeded = false
+        }
+        if succeeded && sqlite3_exec(sqlite3DB, "COMMIT", nil, nil, nil) == SQLITE_OK {
+            hardenDatabaseSidecars(forDBPath: dbPath)
+        } else {
+            _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
+        }
+    }
+
+    private func fetchAllRows(
+        tableName: String,
+        defaultAccessGroup: String?,
+        sqlite3DB: OpaquePointer,
+        encryptionKey: SymmetricKey
+    ) -> (status: OSStatus, rows: [NSMutableDictionary]) {
+        let sql = "SELECT rowid, * FROM \(tableName)"
+        guard let stmt = preparedStatement(for: sql, in: sqlite3DB) else {
+            return (errSecIO, [])
+        }
+        defer { sqlite3_reset(stmt) }
+        let columns = sqlite3_column_count(stmt)
+        var columnNames: [String] = []
+        columnNames.reserveCapacity(Int(columns))
+        for index in 0..<columns {
+            columnNames.append(String(cString: sqlite3_column_name(stmt, index)))
+        }
+        var rows: [NSMutableDictionary] = []
+        var stepRc: Int32 = SQLITE_DONE
+        while true {
+            stepRc = sqlite3_step(stmt)
+            guard stepRc == SQLITE_ROW else { break }
+            let rowID = sqlite3_column_int64(stmt, 0)
+            let row = NSMutableDictionary(capacity: Int(columns) + 2)
+            row[kSecClass as String] = tableName
+            for index in 1..<Int(columns) {
+                if let value = decodeData(
+                    stmt: stmt,
+                    index: Int32(index),
+                    columnName: columnNames[index],
+                    encryptionKey: encryptionKey
+                ) {
+                    row[columnNames[index]] = value
+                }
+            }
+            if row[kSecAttrSynchronizable as String] == nil {
+                row[kSecAttrSynchronizable as String] = false as CFBoolean
+            }
+            if row[kSecAttrAccessGroup as String] == nil, let defGroup = defaultAccessGroup {
+                row[kSecAttrAccessGroup as String] = defGroup
+            }
+            if row[kSecValuePersistentRef as String] == nil {
+                row[kSecValuePersistentRef as String] = Self.makePersistentRef(tableName: tableName, rowID: rowID)
+            }
+            rows.append(row)
+        }
+        guard stepRc == SQLITE_DONE else {
+            return (errSecIO, [])
+        }
+        return (errSecSuccess, rows)
+    }
+
+    // swiftlint:disable:next function_parameter_count
+    private func appendSynthesizedIdentities(
+        into results: inout [NSMutableDictionary],
+        limit: Int,
+        normalizedQuery: NSDictionary,
+        identityPlan: FilterPlan,
+        defaultAccessGroup: String?,
+        sqlite3DB: OpaquePointer,
+        encryptionKey: SymmetricKey
+    ) -> OSStatus {
+        let certFetch = fetchAllRows(
+            tableName: kSecClassCertificate as String,
+            defaultAccessGroup: defaultAccessGroup,
+            sqlite3DB: sqlite3DB,
+            encryptionKey: encryptionKey
+        )
+        guard certFetch.status == errSecSuccess else {
+            return certFetch.status
+        }
+        guard !certFetch.rows.isEmpty else {
+            return errSecSuccess
+        }
+
+        let keyFetch = fetchAllRows(
+            tableName: kSecClassKey as String,
+            defaultAccessGroup: defaultAccessGroup,
+            sqlite3DB: sqlite3DB,
+            encryptionKey: encryptionKey
+        )
+        guard keyFetch.status == errSecSuccess else {
+            return keyFetch.status
+        }
+        let privateKeys = keyFetch.rows.filter { row in
+            let kcls = (row[kSecAttrKeyClass as String] as? String) ?? (row["kcls"] as? String)
+            return kcls == (kSecAttrKeyClassPrivate as String)
+        }
+        guard !privateKeys.isEmpty else {
+            return errSecSuccess
+        }
+
+        let existingCertDatas = Set(results.compactMap { $0[kSecValueData as String] as? Data })
+        let idCols = Self.allowedColumnsByTable[kSecClassIdentity as String] ?? []
+
+        for certRow in certFetch.rows {
+            if results.count >= limit {
+                break
+            }
+            guard let certData = certRow[kSecValueData as String] as? Data,
+                  !existingCertDatas.contains(certData) else {
+                continue
+            }
+            var pubKeyHash = certRow[kSecAttrPublicKeyHash as String] as? Data
+            if pubKeyHash == nil,
+               let cert = SecCertificateCreateWithData(nil, certData as CFData),
+               let pubKey = SecCertificateCopyKey(cert),
+               let pubData = SecKeyCopyExternalRepresentation(pubKey, nil) as Data? {
+                pubKeyHash = Data(Insecure.SHA1.hash(data: pubData))
+            }
+            guard let certHash = pubKeyHash else {
+                continue
+            }
+            let certAgrp = certRow[kSecAttrAccessGroup as String] as? String
+
+            for privRow in privateKeys {
+                guard let privData = privRow[kSecValueData as String] as? Data else {
+                    continue
+                }
+                let keyLabel = privRow[kSecAttrApplicationLabel as String] as? Data
+                var matchesKey = (keyLabel == certHash)
+                if !matchesKey,
+                   let keyType = (privRow[kSecAttrKeyType as String] ?? privRow["type"]) as? String {
+                    let keyAttrs: [CFString: Any] = [
+                        kSecAttrKeyType: keyType,
+                        kSecAttrKeyClass: kSecAttrKeyClassPrivate
+                    ]
+                    if let secPriv = SecKeyCreateWithData(privData as CFData, keyAttrs as CFDictionary, nil),
+                       let secPub = SecKeyCopyPublicKey(secPriv),
+                       let pubExt = SecKeyCopyExternalRepresentation(secPub, nil) as Data? {
+                        matchesKey = (Data(Insecure.SHA1.hash(data: pubExt)) == certHash)
+                    }
+                }
+                guard matchesKey else {
+                    continue
+                }
+                let keyAgrp = privRow[kSecAttrAccessGroup as String] as? String
+                if let certAgrp, let keyAgrp, certAgrp != keyAgrp {
+                    continue
+                }
+
+                let synth = NSMutableDictionary(dictionary: certRow)
+                synth[kSecClass as String] = kSecClassIdentity as String
+                synth[kSecAttrPublicKeyHash as String] = certHash
+                synth[Self.internalPrivateKeyColumn] = privData
+                for (rawKey, val) in privRow {
+                    guard let col = rawKey as? String,
+                          idCols.contains(col),
+                          col != (kSecValueData as String),
+                          col != (kSecValuePersistentRef as String),
+                          synth[col] == nil else {
+                        continue
+                    }
+                    synth[col] = val
+                }
+
+                if Self.synthesizedRowMatchesQuery(
+                    synth,
+                    normalizedQuery: normalizedQuery,
+                    plan: identityPlan,
+                    defaultAccessGroup: defaultAccessGroup
+                ) {
+                    results.append(synth)
+                    break
+                }
+            }
+        }
+        return errSecSuccess
+    }
+
+    private static func synthesizedRowMatchesQuery(
+        _ row: NSDictionary,
+        normalizedQuery: NSDictionary,
+        plan: FilterPlan,
+        defaultAccessGroup: String?
+    ) -> Bool {
+        for (rawKey, attr) in normalizedQuery {
+            guard let key = rawKey as? String else { return false }
+            if queryMetaKeys.contains(key) || key == (kSecValueData as String) {
+                continue
+            }
+            if key == (kSecAttrSynchronizable as String) {
+                if (attr as? String) == (kSecAttrSynchronizableAny as String) {
+                    continue
+                }
+                if let expected = boolValue(from: attr) {
+                    let actual = row[key].flatMap { boolValue(from: $0) } ?? false
+                    if actual != expected { return false }
+                }
+                continue
+            }
+            if key == (kSecAttrAccessGroup as String),
+               let expected = attr as? String,
+               let defGroup = defaultAccessGroup,
+               expected == defGroup {
+                let actual = row[key] as? String
+                if actual != nil && actual != expected { return false }
+                continue
+            }
+            if !valuesEqual(row[key], attr) {
+                return false
+            }
+        }
+        return rowMatchesPostFilters(row, plan: plan)
+    }
+
+    private func prepareInsert(_ attributes: NSDictionary) -> (status: OSStatus, prepared: PreparedInsert?) {
+        let paramStatus = Self.validateQueryParameters(attributes)
+        guard paramStatus == errSecSuccess else {
+            return (paramStatus, nil)
+        }
         if let rawToken = attributes[kSecAttrTokenID as String] as? String,
            rawToken == (kSecAttrTokenIDSecureEnclave as String),
            attributes[Self.internalTokenIDColumn] == nil,
@@ -597,6 +1446,9 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
             forPersistence: true,
             populateCertMetadataFromData: true
         )
+        if normalized[Self.internalInvalidQueryKey] != nil {
+            return (errSecParam, nil)
+        }
         guard let tableName = normalized[kSecClass] as? String,
               let primaryColumns = PlayedAppleDBConstants.primaries[tableName as CFString],
               let secondaryColumns = PlayedAppleDBConstants.attributes[tableName as CFString] else {
@@ -667,10 +1519,11 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
         var primaryBindVals: [CFTypeRef] = []
         var hasNullPrimary = false
         var usesDefaultAccessGroup = false
-        let defGroup = currentDefaultAccessGroup()
         for col in primaryColumns {
             if let val = normalized[col], !(val is NSNull), Self.isEncodableValue(val) {
-                if (col as String) == "agrp", let defGroup, (val as? String) == defGroup {
+                if (col as String) == "agrp",
+                   let defGroup = effectiveDefaultAccessGroup,
+                   (val as? String) == defGroup {
                     usesDefaultAccessGroup = true
                     primaryClauses.append("(agrp = ? OR agrp IS NULL)")
                     primaryBindVals.append(val as CFTypeRef)
@@ -693,90 +1546,145 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
             }
         }
 
+        return (
+            errSecSuccess,
+            PreparedInsert(
+                tableName: tableName,
+                primaryColumns: primaryColumns,
+                columns: columnsQuery,
+                values: insertValues,
+                insertQuery: insertQuery,
+                dupCheckSQL: dupCheckSQL,
+                primaryBindVals: primaryBindVals,
+                hasNullPrimary: hasNullPrimary,
+                usesDefaultAccessGroup: usesDefaultAccessGroup,
+                needsGeneratedPersistentRef: needsGeneratedPersistentRef,
+                resultDict: newDict
+            )
+        )
+    }
+
+    private func executePreparedInsertInTransaction(
+        _ prep: PreparedInsert,
+        sqlite3DB: OpaquePointer,
+        encryptionKey: SymmetricKey
+    ) -> OSStatus {
+        if prep.hasNullPrimary || prep.usesDefaultAccessGroup {
+            if let dupStmt = preparedStatement(for: prep.dupCheckSQL, in: sqlite3DB) {
+                let bound = bindValues(prep.primaryBindVals, to: dupStmt, in: sqlite3DB, context: "check duplicate")
+                let stepRc = bound ? sqlite3_step(dupStmt) : SQLITE_ERROR
+                sqlite3_reset(dupStmt)
+                if !bound || (stepRc != SQLITE_ROW && stepRc != SQLITE_DONE) {
+                    return errSecIO
+                }
+                if stepRc == SQLITE_ROW {
+                    return errSecDuplicateItem
+                }
+            } else {
+                return errSecIO
+            }
+        }
+
+        guard let stmt = preparedStatement(for: prep.insertQuery, in: sqlite3DB) else {
+            let errorMessage = String(cString: sqlite3_errmsg(sqlite3DB))
+            PlayKeychain.debugLogger("Failed query \(prep.insertQuery)")
+            PlayKeychain.debugLogger("Failed to make query: \(errorMessage)")
+            return errSecIO
+        }
+
+        let boundInsert = bindValues(
+            prep.values,
+            columns: prep.columns,
+            encryptionKey: encryptionKey,
+            to: stmt,
+            in: sqlite3DB,
+            context: "insert into"
+        )
+        guard boundInsert else {
+            sqlite3_reset(stmt)
+            return errSecIO
+        }
+
+        let stepRc = sqlite3_step(stmt)
+        let errCode = sqlite3_errcode(sqlite3DB)
+        sqlite3_reset(stmt)
+        guard stepRc == SQLITE_DONE else {
+            if errCode == SQLITE_CONSTRAINT || stepRc == SQLITE_CONSTRAINT {
+                return errSecDuplicateItem
+            }
+            PlayKeychain.debugLogger("Insert failed: \(String(cString: sqlite3_errmsg(sqlite3DB)))")
+            return errSecIO
+        }
+
+        if prep.needsGeneratedPersistentRef {
+            let pRefKey = kSecValuePersistentRef as String
+            let rowID = sqlite3_last_insert_rowid(sqlite3DB)
+            let generatedRef = Self.makePersistentRef(tableName: prep.tableName, rowID: rowID)
+            let refSQL = "UPDATE \(prep.tableName) SET \(pRefKey) = ? WHERE rowid = ?"
+            guard let refStmt = preparedStatement(for: refSQL, in: sqlite3DB) else {
+                return errSecIO
+            }
+            defer { sqlite3_reset(refStmt) }
+            guard encodeData(stmt: refStmt, index: 1, value: generatedRef as CFData),
+                  sqlite3_bind_int64(refStmt, 2, rowID) == SQLITE_OK,
+                  sqlite3_step(refStmt) == SQLITE_DONE else {
+                return errSecIO
+            }
+            prep.resultDict[pRefKey] = generatedRef
+        }
+        return errSecSuccess
+    }
+
+    func insertWithStatus(_ attributes: NSDictionary) -> (status: OSStatus, item: NSMutableDictionary?) {
+        let (batchStatus, items) = insertBatchWithStatus([attributes])
+        return (batchStatus, items?.first)
+    }
+
+    func insertBatchWithStatus(_ items: [NSDictionary]) -> (status: OSStatus, items: [NSMutableDictionary]?) {
+        guard !items.isEmpty else {
+            return (errSecParam, nil)
+        }
+        var preparedItems: [PreparedInsert] = []
+        preparedItems.reserveCapacity(items.count)
+        for raw in items {
+            let (prepStatus, prep) = prepareInsert(raw)
+            guard prepStatus == errSecSuccess, let prep else {
+                return (prepStatus, nil)
+            }
+            preparedItems.append(prep)
+        }
+
         var finalStatus: OSStatus = errSecIO
-        let ok = usingDB { sqlite3DB in
+        let ok = usingDB { sqlite3DB, dbPath, encKey in
             guard sqlite3_exec(sqlite3DB, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else {
                 finalStatus = errSecIO
                 return false
             }
 
-            if hasNullPrimary || usesDefaultAccessGroup {
-                if let dupStmt = preparedStatement(for: dupCheckSQL, in: sqlite3DB) {
-                    let bound = bindValues(primaryBindVals, to: dupStmt, in: sqlite3DB, context: "check duplicate")
-                    let exists = bound && (sqlite3_step(dupStmt) == SQLITE_ROW)
-                    sqlite3_reset(dupStmt)
-                    if !bound {
-                        sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
-                        finalStatus = errSecIO
-                        return false
-                    }
-                    if exists {
-                        sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
-                        finalStatus = errSecDuplicateItem
-                        return false
-                    }
-                }
-            }
-
-            guard let stmt = preparedStatement(for: insertQuery, in: sqlite3DB) else {
-                let errorMessage = String(cString: sqlite3_errmsg(sqlite3DB))
-                PlayKeychain.debugLogger("Failed query \(insertQuery)")
-                PlayKeychain.debugLogger("Failed to make query: \(errorMessage)")
-                sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
-                finalStatus = errSecIO
-                return false
-            }
-
-            let boundInsert = bindValues(insertValues, to: stmt, in: sqlite3DB, context: "insert into")
-            guard boundInsert else {
-                sqlite3_reset(stmt)
-                sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
-                finalStatus = errSecIO
-                return false
-            }
-
-            let stepRc = sqlite3_step(stmt)
-            let errCode = sqlite3_errcode(sqlite3DB)
-            sqlite3_reset(stmt)
-            if stepRc == SQLITE_DONE {
-                if needsGeneratedPersistentRef {
-                    let rowID = sqlite3_last_insert_rowid(sqlite3DB)
-                    let generatedRef = Self.makePersistentRef(tableName: tableName, rowID: rowID)
-                    let refSQL = "UPDATE \(tableName) SET \(pRefKey) = ? WHERE rowid = ?"
-                    guard let refStmt = preparedStatement(for: refSQL, in: sqlite3DB) else {
-                        sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
-                        finalStatus = errSecIO
-                        return false
-                    }
-                    defer { sqlite3_reset(refStmt) }
-                    guard encodeData(stmt: refStmt, index: 1, value: generatedRef as CFData),
-                          sqlite3_bind_int64(refStmt, 2, rowID) == SQLITE_OK,
-                          sqlite3_step(refStmt) == SQLITE_DONE else {
-                        sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
-                        finalStatus = errSecIO
-                        return false
-                    }
-                    newDict[pRefKey] = generatedRef
-                }
-                guard sqlite3_exec(sqlite3DB, "COMMIT", nil, nil, nil) == SQLITE_OK else {
-                    sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
-                    finalStatus = errSecIO
+            for prep in preparedItems {
+                let status = executePreparedInsertInTransaction(
+                    prep,
+                    sqlite3DB: sqlite3DB,
+                    encryptionKey: encKey
+                )
+                guard status == errSecSuccess else {
+                    _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
+                    finalStatus = status
                     return false
                 }
-                finalStatus = errSecSuccess
-                return true
             }
-            sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
-            if errCode == SQLITE_CONSTRAINT || stepRc == SQLITE_CONSTRAINT {
-                finalStatus = errSecDuplicateItem
-            } else {
-                PlayKeychain.debugLogger("Insert failed: \(String(cString: sqlite3_errmsg(sqlite3DB)))")
+
+            guard sqlite3_exec(sqlite3DB, "COMMIT", nil, nil, nil) == SQLITE_OK else {
+                _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
                 finalStatus = errSecIO
+                return false
             }
-            return false
+            hardenDatabaseSidecars(forDBPath: dbPath)
+            finalStatus = errSecSuccess
+            return true
         }
 
-        return ok ? (errSecSuccess, newDict) : (finalStatus, nil)
+        return ok ? (errSecSuccess, preparedItems.map(\.resultDict)) : (finalStatus, nil)
     }
 
     func insert(_ attributes: NSDictionary) -> NSMutableDictionary? {
@@ -784,16 +1692,30 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
     }
 
     func updateMatching(_ query: NSDictionary, attributesToUpdate: NSDictionary) -> OSStatus {
+        let paramStatus = Self.validateQueryParameters(query)
+        guard paramStatus == errSecSuccess else {
+            return paramStatus
+        }
         let normalizedQuery = Self.normalizeAttributes(
             query,
             forPersistence: false,
             populateCertMetadataFromData: false
         )
+        if normalizedQuery[Self.internalInvalidQueryKey] != nil {
+            return errSecParam
+        }
+        if let predicates = normalizedQuery[Self.internalMatchItemListKey] as? [MatchItemPredicate],
+           predicates.isEmpty {
+            return errSecItemNotFound
+        }
         let normalizedUpdates = Self.normalizeAttributes(
             attributesToUpdate,
             forPersistence: true,
             populateCertMetadataFromData: true
         )
+        if normalizedUpdates[Self.internalInvalidQueryKey] != nil {
+            return errSecParam
+        }
         let candidateTables = Self.resolveCandidateTables(for: normalizedQuery)
         guard !candidateTables.isEmpty else {
             return errSecParam
@@ -801,7 +1723,7 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
 
         let defaultGroup = currentDefaultAccessGroup()
         var finalStatus: OSStatus = errSecItemNotFound
-        _ = usingDB { sqlite3DB in
+        _ = usingDB { sqlite3DB, dbPath, encKey in
             guard sqlite3_exec(sqlite3DB, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else {
                 finalStatus = errSecIO
                 return false
@@ -810,7 +1732,7 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
             for tableName in candidateTables {
                 guard let primaryColumns = PlayedAppleDBConstants.primaries[tableName as CFString],
                       let allowedCols = Self.allowedColumnsByTable[tableName],
-                      let whereInfo = filterClauseAndValues(
+                      let plan = buildFilterPlan(
                           tableName: tableName,
                           primaryColumns: primaryColumns,
                           attributes: normalizedQuery,
@@ -819,35 +1741,96 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
                     continue
                 }
 
+                // Refuse WHERE 1 = 1 fallback when non-meta keys were dropped or neither filter nor class exists.
+                if PTPlayChainMutationFilterPolicy.shouldRejectMutation(
+                    droppedNonMetaFilterKey: plan.droppedNonMetaFilterKey,
+                    hasEffectiveFilter: plan.hasEffectiveFilter,
+                    hasExplicitSecClass: normalizedQuery[kSecClass] != nil
+                ) {
+                    _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
+                    finalStatus = errSecParam
+                    return false
+                }
+                if plan.isGuaranteedEmpty {
+                    continue
+                }
+
                 let pkNames = primaryColumns.map { $0 as String }
-                let pkSelect = pkNames.joined(separator: ", ")
-                let selectRowIDsSQL = "SELECT rowid, \(pkSelect) FROM \(tableName) WHERE \(whereInfo.clause)"
+                let selectRowIDsSQL: String
+                if plan.needsPostFetchFilter {
+                    selectRowIDsSQL = "SELECT rowid, * FROM \(tableName) WHERE \(plan.clause)"
+                } else {
+                    let pkSelect = pkNames.joined(separator: ", ")
+                    selectRowIDsSQL = "SELECT rowid, \(pkSelect) FROM \(tableName) WHERE \(plan.clause)"
+                }
 
                 var matchedRows: [(rowID: Int64, pkValues: [CFTypeRef?])] = []
                 do {
                     guard let selectStmt = preparedStatement(for: selectRowIDsSQL, in: sqlite3DB) else {
                         let errMsg = String(cString: sqlite3_errmsg(sqlite3DB))
                         PlayKeychain.debugLogger("Failed query \(selectRowIDsSQL): \(errMsg)")
-                        sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
+                        _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
                         finalStatus = errSecIO
                         return false
                     }
                     defer { sqlite3_reset(selectStmt) }
 
                     let selCtx = "select for update"
-                    guard bindValues(whereInfo.values, to: selectStmt, in: sqlite3DB, context: selCtx) else {
-                        sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
+                    guard bindValues(plan.values, to: selectStmt, in: sqlite3DB, context: selCtx) else {
+                        _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
                         finalStatus = errSecIO
                         return false
                     }
-                    while sqlite3_step(selectStmt) == SQLITE_ROW {
+
+                    let colCount = sqlite3_column_count(selectStmt)
+                    var colNames: [String] = []
+                    colNames.reserveCapacity(Int(colCount))
+                    for idx in 0..<colCount {
+                        colNames.append(String(cString: sqlite3_column_name(selectStmt, idx)))
+                    }
+
+                    var stepRc: Int32 = SQLITE_DONE
+                    while true {
+                        stepRc = sqlite3_step(selectStmt)
+                        guard stepRc == SQLITE_ROW else { break }
                         let rowID = sqlite3_column_int64(selectStmt, 0)
-                        var pks: [CFTypeRef?] = []
-                        pks.reserveCapacity(pkNames.count)
-                        for idx in 0..<pkNames.count {
-                            pks.append(decodeData(stmt: selectStmt, index: Int32(idx + 1), columnName: pkNames[idx]))
+                        if plan.needsPostFetchFilter {
+                            let row = NSMutableDictionary(capacity: Int(colCount))
+                            for idx in 1..<Int(colCount) {
+                                if let val = decodeData(
+                                    stmt: selectStmt,
+                                    index: Int32(idx),
+                                    columnName: colNames[idx],
+                                    encryptionKey: encKey
+                                ) {
+                                    row[colNames[idx]] = val
+                                }
+                            }
+                            if !Self.rowMatchesPostFilters(row, plan: plan) {
+                                continue
+                            }
+                            let pks: [CFTypeRef?] = pkNames.map { row[$0].map { $0 as CFTypeRef } }
+                            matchedRows.append((rowID: rowID, pkValues: pks))
+                        } else {
+                            var pks: [CFTypeRef?] = []
+                            pks.reserveCapacity(pkNames.count)
+                            for idx in 0..<pkNames.count {
+                                pks.append(
+                                    decodeData(
+                                        stmt: selectStmt,
+                                        index: Int32(idx + 1),
+                                        columnName: pkNames[idx],
+                                        encryptionKey: encKey
+                                    )
+                                )
+                            }
+                            matchedRows.append((rowID: rowID, pkValues: pks))
                         }
-                        matchedRows.append((rowID: rowID, pkValues: pks))
+                    }
+                    guard stepRc == SQLITE_DONE else {
+                        _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
+                        finalStatus = errSecIO
+                        return false
                     }
                 }
 
@@ -861,11 +1844,14 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
                 for (rawKey, val) in normalizedUpdates {
                     guard let col = rawKey as? String,
                           allowedCols.contains(col),
-                          !Self.nonFilterableKeys.contains(col),
+                          !Self.nonUpdatableKeys.contains(col),
                           PTPlayChainKeyUpdatePolicy.isUpdatableColumn(
                               col,
                               internalTokenIDColumn: Self.internalTokenIDColumn
                           ) else {
+                        continue
+                    }
+                    if col == Self.internalPrivateKeyColumn && tableName != (kSecClassIdentity as String) {
                         continue
                     }
                     if col == (kSecAttrSynchronizable as String) {
@@ -903,7 +1889,7 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
 
                 if updateCols.isEmpty {
                     guard sqlite3_exec(sqlite3DB, "COMMIT", nil, nil, nil) == SQLITE_OK else {
-                        sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
+                        _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
                         finalStatus = errSecIO
                         return false
                     }
@@ -945,21 +1931,27 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
                         var hasCollision = false
                         do {
                             guard let dupStmt = preparedStatement(for: dupCheckSQL, in: sqlite3DB) else {
-                                sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
+                                _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
                                 finalStatus = errSecIO
                                 return false
                             }
                             defer { sqlite3_reset(dupStmt) }
                             guard bindValues(dupVals, to: dupStmt, in: sqlite3DB, context: "check update duplicate"),
                                   sqlite3_bind_int64(dupStmt, Int32(dupVals.count + 1), rowID) == SQLITE_OK else {
-                                sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
+                                _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
                                 finalStatus = errSecIO
                                 return false
                             }
-                            hasCollision = (sqlite3_step(dupStmt) == SQLITE_ROW)
+                            let dupRc = sqlite3_step(dupStmt)
+                            if dupRc != SQLITE_ROW && dupRc != SQLITE_DONE {
+                                _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
+                                finalStatus = errSecIO
+                                return false
+                            }
+                            hasCollision = (dupRc == SQLITE_ROW)
                         }
                         if hasCollision {
-                            sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
+                            _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
                             finalStatus = errSecDuplicateItem
                             return false
                         }
@@ -967,21 +1959,28 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
 
                     do {
                         guard let updStmt = preparedStatement(for: updateSQL, in: sqlite3DB) else {
-                            sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
+                            _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
                             finalStatus = errSecIO
                             return false
                         }
                         defer { sqlite3_reset(updStmt) }
-                        guard bindValues(updateVals, to: updStmt, in: sqlite3DB, context: "update into"),
+                        guard bindValues(
+                            updateVals,
+                            columns: updateCols,
+                            encryptionKey: encKey,
+                            to: updStmt,
+                            in: sqlite3DB,
+                            context: "update into"
+                        ),
                               sqlite3_bind_int64(updStmt, rowIDParamIndex, rowID) == SQLITE_OK else {
-                            sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
+                            _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
                             finalStatus = errSecIO
                             return false
                         }
                         let rc = sqlite3_step(updStmt)
                         if rc != SQLITE_DONE {
                             let errCode = sqlite3_errcode(sqlite3DB)
-                            sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
+                            _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
                             finalStatus = (rc == SQLITE_CONSTRAINT || errCode == SQLITE_CONSTRAINT)
                                 ? errSecDuplicateItem
                                 : errSecIO
@@ -991,15 +1990,16 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
                 }
 
                 guard sqlite3_exec(sqlite3DB, "COMMIT", nil, nil, nil) == SQLITE_OK else {
-                    sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
+                    _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
                     finalStatus = errSecIO
                     return false
                 }
+                hardenDatabaseSidecars(forDBPath: dbPath)
                 finalStatus = errSecSuccess
                 return true
             }
 
-            sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
+            _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
             finalStatus = errSecItemNotFound
             return false
         }
@@ -1011,11 +2011,22 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
     }
 
     func deleteMatching(_ attributes: NSDictionary) -> OSStatus {
+        let paramStatus = Self.validateQueryParameters(attributes)
+        guard paramStatus == errSecSuccess else {
+            return paramStatus
+        }
         let normalized = Self.normalizeAttributes(
             attributes,
             forPersistence: false,
             populateCertMetadataFromData: false
         )
+        if normalized[Self.internalInvalidQueryKey] != nil {
+            return errSecParam
+        }
+        if let predicates = normalized[Self.internalMatchItemListKey] as? [MatchItemPredicate],
+           predicates.isEmpty {
+            return errSecItemNotFound
+        }
         let candidateTables = Self.resolveCandidateTables(for: normalized)
         guard !candidateTables.isEmpty else {
             return errSecParam
@@ -1029,20 +2040,27 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
             explicitDeleteLimit = nil
         } else if let num = matchLimitObj as? NSNumber {
             explicitDeleteLimit = max(1, num.int64Value)
-        } else {
+        } else if matchLimitObj == nil {
             explicitDeleteLimit = nil
+        } else {
+            return errSecParam
         }
 
         let defaultGroup = currentDefaultAccessGroup()
         var finalStatus: OSStatus = errSecIO
-        _ = usingDB { sqlite3DB in
+        _ = usingDB { sqlite3DB, dbPath, encKey in
+            guard sqlite3_exec(sqlite3DB, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else {
+                finalStatus = errSecIO
+                return false
+            }
+
             var totalChanged: Int64 = 0
             for tableName in candidateTables {
                 if let limit = explicitDeleteLimit, totalChanged >= limit {
                     break
                 }
                 guard let primaryColumns = PlayedAppleDBConstants.primaries[tableName as CFString],
-                      let whereInfo = filterClauseAndValues(
+                      let plan = buildFilterPlan(
                           tableName: tableName,
                           primaryColumns: primaryColumns,
                           attributes: normalized,
@@ -1051,30 +2069,124 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
                     continue
                 }
 
+                // Refuse WHERE 1 = 1 fallback when non-meta keys were dropped or neither filter nor class exists.
+                if PTPlayChainMutationFilterPolicy.shouldRejectMutation(
+                    droppedNonMetaFilterKey: plan.droppedNonMetaFilterKey,
+                    hasEffectiveFilter: plan.hasEffectiveFilter,
+                    hasExplicitSecClass: normalized[kSecClass] != nil
+                ) {
+                    _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
+                    finalStatus = errSecParam
+                    return false
+                }
+                if plan.isGuaranteedEmpty {
+                    continue
+                }
+
+                if plan.needsPostFetchFilter {
+                    let selectSQL = "SELECT rowid, * FROM \(tableName) WHERE \(plan.clause)"
+                    var rowIDsToDelete: [Int64] = []
+                    do {
+                        guard let selStmt = preparedStatement(for: selectSQL, in: sqlite3DB) else {
+                            _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
+                            finalStatus = errSecIO
+                            return false
+                        }
+                        defer { sqlite3_reset(selStmt) }
+                        guard bindValues(plan.values, to: selStmt, in: sqlite3DB, context: "select for delete") else {
+                            _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
+                            finalStatus = errSecIO
+                            return false
+                        }
+                        let colCount = sqlite3_column_count(selStmt)
+                        var colNames: [String] = []
+                        colNames.reserveCapacity(Int(colCount))
+                        for idx in 0..<colCount {
+                            colNames.append(String(cString: sqlite3_column_name(selStmt, idx)))
+                        }
+                        var stepRc: Int32 = SQLITE_DONE
+                        while true {
+                            if let limit = explicitDeleteLimit,
+                               totalChanged + Int64(rowIDsToDelete.count) >= limit {
+                                break
+                            }
+                            stepRc = sqlite3_step(selStmt)
+                            guard stepRc == SQLITE_ROW else { break }
+                            let rowID = sqlite3_column_int64(selStmt, 0)
+                            let row = NSMutableDictionary(capacity: Int(colCount))
+                            for idx in 1..<Int(colCount) {
+                                if let val = decodeData(
+                                    stmt: selStmt,
+                                    index: Int32(idx),
+                                    columnName: colNames[idx],
+                                    encryptionKey: encKey
+                                ) {
+                                    row[colNames[idx]] = val
+                                }
+                            }
+                            if Self.rowMatchesPostFilters(row, plan: plan) {
+                                rowIDsToDelete.append(rowID)
+                            }
+                        }
+                        let hitLimit = explicitDeleteLimit.map { totalChanged + Int64(rowIDsToDelete.count) >= $0 }
+                            ?? false
+                        if !hitLimit && stepRc != SQLITE_DONE {
+                            _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
+                            finalStatus = errSecIO
+                            return false
+                        }
+                    }
+
+                    if !rowIDsToDelete.isEmpty {
+                        let delByRowSQL = "DELETE FROM \(tableName) WHERE rowid = ?"
+                        guard let delStmt = preparedStatement(for: delByRowSQL, in: sqlite3DB) else {
+                            _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
+                            finalStatus = errSecIO
+                            return false
+                        }
+                        defer { sqlite3_reset(delStmt) }
+                        for rowID in rowIDsToDelete {
+                            sqlite3_reset(delStmt)
+                            sqlite3_clear_bindings(delStmt)
+                            guard sqlite3_bind_int64(delStmt, 1, rowID) == SQLITE_OK,
+                                  sqlite3_step(delStmt) == SQLITE_DONE else {
+                                _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
+                                finalStatus = errSecIO
+                                return false
+                            }
+                            totalChanged += Int64(sqlite3_changes(sqlite3DB))
+                        }
+                    }
+                    continue
+                }
+
                 let deleteQuery: String
                 if let limit = explicitDeleteLimit {
                     let remaining = limit - totalChanged
                     deleteQuery = "DELETE FROM \(tableName) WHERE rowid IN "
-                        + "(SELECT rowid FROM \(tableName) WHERE \(whereInfo.clause) LIMIT \(remaining))"
+                        + "(SELECT rowid FROM \(tableName) WHERE \(plan.clause) LIMIT \(remaining))"
                 } else {
-                    deleteQuery = "DELETE FROM \(tableName) WHERE \(whereInfo.clause)"
+                    deleteQuery = "DELETE FROM \(tableName) WHERE \(plan.clause)"
                 }
 
                 guard let stmt = preparedStatement(for: deleteQuery, in: sqlite3DB) else {
                     let errorMessage = String(cString: sqlite3_errmsg(sqlite3DB))
                     PlayKeychain.debugLogger("Failed query \(deleteQuery)")
                     PlayKeychain.debugLogger("Failed to delete items from db table: \(errorMessage)")
+                    _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
                     finalStatus = errSecIO
                     return false
                 }
                 defer { sqlite3_reset(stmt) }
 
-                guard bindValues(whereInfo.values, to: stmt, in: sqlite3DB, context: "delete from") else {
+                guard bindValues(plan.values, to: stmt, in: sqlite3DB, context: "delete from") else {
+                    _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
                     finalStatus = errSecIO
                     return false
                 }
 
                 guard sqlite3_step(stmt) == SQLITE_DONE else {
+                    _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
                     finalStatus = errSecIO
                     return false
                 }
@@ -1082,6 +2194,14 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
                 totalChanged += Int64(sqlite3_changes(sqlite3DB))
             }
 
+            guard sqlite3_exec(sqlite3DB, "COMMIT", nil, nil, nil) == SQLITE_OK else {
+                _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
+                finalStatus = errSecIO
+                return false
+            }
+            if totalChanged > 0 {
+                hardenDatabaseSidecars(forDBPath: dbPath)
+            }
             finalStatus = (totalChanged > 0) ? errSecSuccess : errSecItemNotFound
             return totalChanged > 0
         }
@@ -1092,13 +2212,23 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
         return deleteMatching(attributes) == errSecSuccess
     }
 
-    private func ensureSchema(_ sqlite3DB: OpaquePointer, dbPath: String) -> Bool {
+    private func ensureSchema(
+        _ sqlite3DB: OpaquePointer,
+        dbPath: String,
+        encryptionKey: SymmetricKey
+    ) -> Bool {
         _ = PlayedAppleDBBackup.backupIfNeeded(
             sourceDB: sqlite3DB,
             dbPath: dbPath,
             targetVersion: dbVersion
         ) { msg in
             PlayKeychain.debugLogger(msg)
+        }
+
+        guard sqlite3_exec(sqlite3DB, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else {
+            let errorMessage = String(cString: sqlite3_errmsg(sqlite3DB))
+            PlayKeychain.debugLogger("Failed to start schema transaction: \(errorMessage)")
+            return false
         }
 
         for (key, value) in PlayedAppleDBConstants.primaries {
@@ -1121,6 +2251,7 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
                 let errorMessage = String(cString: sqlite3_errmsg(sqlite3DB))
                 PlayKeychain.debugLogger("Failed query \(createTableQuery)")
                 PlayKeychain.debugLogger("Failed to create db table: \(errorMessage)")
+                _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
                 return false
             }
 
@@ -1131,6 +2262,7 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
                   let stmt = infoStmt else {
                 let errorMessage = String(cString: sqlite3_errmsg(sqlite3DB))
                 PlayKeychain.debugLogger("Failed query \(pragmaSQL): \(errorMessage)")
+                _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
                 return false
             }
             while sqlite3_step(stmt) == SQLITE_ROW {
@@ -1146,6 +2278,7 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
                 guard sqlite3_exec(sqlite3DB, alterSQL, nil, nil, nil) == SQLITE_OK else {
                     let errorMessage = String(cString: sqlite3_errmsg(sqlite3DB))
                     PlayKeychain.debugLogger("Failed query \(alterSQL): \(errorMessage)")
+                    _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
                     return false
                 }
             }
@@ -1154,15 +2287,130 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
         let currentVersion = PlayedAppleDBBackup.queryUserVersion(sqlite3DB)
         if Int(currentVersion) < dbVersion {
             guard migrateLegacyUntaggedScalars(sqlite3DB) else {
+                _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
                 return false
             }
             guard sqlite3_exec(sqlite3DB, "PRAGMA user_version = \(dbVersion);", nil, nil, nil) == SQLITE_OK else {
                 let errorMessage = String(cString: sqlite3_errmsg(sqlite3DB))
                 PlayKeychain.debugLogger("Failed to set user_version=\(dbVersion): \(errorMessage)")
+                _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
                 return false
             }
         }
 
+        guard migrateLegacyPlaintextSecrets(sqlite3DB, encryptionKey: encryptionKey) else {
+            _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
+            return false
+        }
+
+        guard sqlite3_exec(sqlite3DB, "COMMIT", nil, nil, nil) == SQLITE_OK else {
+            let errorMessage = String(cString: sqlite3_errmsg(sqlite3DB))
+            PlayKeychain.debugLogger("Failed to commit schema transaction: \(errorMessage)")
+            _ = sqlite3_exec(sqlite3DB, "ROLLBACK", nil, nil, nil)
+            return false
+        }
+
+        hardenDatabaseSidecars(forDBPath: dbPath)
+        cleanupPlaintextPreMigrationBackups(forDBPath: dbPath)
+        return true
+    }
+
+    private func cleanupPlaintextPreMigrationBackups(forDBPath dbPath: String) {
+        let parentDir = (dbPath as NSString).deletingLastPathComponent
+        var resolvedBuf = [CChar](repeating: 0, count: Int(PATH_MAX))
+        let resolvedParent = Darwin.realpath(parentDir, &resolvedBuf)
+            .map { String(cString: $0) } ?? parentDir
+        let resolvedDBPath = (resolvedParent as NSString)
+            .appendingPathComponent((dbPath as NSString).lastPathComponent)
+        for legacyVer in 0..<dbVersion {
+            let bakPath = PlayedAppleDBBackup.backupPath(for: resolvedDBPath, fromVersion: legacyVer)
+            var st = Darwin.stat()
+            if Darwin.lstat(bakPath, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG {
+                _ = Darwin.unlink(bakPath)
+            }
+        }
+    }
+
+    private func isAlreadyEncryptedBlob(_ bytes: UnsafePointer<UInt8>, size: Int) -> Bool {
+        let magicLen = Self.plistBlobMagic.count
+        guard size > magicLen + 28 else { return false }
+        for i in 0..<magicLen where bytes[i] != Self.plistBlobMagic[i] {
+            return false
+        }
+        return bytes[magicLen] == Self.tagEncryptedData
+    }
+
+    @discardableResult
+    private func migrateLegacyPlaintextSecrets(
+        _ sqlite3DB: OpaquePointer,
+        encryptionKey: SymmetricKey
+    ) -> Bool {
+        var pending: [(table: String, rowID: Int64, col: String, plaintext: Data)] = []
+        let magicLen = Self.plistBlobMagic.count
+        for tableName in Self.orderedTableNames {
+            let targetCols = (tableName == (kSecClassIdentity as String))
+                ? [kSecValueData as String, Self.internalPrivateKeyColumn]
+                : [kSecValueData as String]
+            let selectSQL = "SELECT rowid, \(targetCols.joined(separator: ", ")) FROM \(tableName);"
+            var selectStmt: OpaquePointer?
+            guard sqlite3_prepare_v2(sqlite3DB, selectSQL, -1, &selectStmt, nil) == SQLITE_OK,
+                  let stmt = selectStmt else {
+                continue
+            }
+            defer { sqlite3_finalize(stmt) }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let rowID = sqlite3_column_int64(stmt, 0)
+                for (colIdx, colName) in targetCols.enumerated() {
+                    let sqlIdx = Int32(colIdx + 1)
+                    guard sqlite3_column_type(stmt, sqlIdx) == SQLITE_BLOB else { continue }
+                    let size = Int(sqlite3_column_bytes(stmt, sqlIdx))
+                    if size > 0, let rawPtr = sqlite3_column_blob(stmt, sqlIdx) {
+                        let bytes = rawPtr.assumingMemoryBound(to: UInt8.self)
+                        if isAlreadyEncryptedBlob(bytes, size: size) {
+                            let payloadStart = magicLen + 1
+                            let payloadLen = size - payloadStart
+                            if Self.decryptSecretBlob(
+                                bytes: bytes.advanced(by: payloadStart),
+                                length: payloadLen,
+                                columnName: colName,
+                                key: encryptionKey
+                            ) != nil {
+                                continue
+                            }
+                        }
+                    }
+                    if let decoded = decodeData(
+                        stmt: stmt,
+                        index: sqlIdx,
+                        columnName: colName,
+                        encryptionKey: encryptionKey
+                    ) as? Data {
+                        pending.append((table: tableName, rowID: rowID, col: colName, plaintext: decoded))
+                    }
+                }
+            }
+        }
+
+        for item in pending {
+            let updateSQL = "UPDATE \(item.table) SET \(item.col) = ? WHERE rowid = ?;"
+            var updStmt: OpaquePointer?
+            guard sqlite3_prepare_v2(sqlite3DB, updateSQL, -1, &updStmt, nil) == SQLITE_OK,
+                  let stmt = updStmt else {
+                return false
+            }
+            defer { sqlite3_finalize(stmt) }
+            guard encodeData(
+                stmt: stmt,
+                index: 1,
+                value: item.plaintext as CFData,
+                columnName: item.col,
+                encryptionKey: encryptionKey
+            ),
+                  sqlite3_bind_int64(stmt, 2, item.rowID) == SQLITE_OK,
+                  sqlite3_step(stmt) == SQLITE_DONE else {
+                return false
+            }
+        }
         return true
     }
 
@@ -1245,6 +2493,9 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
     }
 
     private func databasePathLocked() -> String {
+        if let databasePathOverride {
+            return databasePathOverride
+        }
         let cfHome = getenv("CFFIXED_USER_HOME").flatMap { String(validatingCString: $0) }
         let home = getenv("HOME").flatMap { String(validatingCString: $0) }
         if let cached = cachedResolvedDBPath,
@@ -1264,51 +2515,113 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
         return path
     }
 
-    private func usingDB(_ callback: (OpaquePointer) -> Bool) -> Bool {
+    private func usingDB(_ callback: (OpaquePointer, String, SymmetricKey) -> Bool) -> Bool {
         return withDatabase(callback)
     }
 
-    private func withDatabase(_ callback: (OpaquePointer) -> Bool) -> Bool {
+    private func withDatabase(_ callback: (OpaquePointer, String, SymmetricKey) -> Bool) -> Bool {
         dbLock.withLock {
             let dbPath = databasePathLocked()
+            let encKey = encryptionKeyLocked(forDBPath: dbPath)
+            let prevActivePath = activeDBPathForDecryption
+            activeDBPathForDecryption = dbPath
+            defer { activeDBPathForDecryption = prevActivePath }
             if let existingDB = cachedDB {
                 var st = Darwin.stat()
-                let statOK = (stat(dbPath, &st) == 0)
+                let statOK = (Darwin.lstat(dbPath, &st) == 0 && (st.st_mode & S_IFMT) == S_IFREG)
                 if cachedDBPath == dbPath &&
                     statOK &&
                     st.st_nlink > 0 &&
                     st.st_dev == cachedDBDev &&
                     st.st_ino == cachedDBIno {
-                    return callback(existingDB)
+                    return callback(existingDB, dbPath, encKey)
                 }
                 closeDatabaseLocked()
             }
 
-            guard let sqlite3DB = openDatabase(atPath: dbPath) else { return false }
+            guard let sqlite3DB = openDatabase(atPath: dbPath, encryptionKey: encKey) else { return false }
             cachedDB = sqlite3DB
             cachedDBPath = dbPath
             var st = Darwin.stat()
-            if stat(dbPath, &st) == 0 {
+            if Darwin.lstat(dbPath, &st) == 0 && (st.st_mode & S_IFMT) == S_IFREG {
                 cachedDBDev = st.st_dev
                 cachedDBIno = st.st_ino
             } else {
                 cachedDBDev = 0
                 cachedDBIno = 0
             }
-            return callback(sqlite3DB)
+            return callback(sqlite3DB, dbPath, encKey)
         }
     }
 
-    private func openDatabase(atPath dbPath: String) -> OpaquePointer? {
+    private func hardenRegularFileMode0600(atPath path: String) {
+        let fd = Darwin.open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { return }
+        defer { Darwin.close(fd) }
+        var st = Darwin.stat()
+        if Darwin.fstat(fd, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG {
+            _ = Darwin.fchmod(fd, mode_t(0o600))
+        }
+    }
+
+    private func hardenDatabaseSidecars(forDBPath dbPath: String) {
+        hardenRegularFileMode0600(atPath: dbPath)
+        hardenRegularFileMode0600(atPath: "\(dbPath)-wal")
+        hardenRegularFileMode0600(atPath: "\(dbPath)-shm")
+        hardenRegularFileMode0600(atPath: "\(dbPath)-journal")
+    }
+
+    private func openDatabase(atPath dbPath: String, encryptionKey: SymmetricKey) -> OpaquePointer? {
         var sqlite3DB: OpaquePointer?
         let playChainDir = (dbPath as NSString).deletingLastPathComponent
         var dirSt = Darwin.stat()
-        if stat(playChainDir, &dirSt) != 0 {
-            try? FileManager.default.createDirectory(atPath: playChainDir, withIntermediateDirectories: true)
+        if Darwin.lstat(playChainDir, &dirSt) == 0 {
+            guard (dirSt.st_mode & S_IFMT) == S_IFDIR else {
+                PlayKeychain.debugLogger("Refusing non-directory PlayChain path")
+                return nil
+            }
+            if dirSt.st_uid == Darwin.geteuid() {
+                _ = Darwin.chmod(playChainDir, mode_t(0o700))
+            }
+        } else {
+            try? FileManager.default.createDirectory(
+                atPath: playChainDir,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: NSNumber(value: 0o700)]
+            )
+            if Darwin.lstat(playChainDir, &dirSt) == 0, (dirSt.st_mode & S_IFMT) == S_IFDIR {
+                _ = Darwin.chmod(playChainDir, mode_t(0o700))
+            }
         }
 
-        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
-        guard sqlite3_open_v2(dbPath, &sqlite3DB, flags, nil) == SQLITE_OK,
+        // Canonicalize OS-level ancestor symlinks via Darwin.realpath (e.g. /var -> /private/var)
+        // on the already-verified non-symlink PlayChain directory so SQLITE_OPEN_NOFOLLOW succeeds
+        // while still rejecting any symlink at the leaf database file.
+        var resolvedBuf = [CChar](repeating: 0, count: Int(PATH_MAX))
+        let resolvedPlayChainDir = Darwin.realpath(playChainDir, &resolvedBuf)
+            .map { String(cString: $0) } ?? playChainDir
+        let resolvedDBPath = (resolvedPlayChainDir as NSString)
+            .appendingPathComponent((dbPath as NSString).lastPathComponent)
+
+        // Pre-open with O_NOFOLLOW and 0600 permissions to prevent symlink redirection and 0644 creation.
+        let preFD = Darwin.open(resolvedDBPath, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, mode_t(0o600))
+        guard preFD >= 0 else {
+            PlayKeychain.debugLogger("Refused to open DB path safely (errno=\(errno))")
+            return nil
+        }
+        var fileSt = Darwin.stat()
+        let isRegFile = (Darwin.fstat(preFD, &fileSt) == 0 && (fileSt.st_mode & S_IFMT) == S_IFREG)
+        if isRegFile {
+            _ = Darwin.fchmod(preFD, mode_t(0o600))
+        }
+        Darwin.close(preFD)
+        guard isRegFile else {
+            PlayKeychain.debugLogger("Refused non-regular DB file")
+            return nil
+        }
+
+        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW
+        guard sqlite3_open_v2(resolvedDBPath, &sqlite3DB, flags, nil) == SQLITE_OK,
               let db = sqlite3DB else {
             if let sqlite3DB = sqlite3DB {
                 sqlite3_close_v2(sqlite3DB)
@@ -1323,8 +2636,9 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
             let errorMessage = String(cString: sqlite3_errmsg(db))
             PlayKeychain.debugLogger("Failed to configure SQLite pragmas: \(errorMessage)")
         }
+        hardenDatabaseSidecars(forDBPath: dbPath)
 
-        guard ensureSchema(db, dbPath: dbPath) else {
+        guard ensureSchema(db, dbPath: dbPath, encryptionKey: encryptionKey) else {
             sqlite3_close_v2(db)
             return nil
         }
@@ -1365,7 +2679,13 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
         }
     }
 
-    private func encodeData(stmt: OpaquePointer, index: Int32, value: CFTypeRef) -> Bool {
+    private func encodeData(
+        stmt: OpaquePointer,
+        index: Int32,
+        value: CFTypeRef,
+        columnName: String? = nil,
+        encryptionKey: SymmetricKey? = nil
+    ) -> Bool {
         let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
         var result = SQLITE_FAIL
         let typeID = CFGetTypeID(value)
@@ -1375,7 +2695,12 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
             result = sqlite3_bind_text(stmt, index, string, -1, sqliteTransient)
         case CFDataGetTypeID():
             guard let data = value as? Data else { return false }
-            if data.starts(with: Self.plistBlobMagic) {
+            if let col = columnName, Self.encryptedColumns.contains(col), let key = encryptionKey {
+                guard let encrypted = Self.encryptSecretBlob(data, columnName: col, key: key) else {
+                    return false
+                }
+                result = bindBlob(encrypted, to: stmt, index: index, transient: sqliteTransient)
+            } else if data.starts(with: Self.plistBlobMagic) {
                 var payload = Data(capacity: Self.plistBlobMagic.count + 1 + data.count)
                 payload.append(contentsOf: Self.plistBlobMagic)
                 payload.append(Self.tagEscapedRawData)
@@ -1385,7 +2710,7 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
                 result = bindBlob(data, to: stmt, index: index, transient: sqliteTransient)
             }
         case CFBooleanGetTypeID():
-            let boolVal = CFBooleanGetValue((value as! CFBoolean)) // swiftlint:disable:this force_cast
+            let boolVal = CFBooleanGetValue(unsafeDowncast(value, to: CFBoolean.self))
             let magicLen = Self.plistBlobMagic.count
             var stackBuf = [UInt8](repeating: 0, count: magicLen + 1)
             for i in 0..<magicLen {
@@ -1396,7 +2721,7 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
                 sqlite3_bind_blob(stmt, index, rawBuf.baseAddress, Int32(rawBuf.count), sqliteTransient)
             }
         case CFNumberGetTypeID():
-            let numRef = value as! CFNumber // swiftlint:disable:this force_cast
+            let numRef = unsafeDowncast(value, to: CFNumber.self)
             if !CFNumberIsFloatType(numRef) {
                 var intVal: Int64 = 0
                 if CFNumberGetValue(numRef, .sInt64Type, &intVal),
@@ -1438,7 +2763,7 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
             payload.append(plistData as Data)
             result = bindBlob(payload, to: stmt, index: index, transient: sqliteTransient)
         case CFDateGetTypeID():
-            let dateRef = value as! CFDate // swiftlint:disable:this force_cast
+            let dateRef = unsafeDowncast(value, to: CFDate.self)
             let absTime = CFDateGetAbsoluteTime(dateRef)
             result = bindTaggedFixed64(
                 Self.tagDate,
@@ -1540,7 +2865,12 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
         return isScalar ? plist : nil
     }
 
-    private func decodeData(stmt: OpaquePointer, index: Int32, columnName: String? = nil) -> CFTypeRef? {
+    private func decodeData(
+        stmt: OpaquePointer,
+        index: Int32,
+        columnName: String? = nil,
+        encryptionKey: SymmetricKey? = nil
+    ) -> CFTypeRef? {
         switch sqlite3_column_type(stmt, index) {
         case SQLITE_TEXT:
             guard let ptr = sqlite3_column_text(stmt, index) else { return nil }
@@ -1572,6 +2902,30 @@ final class PlayKeychainDB: NSObject, @unchecked Sendable {
                     switch tag {
                     case Self.tagEscapedRawData:
                         return CFDataCreate(kCFAllocatorDefault, bytes.advanced(by: payloadStart), payloadLen)
+                    case Self.tagEncryptedData:
+                        guard let col = columnName,
+                              let key = encryptionKey else {
+                            return nil
+                        }
+                        if let decrypted = Self.decryptSecretBlob(
+                            bytes: bytes.advanced(by: payloadStart),
+                            length: payloadLen,
+                            columnName: col,
+                            key: key
+                        ) {
+                            return decrypted as CFData
+                        }
+                        if let activePath = activeDBPathForDecryption,
+                           let fallbackKey = cachedLegacyFallbackKeys[activePath],
+                           let decrypted = Self.decryptSecretBlob(
+                               bytes: bytes.advanced(by: payloadStart),
+                               length: payloadLen,
+                               columnName: col,
+                               key: fallbackKey
+                           ) {
+                            return decrypted as CFData
+                        }
+                        return nil
                     case Self.tagBoolFalse:
                         if payloadLen == 0 {
                             return kCFBooleanFalse

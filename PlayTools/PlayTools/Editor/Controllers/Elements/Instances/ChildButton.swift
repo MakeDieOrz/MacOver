@@ -8,22 +8,26 @@
 import Foundation
 
 @MainActor
-protocol ParentElement {
+protocol ParentElement: AnyObject {
     func unfocusChildren()
     var button: Element { get }
 }
 
 class ChildButtonModel: ControlModel<Button> {
-    var parent: ParentElement
+    weak var parent: ParentElement?
     init(data: Button, parent: ParentElement) {
         self.parent = parent
         super.init(data: data)
-        self.setKey(code: data.keyCode)
+        if data.keyCode == KeyCodeNames.defaultCode {
+            self.setKey(name: data.keyName)
+        } else {
+            self.setKey(code: data.keyCode)
+        }
         parent.button.addSubview(button)
     }
 
     override func remove() {
-        parent.button.removeFromSuperview()
+        parent?.button.removeFromSuperview()
     }
 
     override func setKey(code: Int, name: String) {
@@ -35,16 +39,16 @@ class ChildButtonModel: ControlModel<Button> {
     }
 
     override func move(deltaY: CGFloat, deltaX: CGFloat) {
-        parent.button.model?.move(deltaY: deltaY, deltaX: deltaX)
+        parent?.button.model?.move(deltaY: deltaY, deltaX: deltaX)
     }
 
     override func resize(down: Bool) {
-        parent.button.model?.resize(down: down)
+        parent?.button.model?.resize(down: down)
     }
 
     override func focus(_ focus: Bool) {
         if focus {
-            parent.unfocusChildren()
+            parent?.unfocusChildren()
         }
         super.focus(focus)
     }

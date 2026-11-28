@@ -171,7 +171,8 @@ static bool pt_rel_has_sensitive_runtime_component(const char *rel) {
             strcasestr(rel, "Playtools.strings") != NULL || strcasestr(rel, "app.makedie.MacOver") != NULL ||
             strcasestr(rel, "io.playcover.PlayCover") != NULL || strcasestr(rel, "AKInterface.bundle") != NULL ||
             strcasestr(rel, "UserPlugins") != NULL || strcasestr(rel, ".pt_sysver_") != NULL ||
-            strcasestr(rel, ".pt_coderes_") != NULL || strcasestr(rel, ".pt_info_") != NULL);
+            strcasestr(rel, ".pt_coderes_") != NULL || strcasestr(rel, ".pt_info_") != NULL ||
+            strcasestr(rel, "pm_keymapping_state") != NULL || strcasestr(rel, "toucher.log") != NULL);
 }
 
 bool pt_is_nonsensitive_app_or_tmp_path(const char *norm_path, const char *bundle_dir, size_t bundle_len,
@@ -208,31 +209,23 @@ bool pt_is_nonsensitive_app_or_tmp_path(const char *norm_path, const char *bundl
 
 bool pt_classify_bounded_frame_kinds_ex(const uint8_t *frame_kinds, size_t count, bool initial_seen_wrapper,
                                         bool *out_cacheable_3frame) {
+    (void)initial_seen_wrapper;
     if (out_cacheable_3frame != NULL) {
         *out_cacheable_3frame = false;
     }
     if (frame_kinds == NULL || count == 0U) {
         return true;
     }
-    bool seen_wrapper = initial_seen_wrapper;
     size_t limit = count < (size_t)PT_MAX_CALLER_UNWIND_DEPTH ? count : (size_t)PT_MAX_CALLER_UNWIND_DEPTH;
     for (size_t i = 0; i < limit; i++) {
         uint8_t fkind = frame_kinds[i];
-        if (fkind == PT_CALLER_PLAYTOOLS) {
-            if (seen_wrapper) {
-                if (out_cacheable_3frame != NULL) {
-                    *out_cacheable_3frame = (i < 3U);
-                }
-                return true;
-            }
-        } else if (fkind == PT_CALLER_SYS_WRAPPER) {
-            seen_wrapper = true;
-        } else {
-            if (out_cacheable_3frame != NULL) {
-                *out_cacheable_3frame = (i < 3U);
-            }
-            return (fkind != PT_CALLER_APP);
+        if (fkind == PT_CALLER_PLAYTOOLS || fkind == PT_CALLER_SYS_WRAPPER) {
+            continue;
         }
+        if (out_cacheable_3frame != NULL) {
+            *out_cacheable_3frame = (i < 3U);
+        }
+        return (fkind != PT_CALLER_APP);
     }
     return true;
 }

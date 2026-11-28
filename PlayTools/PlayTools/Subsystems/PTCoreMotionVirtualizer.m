@@ -25,6 +25,9 @@ __attribute__((visibility("hidden")))
 @property (nonatomic, assign) CMQuaternion simQuat;
 @property (nonatomic, assign) BOOL hasSimQuat;
 @property (nonatomic, assign) double simLastTs;
+@property (nonatomic, assign) uint64_t rngState;
+@property (nonatomic, assign) CMRotationRate simOmega;
+@property (nonatomic, assign) CMAcceleration simUserAccel;
 @property (nonatomic, strong) id lastAccelSample;
 @property (nonatomic, assign) double lastAccelMonoSec;
 @property (nonatomic, strong) id lastGyroSample;
@@ -40,6 +43,15 @@ __attribute__((visibility("hidden")))
 @end
 
 @implementation PSVirtualMotionState
+- (instancetype)init {
+    self = [super init];
+    if (self != nil) {
+        uint64_t seed = 0;
+        arc4random_buf(&seed, sizeof(seed));
+        _rngState = (seed != 0) ? seed : 0xA0761D6478BD642FULL;
+    }
+    return self;
+}
 - (void)dealloc {
     if (_accelTimer) { dispatch_source_cancel(_accelTimer); _accelTimer = nil; }
     if (_gyroTimer) { dispatch_source_cancel(_gyroTimer); _gyroTimer = nil; }
@@ -263,11 +275,92 @@ static PSVirtualAltimeterState *ps_altimeter_state(id alt, BOOL createIfMissing)
     }
 }
 
+typedef struct {
+    CMQuaternion baseQuat;
+    CMMagneticField worldMag;
+    double baseHeadingDeg;
+    double baseHeadingAccuracy;
+    double basePressureKPa;
+} PSCMLaunchBaseline;
+
+static inline uint64_t ps_cm_splitmix64(uint64_t *state) {
+    uint64_t z = (*state += 0x9E3779B97F4A7C15ULL);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+static inline double ps_cm_rng_uniform01(uint64_t *state) {
+    uint64_t r = ps_cm_splitmix64(state) >> 11;
+    return ((double)r + 0.5) * (1.0 / 9007199254740992.0);
+}
+
+static inline double ps_cm_rng_gaussian(uint64_t *state, double sigma) {
+    double u1 = ps_cm_rng_uniform01(state);
+    double u2 = ps_cm_rng_uniform01(state);
+    if (u1 < 1e-12) {
+        u1 = 1e-12;
+    }
+    double mag = sqrt(-2.0 * log(u1));
+    return mag * cos(2.0 * M_PI * u2) * sigma;
+}
+
+static const PSCMLaunchBaseline *ps_cm_launch_baseline(void) {
+    static PSCMLaunchBaseline s_base;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        uint64_t seed = 0;
+        arc4random_buf(&seed, sizeof(seed));
+        if (seed == 0) {
+            seed = 0x2545F4914F6CDD1DULL;
+        }
+        // Per-launch randomized slight resting tilt (~+/- 3.5 deg) and azimuth
+        double roll = (ps_cm_rng_uniform01(&seed) - 0.5) * 0.12;
+        double pitch = (ps_cm_rng_uniform01(&seed) - 0.5) * 0.12;
+        double yaw = (ps_cm_rng_uniform01(&seed) - 0.5) * (2.0 * M_PI);
+        double cr = cos(roll * 0.5), sr = sin(roll * 0.5);
+        double cp = cos(pitch * 0.5), sp = sin(pitch * 0.5);
+        double cy = cos(yaw * 0.5), sy = sin(yaw * 0.5);
+        CMQuaternion q = {
+            .w = cr * cp * cy + sr * sp * sy,
+            .x = sr * cp * cy - cr * sp * sy,
+            .y = cr * sp * cy + sr * cp * sy,
+            .z = cr * cp * sy - sr * sp * cy
+        };
+        double norm = sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+        if (isfinite(norm) && norm > 1e-12) {
+            q.x /= norm; q.y /= norm; q.z /= norm; q.w /= norm;
+        } else {
+            q = (CMQuaternion){ .x = 0.0, .y = 0.0, .z = 0.0, .w = 1.0 };
+        }
+        s_base.baseQuat = q;
+        s_base.baseHeadingDeg = ps_cm_rng_uniform01(&seed) * 360.0;
+        s_base.baseHeadingAccuracy = 10.0 + ps_cm_rng_uniform01(&seed) * 12.0;
+        double horizMag = 18.0 + ps_cm_rng_uniform01(&seed) * 8.0;
+        double vertMag = -47.0 + ps_cm_rng_uniform01(&seed) * 10.0;
+        double magAz = ps_cm_rng_uniform01(&seed) * (2.0 * M_PI);
+        s_base.worldMag = (CMMagneticField){
+            .x = horizMag * cos(magAz),
+            .y = horizMag * sin(magAz),
+            .z = vertMag
+        };
+        s_base.basePressureKPa = 100.6 + ps_cm_rng_uniform01(&seed) * 1.5;
+    });
+    return &s_base;
+}
+
+static PSVirtualMotionState *ps_shared_default_motion_state(void) {
+    static PSVirtualMotionState *s_defaultState = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        s_defaultState = [[PSVirtualMotionState alloc] init];
+    });
+    return s_defaultState;
+}
+
 static inline double ps_motion_micro_jitter(uint64_t seed, double scale) {
-    uint64_t x = seed * 6364136223846793005ULL + 1442695040888963407ULL;
-    x ^= (x >> 33);
-    int32_t centered = (int32_t)(x & 0xFFFFU) - 32768;
-    return ((double)centered / 32768.0) * scale;
+    uint64_t st = seed ^ 0x9E3779B97F4A7C15ULL;
+    return ps_cm_rng_gaussian(&st, scale * 0.5);
 }
 
 static PSVirtualMotionSamplePayload *ps_motion_sample_payload(id sample, BOOL createIfMissing);
@@ -442,37 +535,144 @@ static PSVirtualMotionSamplePayload *ps_make_initialized_motion_payload_for_stat
     BOOL includeAttitude,
     PSVirtualMotionState *state) {
     PSVirtualMotionSamplePayload *payload = [[PSVirtualMotionSamplePayload alloc] init];
-    uint64_t t = atomic_fetch_add_explicit(&s_ps_motion_tick, 1ULL, memory_order_relaxed);
+    (void)atomic_fetch_add_explicit(&s_ps_motion_tick, 1ULL, memory_order_relaxed);
+    const PSCMLaunchBaseline *base = ps_cm_launch_baseline();
+    PSVirtualMotionState *effState = state ?: ps_shared_default_motion_state();
     payload->_timestamp = ps_cm_next_virtual_timestamp();
     payload->_hasTimestamp = YES;
+
+    CMQuaternion q;
+    CMRotationRate omega;
+    CMAcceleration userAcc;
+    double accelNoiseX, accelNoiseY, accelNoiseZ;
+    double gyroNoiseX, gyroNoiseY, gyroNoiseZ;
+    double magNoiseX, magNoiseY, magNoiseZ;
+    CMAttitudeReferenceFrame refFrame = CMAttitudeReferenceFrameXArbitraryZVertical;
+
+    @synchronized (effState) {
+        if (state != nil && state.dmReferenceFrame != 0) {
+            refFrame = state.dmReferenceFrame;
+        }
+        uint64_t rng = effState.rngState;
+        if (!effState.hasSimQuat) {
+            effState.simQuat = base->baseQuat;
+            effState.simOmega = (CMRotationRate){
+                .x = ps_cm_rng_gaussian(&rng, 0.0004),
+                .y = ps_cm_rng_gaussian(&rng, 0.0004),
+                .z = ps_cm_rng_gaussian(&rng, 0.0004)
+            };
+            effState.simUserAccel = (CMAcceleration){
+                .x = ps_cm_rng_gaussian(&rng, 0.0003),
+                .y = ps_cm_rng_gaussian(&rng, 0.0003),
+                .z = ps_cm_rng_gaussian(&rng, 0.0003)
+            };
+            effState.hasSimQuat = YES;
+            effState.simLastTs = payload->_timestamp;
+        } else {
+            double dt = payload->_timestamp - effState.simLastTs;
+            effState.simLastTs = payload->_timestamp;
+            if (dt > 0.0) {
+                if (dt > 0.2) {
+                    dt = 0.2;
+                }
+                // Gentle restoring torque toward per-launch resting pose so micro-tremor never diverges
+                CMQuaternion qCur = effState.simQuat;
+                CMQuaternion qBase = base->baseQuat;
+                CMQuaternion qErr = {
+                    .w =  qCur.w * qBase.w + qCur.x * qBase.x + qCur.y * qBase.y + qCur.z * qBase.z,
+                    .x =  qCur.w * qBase.x - qCur.x * qBase.w - qCur.y * qBase.z + qCur.z * qBase.y,
+                    .y =  qCur.w * qBase.y + qCur.x * qBase.z - qCur.y * qBase.w - qCur.z * qBase.x,
+                    .z =  qCur.w * qBase.z - qCur.x * qBase.y + qCur.y * qBase.x - qCur.z * qBase.w
+                };
+                if (qErr.w < 0.0) {
+                    qErr.x = -qErr.x; qErr.y = -qErr.y; qErr.z = -qErr.z; qErr.w = -qErr.w;
+                }
+                double alphaW = exp(-dt / 0.22);
+                double sigmaW = 0.0009 * sqrt(fmax(0.0, 1.0 - alphaW * alphaW));
+                double restore = 0.8 * (1.0 - alphaW);
+                CMRotationRate wPrev = effState.simOmega;
+                CMRotationRate wNext = {
+                    .x = alphaW * wPrev.x + restore * (2.0 * qErr.x) + ps_cm_rng_gaussian(&rng, sigmaW),
+                    .y = alphaW * wPrev.y + restore * (2.0 * qErr.y) + ps_cm_rng_gaussian(&rng, sigmaW),
+                    .z = alphaW * wPrev.z + restore * (2.0 * qErr.z) + ps_cm_rng_gaussian(&rng, sigmaW)
+                };
+                effState.simOmega = wNext;
+
+                double alphaA = exp(-dt / 0.16);
+                double sigmaA = 0.00055 * sqrt(fmax(0.0, 1.0 - alphaA * alphaA));
+                CMAcceleration aPrev = effState.simUserAccel;
+                effState.simUserAccel = (CMAcceleration){
+                    .x = alphaA * aPrev.x + ps_cm_rng_gaussian(&rng, sigmaA),
+                    .y = alphaA * aPrev.y + ps_cm_rng_gaussian(&rng, sigmaA),
+                    .z = alphaA * aPrev.z + ps_cm_rng_gaussian(&rng, sigmaA)
+                };
+
+                double omegaMag = sqrt(wNext.x * wNext.x + wNext.y * wNext.y + wNext.z * wNext.z);
+                double theta = omegaMag * dt;
+                CMQuaternion dq;
+                if (theta > 1e-8 && omegaMag > 0.0) {
+                    double s = sin(0.5 * theta) / omegaMag;
+                    dq = (CMQuaternion){ .x = wNext.x * s, .y = wNext.y * s, .z = wNext.z * s, .w = cos(0.5 * theta) };
+                } else {
+                    dq = (CMQuaternion){ .x = 0.5 * wNext.x * dt, .y = 0.5 * wNext.y * dt, .z = 0.5 * wNext.z * dt, .w = 1.0 };
+                }
+                CMQuaternion q1 = {
+                    .w = qCur.w * dq.w - qCur.x * dq.x - qCur.y * dq.y - qCur.z * dq.z,
+                    .x = qCur.w * dq.x + qCur.x * dq.w + qCur.y * dq.z - qCur.z * dq.y,
+                    .y = qCur.w * dq.y - qCur.x * dq.z + qCur.y * dq.w + qCur.z * dq.x,
+                    .z = qCur.w * dq.z + qCur.x * dq.y - qCur.y * dq.x + qCur.z * dq.w
+                };
+                double norm = sqrt(q1.x * q1.x + q1.y * q1.y + q1.z * q1.z + q1.w * q1.w);
+                if (isfinite(norm) && norm > 1e-12) {
+                    double inv = 1.0 / norm;
+                    q1.x *= inv; q1.y *= inv; q1.z *= inv; q1.w *= inv;
+                    effState.simQuat = q1;
+                }
+            }
+        }
+        q = effState.simQuat;
+        omega = effState.simOmega;
+        userAcc = effState.simUserAccel;
+        accelNoiseX = ps_cm_rng_gaussian(&rng, 0.00028);
+        accelNoiseY = ps_cm_rng_gaussian(&rng, 0.00028);
+        accelNoiseZ = ps_cm_rng_gaussian(&rng, 0.00028);
+        gyroNoiseX = ps_cm_rng_gaussian(&rng, 0.00022);
+        gyroNoiseY = ps_cm_rng_gaussian(&rng, 0.00022);
+        gyroNoiseZ = ps_cm_rng_gaussian(&rng, 0.00022);
+        magNoiseX = ps_cm_rng_gaussian(&rng, 0.035);
+        magNoiseY = ps_cm_rng_gaussian(&rng, 0.035);
+        magNoiseZ = ps_cm_rng_gaussian(&rng, 0.035);
+        effState.rngState = rng;
+    }
+
+    // Derive body-frame gravity, magnetic field, and Euler yaw from the coupled quaternion
+    double xx = q.x * q.x, yy = q.y * q.y, zz = q.z * q.z;
+    double xy = q.x * q.y, xz = q.x * q.z, yz = q.y * q.z;
+    double xw = q.x * q.w, yw = q.y * q.w, zw = q.z * q.w;
+    double m11 = 1.0 - 2.0 * (yy + zz), m12 = 2.0 * (xy - zw), m13 = 2.0 * (xz + yw);
+    double m21 = 2.0 * (xy + zw), m22 = 1.0 - 2.0 * (xx + zz), m23 = 2.0 * (yz - xw);
+    double m31 = 2.0 * (xz - yw), m32 = 2.0 * (yz + xw), m33 = 1.0 - 2.0 * (xx + yy);
+
+    payload->_gravity = (CMAcceleration){ .x = -m31, .y = -m32, .z = -m33 };
+    payload->_userAcceleration = userAcc;
     payload->_acceleration = (CMAcceleration){
-        .x = 0.0012 + ps_motion_micro_jitter(t, 0.0004),
-        .y = -0.0085 + ps_motion_micro_jitter(t ^ 0x9E3779B9ULL, 0.0004),
-        .z = -0.9998 + ps_motion_micro_jitter(t ^ 0x517CC1B7ULL, 0.0004)
+        .x = payload->_gravity.x + userAcc.x + accelNoiseX,
+        .y = payload->_gravity.y + userAcc.y + accelNoiseY,
+        .z = payload->_gravity.z + userAcc.z + accelNoiseZ
     };
     payload->_rotationRate = (CMRotationRate){
-        .x = ps_motion_micro_jitter(t ^ 0x11ULL, 0.0003),
-        .y = ps_motion_micro_jitter(t ^ 0x22ULL, 0.0003),
-        .z = ps_motion_micro_jitter(t ^ 0x33ULL, 0.0003)
+        .x = omega.x + gyroNoiseX,
+        .y = omega.y + gyroNoiseY,
+        .z = omega.z + gyroNoiseZ
     };
+    // Rotate world-frame magnetic field into the same body frame as gravity (R^T * worldMag)
+    CMMagneticField wm = base->worldMag;
     payload->_magneticField = (CMMagneticField){
-        .x = 18.4 + ps_motion_micro_jitter(t ^ 0x44ULL, 0.02),
-        .y = -6.2 + ps_motion_micro_jitter(t ^ 0x55ULL, 0.02),
-        .z = -41.5 + ps_motion_micro_jitter(t ^ 0x66ULL, 0.02)
+        .x = m11 * wm.x + m21 * wm.y + m31 * wm.z + magNoiseX,
+        .y = m12 * wm.x + m22 * wm.y + m32 * wm.z + magNoiseY,
+        .z = m13 * wm.x + m23 * wm.y + m33 * wm.z + magNoiseZ
     };
-    payload->_gravity = (CMAcceleration){
-        .x = 0.0012,
-        .y = -0.0085,
-        .z = -0.999963
-    };
-    payload->_userAcceleration = (CMAcceleration){
-        .x = ps_motion_micro_jitter(t ^ 0x77ULL, 0.0003),
-        .y = ps_motion_micro_jitter(t ^ 0x88ULL, 0.0003),
-        .z = ps_motion_micro_jitter(t ^ 0x99ULL, 0.0003)
-    };
-    CMAttitudeReferenceFrame refFrame = (state != nil && state.dmReferenceFrame != 0)
-        ? state.dmReferenceFrame
-        : CMAttitudeReferenceFrameXArbitraryZVertical;
+
     BOOL hasCalibratedMag = ps_cm_ref_frame_has_calibrated_mag(refFrame);
     BOOL hasNorth = ps_cm_ref_frame_has_north(refFrame);
     if (hasCalibratedMag) {
@@ -487,84 +687,22 @@ static PSVirtualMotionSamplePayload *ps_make_initialized_motion_payload_for_stat
         };
     }
     if (hasNorth) {
-        payload->_heading = 18.6 + ps_motion_micro_jitter(t ^ 0xABULL, 0.08);
-        payload->_headingAccuracy = 15.0;
+        double yawRad = atan2(-m12, m22);
+        double deg = fmod(base->baseHeadingDeg - yawRad * (180.0 / M_PI), 360.0);
+        if (deg < 0.0) {
+            deg += 360.0;
+        }
+        payload->_heading = deg;
+        payload->_headingAccuracy = base->baseHeadingAccuracy;
     } else {
         payload->_heading = -1.0;
         payload->_headingAccuracy = -1.0;
     }
     if (includeAttitude) {
-        CMQuaternion q = {
-            .x = 0.00425 + ps_motion_micro_jitter(t ^ 0xAAULL, 0.00005),
-            .y = 0.0006 + ps_motion_micro_jitter(t ^ 0xBBULL, 0.00005),
-            .z = ps_motion_micro_jitter(t ^ 0xCCULL, 0.00005),
-            .w = 0.99999079
-        };
-        if (state != nil) {
-            if (!state.hasSimQuat) {
-                state.simQuat = q;
-                state.hasSimQuat = YES;
-                state.simLastTs = payload->_timestamp;
-            } else {
-                double dt = payload->_timestamp - state.simLastTs;
-                state.simLastTs = payload->_timestamp;
-                if (dt > 0.0) {
-                    if (dt > 0.2) {
-                        dt = 0.2;
-                    }
-                    double wx = payload->_rotationRate.x;
-                    double wy = payload->_rotationRate.y;
-                    double wz = payload->_rotationRate.z;
-                    double omega = sqrt(wx * wx + wy * wy + wz * wz);
-                    double theta = omega * dt;
-                    CMQuaternion dq;
-                    if (theta > 1e-8 && omega > 0.0) {
-                        double s = sin(0.5 * theta) / omega;
-                        dq = (CMQuaternion){ .x = wx * s, .y = wy * s, .z = wz * s, .w = cos(0.5 * theta) };
-                    } else {
-                        dq = (CMQuaternion){ .x = 0.5 * wx * dt, .y = 0.5 * wy * dt, .z = 0.5 * wz * dt, .w = 1.0 };
-                    }
-                    CMQuaternion q0 = state.simQuat;
-                    CMQuaternion q1 = {
-                        .w = q0.w * dq.w - q0.x * dq.x - q0.y * dq.y - q0.z * dq.z,
-                        .x = q0.w * dq.x + q0.x * dq.w + q0.y * dq.z - q0.z * dq.y,
-                        .y = q0.w * dq.y - q0.x * dq.z + q0.y * dq.w + q0.z * dq.x,
-                        .z = q0.w * dq.z + q0.x * dq.y - q0.y * dq.x + q0.z * dq.w
-                    };
-                    double norm = sqrt(q1.x * q1.x + q1.y * q1.y + q1.z * q1.z + q1.w * q1.w);
-                    if (isfinite(norm) && norm > 1e-12) {
-                        double inv = 1.0 / norm;
-                        q1.x *= inv;
-                        q1.y *= inv;
-                        q1.z *= inv;
-                        q1.w *= inv;
-                        q = q1;
-                        state.simQuat = q1;
-                    }
-                } else {
-                    q = state.simQuat;
-                }
-            }
-        }
         payload->_attitude = ps_make_virtual_attitude_with_quaternion(q);
-        PSVirtualAttitudePayload *attP = ps_attitude_payload(payload->_attitude, NO);
-        if (attP != nil) {
-            payload->_gravity = (CMAcceleration){
-                .x = -attP->_rotationMatrix.m31,
-                .y = -attP->_rotationMatrix.m32,
-                .z = -attP->_rotationMatrix.m33
-            };
-            if (hasNorth) {
-                double deg = fmod(18.6 - attP->_yaw * (180.0 / M_PI), 360.0);
-                if (deg < 0.0) {
-                    deg += 360.0;
-                }
-                payload->_heading = deg;
-            }
-        }
     }
     payload->_relativeAltitude = @(0.0);
-    payload->_pressure = @(101.325);
+    payload->_pressure = @(base->basePressureKPa);
     return payload;
 }
 
@@ -608,10 +746,6 @@ static id ps_make_virtual_sample_instance_with_state(Class cls, PSVirtualMotionS
     return instance;
 }
 
-static id ps_make_virtual_sample_instance(Class cls) {
-    return ps_make_virtual_sample_instance_with_state(cls, nil);
-}
-
 static CMAltitudeData *ps_make_virtual_altitude_sample(BOOL isFirstSample) {
     Class altDataCls = objc_getClass("CMAltitudeData");
     if (altDataCls == Nil) {
@@ -620,9 +754,10 @@ static CMAltitudeData *ps_make_virtual_altitude_sample(BOOL isFirstSample) {
     CMAltitudeData *instance = [[altDataCls alloc] init];
     if (instance != nil) {
         PSVirtualMotionSamplePayload *payload = ps_make_initialized_motion_payload(NO);
+        const PSCMLaunchBaseline *base = ps_cm_launch_baseline();
         uint64_t t = atomic_fetch_add_explicit(&s_ps_motion_tick, 1ULL, memory_order_relaxed);
         double relAlt = isFirstSample ? 0.0 : ps_motion_micro_jitter(t ^ 0xDDULL, 0.02);
-        double press = 101.325 + (isFirstSample ? 0.0 : ps_motion_micro_jitter(t ^ 0xEEULL, 0.002));
+        double press = base->basePressureKPa + (isFirstSample ? 0.0 : ps_motion_micro_jitter(t ^ 0xEEULL, 0.002));
         payload->_relativeAltitude = @(relAlt);
         payload->_pressure = @(press);
         objc_setAssociatedObject(instance, &kPSMotionSamplePayloadKey, payload, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -807,6 +942,13 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
                                          &kPSMotionSamplePayloadKey,
                                          copyPayload,
                                          OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                NSNumber *refFrameNum = objc_getAssociatedObject(self, &kPSMotionSampleRefFrameKey);
+                if (refFrameNum != nil) {
+                    objc_setAssociatedObject(cloned,
+                                             &kPSMotionSampleRefFrameKey,
+                                             refFrameNum,
+                                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                }
                 return cloned;
             }
         }
@@ -815,11 +957,22 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
     BOOL pushed = NO;
     IMP origIMP = ps_lookup_orig_imp_and_push(&s_cm_swizzle_lock, s_cm_orig_copy_imps, self, &pushed);
     if (origIMP != NULL) {
+        id cloned = nil;
         @try {
-            return ((ps_cm_copy_zone_imp_t)origIMP)(self, @selector(copyWithZone:), zone);
+            cloned = ((ps_cm_copy_zone_imp_t)origIMP)(self, @selector(copyWithZone:), zone);
         } @finally {
             ps_pop_orig_imp_frame(pushed);
         }
+        if (cloned != nil && cloned != self) {
+            NSNumber *refFrameNum = objc_getAssociatedObject(self, &kPSMotionSampleRefFrameKey);
+            if (refFrameNum != nil) {
+                objc_setAssociatedObject(cloned,
+                                         &kPSMotionSampleRefFrameKey,
+                                         refFrameNum,
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+        }
+        return cloned;
     }
     return self;
 }
@@ -983,41 +1136,101 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
     PSVirtualMotionSamplePayload *otherPayload = ps_motion_sample_payload(other, NO);
     if (selfPayload != nil || otherPayload != nil) {
         Class dmCls = objc_getClass("CMDeviceMotion");
-        if (dmCls == Nil || ![self isKindOfClass:dmCls] || ![other isKindOfClass:dmCls]) {
-            return NO;
+        if (dmCls != Nil && [self isKindOfClass:dmCls]) {
+            if (![other isKindOfClass:dmCls]) {
+                return NO;
+            }
+            CMDeviceMotion *dm1 = (CMDeviceMotion *)self;
+            CMDeviceMotion *dm2 = (CMDeviceMotion *)other;
+            NSTimeInterval ts1 = ps_cm_effective_sample_timestamp(dm1);
+            NSTimeInterval ts2 = ps_cm_effective_sample_timestamp(dm2);
+            if (fabs(ts1 - ts2) >= 1e-9 || fabs(dm1.heading - dm2.heading) >= 1e-4) {
+                return NO;
+            }
+            CMAcceleration g1 = dm1.gravity;
+            CMAcceleration g2 = dm2.gravity;
+            if (!ps_cm_vec3_close(g1.x, g1.y, g1.z, g2.x, g2.y, g2.z, 1e-4)) {
+                return NO;
+            }
+            CMAcceleration ua1 = dm1.userAcceleration;
+            CMAcceleration ua2 = dm2.userAcceleration;
+            if (!ps_cm_vec3_close(ua1.x, ua1.y, ua1.z, ua2.x, ua2.y, ua2.z, 1e-4)) {
+                return NO;
+            }
+            CMRotationRate rr1 = dm1.rotationRate;
+            CMRotationRate rr2 = dm2.rotationRate;
+            if (!ps_cm_vec3_close(rr1.x, rr1.y, rr1.z, rr2.x, rr2.y, rr2.z, 1e-4)) {
+                return NO;
+            }
+            CMCalibratedMagneticField mf1 = dm1.magneticField;
+            CMCalibratedMagneticField mf2 = dm2.magneticField;
+            if (mf1.accuracy != mf2.accuracy ||
+                !ps_cm_vec3_close(mf1.field.x, mf1.field.y, mf1.field.z,
+                                  mf2.field.x, mf2.field.y, mf2.field.z, 1e-4)) {
+                return NO;
+            }
+            CMAttitude *att1 = dm1.attitude;
+            CMAttitude *att2 = dm2.attitude;
+            return ((att1 == att2) || (att1 != nil && att2 != nil && [att1 isEqual:att2]));
         }
-        CMDeviceMotion *dm1 = (CMDeviceMotion *)self;
-        CMDeviceMotion *dm2 = (CMDeviceMotion *)other;
-        NSTimeInterval ts1 = ps_cm_effective_sample_timestamp(dm1);
-        NSTimeInterval ts2 = ps_cm_effective_sample_timestamp(dm2);
-        if (fabs(ts1 - ts2) >= 1e-9 || fabs(dm1.heading - dm2.heading) >= 1e-4) {
-            return NO;
+        Class accelCls = objc_getClass("CMAccelerometerData");
+        if (accelCls != Nil && [self isKindOfClass:accelCls]) {
+            if (![other isKindOfClass:accelCls]) {
+                return NO;
+            }
+            NSTimeInterval ts1 = ps_cm_effective_sample_timestamp(self);
+            NSTimeInterval ts2 = ps_cm_effective_sample_timestamp(other);
+            if (fabs(ts1 - ts2) >= 1e-9) {
+                return NO;
+            }
+            CMAcceleration a1 = ((CMAccelerometerData *)self).acceleration;
+            CMAcceleration a2 = ((CMAccelerometerData *)other).acceleration;
+            return ps_cm_vec3_close(a1.x, a1.y, a1.z, a2.x, a2.y, a2.z, 1e-4);
         }
-        CMAcceleration g1 = dm1.gravity;
-        CMAcceleration g2 = dm2.gravity;
-        if (!ps_cm_vec3_close(g1.x, g1.y, g1.z, g2.x, g2.y, g2.z, 1e-4)) {
-            return NO;
+        Class gyroCls = objc_getClass("CMGyroData");
+        if (gyroCls != Nil && [self isKindOfClass:gyroCls]) {
+            if (![other isKindOfClass:gyroCls]) {
+                return NO;
+            }
+            NSTimeInterval ts1 = ps_cm_effective_sample_timestamp(self);
+            NSTimeInterval ts2 = ps_cm_effective_sample_timestamp(other);
+            if (fabs(ts1 - ts2) >= 1e-9) {
+                return NO;
+            }
+            CMRotationRate r1 = ((CMGyroData *)self).rotationRate;
+            CMRotationRate r2 = ((CMGyroData *)other).rotationRate;
+            return ps_cm_vec3_close(r1.x, r1.y, r1.z, r2.x, r2.y, r2.z, 1e-4);
         }
-        CMAcceleration ua1 = dm1.userAcceleration;
-        CMAcceleration ua2 = dm2.userAcceleration;
-        if (!ps_cm_vec3_close(ua1.x, ua1.y, ua1.z, ua2.x, ua2.y, ua2.z, 1e-4)) {
-            return NO;
+        Class magCls = objc_getClass("CMMagnetometerData");
+        if (magCls != Nil && [self isKindOfClass:magCls]) {
+            if (![other isKindOfClass:magCls]) {
+                return NO;
+            }
+            NSTimeInterval ts1 = ps_cm_effective_sample_timestamp(self);
+            NSTimeInterval ts2 = ps_cm_effective_sample_timestamp(other);
+            if (fabs(ts1 - ts2) >= 1e-9) {
+                return NO;
+            }
+            CMMagneticField m1 = ((CMMagnetometerData *)self).magneticField;
+            CMMagneticField m2 = ((CMMagnetometerData *)other).magneticField;
+            return ps_cm_vec3_close(m1.x, m1.y, m1.z, m2.x, m2.y, m2.z, 1e-4);
         }
-        CMRotationRate rr1 = dm1.rotationRate;
-        CMRotationRate rr2 = dm2.rotationRate;
-        if (!ps_cm_vec3_close(rr1.x, rr1.y, rr1.z, rr2.x, rr2.y, rr2.z, 1e-4)) {
-            return NO;
+        Class altCls = objc_getClass("CMAltitudeData");
+        if (altCls != Nil && [self isKindOfClass:altCls]) {
+            if (![other isKindOfClass:altCls]) {
+                return NO;
+            }
+            NSTimeInterval ts1 = ps_cm_effective_sample_timestamp(self);
+            NSTimeInterval ts2 = ps_cm_effective_sample_timestamp(other);
+            if (fabs(ts1 - ts2) >= 1e-9) {
+                return NO;
+            }
+            CMAltitudeData *ad1 = (CMAltitudeData *)self;
+            CMAltitudeData *ad2 = (CMAltitudeData *)other;
+            return (fabs(ad1.relativeAltitude.doubleValue - ad2.relativeAltitude.doubleValue) < 1e-4 &&
+                    fabs(ad1.pressure.doubleValue - ad2.pressure.doubleValue) < 1e-4);
         }
-        CMCalibratedMagneticField mf1 = dm1.magneticField;
-        CMCalibratedMagneticField mf2 = dm2.magneticField;
-        if (mf1.accuracy != mf2.accuracy ||
-            !ps_cm_vec3_close(mf1.field.x, mf1.field.y, mf1.field.z,
-                              mf2.field.x, mf2.field.y, mf2.field.z, 1e-4)) {
-            return NO;
-        }
-        CMAttitude *att1 = dm1.attitude;
-        CMAttitude *att2 = dm2.attitude;
-        return ((att1 == att2) || (att1 != nil && att2 != nil && [att1 isEqual:att2]));
+        return NO;
     }
     BOOL pushed = NO;
     IMP origIMP = ps_lookup_orig_imp_and_push(&s_cm_swizzle_lock, s_cm_orig_isEqual_imps, self, &pushed);
@@ -1397,11 +1610,12 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
                 return out;
             }
             uint64_t t = atomic_fetch_add_explicit(&s_ps_motion_tick, 1ULL, memory_order_relaxed);
+            const PSCMLaunchBaseline *base = ps_cm_launch_baseline();
             CMCalibratedMagneticField synth = {
                 .field = {
-                    .x = 18.4 + ps_motion_micro_jitter(t ^ 0x44ULL, 0.02),
-                    .y = -6.2 + ps_motion_micro_jitter(t ^ 0x55ULL, 0.02),
-                    .z = -41.5 + ps_motion_micro_jitter(t ^ 0x66ULL, 0.02)
+                    .x = base->worldMag.x + ps_motion_micro_jitter(t ^ 0x44ULL, 0.04),
+                    .y = base->worldMag.y + ps_motion_micro_jitter(t ^ 0x55ULL, 0.04),
+                    .z = base->worldMag.z + ps_motion_micro_jitter(t ^ 0x66ULL, 0.04)
                 },
                 .accuracy = CMMagneticFieldCalibrationAccuracyHigh
             };
@@ -1509,9 +1723,9 @@ static BOOL ps_cm_vec3_close(double ax, double ay, double az,
 }
 
 + (BOOL) pm_ps_cm_ped_isPedometerEventTrackingAvailable {
-    if (pt_is_bypass_enabled() && ps_is_iphone_device_model() &&
+    if (pt_is_bypass_enabled() &&
         !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        return YES;
+        return NO;
     }
     return [self pm_ps_cm_ped_isPedometerEventTrackingAvailable];
 }
@@ -1737,9 +1951,9 @@ static id ps_make_virtual_pedometer_data(NSDate *startDate, NSDate *endDate, NSI
 }
 
 + (BOOL) pm_ps_cm_activity_isActivityAvailable {
-    if (pt_is_bypass_enabled() && ps_is_iphone_device_model() &&
+    if (pt_is_bypass_enabled() &&
         !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        return YES;
+        return NO;
     }
     return [self pm_ps_cm_activity_isActivityAvailable];
 }
@@ -1847,26 +2061,6 @@ static id ps_make_virtual_pedometer_data(NSDate *startDate, NSDate *endDate, NSI
 
 + (BOOL) pm_ps_cm_isAbsoluteAltitudeAvailable {
     if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        if (pt_is_compat13_7_active()) {
-            return NO;
-        }
-        const char *m = pt_get_device_model_cstr();
-        if (m == NULL) {
-            return NO;
-        }
-        if (strncmp(m, "iPhone", 6) == 0) {
-            int major = atoi(m + 6);
-            return (major >= 13);
-        }
-        if (strncmp(m, "iPad", 4) == 0) {
-            int major = atoi(m + 4);
-            int minor = 0;
-            const char *comma = strchr(m + 4, ',');
-            if (comma != NULL) {
-                minor = atoi(comma + 1);
-            }
-            return (major >= 14) || (major == 13 && minor >= 4);
-        }
         return NO;
     }
     return [self pm_ps_cm_isAbsoluteAltitudeAvailable];
@@ -2016,6 +2210,7 @@ static inline id ps_cm_cached_pull_sample(BOOL active,
                                           double currentMono,
                                           NSTimeInterval rawInterval,
                                           const char *className,
+                                          PSVirtualMotionState *state,
                                           void (^saveBlock)(id sample, double mono)) {
     if (!active) {
         return nil;
@@ -2025,7 +2220,7 @@ static inline id ps_cm_cached_pull_sample(BOOL active,
     if (currentSample != nil && now >= currentMono && (now - currentMono) < eff) {
         return currentSample;
     }
-    id fresh = ps_make_virtual_sample_instance(objc_getClass(className));
+    id fresh = ps_make_virtual_sample_instance_with_state(objc_getClass(className), state);
     if (fresh != nil && saveBlock != nil) {
         saveBlock(fresh, now);
     }
@@ -2045,6 +2240,7 @@ static inline id ps_cm_cached_pull_sample(BOOL active,
                                                 st.lastAccelMonoSec,
                                                 iv,
                                                 "CMAccelerometerData",
+                                                st,
                                                 ^(id sample, double mono) {
                                                     st.lastAccelSample = sample;
                                                     st.lastAccelMonoSec = mono;
@@ -2068,6 +2264,7 @@ static inline id ps_cm_cached_pull_sample(BOOL active,
                                                 st.lastGyroMonoSec,
                                                 iv,
                                                 "CMGyroData",
+                                                st,
                                                 ^(id sample, double mono) {
                                                     st.lastGyroSample = sample;
                                                     st.lastGyroMonoSec = mono;
@@ -2091,6 +2288,7 @@ static inline id ps_cm_cached_pull_sample(BOOL active,
                                                 st.lastMagMonoSec,
                                                 iv,
                                                 "CMMagnetometerData",
+                                                st,
                                                 ^(id sample, double mono) {
                                                     st.lastMagSample = sample;
                                                     st.lastMagMonoSec = mono;
@@ -2168,16 +2366,14 @@ static inline id ps_cm_cached_pull_sample(BOOL active,
                 NSTimeInterval iv = ((CMMotionManager *)self).accelerometerUpdateInterval;
                 dispatch_source_t timer = ps_create_suspended_motion_timer(self, iv, queue, ^(id mgr) {
                     PSVirtualMotionState *curSt = ps_motion_state(mgr, NO);
-                    BOOL shouldEmit = NO;
+                    CMAccelerometerData *sample = nil;
                     if (curSt != nil) {
                         @synchronized (curSt) {
-                            shouldEmit = (curSt.accelActive && curSt.accelGen == gen);
+                            if (curSt.accelActive && curSt.accelGen == gen) {
+                                sample = ps_make_virtual_sample_instance_with_state(objc_getClass("CMAccelerometerData"), curSt);
+                            }
                         }
                     }
-                    if (!shouldEmit) {
-                        return;
-                    }
-                    CMAccelerometerData *sample = ps_make_virtual_sample_instance(objc_getClass("CMAccelerometerData"));
                     if (sample != nil) {
                         userHandler(sample, nil);
                     }
@@ -2245,16 +2441,14 @@ static inline id ps_cm_cached_pull_sample(BOOL active,
                 NSTimeInterval iv = ((CMMotionManager *)self).gyroUpdateInterval;
                 dispatch_source_t timer = ps_create_suspended_motion_timer(self, iv, queue, ^(id mgr) {
                     PSVirtualMotionState *curSt = ps_motion_state(mgr, NO);
-                    BOOL shouldEmit = NO;
+                    CMGyroData *sample = nil;
                     if (curSt != nil) {
                         @synchronized (curSt) {
-                            shouldEmit = (curSt.gyroActive && curSt.gyroGen == gen);
+                            if (curSt.gyroActive && curSt.gyroGen == gen) {
+                                sample = ps_make_virtual_sample_instance_with_state(objc_getClass("CMGyroData"), curSt);
+                            }
                         }
                     }
-                    if (!shouldEmit) {
-                        return;
-                    }
-                    CMGyroData *sample = ps_make_virtual_sample_instance(objc_getClass("CMGyroData"));
                     if (sample != nil) {
                         userHandler(sample, nil);
                     }
@@ -2322,16 +2516,14 @@ static inline id ps_cm_cached_pull_sample(BOOL active,
                 NSTimeInterval iv = st.hasExplicitMagUpdateInterval ? st.explicitMagUpdateInterval : 0.01;
                 dispatch_source_t timer = ps_create_suspended_motion_timer(self, iv, queue, ^(id mgr) {
                     PSVirtualMotionState *curSt = ps_motion_state(mgr, NO);
-                    BOOL shouldEmit = NO;
+                    CMMagnetometerData *sample = nil;
                     if (curSt != nil) {
                         @synchronized (curSt) {
-                            shouldEmit = (curSt.magActive && curSt.magGen == gen);
+                            if (curSt.magActive && curSt.magGen == gen) {
+                                sample = ps_make_virtual_sample_instance_with_state(objc_getClass("CMMagnetometerData"), curSt);
+                            }
                         }
                     }
-                    if (!shouldEmit) {
-                        return;
-                    }
-                    CMMagnetometerData *sample = ps_make_virtual_sample_instance(objc_getClass("CMMagnetometerData"));
                     if (sample != nil) {
                         userHandler(sample, nil);
                     }
@@ -2642,6 +2834,30 @@ __attribute__((visibility("hidden"))) void ps_install_coremotion_hooks_if_loaded
                 ps_swizzle_cm_sel_if_defined(&s_cm_orig_encode_imps, c, @selector(encodeWithCoder:), @selector(pm_ps_cm_encodeWithCoder:));
                 if (c != logCls) {
                     ps_swizzle_cm_sel_if_defined(&s_cm_orig_desc_imps, c, @selector(description), @selector(pm_ps_cm_sample_description));
+                    if (ps_class_defines_instance_method(c, @selector(isEqual:))) {
+                        ps_swizzle_class_sel_storing_imp(&s_cm_swizzle_lock, &s_cm_orig_isEqual_imps, c,
+                                                         @selector(isEqual:), @selector(pm_ps_cm_isEqual:));
+                    } else {
+                        Method origM = class_getInstanceMethod(c, @selector(isEqual:));
+                        Method hookM = class_getInstanceMethod([PSSwizzleHooks class], @selector(pm_ps_cm_isEqual:));
+                        if (origM != NULL && hookM != NULL) {
+                            IMP origIMP = method_getImplementation(origM);
+                            IMP hookIMP = method_getImplementation(hookM);
+                            if (origIMP != NULL && hookIMP != NULL && origIMP != hookIMP) {
+                                os_unfair_lock_lock(&s_cm_swizzle_lock);
+                                if (s_cm_orig_isEqual_imps == NULL) {
+                                    s_cm_orig_isEqual_imps = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, NULL, NULL);
+                                }
+                                if (s_cm_orig_isEqual_imps != NULL &&
+                                    !CFDictionaryContainsKey(s_cm_orig_isEqual_imps, (__bridge const void *)c)) {
+                                    CFDictionarySetValue(s_cm_orig_isEqual_imps, (__bridge const void *)c, (const void *)origIMP);
+                                    class_addMethod(c, @selector(isEqual:), hookIMP, method_getTypeEncoding(origM));
+                                }
+                                os_unfair_lock_unlock(&s_cm_swizzle_lock);
+                                pt_register_swizzled_imp((const void *)hookIMP, (const void *)origIMP);
+                            }
+                        }
+                    }
                 }
             }
             ps_swizzle_cm_sel_if_defined(&s_cm_orig_accel_imps, accelCls, @selector(acceleration), @selector(pm_ps_cm_sample_acceleration));

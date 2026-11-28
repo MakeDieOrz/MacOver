@@ -1023,4 +1023,118 @@ struct PTCoordinateMathTests {
         Thread.sleep(forTimeInterval: 0.08)
         #expect(rearmCount.withLock { $0 } == 1)
     }
+
+    @Test
+    func cursorPositionRejectsLetterboxAndPillarboxBlackBarClicks() {
+        let viewRect = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+
+        // Wide window (pillarboxed: content spans x in [120, 1080])
+        let wideWindow = CGRect(x: 0, y: 0, width: 1200, height: 540)
+        #expect(PTCoordinateMath.cursorPosition(
+            mousePoint: CGPoint(x: 50, y: 270),
+            windowFrame: wideWindow,
+            viewRect: viewRect,
+            resizable: false,
+            fullscreen: false
+        ) == nil)
+        #expect(PTCoordinateMath.cursorPosition(
+            mousePoint: CGPoint(x: 1150, y: 270),
+            windowFrame: wideWindow,
+            viewRect: viewRect,
+            resizable: false,
+            fullscreen: false
+        ) == nil)
+
+        // Tall fullscreen window (letterboxed: content spans y in [90, 630])
+        let tallWindow = CGRect(x: 0, y: 0, width: 960, height: 720)
+        #expect(PTCoordinateMath.cursorPosition(
+            mousePoint: CGPoint(x: 480, y: 20),
+            windowFrame: tallWindow,
+            viewRect: viewRect,
+            resizable: true,
+            fullscreen: true
+        ) == nil)
+        #expect(PTCoordinateMath.cursorPosition(
+            mousePoint: CGPoint(x: 480, y: 700),
+            windowFrame: tallWindow,
+            viewRect: viewRect,
+            resizable: true,
+            fullscreen: true
+        ) == nil)
+    }
+
+    @Test
+    func strictDeviceDisplaySpecEnforcesIOSMajorBounds() {
+        func resolved(_ model: String, mode: String, host: Int) -> String {
+            PTWindowGeometryMath.StrictDeviceDisplaySpec.effectiveModel(
+                for: model,
+                normalizedReportedIOSVersion: mode,
+                hostIOSMajor: host
+            )
+        }
+
+        // EOL iPad6,7 (9..16)
+        #expect(resolved("iPad6,7", mode: "automatic", host: 16) == "iPad6,7")
+        #expect(resolved("iPad6,7", mode: "automatic", host: 17) == "iPad13,8")
+        #expect(resolved("iPad6,7", mode: "compat18_3", host: 27) == "iPad13,8")
+        #expect(resolved("iPad6,7", mode: "compat13_7", host: 27) == "iPad6,7")
+
+        // EOL iPad8,6 (12..18)
+        #expect(resolved("iPad8,6", mode: "compat18_3", host: 27) == "iPad8,6")
+        #expect(resolved("iPad8,6", mode: "automatic", host: 26) == "iPad13,8")
+
+        // Future iPhone18,* / iPad17,* (26..99)
+        #expect(resolved("iPhone18,2", mode: "compat18_3", host: 27) == "iPhone17,2")
+        #expect(resolved("iPhone18,2", mode: "automatic", host: 26) == "iPhone18,2")
+        #expect(resolved("iPhone18,2", mode: "compat13_7", host: 27) == "iPhone12,5")
+        #expect(resolved("iPad17,3", mode: "compat18_3", host: 27) == "iPad16,6")
+        #expect(resolved("iPad17,3", mode: "automatic", host: 26) == "iPad17,3")
+        #expect(resolved("iPad17,3", mode: "compat13_7", host: 27) == "iPad8,6")
+
+        // M1 iPad13,8 (14..99)
+        #expect(resolved("iPad13,8", mode: "compat13_7", host: 27) == "iPad8,6")
+        #expect(resolved("iPad13,8", mode: "automatic", host: 27) == "iPad13,8")
+    }
+
+    @Test
+    func touchRoutingIncludesCustomInputHostAndExcludesChromeOverlay() {
+        #expect(!PTWindowGeometryMath.isExcludedFromTouchRouting(
+            isChromeOverlayWindow: false,
+            internalOverlayTagValue: nil
+        ))
+        #expect(!PTWindowGeometryMath.isExcludedFromTouchRouting(
+            isChromeOverlayWindow: false,
+            internalOverlayTagValue: PTWindowGeometryMath.interactiveInputHostOverlayTagValue
+        ))
+        #expect(PTWindowGeometryMath.isExcludedFromTouchRouting(
+            isChromeOverlayWindow: true,
+            internalOverlayTagValue: 1
+        ))
+        #expect(PTWindowGeometryMath.isExcludedFromTouchRouting(
+            isChromeOverlayWindow: true,
+            internalOverlayTagValue: PTWindowGeometryMath.interactiveInputHostOverlayTagValue
+        ))
+        #expect(PTWindowGeometryMath.isExcludedFromTouchRouting(
+            isChromeOverlayWindow: false,
+            internalOverlayTagValue: 1
+        ))
+
+        let candidates = [
+            PTWindowGeometryMath.TouchWindowCandidate(
+                isHidden: false,
+                alpha: 1.0,
+                isUserInteractionEnabled: true,
+                boundsSize: CGSize(width: 1280, height: 720),
+                windowLevel: 0
+            ),
+            PTWindowGeometryMath.TouchWindowCandidate(
+                isHidden: false,
+                alpha: 1.0,
+                isUserInteractionEnabled: true,
+                boundsSize: CGSize(width: 1280, height: 720),
+                windowLevel: 1999
+            )
+        ]
+        #expect(PTWindowGeometryMath.orderedTouchCandidateIndices(candidates) == [1, 0])
+    }
 }

@@ -10,6 +10,8 @@
 #define PTNetworkInternal_h
 
 #import "PTCommon.h"
+#include <netinet/in.h>
+#include <sys/socket.h>
 @import CFNetwork;
 @import Network;
 @import SystemConfiguration;
@@ -37,6 +39,7 @@ __attribute__((visibility("hidden")))
 @property (nonatomic, strong) NSArray<NSString *> *dnsExemptHostPatterns;
 @property (nonatomic, strong) NSArray<NSRegularExpression *> *dnsExemptHostRegexes;
 @property (nonatomic, assign) BOOL enableCustomCertificates;
+@property (nonatomic, assign) BOOL isBuiltInMITM;
 @property (nonatomic, assign) BOOL mitmAllHosts;
 @property (nonatomic, assign) BOOL mitmAllowPinningBypass;
 @property (nonatomic, assign) BOOL hideProxyFromApp;
@@ -82,6 +85,20 @@ __attribute__((visibility("hidden"))) BOOL ps_dict_has_active_proxy(NSDictionary
 __attribute__((visibility("hidden"))) BOOL ps_host_matches_mitm_scope(NSString *host, PSNetworkRuleSnapshot *snap);
 __attribute__((visibility("hidden"))) BOOL ps_should_apply_custom_ca_for_trust(SecTrustRef trust, PSNetworkRuleSnapshot *snap);
 __attribute__((visibility("hidden"))) BOOL ps_evaluate_trust_with_custom_anchors(SecTrustRef trust, PSNetworkRuleSnapshot *snap, CFErrorRef *outError);
+__attribute__((visibility("hidden"))) void ps_trust_state_reset(SecTrustRef trust);
+__attribute__((visibility("hidden"))) void ps_trust_state_set_anchors_only(SecTrustRef trust, BOOL anchorsOnly);
+__attribute__((visibility("hidden"))) void ps_trust_state_clear_synthetic_result(SecTrustRef trust);
+__attribute__((visibility("hidden"))) void ps_trust_state_set_synthetic_result(SecTrustRef trust, SecTrustResultType result, SecTrustRef evaluatedClone);
+__attribute__((visibility("hidden"))) BOOL ps_trust_state_is_anchors_only(SecTrustRef trust);
+__attribute__((visibility("hidden"))) BOOL ps_trust_state_get_synthetic_result(SecTrustRef trust, SecTrustResultType *outResult);
+__attribute__((visibility("hidden"))) SecTrustRef ps_trust_state_copy_evaluated_clone(SecTrustRef trust) CF_RETURNS_RETAINED;
+__attribute__((visibility("hidden"))) BOOL ps_is_hidden_proxy_ipv4_peer(uint32_t addr_be, uint16_t port_host);
+__attribute__((visibility("hidden"))) BOOL ps_is_hidden_proxy_ipv6_peer(const struct in6_addr *addr6, uint16_t port_host);
+__attribute__((visibility("hidden"))) BOOL ps_is_hidden_proxy_sockaddr(const struct sockaddr *sa, socklen_t sa_len);
+__attribute__((visibility("hidden"))) void pt_network_record_mitm_peer(int fd, const struct sockaddr *peer, socklen_t len);
+__attribute__((visibility("hidden"))) BOOL pt_network_lookup_mitm_peer(int fd, struct sockaddr_storage *out_addr, socklen_t *out_len);
+__attribute__((visibility("hidden"))) BOOL pt_network_get_or_synth_mitm_peer(int fd, int family, BOOL record_in_table, struct sockaddr_storage *out_addr, socklen_t *out_len);
+__attribute__((visibility("hidden"))) BOOL pt_network_get_spoofed_local_ip_for_proxied_socket(int family, struct sockaddr_storage *out_addr, socklen_t *out_len);
 __attribute__((visibility("hidden"))) id ps_create_nw_proxy_config_for_snapshot(PSNetworkRuleSnapshot *snap);
 __attribute__((visibility("hidden"))) void ps_swizzle_cfg_instance_methods_if_needed(Class concreteCfgCls);
 __attribute__((visibility("hidden"))) void ps_notify_dynamic_image_loaded(void);
@@ -91,8 +108,12 @@ __attribute__((visibility("hidden"))) void pt_network_notify_fd_close(int fd);
 __attribute__((visibility("hidden"))) int pt_network_ioctl_with_caller(int fd, unsigned long request, uintptr_t arg, const void *caller);
 __attribute__((visibility("hidden"))) int pt_network_bind_with_caller(int socket, const struct sockaddr *address, socklen_t address_len, int raw_syscall_num, const void *caller);
 __attribute__((visibility("hidden"))) int pt_network_connect_with_caller(int socket, const struct sockaddr *address, socklen_t address_len, int raw_syscall_num, const void *caller);
+__attribute__((visibility("hidden"))) int pt_network_connectx_with_caller(int socket, const sa_endpoints_t *endpoints, sae_associd_t associd, unsigned int flags, const struct iovec *iov, unsigned int iovcnt, size_t *len, sae_connid_t *connid, int raw_syscall_num, const void *caller);
 __attribute__((visibility("hidden"))) int pt_network_accept_with_caller(int socket, struct sockaddr * __restrict address, socklen_t * __restrict address_len, int raw_syscall_num, const void *caller);
 __attribute__((visibility("hidden"))) ssize_t pt_network_sendto_with_caller(int socket, const void *buffer, size_t length, int flags, const struct sockaddr *dest_addr, socklen_t dest_len, int raw_syscall_num, const void *caller);
+__attribute__((visibility("hidden"))) ssize_t pt_network_sendmsg_with_caller(int socket, const struct msghdr *message, int flags, int raw_syscall_num, const void *caller);
+__attribute__((visibility("hidden"))) ssize_t pt_network_recvfrom_with_caller(int socket, void * __restrict buffer, size_t length, int flags, struct sockaddr * __restrict address, socklen_t * __restrict address_len, int raw_syscall_num, const void *caller);
+__attribute__((visibility("hidden"))) ssize_t pt_network_recvmsg_with_caller(int socket, struct msghdr *message, int flags, int raw_syscall_num, const void *caller);
 __attribute__((visibility("hidden"))) int pt_network_getsockname_with_caller(int socket, struct sockaddr * __restrict address, socklen_t * __restrict address_len, int raw_syscall_num, const void *caller);
 __attribute__((visibility("hidden"))) int pt_network_getpeername_with_caller(int socket, struct sockaddr * __restrict address, socklen_t * __restrict address_len, int raw_syscall_num, const void *caller);
 

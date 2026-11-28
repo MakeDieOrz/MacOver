@@ -17,7 +17,8 @@ final class EditorCircleMenu: CircleMenuDelegate {
         if menu != nil {
             hide()
         }
-        guard let window = screen.keyWindow ?? screen.primaryWindow else { return }
+        guard let containerView = EditorController.shared.editorWindow?.rootViewController?.view
+            ?? PTOverlayWindowHost.shared.ensureOverlayContainerView() else { return }
         let createdMenu = CircleMenu(
             frame: CGRect(x: 0, y: 0, width: 50, height: 50),
             normalIcon: "xmark.circle.fill",
@@ -30,7 +31,7 @@ final class EditorCircleMenu: CircleMenuDelegate {
         createdMenu.layer.cornerRadius = createdMenu.frame.size.width / 2
         createdMenu.backgroundColor = UIColor.black
         PlaySettings.tagInternalView(createdMenu)
-        window.addSubview(createdMenu)
+        containerView.addSubview(createdMenu)
         menu = createdMenu
         createdMenu.onTap()
     }

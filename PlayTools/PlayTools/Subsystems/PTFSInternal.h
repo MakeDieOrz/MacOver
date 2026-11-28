@@ -14,6 +14,7 @@
 #include <sys/attr.h>
 #include <sys/mount.h>
 #include <sys/statvfs.h>
+#include <sys/uio.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -117,6 +118,8 @@ __attribute__((visibility("hidden"))) BOOL pt_path_equals_real_data_root(const c
 __attribute__((visibility("hidden"))) void pt_sanitize_statfs_entry(struct statfs *buf, const void *caller, int *inout_is_sys);
 __attribute__((visibility("hidden"))) int pt_filter_statfs_array(struct statfs *buf, int count, const void *caller);
 __attribute__((visibility("hidden"))) const char *pt_fs_ue_fix_filename(const char *filename);
+__attribute__((visibility("hidden"))) ssize_t pt_fs_write_with_caller(int fd, const void *buf, size_t nbyte, off_t offset, BOOL has_offset, BOOL nocancel, const void *caller);
+__attribute__((visibility("hidden"))) ssize_t pt_fs_writev_with_caller(int fd, const struct iovec *iov, int iovcnt, BOOL nocancel, const void *caller);
 
 static inline pt_fs_path_disposition_t pt_prepare_fs_path_cached_caller_ro(const char *raw_path,
                                                                            const void *caller,
@@ -198,7 +201,8 @@ static inline BOOL pt_is_hidden_dirent_name(const char *d_name) {
     if (strncasecmp(d_name, "discord-ipc-", 12) == 0 ||
         strncasecmp(d_name, ".pt_sysver_", 11) == 0 ||
         strncasecmp(d_name, ".pt_coderes_", 12) == 0 ||
-        strncasecmp(d_name, ".pt_info_", 9) == 0) {
+        strncasecmp(d_name, ".pt_info_", 9) == 0 ||
+        pt_is_hidden_runtime_artifact_name_cstr(d_name)) {
         return YES;
     }
     if (strcasestr(d_name, "Play") != NULL &&

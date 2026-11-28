@@ -196,7 +196,8 @@ static BOOL pt_is_hidden_sysctl_name(const char *name) {
 
 static int pt_get_spoofed_cpusubfamily(const pt_device_profile_t *profile) {
     if (profile != NULL && profile->is_ipad &&
-        (strcmp(profile->model, "iPad13,8") == 0 ||
+        (strcmp(profile->model, "iPad8,6") == 0 ||
+         strcmp(profile->model, "iPad13,8") == 0 ||
          strcmp(profile->model, "iPad14,5") == 0 ||
          strcmp(profile->model, "iPad16,6") == 0 ||
          strcmp(profile->model, "iPad17,3") == 0)) {
@@ -661,6 +662,63 @@ BOOL pt_is_hidden_env_value(const char *val, BOOL has_virtual_container) {
     return NO;
 }
 
+static char s_initial_host_path_env[4096];
+static pthread_once_t s_initial_host_path_once = PTHREAD_ONCE_INIT;
+
+static void pt_init_initial_host_path_env(void) {
+    const char *p = pt_raw_getenv("PATH");
+    if (p != NULL && p[0] != '\0') {
+        strlcpy(s_initial_host_path_env, p, sizeof(s_initial_host_path_env));
+    }
+}
+
+static BOOL pt_env_val_is_host_path_or_container(const char *val, BOOL has_vc) {
+    if (val == NULL || val[0] == '\0') {
+        return NO;
+    }
+    if (pt_is_hidden_env_value(val, has_vc)) {
+        return YES;
+    }
+    if (strncmp(val, "/Users/", 7) == 0 ||
+        strncmp(val, "/System/Volumes/Data/Users/", 27) == 0 ||
+        strncmp(val, "/var/folders/", 13) == 0 ||
+        strncmp(val, "/private/var/folders/", 21) == 0) {
+        return YES;
+    }
+    pt_ensure_data_container_map();
+    if (s_real_data_container_len > 0 &&
+        pt_match_prefix_modulo_private(val, s_real_data_container_dir, s_real_data_container_len) != NULL) {
+        return YES;
+    }
+    pt_ensure_bundle_path_map();
+    if (s_real_app_bundle_len > 0 &&
+        pt_match_prefix_modulo_private(val, s_real_app_bundle_dir, s_real_app_bundle_len) != NULL) {
+        return YES;
+    }
+    return NO;
+}
+
+static BOOL pt_env_path_val_is_host_macos(const char *val, BOOL has_vc) {
+    if (val == NULL || val[0] == '\0') {
+        return NO;
+    }
+    if (pt_is_hidden_env_value(val, has_vc)) {
+        return YES;
+    }
+    pthread_once(&s_initial_host_path_once, pt_init_initial_host_path_env);
+    if (s_initial_host_path_env[0] != '\0' && strcmp(val, s_initial_host_path_env) == 0) {
+        return YES;
+    }
+    if (strstr(val, "/usr/local/") != NULL ||
+        strstr(val, "/opt/homebrew") != NULL ||
+        strstr(val, "/Library/Apple") != NULL ||
+        strstr(val, "/System/Cryptexes") != NULL ||
+        strstr(val, "/Applications/") != NULL) {
+        return YES;
+    }
+    return NO;
+}
+
 __attribute__((visibility("hidden")))
 pt_env_entry_action_t pt_resolve_env_entry(const char *key,
                                            const char *raw_val,
@@ -672,60 +730,39 @@ pt_env_entry_action_t pt_resolve_env_entry(const char *key,
     if (out_val != NULL) {
         *out_val = NULL;
     }
-    if (key == NULL || key[0] == '\0') {
+    if (key == NULL || key[0] == '\0' || !has_raw_entry || raw_val == NULL) {
         return PT_ENV_ENTRY_HIDE;
+    }
+    if (!bypass_enabled) {
+        return PT_ENV_ENTRY_KEEP;
     }
     BOOL has_vc = (vh != NULL);
     if (strcmp(key, "HOME") == 0 || strcmp(key, "CFFIXED_USER_HOME") == 0) {
-        if (vh != NULL) {
+        if (vh != NULL && pt_env_val_is_host_path_or_container(raw_val, has_vc)) {
             if (out_val != NULL) {
                 *out_val = vh;
             }
             return PT_ENV_ENTRY_REWRITE;
         }
-        if (!has_raw_entry) {
-            return PT_ENV_ENTRY_HIDE;
-        }
-        if (bypass_enabled && pt_is_hidden_env_value(raw_val, has_vc)) {
+        if (pt_is_hidden_env_value(raw_val, has_vc)) {
             return PT_ENV_ENTRY_HIDE;
         }
         return PT_ENV_ENTRY_KEEP;
     }
-    if (strcmp(key, "TMPDIR") == 0) {
-        if (vt != NULL) {
+    if (strcmp(key, "TMPDIR") == 0 || strcmp(key, "TMP") == 0 || strcmp(key, "TEMP") == 0) {
+        if (vt != NULL && pt_env_val_is_host_path_or_container(raw_val, has_vc)) {
             if (out_val != NULL) {
                 *out_val = vt;
             }
             return PT_ENV_ENTRY_REWRITE;
         }
-        if (!has_raw_entry) {
-            return PT_ENV_ENTRY_HIDE;
-        }
-        if (bypass_enabled && pt_is_hidden_env_value(raw_val, has_vc)) {
-            return PT_ENV_ENTRY_HIDE;
-        }
-        return PT_ENV_ENTRY_KEEP;
-    }
-    if (strcmp(key, "TMP") == 0 || strcmp(key, "TEMP") == 0) {
-        if (!has_raw_entry) {
-            return PT_ENV_ENTRY_HIDE;
-        }
-        if (vt != NULL) {
-            if (out_val != NULL) {
-                *out_val = vt;
-            }
-            return PT_ENV_ENTRY_REWRITE;
-        }
-        if (bypass_enabled && pt_is_hidden_env_value(raw_val, has_vc)) {
+        if (pt_is_hidden_env_value(raw_val, has_vc)) {
             return PT_ENV_ENTRY_HIDE;
         }
         return PT_ENV_ENTRY_KEEP;
     }
     if (strcmp(key, "PWD") == 0) {
-        if (!has_raw_entry) {
-            return PT_ENV_ENTRY_HIDE;
-        }
-        if (bypass_enabled) {
+        if (pt_env_val_is_host_path_or_container(raw_val, has_vc)) {
             if (out_val != NULL) {
                 *out_val = "/";
             }
@@ -734,19 +771,15 @@ pt_env_entry_action_t pt_resolve_env_entry(const char *key,
         return PT_ENV_ENTRY_KEEP;
     }
     if (strcmp(key, "PATH") == 0) {
-        if (bypass_enabled) {
+        if (pt_env_path_val_is_host_macos(raw_val, has_vc)) {
             if (out_val != NULL) {
                 *out_val = "/usr/bin:/bin:/usr/sbin:/sbin";
             }
             return PT_ENV_ENTRY_REWRITE;
         }
-        return has_raw_entry ? PT_ENV_ENTRY_KEEP : PT_ENV_ENTRY_HIDE;
+        return PT_ENV_ENTRY_KEEP;
     }
-    if (!has_raw_entry) {
-        return PT_ENV_ENTRY_HIDE;
-    }
-    if (bypass_enabled &&
-        (pt_is_hidden_env_key(key) || pt_is_hidden_env_value(raw_val, has_vc))) {
+    if (pt_is_hidden_env_key(key) || pt_is_hidden_env_value(raw_val, has_vc)) {
         return PT_ENV_ENTRY_HIDE;
     }
     return PT_ENV_ENTRY_KEEP;
@@ -755,14 +788,50 @@ pt_env_entry_action_t pt_resolve_env_entry(const char *key,
 extern int pt_orig_kernel_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen)
     __asm("___sysctl");
 
+static BOOL pt_is_xnu_apple_vector_entry(const char *entry, size_t elen) {
+    if (entry == NULL || elen == 0) {
+        return NO;
+    }
+    static const struct {
+        const char *prefix;
+        size_t len;
+    } kApplePrefixes[] = {
+        PT_STR_ENTRY("executable_path="),
+        PT_STR_ENTRY("pfz="),
+        PT_STR_ENTRY("stack_guard="),
+        PT_STR_ENTRY("malloc_entropy="),
+        PT_STR_ENTRY("ptr_munge="),
+        PT_STR_ENTRY("main_stack="),
+        PT_STR_ENTRY("executable_file="),
+        PT_STR_ENTRY("dyld_file="),
+        PT_STR_ENTRY("executable_cdhash="),
+        PT_STR_ENTRY("executable_boothash="),
+        PT_STR_ENTRY("arm64e_abi="),
+        PT_STR_ENTRY("th_port="),
+        PT_STR_ENTRY("dyld_flags="),
+        PT_STR_ENTRY("shm_size="),
+        PT_STR_ENTRY("ptrauth_disabled="),
+    };
+    for (size_t i = 0; i < sizeof(kApplePrefixes) / sizeof(kApplePrefixes[0]); i++) {
+        if (elen >= kApplePrefixes[i].len &&
+            memcmp(entry, kApplePrefixes[i].prefix, kApplePrefixes[i].len) == 0) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
 static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *size) {
     if (types < 3 || (name[2] != getpid())) {
         errno = ESRCH;
         return -1;
     }
     BOOL is_v2 = (name[1] == KERN_PROCARGS2);
+    // Always query KERN_PROCARGS2 from the kernel so we have the exact argc boundary
+    // for both KERN_PROCARGS (v1) and KERN_PROCARGS2 (v2), preventing argv/envp/apple misclassification.
+    int query_mib[3] = { CTL_KERN, KERN_PROCARGS2, name[2] };
     size_t raw_len = 0;
-    if (pt_orig_kernel_sysctl(name, types, NULL, &raw_len, NULL, 0) != 0 || raw_len == 0) {
+    if (pt_orig_kernel_sysctl(query_mib, 3, NULL, &raw_len, NULL, 0) != 0 || raw_len < sizeof(int)) {
         return -1;
     }
     size_t alloc_len = raw_len + 64U;
@@ -771,7 +840,7 @@ static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *
         errno = ENOMEM;
         return -1;
     }
-    if (pt_orig_kernel_sysctl(name, types, raw, &raw_len, NULL, 0) != 0) {
+    if (pt_orig_kernel_sysctl(query_mib, 3, raw, &raw_len, NULL, 0) != 0 || raw_len < sizeof(int)) {
         int saved = errno;
         free(raw);
         errno = saved;
@@ -782,27 +851,25 @@ static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *
     char *out = NULL;
     size_t out_len = 0;
     size_t out_cap = 0;
-    size_t pos = 0;
+    size_t pos = sizeof(int);
     int argc = 0;
+    memcpy(&argc, raw, sizeof(int));
+    if (argc < 0) {
+        argc = 0;
+    }
 
     if (is_v2) {
-        if (raw_len < sizeof(int)) {
-            free(raw);
-            errno = EINVAL;
-            return -1;
-        }
-        memcpy(&argc, raw, sizeof(int));
-        pos = sizeof(int);
         if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, &argc, sizeof(int))) {
             free(raw); free(out); errno = ENOMEM; return -1;
         }
     }
 
+    char vexec_buf[PATH_MAX];
+    const char *virt_exec = "";
     if (pos < raw_len) {
         const char *exec_path = raw + pos;
         size_t elen = strnlen(exec_path, raw_len - pos);
-        char vexec[PATH_MAX];
-        const char *virt_exec = pt_virtualize_path_for_app(exec_path, vexec, sizeof(vexec), YES);
+        virt_exec = pt_virtualize_path_for_app(exec_path, vexec_buf, sizeof(vexec_buf), YES);
         size_t velen = strlen(virt_exec) + 1U;
         if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, virt_exec, velen)) {
             free(raw); free(out); errno = ENOMEM; return -1;
@@ -811,168 +878,131 @@ static int pt_handle_sysctl_procargs(int *name, u_int types, void *buf, size_t *
         while (pos < raw_len && raw[pos] == '\0') {
             pos++;
         }
-        if (is_v2) {
-            uint8_t zero = 0;
-            while ((out_len & 3U) != 0U) {
-                if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, &zero, 1U)) {
-                    free(raw); free(out); errno = ENOMEM; return -1;
-                }
-            }
-        }
-    }
-
-    BOOL bypass = pt_is_bypass_enabled();
-    if (is_v2 && argc > 0) {
-        int written_argc = 0;
-        for (int i = 0; i < argc && pos < raw_len; i++) {
-            const char *arg = raw + pos;
-            size_t alen = strnlen(arg, raw_len - pos);
-            size_t next_pos = pos + ((alen < raw_len - pos) ? (alen + 1U) : alen);
-            if (bypass && i > 0) {
-                const char *next_arg = (i + 1 < argc && next_pos < raw_len) ? (raw + next_pos) : NULL;
-                int skip = pt_macos_launch_arg_skip_count(arg, next_arg);
-                if (skip > 0) {
-                    pos = next_pos;
-                    if (skip == 2 && i + 1 < argc && pos < raw_len) {
-                        size_t nlen = strnlen(raw + pos, raw_len - pos);
-                        pos += (nlen < raw_len - pos) ? (nlen + 1U) : nlen;
-                        i++;
-                    }
-                    continue;
-                }
-            }
-            const char *out_arg = arg;
-            char varg[PATH_MAX];
-            if (i == 0) {
-                out_arg = pt_virtualize_path_for_app(arg, varg, sizeof(varg), YES);
-            }
-            if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, out_arg, strlen(out_arg) + 1U)) {
+        uint8_t zero = 0;
+        while ((out_len & 3U) != 0U) {
+            if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, &zero, 1U)) {
                 free(raw); free(out); errno = ENOMEM; return -1;
             }
-            written_argc++;
-            pos = next_pos;
-        }
-        if (out != NULL && out_len >= sizeof(int)) {
-            memcpy(out, &written_argc, sizeof(int));
         }
     }
 
+    // Emit sanitized argv for BOTH KERN_PROCARGS (v1) and KERN_PROCARGS2 (v2).
+    BOOL bypass = pt_is_bypass_enabled();
+    int written_argc = 0;
+    for (int i = 0; i < argc && pos < raw_len; i++) {
+        const char *arg = raw + pos;
+        size_t alen = strnlen(arg, raw_len - pos);
+        size_t next_pos = pos + ((alen < raw_len - pos) ? (alen + 1U) : alen);
+        if (bypass && i > 0) {
+            const char *next_arg = (i + 1 < argc && next_pos < raw_len) ? (raw + next_pos) : NULL;
+            int skip = pt_macos_launch_arg_skip_count(arg, next_arg);
+            if (skip > 0) {
+                pos = next_pos;
+                if (skip == 2 && i + 1 < argc && pos < raw_len) {
+                    size_t nlen = strnlen(raw + pos, raw_len - pos);
+                    pos += (nlen < raw_len - pos) ? (nlen + 1U) : nlen;
+                    i++;
+                }
+                continue;
+            }
+        }
+        const char *out_arg = arg;
+        char varg[PATH_MAX];
+        if (i == 0) {
+            out_arg = pt_virtualize_path_for_app(arg, varg, sizeof(varg), YES);
+        }
+        if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, out_arg, strlen(out_arg) + 1U)) {
+            free(raw); free(out); errno = ENOMEM; return -1;
+        }
+        written_argc++;
+        pos = next_pos;
+    }
+    if (is_v2 && out != NULL && out_len >= sizeof(int)) {
+        memcpy(out, &written_argc, sizeof(int));
+    }
+
+    // Serialize sanitized envp directly from pt_get_app_shadow_environ_ptr() so zeroed
+    // PlayLoader.m stack slots never truncate the environment vector.
+    char ***shadow_envpp = pt_get_app_shadow_environ_ptr();
+    char **shadow_envp = (shadow_envpp != NULL) ? __atomic_load_n(shadow_envpp, __ATOMIC_ACQUIRE) : NULL;
+    if (shadow_envp != NULL) {
+        for (size_t i = 0; shadow_envp[i] != NULL; i++) {
+            const char *kv = shadow_envp[i];
+            if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, kv, strlen(kv) + 1U)) {
+                free(raw); free(out); errno = ENOMEM; return -1;
+            }
+        }
+    }
+
+    // Empty-string separator between envp[] and apple[].
+    if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, "", 1U)) {
+        free(raw); free(out); errno = ENOMEM; return -1;
+    }
+
+    // Scan remaining raw bytes (skipping any NUL runs left by zeroed env slots) and emit sanitized apple[] entries.
     const char *vh = pt_get_virtual_home_cstr();
-    const char *vt = pt_get_virtual_tmpdir_cstr();
-    BOOL wrote_home = NO;
-    BOOL wrote_cffixed_home = NO;
-    BOOL wrote_tmpdir = NO;
-    BOOL wrote_tmp = NO;
-    BOOL wrote_temp = NO;
-    BOOL wrote_pwd = NO;
-    BOOL wrote_path = NO;
-    BOOL seen_env_entry = NO;
+    BOOL has_vc = (vh != NULL);
+    BOOL in_apple = NO;
+    BOOL wrote_exec_path_apple = NO;
     while (pos < raw_len) {
         if (raw[pos] == '\0') {
-            if (is_v2 || seen_env_entry) {
-                break;
-            }
             pos++;
             continue;
         }
         const char *entry = raw + pos;
         size_t elen = strnlen(entry, raw_len - pos);
-        const char *eq = (const char *)memchr(entry, '=', elen);
-        if (eq != NULL && eq > entry) {
-            seen_env_entry = YES;
-            size_t klen = (size_t)(eq - entry);
-            char stack_key[256];
-            char *heap_key = NULL;
-            const char *kptr = stack_key;
-            if (klen < sizeof(stack_key)) {
-                memcpy(stack_key, entry, klen);
-                stack_key[klen] = '\0';
-            } else {
-                heap_key = (char *)malloc(klen + 1U);
-                if (heap_key != NULL) {
-                    memcpy(heap_key, entry, klen);
-                    heap_key[klen] = '\0';
-                    kptr = heap_key;
-                } else {
-                    kptr = "";
-                }
-            }
-            BOOL duplicate_special = NO;
-            if (strcmp(kptr, "HOME") == 0) {
-                duplicate_special = wrote_home;
-                wrote_home = YES;
-            } else if (strcmp(kptr, "CFFIXED_USER_HOME") == 0) {
-                duplicate_special = wrote_cffixed_home;
-                wrote_cffixed_home = YES;
-            } else if (strcmp(kptr, "TMPDIR") == 0) {
-                duplicate_special = wrote_tmpdir;
-                wrote_tmpdir = YES;
-            } else if (strcmp(kptr, "TMP") == 0) {
-                duplicate_special = wrote_tmp;
-                wrote_tmp = YES;
-            } else if (strcmp(kptr, "TEMP") == 0) {
-                duplicate_special = wrote_temp;
-                wrote_temp = YES;
-            } else if (strcmp(kptr, "PWD") == 0) {
-                duplicate_special = wrote_pwd;
-                wrote_pwd = YES;
-            } else if (strcmp(kptr, "PATH") == 0) {
-                duplicate_special = wrote_path;
-                wrote_path = YES;
-            }
-            if (!duplicate_special && kptr[0] != '\0') {
-                size_t vlen = elen - klen - 1U;
-                char val_stack[2048];
-                char *heap_val = NULL;
-                const char *vptr = val_stack;
-                if (vlen < sizeof(val_stack)) {
-                    memcpy(val_stack, eq + 1, vlen);
-                    val_stack[vlen] = '\0';
-                } else {
-                    heap_val = (char *)malloc(vlen + 1U);
-                    if (heap_val != NULL) {
-                        memcpy(heap_val, eq + 1, vlen);
-                        heap_val[vlen] = '\0';
-                        vptr = heap_val;
-                    } else {
-                        val_stack[0] = '\0';
-                    }
-                }
-                const char *rewritten = NULL;
-                pt_env_entry_action_t act = pt_resolve_env_entry(
-                    kptr, vptr, YES, bypass, vh, vt, &rewritten);
-                free(heap_val);
-                if (act == PT_ENV_ENTRY_REWRITE && rewritten != NULL) {
-                    if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, kptr, klen) ||
-                        !pt_append_procargs_bytes(&out, &out_len, &out_cap, "=", 1U) ||
-                        !pt_append_procargs_bytes(&out, &out_len, &out_cap, rewritten, strlen(rewritten) + 1U)) {
-                        free(heap_key); free(raw); free(out); errno = ENOMEM; return -1;
-                    }
-                } else if (act == PT_ENV_ENTRY_KEEP) {
-                    if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, entry, elen) ||
-                        !pt_append_procargs_bytes(&out, &out_len, &out_cap, "", 1U)) {
-                        free(heap_key); free(raw); free(out); errno = ENOMEM; return -1;
-                    }
-                }
-            }
-            free(heap_key);
-        }
         pos += (elen < raw_len - pos) ? (elen + 1U) : elen;
-    }
-    const char *const kMandatoryKeys[] = { "HOME", "CFFIXED_USER_HOME", "TMPDIR", "PATH" };
-    const BOOL wroteFlags[] = { wrote_home, wrote_cffixed_home, wrote_tmpdir, wrote_path };
-    for (size_t mi = 0; mi < 4U; mi++) {
-        if (!wroteFlags[mi]) {
-            const char *mkey = kMandatoryKeys[mi];
-            const char *rewritten = NULL;
-            if (pt_resolve_env_entry(mkey, NULL, NO, bypass, vh, vt, &rewritten) == PT_ENV_ENTRY_REWRITE &&
-                rewritten != NULL) {
-                if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, mkey, strlen(mkey)) ||
-                    !pt_append_procargs_bytes(&out, &out_len, &out_cap, "=", 1U) ||
-                    !pt_append_procargs_bytes(&out, &out_len, &out_cap, rewritten, strlen(rewritten) + 1U)) {
+
+        if (!in_apple) {
+            if (elen >= 16U && memcmp(entry, "executable_path=", 16U) == 0) {
+                in_apple = YES;
+            } else if (!pt_is_xnu_apple_vector_entry(entry, elen)) {
+                continue;
+            }
+        }
+
+        if (elen >= 16U && memcmp(entry, "executable_path=", 16U) == 0) {
+            if (!wrote_exec_path_apple) {
+                if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, "executable_path=", 16U) ||
+                    !pt_append_procargs_bytes(&out, &out_len, &out_cap, virt_exec, strlen(virt_exec) + 1U)) {
                     free(raw); free(out); errno = ENOMEM; return -1;
                 }
+                wrote_exec_path_apple = YES;
             }
+            continue;
+        }
+        if (elen >= 19U && memcmp(entry, "MACOVER_AUTOMATION_", 19U) == 0) {
+            continue;
+        }
+        char abuf_stack[1024];
+        char *abuf_heap = NULL;
+        const char *astr = abuf_stack;
+        if (elen < sizeof(abuf_stack)) {
+            memcpy(abuf_stack, entry, elen);
+            abuf_stack[elen] = '\0';
+        } else {
+            abuf_heap = (char *)malloc(elen + 1U);
+            if (abuf_heap == NULL) {
+                free(raw); free(out); errno = ENOMEM; return -1;
+            }
+            memcpy(abuf_heap, entry, elen);
+            abuf_heap[elen] = '\0';
+            astr = abuf_heap;
+        }
+        BOOL hide_apple = (bypass && pt_is_hidden_env_value(astr, has_vc));
+        free(abuf_heap);
+        if (hide_apple) {
+            continue;
+        }
+        if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, entry, elen) ||
+            !pt_append_procargs_bytes(&out, &out_len, &out_cap, "", 1U)) {
+            free(raw); free(out); errno = ENOMEM; return -1;
+        }
+    }
+    if (!wrote_exec_path_apple && virt_exec[0] != '\0') {
+        if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, "executable_path=", 16U) ||
+            !pt_append_procargs_bytes(&out, &out_len, &out_cap, virt_exec, strlen(virt_exec) + 1U)) {
+            free(raw); free(out); errno = ENOMEM; return -1;
         }
     }
     if (!pt_append_procargs_bytes(&out, &out_len, &out_cap, "", 1U)) {
@@ -1279,10 +1309,10 @@ static void pt_sanitize_kinfo_proc(struct kinfo_proc *info, BOOL is_sys) {
     if (info == NULL) {
         return;
     }
-    info->kp_proc.p_flag &= ~P_TRACED;
     if (is_sys || !pt_is_bypass_enabled()) {
         return;
     }
+    info->kp_proc.p_flag &= ~P_TRACED;
     info->kp_eproc.e_ppid = 1;
     strlcpy(info->kp_eproc.e_login, "mobile", sizeof(info->kp_eproc.e_login));
     info->kp_eproc.e_pcred.p_rgid = pt_map_spoofed_gid(info->kp_eproc.e_pcred.p_rgid);
@@ -1484,7 +1514,7 @@ int pt_sysctl_with_caller(int *name,
         if (name[0] == CTL_KERN) {
             if (types >= 4 && name[1] == KERN_PROC && name[2] == KERN_PROC_PID &&
                 name[3] != getpid()) {
-                if (!pt_sysctl_resolve_is_sys(ret_addr, &is_sys_caller)) {
+                if (pt_is_bypass_enabled() && !pt_sysctl_resolve_is_sys(ret_addr, &is_sys_caller)) {
                     errno = ESRCH;
                     return -1;
                 }
@@ -1624,7 +1654,8 @@ int pt_sysctl_with_caller(int *name,
         ? sysctl(name, types, buf, size, arg0, arg1)
         : pt_orig_kernel_sysctl(name, types, buf, size, arg0, arg1);
     if (ret == 0 && name != NULL && types >= 3 &&
-        name[0] == CTL_KERN && name[1] == KERN_PROC && size != NULL) {
+        name[0] == CTL_KERN && name[1] == KERN_PROC && size != NULL &&
+        pt_is_bypass_enabled()) {
         BOOL is_sys = pt_sysctl_resolve_is_sys(ret_addr, &is_sys_caller);
         if (name[2] == KERN_PROC_PID) {
             if (buf != NULL && *size >= sizeof(struct kinfo_proc)) {

@@ -359,38 +359,66 @@ final class AKPlugin: NSObject, Plugin, @unchecked Sendable {
         }
     }
 
-    var cmdPressed: Bool = false
-    var cursorHideLevel = 0
+    private let cmdPressedState = Mutex(false)
+    var cmdPressed: Bool {
+        get { cmdPressedState.withLock { $0 } }
+        set { cmdPressedState.withLock { $0 = newValue } }
+    }
+    @MainActor private var cursorHideLevel = 0
+
+    private static func onMainAsync(_ body: @escaping @MainActor @Sendable () -> Void) {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated(body)
+        } else {
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated(body)
+            }
+        }
+    }
+
     func hideCursor() {
-        NSCursor.hide()
-        cursorHideLevel += 1
-        CGAssociateMouseAndMouseCursorPosition(0)
-        warpCursor()
+        Self.onMainAsync { [weak self] in
+            guard let self else { return }
+            NSCursor.hide()
+            self.cursorHideLevel += 1
+            CGAssociateMouseAndMouseCursorPosition(0)
+            self.warpCursorOnMain()
+        }
     }
 
     func hideCursorMove() {
-        NSCursor.setHiddenUntilMouseMoves(true)
+        Self.onMainAsync {
+            NSCursor.setHiddenUntilMouseMoves(true)
+        }
+    }
+
+    @MainActor
+    private func warpCursorOnMain() {
+        guard let firstScreen = NSScreen.screens.first else { return }
+        let frame = activeWindow?.frame ?? CGRect()
+        // Convert from NS coordinates to CG coordinates
+        CGWarpMouseCursorPosition(CGPoint(x: frame.midX, y: firstScreen.frame.height - frame.midY))
     }
 
     func warpCursor() {
-        Self.onMainSync {
-            guard let firstScreen = NSScreen.screens.first else { return }
-            let frame = windowFrame
-            // Convert from NS coordinates to CG coordinates
-            CGWarpMouseCursorPosition(CGPoint(x: frame.midX, y: firstScreen.frame.height - frame.midY))
+        Self.onMainAsync { [weak self] in
+            self?.warpCursorOnMain()
         }
     }
 
     func unhideCursor() {
-        guard cursorHideLevel > 0 else {
-            CGAssociateMouseAndMouseCursorPosition(1)
-            return
-        }
-        NSCursor.unhide()
-        cursorHideLevel -= 1
-        if cursorHideLevel <= 0 {
-            cursorHideLevel = 0
-            CGAssociateMouseAndMouseCursorPosition(1)
+        Self.onMainAsync { [weak self] in
+            guard let self else { return }
+            guard self.cursorHideLevel > 0 else {
+                CGAssociateMouseAndMouseCursorPosition(1)
+                return
+            }
+            NSCursor.unhide()
+            self.cursorHideLevel -= 1
+            if self.cursorHideLevel <= 0 {
+                self.cursorHideLevel = 0
+                CGAssociateMouseAndMouseCursorPosition(1)
+            }
         }
     }
 
@@ -462,8 +490,7 @@ final class AKPlugin: NSObject, Plugin, @unchecked Sendable {
                     name: Self.willBeginTerminationNotification,
                     object: NSApplication.shared
                 )
-                let token = Self.terminationWatchdog.arm()
-                defer { Self.terminationWatchdog.cancel(token: token) }
+                _ = Self.terminationWatchdog.arm()
                 NSApplication.shared.terminate(nil)
             }
         }
@@ -684,7 +711,9 @@ final class AKPlugin: NSObject, Plugin, @unchecked Sendable {
     }
 
     func setMenuBarVisible(_ visible: Bool) {
-        NSMenu.setMenuBarVisible(visible)
+        Self.onMainAsync {
+            NSMenu.setMenuBarVisible(visible)
+        }
     }
 
     private static func parseSafeModeEnvFlag(_ raw: String?) -> Bool? {
@@ -768,11 +797,13 @@ final class AKPlugin: NSObject, Plugin, @unchecked Sendable {
         if let strictSize = strictDeviceLogicalSize {
             return NSSize(width: strictSize.width, height: strictSize.height)
         }
-        guard Self.akAppSettingsData?.resolution == 6 else {
+        guard let settings = Self.akAppSettingsData,
+              settings.resolution == 6,
+              settings.resizableAspectRatioType != 0 else {
             return nil
         }
-        let width = Self.akAppSettingsData?.resizableAspectRatioWidth ?? 0
-        let height = Self.akAppSettingsData?.resizableAspectRatioHeight ?? 0
+        let width = settings.resizableAspectRatioWidth
+        let height = settings.resizableAspectRatioHeight
         guard width > 0 && height > 0 else {
             return nil
         }

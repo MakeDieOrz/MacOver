@@ -327,11 +327,39 @@ __attribute__((visibility("hidden"))) BOOL pt_is_app_embedded_bundle_path(const 
     return NO;
 }
 
+static BOOL pt_dyld_has_cryptex_prefix(const char *path) {
+    if (path == NULL) {
+        return NO;
+    }
+    return (strcmp(path, "/System/Volumes/Preboot/Cryptexes/OS") == 0 ||
+            strncmp(path, "/System/Volumes/Preboot/Cryptexes/OS/", 37) == 0 ||
+            strcmp(path, "/System/Cryptexes/OS") == 0 ||
+            strncmp(path, "/System/Cryptexes/OS/", 21) == 0);
+}
+
+static const char *pt_dyld_strip_cryptex_prefix(const char *path) {
+    if (path == NULL) {
+        return NULL;
+    }
+    const char *p = path;
+    for (int pass = 0; pass < 2; pass++) {
+        if (strncmp(p, "/System/Volumes/Preboot/Cryptexes/OS/", 37) == 0) {
+            p += 36;
+        } else if (strncmp(p, "/System/Cryptexes/OS/", 21) == 0) {
+            p += 20;
+        } else {
+            break;
+        }
+    }
+    return p;
+}
+
 __attribute__((visibility("hidden"))) BOOL pt_is_macos_only_framework_path(const char *name) {
     if (name == NULL || name[0] == '\0' || pt_is_app_embedded_bundle_path(name)) {
         return NO;
     }
-    return pt_is_macos_only_framework_path_cstr(name) ? YES : NO;
+    const char *norm = pt_dyld_strip_cryptex_prefix(name);
+    return pt_is_macos_only_framework_path_cstr(norm) ? YES : NO;
 }
 
 __attribute__((visibility("hidden"))) BOOL pt_is_hidden_dyld_image_name(const char *name) {
@@ -341,12 +369,13 @@ __attribute__((visibility("hidden"))) BOOL pt_is_hidden_dyld_image_name(const ch
     if (pt_is_registered_hidden_module(name)) {
         return YES;
     }
-    return (strstr(name, "PlayTools") != NULL ||
-            strstr(name, "AKInterface") != NULL ||
-            strstr(name, "UserPlugins") != NULL ||
-            strstr(name, "AGXMetal") != NULL ||
-            strstr(name, "/System/Library/Extensions/") != NULL ||
-            pt_is_macos_only_framework_path(name));
+    const char *norm = pt_dyld_strip_cryptex_prefix(name);
+    return (strstr(norm, "PlayTools") != NULL ||
+            strstr(norm, "AKInterface") != NULL ||
+            strstr(norm, "UserPlugins") != NULL ||
+            strstr(norm, "AGXMetal") != NULL ||
+            strstr(norm, "/System/Library/Extensions/") != NULL ||
+            pt_is_macos_only_framework_path(norm));
 }
 
 __attribute__((visibility("hidden"))) BOOL pt_should_hide_dyld_image(const char *name) {
@@ -1068,147 +1097,55 @@ void pt_init_nonlazy_got_cloaking(void) {
 #endif
 }
 
-static const struct mach_header_64 *pt_validated_app_arm64_header_for_addr(uintptr_t addr) {
-#if defined(__arm64__) || defined(__aarch64__)
-    const struct mach_header *mh = dyld_image_header_containing_address((const void *)addr);
-    if (mh == NULL || !pt_is_valid_user_pointer((const void *)mh)) {
-        return NULL;
-    }
-    const struct mach_header_64 *mh64 = (const struct mach_header_64 *)mh;
-    uint32_t cpu_sub = (uint32_t)mh64->cpusubtype & ~(uint32_t)CPU_SUBTYPE_MASK;
-    if (mh64->magic != MH_MAGIC_64 ||
-        mh64->cputype != CPU_TYPE_ARM64 ||
-        cpu_sub == CPU_SUBTYPE_ARM64E ||
-        mh64->sizeofcmds == 0 ||
-        mh64->sizeofcmds > (1U << 20)) {
-        return NULL;
-    }
-    const char *img_path = dyld_image_path_containing_address((const void *)mh);
-    if (img_path == NULL) {
-        return NULL;
-    }
-    bool cacheable = false;
-    if (pt_classify_caller_image_path(img_path, &cacheable) != PT_CALLER_APP ||
-        pt_should_hide_dyld_image(img_path) ||
-        pt_is_hidden_dyld_image_header(mh) ||
-        pt_is_address_in_playtools((const void *)mh)) {
-        return NULL;
-    }
-    return mh64;
-#else
-    (void)addr;
-    return NULL;
-#endif
-}
+#define PT_HIDDEN_SPAN_CAP 64U
 
-static void pt_dyld_sanitize_got_ptrs_for_header(const struct mach_header_64 *mh64,
-                                                 uintptr_t read_start,
-                                                 uintptr_t read_end,
-                                                 uint8_t *dst) {
-    const uint8_t *base = (const uint8_t *)mh64;
-    size_t total = sizeof(struct mach_header_64) + (size_t)mh64->sizeofcmds;
-    size_t off = sizeof(struct mach_header_64);
-    uintptr_t slide = 0;
-    BOOL has_text = NO;
-    for (uint32_t i = 0; i < mh64->ncmds && off + sizeof(struct load_command) <= total; i++) {
-        const struct load_command *lc = (const struct load_command *)(base + off);
-        if (lc->cmdsize < sizeof(struct load_command) || off + lc->cmdsize > total) {
-            break;
-        }
-        if (lc->cmd == LC_SEGMENT_64 && lc->cmdsize >= sizeof(struct segment_command_64)) {
-            const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
-            if (strncmp(seg->segname, "__TEXT", 16) == 0) {
-                slide = (uintptr_t)mh64 - (uintptr_t)seg->vmaddr;
-                has_text = YES;
-                break;
-            }
-        }
-        off += lc->cmdsize;
-    }
-    if (!has_text) {
-        return;
-    }
+typedef struct {
+    uintptr_t lo;
+    uintptr_t hi;
+} pt_hidden_span_t;
 
-    off = sizeof(struct mach_header_64);
-    for (uint32_t i = 0; i < mh64->ncmds && off + sizeof(struct load_command) <= total; i++) {
-        const struct load_command *lc = (const struct load_command *)(base + off);
-        if (lc->cmdsize < sizeof(struct load_command) || off + lc->cmdsize > total) {
-            break;
-        }
-        off += lc->cmdsize;
-        if (lc->cmd != LC_SEGMENT_64 || lc->cmdsize < sizeof(struct segment_command_64)) {
-            continue;
-        }
-        const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
-        if ((size_t)seg->nsects > (lc->cmdsize - sizeof(struct segment_command_64)) / sizeof(struct section_64)) {
-            break;
-        }
-        const struct section_64 *sects = (const struct section_64 *)(seg + 1);
-        for (uint32_t s = 0; s < seg->nsects; s++) {
-            uint32_t stype = sects[s].flags & SECTION_TYPE;
-            if ((stype != S_NON_LAZY_SYMBOL_POINTERS && stype != S_LAZY_SYMBOL_POINTERS) ||
-                strncmp(sects[s].sectname, "__auth_", 7) == 0) {
-                continue;
-            }
-            uintptr_t s_addr = (uintptr_t)sects[s].addr + slide;
-            uintptr_t s_size = (uintptr_t)sects[s].size;
-            if (s_size < sizeof(void *) ||
-                s_size > UINTPTR_MAX - s_addr ||
-                (s_addr % sizeof(void *)) != 0) {
-                continue;
-            }
-            uintptr_t s_end = s_addr + s_size;
-            uintptr_t ov_start = (read_start > s_addr) ? read_start : s_addr;
-            uintptr_t ov_end = (read_end < s_end) ? read_end : s_end;
-            if (ov_start >= ov_end) {
-                continue;
-            }
-            uintptr_t slot_addr = ov_start & ~(uintptr_t)(sizeof(void *) - 1U);
-            while (slot_addr < ov_end) {
-                uintptr_t slot_end = slot_addr + sizeof(void *);
-                uintptr_t patch_start = (ov_start > slot_addr) ? ov_start : slot_addr;
-                uintptr_t patch_end = (ov_end < slot_end) ? ov_end : slot_end;
-                if (patch_start < patch_end && pt_is_valid_user_pointer((const void *)slot_addr)) {
-                    const void *live_val = NULL;
-                    memcpy(&live_val, (const void *)slot_addr, sizeof(live_val));
-                    const void *orig = pt_resolve_dyld_interposed_only(live_val);
-                    if (orig != NULL) {
-                        uint8_t orig_bytes[sizeof(orig)];
-                        memcpy(orig_bytes, &orig, sizeof(orig_bytes));
-                        size_t slot_off = (size_t)(patch_start - slot_addr);
-                        size_t dst_off = (size_t)(patch_start - read_start);
-                        size_t copy_len = (size_t)(patch_end - patch_start);
-                        memcpy(dst + dst_off, orig_bytes + slot_off, copy_len);
-                    }
-                }
-                if (ov_end - slot_addr <= sizeof(void *)) {
-                    break;
-                }
-                slot_addr += sizeof(void *);
-            }
-        }
+static os_unfair_lock s_pt_hidden_span_lock = OS_UNFAIR_LOCK_INIT;
+static pt_hidden_span_t s_pt_hidden_spans[PT_HIDDEN_SPAN_CAP];
+static size_t s_pt_hidden_span_count = 0;
+static _Atomic uintptr_t s_pt_hidden_img_lo = 0;
+static _Atomic uintptr_t s_pt_hidden_img_hi = 0;
+static _Atomic uint64_t s_pt_hidden_img_dyld_gen = UINT64_MAX;
+static _Atomic uint64_t s_pt_hidden_img_reg_gen = UINT64_MAX;
+
+static BOOL pt_is_hidden_playtools_family_image(const struct mach_header *mh, const char *path) {
+    if (mh != NULL && pt_is_hidden_dyld_image_header(mh)) {
+        return YES;
     }
+    if (path != NULL &&
+        (strstr(path, "PlayTools") != NULL ||
+         strstr(path, "AKInterface") != NULL ||
+         strstr(path, "UserPlugins") != NULL ||
+         pt_is_registered_hidden_module(path))) {
+        return YES;
+    }
+    return NO;
 }
 
 __attribute__((visibility("hidden")))
-void pt_dyld_sanitize_got_ptrs_in_vm_read_buffer(uintptr_t read_start, uint8_t *dst, size_t copied) {
-#if defined(__arm64__) || defined(__aarch64__)
-    if (dst == NULL || copied == 0U || read_start > UINTPTR_MAX - copied || !pt_is_bypass_enabled()) {
-        return;
-    }
-    uintptr_t read_end = read_start + copied;
-    uint32_t img_count = _dyld_image_count();
-    for (uint32_t idx = 0; idx < img_count; idx++) {
+void pt_refresh_hidden_image_bounds(void) {
+    uint64_t dyld_gen = atomic_load_explicit(&s_dyld_generation, memory_order_acquire);
+    uint64_t reg_gen = pt_hidden_registry_generation();
+    pt_hidden_span_t spans[PT_HIDDEN_SPAN_CAP];
+    size_t span_count = 0;
+    uintptr_t env_lo = UINTPTR_MAX;
+    uintptr_t env_hi = 0;
+
+    uint32_t count = _dyld_image_count();
+    for (uint32_t idx = 0; idx < count && span_count < PT_HIDDEN_SPAN_CAP; idx++) {
         const struct mach_header *mh = _dyld_get_image_header(idx);
-        if (mh == NULL) {
+        const char *path = _dyld_get_image_name(idx);
+        if (mh == NULL || !pt_is_hidden_playtools_family_image(mh, path) || mh->magic != MH_MAGIC_64) {
             continue;
         }
-        const struct mach_header_64 *mh64 = pt_validated_app_arm64_header_for_addr((uintptr_t)mh);
-        if (mh64 == NULL) {
+        const struct mach_header_64 *mh64 = (const struct mach_header_64 *)mh;
+        if (mh64->sizeofcmds == 0 || mh64->sizeofcmds > (1U << 20)) {
             continue;
         }
-        uintptr_t img_lo = UINTPTR_MAX;
-        uintptr_t img_hi = 0;
         const uint8_t *base = (const uint8_t *)mh64;
         size_t total = sizeof(struct mach_header_64) + (size_t)mh64->sizeofcmds;
         size_t off = sizeof(struct mach_header_64);
@@ -1243,24 +1180,68 @@ void pt_dyld_sanitize_got_ptrs_in_vm_read_buffer(uintptr_t read_start, uint8_t *
                 continue;
             }
             const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+            if (strncmp(seg->segname, "__PAGEZERO", 16) == 0 || seg->vmsize == 0) {
+                continue;
+            }
             uintptr_t seg_start = (uintptr_t)seg->vmaddr + slide;
             uintptr_t seg_len = (uintptr_t)seg->vmsize;
-            if (seg_len == 0 || seg_len > UINTPTR_MAX - seg_start) {
+            if (seg_len > UINTPTR_MAX - seg_start) {
                 continue;
             }
             uintptr_t seg_end = seg_start + seg_len;
-            if (seg_start < img_lo) img_lo = seg_start;
-            if (seg_end > img_hi) img_hi = seg_end;
-        }
-        if (img_lo < img_hi && read_start < img_hi && read_end > img_lo) {
-            pt_dyld_sanitize_got_ptrs_for_header(mh64, read_start, read_end, dst);
+            if (span_count < PT_HIDDEN_SPAN_CAP) {
+                spans[span_count++] = (pt_hidden_span_t){ .lo = seg_start, .hi = seg_end };
+            }
+            if (seg_start < env_lo) env_lo = seg_start;
+            if (seg_end > env_hi) env_hi = seg_end;
         }
     }
-#else
-    (void)read_start;
-    (void)dst;
-    (void)copied;
-#endif
+
+    os_unfair_lock_lock(&s_pt_hidden_span_lock);
+    s_pt_hidden_span_count = span_count;
+    if (span_count > 0) {
+        memcpy(s_pt_hidden_spans, spans, span_count * sizeof(pt_hidden_span_t));
+        atomic_store_explicit(&s_pt_hidden_img_lo, env_lo, memory_order_release);
+        atomic_store_explicit(&s_pt_hidden_img_hi, env_hi, memory_order_release);
+    } else {
+        atomic_store_explicit(&s_pt_hidden_img_lo, 0, memory_order_release);
+        atomic_store_explicit(&s_pt_hidden_img_hi, 0, memory_order_release);
+    }
+    atomic_store_explicit(&s_pt_hidden_img_dyld_gen, dyld_gen, memory_order_release);
+    atomic_store_explicit(&s_pt_hidden_img_reg_gen, reg_gen, memory_order_release);
+    os_unfair_lock_unlock(&s_pt_hidden_span_lock);
+}
+
+__attribute__((visibility("hidden")))
+BOOL pt_range_overlaps_hidden_playtools_image(uintptr_t addr, size_t len) {
+    if (addr == 0 || len == 0) {
+        return NO;
+    }
+    uint64_t cur_dyld_gen = atomic_load_explicit(&s_dyld_generation, memory_order_acquire);
+    uint64_t cur_reg_gen = pt_hidden_registry_generation();
+    if (atomic_load_explicit(&s_pt_hidden_img_dyld_gen, memory_order_acquire) != cur_dyld_gen ||
+        atomic_load_explicit(&s_pt_hidden_img_reg_gen, memory_order_acquire) != cur_reg_gen) {
+        pt_refresh_hidden_image_bounds();
+    }
+    uintptr_t env_lo = atomic_load_explicit(&s_pt_hidden_img_lo, memory_order_acquire);
+    uintptr_t env_hi = atomic_load_explicit(&s_pt_hidden_img_hi, memory_order_acquire);
+    if (env_lo == 0 || env_hi <= env_lo) {
+        return NO;
+    }
+    uintptr_t end = (len <= UINTPTR_MAX - addr) ? (addr + len) : UINTPTR_MAX;
+    if (end <= env_lo || addr >= env_hi) {
+        return NO;
+    }
+    BOOL hit = NO;
+    os_unfair_lock_lock(&s_pt_hidden_span_lock);
+    for (size_t i = 0; i < s_pt_hidden_span_count; i++) {
+        if (addr < s_pt_hidden_spans[i].hi && end > s_pt_hidden_spans[i].lo) {
+            hit = YES;
+            break;
+        }
+    }
+    os_unfair_lock_unlock(&s_pt_hidden_span_lock);
+    return hit;
 }
 
 // Define dyld platform functions for interpose
@@ -1706,6 +1687,7 @@ static const char *pt_dyld_shared_cache_real_path(const char *path) {
         }
         if (strcmp(norm, "/System/iOSSupport") == 0 ||
             strncmp(norm, "/System/iOSSupport/", 19) == 0 ||
+            pt_dyld_has_cryptex_prefix(norm) ||
             strstr(norm, ".framework/Versions/") != NULL ||
             pt_should_hide_dyld_image(norm) ||
             pt_is_hidden_path(norm, caller)) {
@@ -1713,19 +1695,28 @@ static const char *pt_dyld_shared_cache_real_path(const char *path) {
         }
         const char *res = pt_orig_sym_dyld_shared_cache_real_path(norm);
         if (res == NULL && (strncmp(norm, "/System/Library/", 16) == 0 || strncmp(norm, "/usr/lib/", 9) == 0)) {
+            static const char *const kSharedCachePrefixes[] = {
+                "/System/iOSSupport",
+                "/System/Volumes/Preboot/Cryptexes/OS",
+                "/System/Cryptexes/OS",
+                "/System/Volumes/Preboot/Cryptexes/OS/System/iOSSupport",
+                "/System/Cryptexes/OS/System/iOSSupport",
+            };
+            const char *slash = strrchr(norm, '/');
+            BOOL can_try_ver_a = (slash != NULL && slash > norm &&
+                                  strstr(norm, ".framework/") != NULL &&
+                                  strstr(norm, "/Versions/") == NULL);
+            size_t dir_len = can_try_ver_a ? (size_t)(slash - norm) : 0U;
             char ios_buf[PATH_MAX];
-            int n = snprintf(ios_buf, sizeof(ios_buf), "/System/iOSSupport%s", norm);
-            if (n > 0 && (size_t)n < sizeof(ios_buf)) {
-                res = pt_orig_sym_dyld_shared_cache_real_path(ios_buf);
-            }
-            if (res == NULL) {
-                const char *slash = strrchr(norm, '/');
-                if (slash != NULL && slash > norm && strstr(norm, ".framework/") != NULL &&
-                    strstr(norm, "/Versions/") == NULL) {
-                    size_t dir_len = (size_t)(slash - norm);
+            for (size_t pi = 0; pi < sizeof(kSharedCachePrefixes) / sizeof(kSharedCachePrefixes[0]) && res == NULL; pi++) {
+                int n = snprintf(ios_buf, sizeof(ios_buf), "%s%s", kSharedCachePrefixes[pi], norm);
+                if (n > 0 && (size_t)n < sizeof(ios_buf)) {
+                    res = pt_orig_sym_dyld_shared_cache_real_path(ios_buf);
+                }
+                if (res == NULL && can_try_ver_a) {
                     n = snprintf(ios_buf, sizeof(ios_buf),
-                                 "/System/iOSSupport%.*s/Versions/A%s",
-                                 (int)dir_len, norm, slash);
+                                 "%s%.*s/Versions/A%s",
+                                 kSharedCachePrefixes[pi], (int)dir_len, norm, slash);
                     if (n > 0 && (size_t)n < sizeof(ios_buf)) {
                         res = pt_orig_sym_dyld_shared_cache_real_path(ios_buf);
                     }
@@ -1964,7 +1955,8 @@ static BOOL pt_path_is_post13_7_framework(const char *path) {
     if (pt_is_app_embedded_bundle_path(path)) {
         return NO;
     }
-    return pt_is_post13_7_framework_path_cstr(path) ? YES : NO;
+    const char *norm = pt_dyld_strip_cryptex_prefix(path);
+    return pt_is_post13_7_framework_path_cstr(norm) ? YES : NO;
 }
 
 __attribute__((visibility("hidden"))) BOOL pt_is_post13_7_hidden_framework_path(const char *path) {
@@ -2234,7 +2226,8 @@ static bool pt_dyld_shared_cache_contains_path(const char *path) {
             }
         }
         if (strcmp(norm, "/System/iOSSupport") == 0 ||
-            strncmp(norm, "/System/iOSSupport/", 19) == 0) {
+            strncmp(norm, "/System/iOSSupport/", 19) == 0 ||
+            pt_dyld_has_cryptex_prefix(norm)) {
             return false;
         }
         if (strstr(norm, ".framework/Versions/") != NULL) {
@@ -2250,22 +2243,33 @@ static bool pt_dyld_shared_cache_contains_path(const char *path) {
             return true;
         }
         if (strncmp(norm, "/System/Library/", 16) == 0 || strncmp(norm, "/usr/lib/", 9) == 0) {
-            char ios_buf[PATH_MAX];
-            int n = snprintf(ios_buf, sizeof(ios_buf), "/System/iOSSupport%s", norm);
-            if (n > 0 && (size_t)n < sizeof(ios_buf) &&
-                pt_orig_dyld_shared_cache_contains_path(ios_buf)) {
-                return true;
-            }
+            static const char *const kSharedCachePrefixes[] = {
+                "/System/iOSSupport",
+                "/System/Volumes/Preboot/Cryptexes/OS",
+                "/System/Cryptexes/OS",
+                "/System/Volumes/Preboot/Cryptexes/OS/System/iOSSupport",
+                "/System/Cryptexes/OS/System/iOSSupport",
+            };
             const char *slash = strrchr(norm, '/');
-            if (slash != NULL && slash > norm && strstr(norm, ".framework/") != NULL &&
-                strstr(norm, "/Versions/") == NULL) {
-                size_t dir_len = (size_t)(slash - norm);
-                n = snprintf(ios_buf, sizeof(ios_buf),
-                             "/System/iOSSupport%.*s/Versions/A%s",
-                             (int)dir_len, norm, slash);
+            BOOL can_try_ver_a = (slash != NULL && slash > norm &&
+                                  strstr(norm, ".framework/") != NULL &&
+                                  strstr(norm, "/Versions/") == NULL);
+            size_t dir_len = can_try_ver_a ? (size_t)(slash - norm) : 0U;
+            char ios_buf[PATH_MAX];
+            for (size_t pi = 0; pi < sizeof(kSharedCachePrefixes) / sizeof(kSharedCachePrefixes[0]); pi++) {
+                int n = snprintf(ios_buf, sizeof(ios_buf), "%s%s", kSharedCachePrefixes[pi], norm);
                 if (n > 0 && (size_t)n < sizeof(ios_buf) &&
                     pt_orig_dyld_shared_cache_contains_path(ios_buf)) {
                     return true;
+                }
+                if (can_try_ver_a) {
+                    n = snprintf(ios_buf, sizeof(ios_buf),
+                                 "%s%.*s/Versions/A%s",
+                                 kSharedCachePrefixes[pi], (int)dir_len, norm, slash);
+                    if (n > 0 && (size_t)n < sizeof(ios_buf) &&
+                        pt_orig_dyld_shared_cache_contains_path(ios_buf)) {
+                        return true;
+                    }
                 }
             }
         }

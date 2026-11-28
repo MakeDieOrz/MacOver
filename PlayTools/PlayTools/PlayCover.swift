@@ -39,7 +39,7 @@ public final class PlayCover: NSObject, Sendable {
         UserPluginLoader.initialize()
         PlayScreen.shared.initialize()
         PlayInput.shared.initialize()
-        if PlaySettings.shared.discordActivity.enable {
+        if PlaySettings.shared.discordActivityEnabled {
             DiscordIPC.shared.initialize()
         }
 

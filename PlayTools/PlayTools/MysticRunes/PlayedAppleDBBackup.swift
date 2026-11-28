@@ -39,6 +39,52 @@ public enum PlayedAppleDBBackup {
         return false
     }
 
+    private static func precreateSecureRegularFile(atPath path: String, exclusive: Bool) -> Bool {
+        var flags = O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC
+        if exclusive {
+            flags |= O_EXCL
+        }
+        let fd = Darwin.open(path, flags, mode_t(0o600))
+        guard fd >= 0 else {
+            return false
+        }
+        defer { Darwin.close(fd) }
+        var st = Darwin.stat()
+        guard Darwin.fstat(fd, &st) == 0,
+              (st.st_mode & S_IFMT) == S_IFREG else {
+            return false
+        }
+        _ = Darwin.fchmod(fd, mode_t(0o600))
+        return true
+    }
+
+    private static func hardenRegularFile(atPath path: String) {
+        let fd = Darwin.open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { return }
+        defer { Darwin.close(fd) }
+        var st = Darwin.stat()
+        if Darwin.fstat(fd, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG {
+            _ = Darwin.fchmod(fd, mode_t(0o600))
+        }
+    }
+
+    private static func hardenParentDirectoryIfSafe(forFilePath path: String) {
+        let parentDir = (path as NSString).deletingLastPathComponent
+        guard !parentDir.isEmpty,
+              parentDir != "/",
+              parentDir != "/tmp",
+              parentDir != "/private/tmp" else {
+            return
+        }
+        var dirSt = Darwin.stat()
+        guard Darwin.lstat(parentDir, &dirSt) == 0,
+              (dirSt.st_mode & S_IFMT) == S_IFDIR,
+              dirSt.st_uid == Darwin.geteuid() else {
+            return
+        }
+        _ = Darwin.chmod(parentDir, mode_t(0o700))
+    }
+
     @discardableResult
     public static func backupIfNeeded(
         sourceDB: OpaquePointer,
@@ -57,17 +103,38 @@ public enum PlayedAppleDBBackup {
             return true
         }
 
+        hardenParentDirectoryIfSafe(forFilePath: dbPath)
+
         let bakPath = backupPath(for: dbPath, fromVersion: currentVersion)
         var existingStat = Darwin.stat()
-        if stat(bakPath, &existingStat) == 0 {
+        if Darwin.lstat(bakPath, &existingStat) == 0 {
+            if (existingStat.st_mode & S_IFMT) == S_IFLNK {
+                logger?("Refusing to write pre-migration backup over symlink at \(bakPath)")
+                return false
+            }
+            hardenRegularFile(atPath: bakPath)
             return true
         }
 
-        let tmpPath = "\(bakPath).tmp"
+        // Canonicalize the parent directory via Darwin.realpath (unlike URL.resolvingSymlinksInPath,
+        // realpath resolves /var -> /private/var on macOS) so SQLITE_OPEN_NOFOLLOW succeeds on real
+        // parent paths while still strictly refusing symlinks at the leaf backup file.
+        let parentDir = (bakPath as NSString).deletingLastPathComponent
+        var resolvedBuf = [CChar](repeating: 0, count: Int(PATH_MAX))
+        let resolvedParentDir = Darwin.realpath(parentDir, &resolvedBuf)
+            .map { String(cString: $0) } ?? parentDir
+        let resolvedBakPath = (resolvedParentDir as NSString)
+            .appendingPathComponent((bakPath as NSString).lastPathComponent)
+        let tmpPath = "\(resolvedBakPath).tmp"
         _ = Darwin.unlink(tmpPath)
+        guard precreateSecureRegularFile(atPath: tmpPath, exclusive: true) else {
+            let errnoCopy = errno
+            logger?("Failed to pre-create secure pre-migration backup \(tmpPath): errno=\(errnoCopy)")
+            return false
+        }
 
         var destPtr: OpaquePointer?
-        let openFlags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
+        let openFlags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOFOLLOW
         guard sqlite3_open_v2(tmpPath, &destPtr, openFlags, nil) == SQLITE_OK,
               let destDB = destPtr else {
             if let destPtr {
@@ -95,6 +162,8 @@ public enum PlayedAppleDBBackup {
             _ = sqlite3_exec(destDB, "PRAGMA journal_mode=DELETE;", nil, nil, nil)
         }
         sqlite3_close_v2(destDB)
+        _ = Darwin.unlink("\(tmpPath)-wal")
+        _ = Darwin.unlink("\(tmpPath)-shm")
 
         guard stepRc == SQLITE_DONE, finishRc == SQLITE_OK else {
             logger?("SQLite backup failed step=\(stepRc) finish=\(finishRc)")
@@ -102,14 +171,16 @@ public enum PlayedAppleDBBackup {
             return false
         }
 
-        if Darwin.rename(tmpPath, bakPath) != 0 {
+        hardenRegularFile(atPath: tmpPath)
+        if Darwin.rename(tmpPath, resolvedBakPath) != 0 {
             let errnoCopy = errno
-            logger?("Failed atomic rename for DB backup \(bakPath): errno=\(errnoCopy)")
+            logger?("Failed atomic rename for DB backup \(resolvedBakPath): errno=\(errnoCopy)")
             _ = Darwin.unlink(tmpPath)
             return false
         }
+        hardenRegularFile(atPath: resolvedBakPath)
 
-        logger?("Created pre-migration Keychain DB backup at \(bakPath)")
+        logger?("Created pre-migration Keychain DB backup at \(resolvedBakPath)")
         return true
     }
 }

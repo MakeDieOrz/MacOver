@@ -3,6 +3,7 @@
 //  PlayCoverInject
 //
 
+import Darwin
 import Foundation
 import Synchronization
 import UIKit
@@ -10,8 +11,7 @@ import UIKit
 final class Toucher: Sendable {
     private struct LogState {
         var logEnabled = false
-        var logFilePath =
-            NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true)[0] + "/toucher.log"
+        var logFilePath: String?
         var logCount = 0
         var logFile: FileHandle?
         var termObserverInstalled = false
@@ -19,13 +19,37 @@ final class Toucher: Sendable {
 
     private static let state = Mutex(LogState())
 
-    // For debug only
+    private static var isLoggingPermitted: Bool {
+        #if DEBUG
+        return !PlaySettings.shared.bypass && !PlaySettings.shared.strictEmulationMode
+        #else
+        return false
+        #endif
+    }
+
+    // For debug only (strictly disabled under bypass/strictEmulationMode and Release builds).
     static var logEnabled: Bool {
-        get { state.withLock { $0.logEnabled } }
-        set { state.withLock { $0.logEnabled = newValue } }
+        get {
+            guard isLoggingPermitted else { return false }
+            return state.withLock { $0.logEnabled }
+        }
+        set {
+            state.withLock { $0.logEnabled = isLoggingPermitted ? newValue : false }
+        }
     }
     static var logFilePath: String {
-        get { state.withLock { $0.logFilePath } }
+        get {
+            state.withLock { current in
+                if let existing = current.logFilePath {
+                    return existing
+                }
+                let path = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("toucher.log")
+                    .path
+                current.logFilePath = path
+                return path
+            }
+        }
         set { state.withLock { $0.logFilePath = newValue } }
     }
     static var logFile: FileHandle? {
@@ -88,9 +112,11 @@ final class Toucher: Sendable {
     }
 
     static func setupLogfile() {
+        guard isLoggingPermitted, logEnabled else { return }
         let path = logFilePath
-        if FileManager.default.createFile(atPath: path, contents: nil, attributes: nil) {
-            let handle = FileHandle(forWritingAtPath: path)
+        let fd = Darwin.open(path, O_RDWR | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, mode_t(0o600))
+        if fd >= 0 {
+            let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
             var shouldInstallObserver = false
             state.withLock {
                 $0.logFile = handle
@@ -121,7 +147,7 @@ final class Toucher: Sendable {
     }
 
     static func writeLog(logMessage: String) {
-        if !logEnabled {
+        guard isLoggingPermitted, logEnabled else {
             return
         }
         if logFile == nil {

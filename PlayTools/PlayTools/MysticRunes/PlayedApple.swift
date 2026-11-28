@@ -489,16 +489,6 @@ public final class PlayKeychain: NSObject, @unchecked Sendable {
             publicKeyDict["type"] = publicKeyDict[kSecAttrKeyType as String]
             publicKeyDict["kcls"] = kSecAttrKeyClassPublic
             publicKeyDict[kSecValueData as String] = pubData
-            let (pubStatus, insertedPub) = playChainDB.insertWithStatus(publicKeyDict as NSDictionary)
-            guard pubStatus == errSecSuccess else {
-                debugLogger("Failed to write public key to keychain db (status: \(pubStatus))")
-                return pubStatus
-            }
-            let pubSource = (insertedPub as? [String: Any]) ?? publicKeyDict
-            PTPlayChainSecureEnclaveRegistry.setPersistedAttributes(
-                buildPersistedAttributesMetadata(from: pubSource, permanentFallback: true),
-                for: publicKeyRef
-            )
             var privateKeyDict = [String: Any]()
             privateKeyDict[kSecClass as String] = kSecClassKey
             privateKeyDict[kSecAttrKeyType as String] = parameters[kSecAttrKeyType as String]
@@ -512,12 +502,20 @@ public final class PlayKeychain: NSObject, @unchecked Sendable {
             if isSecureEnclave {
                 privateKeyDict[PlayKeychainDB.internalTokenIDColumn] = kSecAttrTokenIDSecureEnclave as String
             }
-            let (privStatus, insertedPriv) = playChainDB.insertWithStatus(privateKeyDict as NSDictionary)
-            guard privStatus == errSecSuccess else {
-                debugLogger("Failed to write private key to keychain db (status: \(privStatus))")
-                return privStatus
+            let (batchStatus, insertedItems) = playChainDB.insertBatchWithStatus([
+                publicKeyDict as NSDictionary,
+                privateKeyDict as NSDictionary
+            ])
+            guard batchStatus == errSecSuccess else {
+                debugLogger("Failed to write key pair to keychain db (status: \(batchStatus))")
+                return batchStatus
             }
-            let privSource = (insertedPriv as? [String: Any]) ?? privateKeyDict
+            let pubSource = (insertedItems?.first as? [String: Any]) ?? publicKeyDict
+            PTPlayChainSecureEnclaveRegistry.setPersistedAttributes(
+                buildPersistedAttributesMetadata(from: pubSource, permanentFallback: true),
+                for: publicKeyRef
+            )
+            let privSource = (insertedItems?.dropFirst().first as? [String: Any]) ?? privateKeyDict
             PTPlayChainSecureEnclaveRegistry.setPersistedAttributes(
                 buildPersistedAttributesMetadata(from: privSource, permanentFallback: true),
                 for: privateKeyRef
@@ -670,7 +668,12 @@ extension PlayKeychain {
     // SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result)
     @objc static public func copyMatching(_ query: NSDictionary,
                                           result: UnsafeMutableRawPointer?) -> OSStatus {
-        guard let keychainDicts = playChainDB.query(query),
+        let (queryStatus, matchedDicts) = playChainDB.queryWithStatus(query)
+        guard queryStatus == errSecSuccess else {
+            debugLogger("Keychain query failed with status \(queryStatus)")
+            return queryStatus
+        }
+        guard let keychainDicts = matchedDicts,
               let keychainDict = keychainDicts.first else {
             debugLogger("Keychain item not found in db")
             return errSecItemNotFound

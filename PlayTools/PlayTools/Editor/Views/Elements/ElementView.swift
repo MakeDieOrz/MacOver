@@ -16,8 +16,8 @@ class Element: UIButton {
 
     func commonInit() {
         backgroundColor = UIColor.gray.withAlphaComponent(0.8)
-        addTarget(editor.view, action: #selector(editor.view.pressed(sender:)), for: .touchUpInside)
-        let recognizer = UIPanGestureRecognizer(target: editor.view, action: #selector(editor.view.dragged(_:)))
+        addTarget(editor.view, action: #selector(EditorView.pressed(sender:)), for: .touchUpInside)
+        let recognizer = UIPanGestureRecognizer(target: editor.view, action: #selector(EditorView.dragged(_:)))
         addGestureRecognizer(recognizer)
         isUserInteractionEnabled = true
         clipsToBounds = true

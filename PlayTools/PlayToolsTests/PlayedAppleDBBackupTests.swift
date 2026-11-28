@@ -55,6 +55,9 @@ final class PlayedAppleDBBackupTests {
         #expect(FileManager.default.fileExists(atPath: backupURL.path))
         #expect(!FileManager.default.fileExists(atPath: "\(backupURL.path).tmp"))
         #expect(!logged.isEmpty)
+        let attrs = try FileManager.default.attributesOfItem(atPath: backupURL.path)
+        let perms = (attrs[.posixPermissions] as? NSNumber)?.intValue
+        #expect(perms == 0o600)
 
         // Mutate live DB to v2 and verify backup retains original v1 data
         #expect(
@@ -73,7 +76,8 @@ final class PlayedAppleDBBackupTests {
         let prepared = try #require(stmt)
         defer { sqlite3_finalize(prepared) }
         #expect(sqlite3_step(prepared) == SQLITE_ROW)
-        let restoredVal = try #require(sqlite3_column_text(prepared, 0)).withMemoryRebound(to: CChar.self, capacity: 1) {
+        let textPtr = try #require(sqlite3_column_text(prepared, 0))
+        let restoredVal = textPtr.withMemoryRebound(to: CChar.self, capacity: 1) {
             String(cString: $0)
         }
         #expect(restoredVal == "secret_v1")
@@ -186,7 +190,14 @@ final class PlayedAppleDBBackupTests {
                 requestedGroup: "",
                 allowedPatterns: patterns,
                 isReadOnlyQuery: false
-            ) == errSecSuccess
+            ) == errSecMissingEntitlement
+        )
+        #expect(
+            PTPlayChainAccessGroupPolicy.validate(
+                requestedGroup: "",
+                allowedPatterns: patterns,
+                isReadOnlyQuery: true
+            ) == errSecMissingEntitlement
         )
         #expect(
             PTPlayChainAccessGroupPolicy.validate(
@@ -370,10 +381,22 @@ final class PlayedAppleDBBackupTests {
     }
 
     @Test
-    func secureEnclaveUpdatePolicyProtectsTokenIDColumn() {
+    func secureEnclaveUpdatePolicyProtectsTokenIDPersistentRefAndCreationDate() {
         #expect(
             !PTPlayChainKeyUpdatePolicy.isUpdatableColumn(
                 "pc_tokid",
+                internalTokenIDColumn: "pc_tokid"
+            )
+        )
+        #expect(
+            !PTPlayChainKeyUpdatePolicy.isUpdatableColumn(
+                kSecValuePersistentRef as String,
+                internalTokenIDColumn: "pc_tokid"
+            )
+        )
+        #expect(
+            !PTPlayChainKeyUpdatePolicy.isUpdatableColumn(
+                kSecAttrCreationDate as String,
                 internalTokenIDColumn: "pc_tokid"
             )
         )
@@ -387,6 +410,73 @@ final class PlayedAppleDBBackupTests {
             PTPlayChainKeyUpdatePolicy.isUpdatableColumn(
                 kSecAttrApplicationTag as String,
                 internalTokenIDColumn: "pc_tokid"
+            )
+        )
+    }
+
+    @Test
+    func backupRefusesSymlinkAtBackupDestination() throws {
+        let dbURL = tempDir.appendingPathComponent("com.example.symlink.db")
+        let backupURL = URL(fileURLWithPath: PlayedAppleDBBackup.backupPath(for: dbURL.path, fromVersion: 1))
+        let victimURL = tempDir.appendingPathComponent("victim.txt")
+        try Data("untouched".utf8).write(to: victimURL)
+        try FileManager.default.createSymbolicLink(at: backupURL, withDestinationURL: victimURL)
+
+        var dbPtr: OpaquePointer?
+        #expect(
+            sqlite3_open_v2(dbURL.path, &dbPtr, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) == SQLITE_OK
+        )
+        let db = try #require(dbPtr)
+        defer { sqlite3_close_v2(db) }
+        #expect(
+            sqlite3_exec(db, "CREATE TABLE genp (acct TEXT PRIMARY KEY); PRAGMA user_version = 1;", nil, nil, nil)
+                == SQLITE_OK
+        )
+
+        #expect(!PlayedAppleDBBackup.backupIfNeeded(sourceDB: db, dbPath: dbURL.path, targetVersion: 2))
+        let victimText = try String(contentsOf: victimURL, encoding: .utf8)
+        #expect(victimText == "untouched")
+    }
+
+    @Test
+    func mutationFilterPolicyAllowsClassWideDeleteAndRejectsDroppedFilters() {
+        // Class-wide SecItemDelete([kSecClass: kSecClassGenericPassword]) must be allowed
+        #expect(
+            !PTPlayChainMutationFilterPolicy.shouldRejectMutation(
+                droppedNonMetaFilterKey: false,
+                hasEffectiveFilter: false,
+                hasExplicitSecClass: true
+            )
+        )
+        // Unrecognized/dropped non-meta filter key must still be rejected with errSecParam
+        #expect(
+            PTPlayChainMutationFilterPolicy.shouldRejectMutation(
+                droppedNonMetaFilterKey: true,
+                hasEffectiveFilter: false,
+                hasExplicitSecClass: true
+            )
+        )
+        #expect(
+            PTPlayChainMutationFilterPolicy.shouldRejectMutation(
+                droppedNonMetaFilterKey: true,
+                hasEffectiveFilter: true,
+                hasExplicitSecClass: true
+            )
+        )
+        // Empty mutation with neither kSecClass nor effective filter must be rejected
+        #expect(
+            PTPlayChainMutationFilterPolicy.shouldRejectMutation(
+                droppedNonMetaFilterKey: false,
+                hasEffectiveFilter: false,
+                hasExplicitSecClass: false
+            )
+        )
+        // Effective filter without explicit kSecClass (e.g. persistent ref) is allowed
+        #expect(
+            !PTPlayChainMutationFilterPolicy.shouldRejectMutation(
+                droppedNonMetaFilterKey: false,
+                hasEffectiveFilter: true,
+                hasExplicitSecClass: false
             )
         )
     }

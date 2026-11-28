@@ -5,6 +5,7 @@
 
 #import "PSInternal.h"
 #import <IOKit/IOKitLib.h>
+#import <QuartzCore/QuartzCore.h>
 #include <math.h>
 
 @protocol PSExternalSwizzleSelectors <NSObject>
@@ -50,6 +51,43 @@
 + (bool)isRootedOrJailbroken;
 @end
 
+static BOOL ps_should_suppress_notification_for_app(NSNotification *note);
+static os_unfair_lock s_ps_notif_proxy_lock = OS_UNFAIR_LOCK_INIT;
+static const char kPSNotifProxyAssocKey = 0;
+
+__attribute__((visibility("hidden")))
+@interface PSNotifFilterProxy : NSObject
+@property (nonatomic, weak) id target;
+@property (nonatomic, assign) SEL action;
+@property (nonatomic, weak) NSNotificationCenter *center;
+@property (nonatomic, copy) NSNotificationName filterName;
+@property (nonatomic, assign) uintptr_t filterObjectPtr;
+@property (nonatomic, assign) BOOL hasFilterObject;
+- (void)handleNotification:(NSNotification *)note;
+@end
+
+@implementation PSNotifFilterProxy
+
+- (void)handleNotification:(NSNotification *)note {
+    if (ps_should_suppress_notification_for_app(note)) {
+        return;
+    }
+    id strongTarget = self.target;
+    SEL sel = self.action;
+    if (strongTarget != nil && sel != NULL) {
+        ((void (*)(id, SEL, NSNotification *))objc_msgSend)(strongTarget, sel, note);
+    }
+}
+
+- (void)dealloc {
+    NSNotificationCenter *c = _center;
+    if (c != nil) {
+        [c removeObserver:self];
+    }
+}
+
+@end
+
 @implementation PSSwizzleHooks (PlayShadowSystem)
 
 - (NSInteger) pm_hook_deviceType {
@@ -79,23 +117,43 @@ static NSString *ps_current_oem_id_nsstring(void) {
 }
 
 - (NSString *) pm_hook_platform {
-    return ps_current_device_model_nsstring();
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return ps_current_device_model_nsstring();
+    }
+    return [self pm_hook_platform];
 }
 
 - (NSString *) pm_hook_hwModel {
-    return ps_current_oem_id_nsstring();
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return ps_current_oem_id_nsstring();
+    }
+    return [self pm_hook_hwModel];
 }
 
 - (NSString *) pm_hook_deviceName {
-    return ps_is_iphone_device_model() ? @"iPhone" : @"iPad";
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return ps_is_iphone_device_model() ? @"iPhone" : @"iPad";
+    }
+    return [self pm_hook_deviceName];
 }
 
 - (NSString *) pm_hook_deviceModel {
-    return ps_is_iphone_device_model() ? @"iPhone" : @"iPad";
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return ps_is_iphone_device_model() ? @"iPhone" : @"iPad";
+    }
+    return [self pm_hook_deviceModel];
 }
 
 - (NSString *) pm_hook_deviceLocalizedModel {
-    return ps_is_iphone_device_model() ? @"iPhone" : @"iPad";
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return ps_is_iphone_device_model() ? @"iPhone" : @"iPad";
+    }
+    return [self pm_hook_deviceLocalizedModel];
 }
 
 __attribute__((visibility("hidden"))) NSUUID * (*s_orig_device_identifierForVendor)(id, SEL) = NULL;
@@ -178,15 +236,19 @@ __attribute__((visibility("hidden"))) NSUUID *ps_hook_device_identifierForVendor
 }
 
 - (NSString *) pm_hook_systemName {
-    return ps_is_iphone_device_model() ? @"iOS" : @"iPadOS";
+    if (pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return ps_is_iphone_device_model() ? @"iOS" : @"iPadOS";
+    }
+    return [self pm_hook_systemName];
 }
 
 - (NSString *) pm_hook_systemVersion {
     if (pt_is_bypass_enabled() &&
         !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
-        const char *ovVer = pt_get_reported_ios_version_override(NULL);
-        if (ovVer != NULL) {
-            NSString *verStr = [NSString stringWithUTF8String:ovVer];
+        const char *spoofed = pt_get_spoofed_ios_version_cstr();
+        if (spoofed != NULL && spoofed[0] != '\0') {
+            NSString *verStr = [NSString stringWithUTF8String:spoofed];
             if (verStr.length > 0) {
                 return verStr;
             }
@@ -451,13 +513,26 @@ static NSArray<NSBundle *> *ps_filter_bundles(NSArray<NSBundle *> *bundles, cons
 
 __attribute__((visibility("hidden"))) NSBundle * (*s_orig_bundleForClass)(id, SEL, Class) = NULL;
 __attribute__((visibility("hidden"))) NSBundle *ps_hook_bundle_for_class(id self, SEL _cmd, Class aClass) {
+    if (aClass == Nil) {
+        return nil;
+    }
     NSBundle *orig = s_orig_bundleForClass ? s_orig_bundleForClass(self, _cmd, aClass) : nil;
     const void *caller = __builtin_return_address(0);
-    if (orig == nil ||
-        (pt_is_bypass_enabled() &&
-         !ps_is_effective_system_or_playtools_caller(caller) &&
-         ps_is_hidden_bundle(orig, caller))) {
-        return [NSBundle mainBundle];
+    if (pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(caller)) {
+        if (orig != nil) {
+            if (ps_is_hidden_bundle(orig, caller)) {
+                return [NSBundle mainBundle];
+            }
+        } else {
+            const char *img = class_getImageName(aClass);
+            const char *cname = class_getName(aClass);
+            if ((img != NULL && (pt_should_hide_dyld_image(img) ||
+                                 pt_is_hidden_dyld_image_name(img) ||
+                                 pt_is_post13_7_hidden_framework_path(img))) ||
+                (cname != NULL && pt_is_registered_hidden_class(cname))) {
+                return [NSBundle mainBundle];
+            }
+        }
     }
     return orig;
 }
@@ -1402,15 +1477,24 @@ __attribute__((visibility("hidden"))) BOOL ps_get_cached_ios_sysver(NSOperatingS
 }
 
 static NSString *ps_spoofed_os_version_string(NSProcessInfo *pi) {
+    (void)pi;
     NSString *cached = nil;
     ps_get_cached_ios_sysver(NULL, &cached);
     if (cached.length > 0) {
         return cached;
     }
-    NSOperatingSystemVersion ver = [pi operatingSystemVersion];
-    NSString *verStr = (ver.patchVersion > 0)
-        ? [NSString stringWithFormat:@"%ld.%ld.%ld", (long)ver.majorVersion, (long)ver.minorVersion, (long)ver.patchVersion]
-        : [NSString stringWithFormat:@"%ld.%ld", (long)ver.majorVersion, (long)ver.minorVersion];
+    const char *verC = NULL;
+    const char *buildC = NULL;
+    pt_get_effective_ios_version_and_build(&verC, &buildC);
+    NSString *verStr = (verC != NULL && verC[0] != '\0')
+        ? [NSString stringWithUTF8String:verC]
+        : @"18.0";
+    NSString *buildStr = (buildC != NULL && buildC[0] != '\0')
+        ? [NSString stringWithUTF8String:buildC]
+        : nil;
+    if (buildStr.length > 0) {
+        return [NSString stringWithFormat:@"Version %@ (Build %@)", verStr, buildStr];
+    }
     return [NSString stringWithFormat:@"Version %@", verStr];
 }
 
@@ -1621,6 +1705,18 @@ static NSDictionary<NSString *, id> *ps_sanitize_user_defaults_dict(NSDictionary
     return (filtered != nil) ? [filtered copy] : dict;
 }
 
+- (instancetype) pm_ps_ud_initWithSuiteName:(NSString *)suitename __attribute__((objc_method_family(init))) {
+    NSString *effectiveSuite = suitename;
+    if (suitename.length > 0 &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        CFStringRef rewritten = pt_rewrite_declared_app_group_pref_domain((__bridge CFStringRef)suitename);
+        if (rewritten != NULL) {
+            effectiveSuite = (__bridge_transfer NSString *)rewritten;
+        }
+    }
+    return [self pm_ps_ud_initWithSuiteName:effectiveSuite];
+}
+
 - (id) pm_ps_objectForKey:(NSString *)defaultName {
     const void *caller = __builtin_return_address(0);
     BOOL isAppCaller = pt_is_bypass_enabled() && !ps_is_effective_system_or_playtools_caller(caller);
@@ -1765,7 +1861,12 @@ static BOOL ps_is_internal_playtools_view(UIView *view) {
     if (tagKey != NULL && objc_getAssociatedObject(view, tagKey) != nil) {
         return YES;
     }
-    if (ps_class_belongs_to_playtools_image(object_getClass(view))) {
+    Class cls = object_getClass(view);
+    if (ps_class_belongs_to_playtools_image(cls)) {
+        return YES;
+    }
+    const char *cname = (cls != Nil) ? class_getName(cls) : NULL;
+    if (cname != NULL && pt_is_hidden_objc_class(cname)) {
         return YES;
     }
     UIResponder *next = [view nextResponder];
@@ -1790,6 +1891,122 @@ static BOOL ps_is_internal_playtools_window(UIWindow *window) {
     return NO;
 }
 
+static BOOL ps_is_internal_playtools_layer(CALayer *layer) {
+    if (layer == nil) {
+        return NO;
+    }
+    const void *tagKey = ps_internal_overlay_tag_key();
+    if (tagKey != NULL && objc_getAssociatedObject(layer, tagKey) != nil) {
+        return YES;
+    }
+    Class cls = object_getClass(layer);
+    if (ps_class_belongs_to_playtools_image(cls)) {
+        return YES;
+    }
+    const char *cname = (cls != Nil) ? class_getName(cls) : NULL;
+    if (cname != NULL && pt_is_hidden_objc_class(cname)) {
+        return YES;
+    }
+    id delegate = layer.delegate;
+    if (delegate != nil) {
+        if ([delegate isKindOfClass:[UIView class]] && ps_is_internal_playtools_view((UIView *)delegate)) {
+            return YES;
+        }
+        if (ps_class_belongs_to_playtools_image(object_getClass(delegate))) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static UIWindow *ps_first_non_internal_window(NSArray<UIWindow *> *windows) {
+    UIWindow *firstNonInternal = nil;
+    UIWindow *firstVisible = nil;
+    for (UIWindow *win in windows) {
+        if (ps_is_internal_playtools_window(win)) {
+            continue;
+        }
+        if (firstNonInternal == nil) {
+            firstNonInternal = win;
+        }
+        if (!win.isHidden) {
+            if (firstVisible == nil) {
+                firstVisible = win;
+            }
+            if (win.windowLevel == UIWindowLevelNormal) {
+                return win;
+            }
+        }
+    }
+    return firstVisible ?: firstNonInternal;
+}
+
+static BOOL ps_is_hidden_gc_input_notification_name(NSNotificationName name) {
+    if (![name isKindOfClass:[NSString class]] || name.length == 0) {
+        return NO;
+    }
+    return ([name isEqualToString:@"GCMouseDidConnectNotification"] ||
+            [name isEqualToString:@"GCMouseDidDisconnectNotification"] ||
+            [name isEqualToString:@"GCMouseDidBecomeCurrentNotification"] ||
+            [name isEqualToString:@"GCMouseDidStopBeingCurrentNotification"] ||
+            [name isEqualToString:@"GCKeyboardDidConnectNotification"] ||
+            [name isEqualToString:@"GCKeyboardDidDisconnectNotification"]);
+}
+
+static BOOL ps_is_hidden_gc_input_object(id obj) {
+    if (obj == nil) {
+        return NO;
+    }
+    Class mouseCls = objc_getClass("GCMouse");
+    if (mouseCls != Nil && [obj isKindOfClass:mouseCls]) {
+        return YES;
+    }
+    Class keyCls = objc_getClass("GCKeyboard");
+    if (keyCls != Nil && [obj isKindOfClass:keyCls]) {
+        return YES;
+    }
+    return NO;
+}
+
+static BOOL ps_is_filtered_notification_name(NSNotificationName name) {
+    if (name == nil) {
+        return YES;
+    }
+    return ([name isEqualToString:UIWindowDidBecomeKeyNotification] ||
+            [name isEqualToString:UIWindowDidResignKeyNotification] ||
+            [name isEqualToString:UIWindowDidBecomeVisibleNotification] ||
+            [name isEqualToString:UIWindowDidBecomeHiddenNotification] ||
+            [name isEqualToString:NSProcessInfoThermalStateDidChangeNotification] ||
+            ps_is_hidden_gc_input_notification_name(name));
+}
+
+static BOOL ps_should_suppress_notification_for_app(NSNotification *note) {
+    if (note == nil || !pt_is_bypass_enabled()) {
+        return NO;
+    }
+    NSNotificationName name = note.name;
+    if (ps_is_hidden_gc_input_notification_name(name) ||
+        ps_is_hidden_gc_input_object(note.object)) {
+        return YES;
+    }
+    if (name == nil) {
+        return NO;
+    }
+    if ([name isEqualToString:NSProcessInfoThermalStateDidChangeNotification]) {
+        return YES;
+    }
+    if ([name isEqualToString:UIWindowDidBecomeKeyNotification] ||
+        [name isEqualToString:UIWindowDidResignKeyNotification] ||
+        [name isEqualToString:UIWindowDidBecomeVisibleNotification] ||
+        [name isEqualToString:UIWindowDidBecomeHiddenNotification]) {
+        id obj = note.object;
+        if ([obj isKindOfClass:[UIWindow class]] && ps_is_internal_playtools_window((UIWindow *)obj)) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
 - (NSArray<__kindof UIView *> *) pm_ps_subviews {
     NSArray<UIView *> *orig = [self pm_ps_subviews];
     if (orig.count == 0 || !pt_is_bypass_enabled() ||
@@ -1800,6 +2017,29 @@ static BOOL ps_is_internal_playtools_window(UIWindow *window) {
     for (NSUInteger i = 0; i < orig.count; i++) {
         UIView *sub = orig[i];
         if (ps_is_internal_playtools_view(sub)) {
+            if (filtered == nil) {
+                filtered = [NSMutableArray arrayWithCapacity:orig.count - 1];
+                for (NSUInteger j = 0; j < i; j++) {
+                    [filtered addObject:orig[j]];
+                }
+            }
+        } else if (filtered != nil) {
+            [filtered addObject:sub];
+        }
+    }
+    return filtered != nil ? [filtered copy] : orig;
+}
+
+- (NSArray<CALayer *> *) pm_ps_layer_sublayers {
+    NSArray<CALayer *> *orig = [self pm_ps_layer_sublayers];
+    if (orig.count == 0 || !pt_is_bypass_enabled() ||
+        ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return orig;
+    }
+    NSMutableArray<CALayer *> *filtered = nil;
+    for (NSUInteger i = 0; i < orig.count; i++) {
+        CALayer *sub = orig[i];
+        if (ps_is_internal_playtools_layer(sub)) {
             if (filtered == nil) {
                 filtered = [NSMutableArray arrayWithCapacity:orig.count - 1];
                 for (NSUInteger j = 0; j < i; j++) {
@@ -1841,6 +2081,176 @@ static NSArray<UIWindow *> *ps_filter_windows_array(NSArray<UIWindow *> *orig, c
 
 - (NSArray<UIWindow *> *) pm_ps_scene_windows {
     return ps_filter_windows_array([self pm_ps_scene_windows], __builtin_return_address(0));
+}
+
+- (UIWindow *) pm_ps_app_keyWindow {
+    UIWindow *orig = [self pm_ps_app_keyWindow];
+    if (orig != nil && pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        ps_is_internal_playtools_window(orig)) {
+        return ps_first_non_internal_window([self pm_ps_app_windows]);
+    }
+    return orig;
+}
+
+- (UIWindow *) pm_ps_scene_keyWindow {
+    UIWindow *orig = [self pm_ps_scene_keyWindow];
+    if (orig != nil && pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        ps_is_internal_playtools_window(orig)) {
+        return ps_first_non_internal_window([self pm_ps_scene_windows]);
+    }
+    return orig;
+}
+
+- (BOOL) pm_ps_window_isKeyWindow {
+    BOOL orig = [self pm_ps_window_isKeyWindow];
+    if (!pt_is_bypass_enabled() ||
+        ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        return orig;
+    }
+    UIWindow *win = (UIWindow *)self;
+    if (ps_is_internal_playtools_window(win)) {
+        return NO;
+    }
+    if (!orig) {
+        UIWindowScene *scene = win.windowScene;
+        UIWindow *actualKey = nil;
+        NSArray<UIWindow *> *allWindows = nil;
+        if (scene != nil) {
+            if ([scene respondsToSelector:@selector(keyWindow)]) {
+                actualKey = scene.keyWindow;
+            }
+            allWindows = scene.windows;
+        } else {
+            UIApplication *app = [UIApplication sharedApplication];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            actualKey = app.keyWindow;
+            allWindows = app.windows;
+#pragma clang diagnostic pop
+        }
+        if (actualKey != nil && ps_is_internal_playtools_window(actualKey)) {
+            UIWindow *fallback = ps_first_non_internal_window(allWindows);
+            if (fallback == win) {
+                return YES;
+            }
+        }
+    }
+    return orig;
+}
+
+- (id<NSObject>) pm_ps_nc_addObserverForName:(NSNotificationName)name
+                                      object:(id)obj
+                                       queue:(NSOperationQueue *)queue
+                                  usingBlock:(void (^)(NSNotification * _Nonnull))block {
+    if (block != nil &&
+        pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        (ps_is_filtered_notification_name(name) || ps_is_hidden_gc_input_object(obj))) {
+        void (^origBlock)(NSNotification * _Nonnull) = [block copy];
+        void (^wrappedBlock)(NSNotification * _Nonnull) = ^(NSNotification * _Nonnull note) {
+            if (ps_should_suppress_notification_for_app(note)) {
+                return;
+            }
+            origBlock(note);
+        };
+        return [self pm_ps_nc_addObserverForName:name object:obj queue:queue usingBlock:wrappedBlock];
+    }
+    return [self pm_ps_nc_addObserverForName:name object:obj queue:queue usingBlock:block];
+}
+
+- (void) pm_ps_nc_addObserver:(id)observer
+                     selector:(SEL)aSelector
+                         name:(NSNotificationName)aName
+                       object:(id)anObject {
+    if (observer != nil &&
+        aSelector != NULL &&
+        ![observer isKindOfClass:[PSNotifFilterProxy class]] &&
+        pt_is_bypass_enabled() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0)) &&
+        (ps_is_filtered_notification_name(aName) || ps_is_hidden_gc_input_object(anObject))) {
+        PSNotifFilterProxy *proxy = [[PSNotifFilterProxy alloc] init];
+        proxy.target = observer;
+        proxy.action = aSelector;
+        proxy.center = (NSNotificationCenter *)self;
+        proxy.filterName = aName;
+        proxy.filterObjectPtr = (uintptr_t)(__bridge const void *)anObject;
+        proxy.hasFilterObject = (anObject != nil);
+        os_unfair_lock_lock(&s_ps_notif_proxy_lock);
+        NSMutableArray<PSNotifFilterProxy *> *proxies = objc_getAssociatedObject(observer, &kPSNotifProxyAssocKey);
+        if (proxies == nil) {
+            proxies = [NSMutableArray arrayWithCapacity:2];
+            objc_setAssociatedObject(observer, &kPSNotifProxyAssocKey, proxies, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        [proxies addObject:proxy];
+        os_unfair_lock_unlock(&s_ps_notif_proxy_lock);
+        [self pm_ps_nc_addObserver:proxy selector:@selector(handleNotification:) name:aName object:anObject];
+        return;
+    }
+    [self pm_ps_nc_addObserver:observer selector:aSelector name:aName object:anObject];
+}
+
+- (void) pm_ps_nc_removeObserver:(id)observer {
+    if (observer != nil && ![observer isKindOfClass:[PSNotifFilterProxy class]]) {
+        NSMutableArray<PSNotifFilterProxy *> *toRemove = nil;
+        os_unfair_lock_lock(&s_ps_notif_proxy_lock);
+        NSMutableArray<PSNotifFilterProxy *> *proxies = objc_getAssociatedObject(observer, &kPSNotifProxyAssocKey);
+        if (proxies.count > 0) {
+            for (NSInteger i = (NSInteger)proxies.count - 1; i >= 0; i--) {
+                PSNotifFilterProxy *p = proxies[(NSUInteger)i];
+                if (p.center == (NSNotificationCenter *)self || p.center == nil) {
+                    if (toRemove == nil) toRemove = [NSMutableArray array];
+                    [toRemove addObject:p];
+                    [proxies removeObjectAtIndex:(NSUInteger)i];
+                }
+            }
+        }
+        os_unfair_lock_unlock(&s_ps_notif_proxy_lock);
+        for (PSNotifFilterProxy *p in toRemove) {
+            p.center = nil;
+            [self pm_ps_nc_removeObserver:p];
+        }
+    }
+    [self pm_ps_nc_removeObserver:observer];
+}
+
+- (void) pm_ps_nc_removeObserver:(id)observer name:(NSNotificationName)aName object:(id)anObject {
+    if (observer != nil && ![observer isKindOfClass:[PSNotifFilterProxy class]]) {
+        NSMutableArray<PSNotifFilterProxy *> *toRemove = nil;
+        NSMutableArray<PSNotifFilterProxy *> *toForwardPartial = nil;
+        uintptr_t objPtr = (uintptr_t)(__bridge const void *)anObject;
+        os_unfair_lock_lock(&s_ps_notif_proxy_lock);
+        NSMutableArray<PSNotifFilterProxy *> *proxies = objc_getAssociatedObject(observer, &kPSNotifProxyAssocKey);
+        if (proxies.count > 0) {
+            for (NSInteger i = (NSInteger)proxies.count - 1; i >= 0; i--) {
+                PSNotifFilterProxy *p = proxies[(NSUInteger)i];
+                if (p.center != (NSNotificationCenter *)self && p.center != nil) {
+                    continue;
+                }
+                BOOL exactName = (aName == nil || (p.filterName != nil && [p.filterName isEqualToString:aName]));
+                BOOL exactObj = (anObject == nil || (p.hasFilterObject && p.filterObjectPtr == objPtr));
+                if (exactName && exactObj) {
+                    if (toRemove == nil) toRemove = [NSMutableArray array];
+                    [toRemove addObject:p];
+                    [proxies removeObjectAtIndex:(NSUInteger)i];
+                } else if ((p.filterName == nil || exactName) && (!p.hasFilterObject || exactObj)) {
+                    // Wildcard observer (name == nil or object == nil) partially unsubscribing a specific name/object.
+                    if (toForwardPartial == nil) toForwardPartial = [NSMutableArray array];
+                    [toForwardPartial addObject:p];
+                }
+            }
+        }
+        os_unfair_lock_unlock(&s_ps_notif_proxy_lock);
+        for (PSNotifFilterProxy *p in toRemove) {
+            p.center = nil;
+            [self pm_ps_nc_removeObserver:p name:aName object:anObject];
+        }
+        for (PSNotifFilterProxy *p in toForwardPartial) {
+            [self pm_ps_nc_removeObserver:p name:aName object:anObject];
+        }
+    }
+    [self pm_ps_nc_removeObserver:observer name:aName object:anObject];
 }
 
 - (id) pm_ps_scene_titlebar {
@@ -1889,9 +2299,12 @@ static NSArray<UIWindow *> *ps_filter_windows_array(NSArray<UIWindow *> *orig, c
 
 static NSDictionary *ps_sanitize_process_environment(NSDictionary *orig) {
     BOOL bypass = pt_is_bypass_enabled();
+    if (!bypass) {
+        return orig ?: @{};
+    }
     const char *vh = pt_get_virtual_home_cstr();
     const char *vt = pt_get_virtual_tmpdir_cstr();
-    NSMutableDictionary *sanitized = [NSMutableDictionary dictionaryWithCapacity:orig.count + 4U];
+    NSMutableDictionary *sanitized = [NSMutableDictionary dictionaryWithCapacity:orig.count];
     if (orig != nil) {
         [orig enumerateKeysAndObjectsUsingBlock:^(id keyObj, id valObj, BOOL *stop) {
             (void)stop;
@@ -1917,19 +2330,6 @@ static NSDictionary *ps_sanitize_process_environment(NSDictionary *orig) {
                 sanitized[key] = valStr;
             }
         }];
-    }
-    NSArray<NSString *> *mandatoryKeys = @[@"HOME", @"CFFIXED_USER_HOME", @"TMPDIR", @"PATH"];
-    for (NSString *mkey in mandatoryKeys) {
-        if (sanitized[mkey] == nil) {
-            const char *rewritten = NULL;
-            if (pt_resolve_env_entry([mkey UTF8String], NULL, NO, bypass, vh, vt, &rewritten) == PT_ENV_ENTRY_REWRITE &&
-                rewritten != NULL) {
-                NSString *rewrittenStr = [NSString stringWithUTF8String:rewritten];
-                if (rewrittenStr != nil) {
-                    sanitized[mkey] = rewrittenStr;
-                }
-            }
-        }
     }
     return [sanitized copy];
 }
@@ -2102,6 +2502,23 @@ static NSArray<NSString *> *ps_sanitize_process_arguments(NSArray<NSString *> *o
 
 + (int) pm_clsm_do_nothing_with_callback:(void (^)(int))callback {
     return 0;
+}
+
++ (UIImage *) pm_ps_uiimage_priv_systemImageNamed:(NSString *)name
+                                withConfiguration:(UIImageConfiguration *)configuration
+                                     allowPrivate:(BOOL)allowPrivate {
+    if (name.length > 0 &&
+        pt_is_bypass_enabled() &&
+        pt_is_compat13_7_active() &&
+        !ps_is_effective_system_or_playtools_caller(__builtin_return_address(0))) {
+        const char *cname = [name UTF8String];
+        if (cname != NULL && pt_is_post13_7_sf_symbol_name_cstr(cname)) {
+            return nil;
+        }
+    }
+    return [self pm_ps_uiimage_priv_systemImageNamed:name
+                                   withConfiguration:configuration
+                                        allowPrivate:allowPrivate];
 }
 
 
@@ -2292,6 +2709,9 @@ void ps_load_environment_bypass_hooks(void) {
 
     Class udCls = objc_getClass("NSUserDefaults");
     if (udCls != Nil) {
+        if (class_getInstanceMethod(udCls, @selector(initWithSuiteName:)) != NULL) {
+            ps_swizzle_instance_method(udCls, @selector(initWithSuiteName:), @selector(pm_ps_ud_initWithSuiteName:));
+        }
         ps_swizzle_instance_method(udCls, @selector(objectForKey:), @selector(pm_ps_objectForKey:));
         if (class_getInstanceMethod(udCls, @selector(boolForKey:)) != NULL) {
             ps_swizzle_instance_method(udCls, @selector(boolForKey:), @selector(pm_ps_boolForKey:));
@@ -2318,10 +2738,18 @@ void ps_load_environment_bypass_hooks(void) {
     if (viewCls != Nil && class_getInstanceMethod(viewCls, @selector(subviews)) != NULL) {
         ps_swizzle_instance_method(viewCls, @selector(subviews), @selector(pm_ps_subviews));
     }
+    Class layerCls = objc_getClass("CALayer");
+    if (layerCls != Nil && class_getInstanceMethod(layerCls, @selector(sublayers)) != NULL) {
+        ps_swizzle_instance_method(layerCls, @selector(sublayers), @selector(pm_ps_layer_sublayers));
+    }
     Class appCls = objc_getClass("UIApplication");
     if (appCls != Nil) {
         if (class_getInstanceMethod(appCls, @selector(windows)) != NULL) {
             ps_swizzle_instance_method(appCls, @selector(windows), @selector(pm_ps_app_windows));
+        }
+        SEL appKeyWinSel = sel_registerName("keyWindow");
+        if (class_getInstanceMethod(appCls, appKeyWinSel) != NULL) {
+            ps_swizzle_instance_method(appCls, appKeyWinSel, @selector(pm_ps_app_keyWindow));
         }
         SEL multiScenesSel = sel_registerName("supportsMultipleScenes");
         if (class_getInstanceMethod(appCls, multiScenesSel) != NULL) {
@@ -2333,6 +2761,10 @@ void ps_load_environment_bypass_hooks(void) {
         if (class_getInstanceMethod(sceneCls, @selector(windows)) != NULL) {
             ps_swizzle_instance_method(sceneCls, @selector(windows), @selector(pm_ps_scene_windows));
         }
+        SEL sceneKeyWinSel = sel_registerName("keyWindow");
+        if (class_getInstanceMethod(sceneCls, sceneKeyWinSel) != NULL) {
+            ps_swizzle_instance_method(sceneCls, sceneKeyWinSel, @selector(pm_ps_scene_keyWindow));
+        }
         SEL titlebarSel = sel_registerName("titlebar");
         if (class_getInstanceMethod(sceneCls, titlebarSel) != NULL) {
             ps_swizzle_instance_method(sceneCls, titlebarSel, @selector(pm_ps_scene_titlebar));
@@ -2340,6 +2772,34 @@ void ps_load_environment_bypass_hooks(void) {
         SEL sizeRestrSel = sel_registerName("sizeRestrictions");
         if (class_getInstanceMethod(sceneCls, sizeRestrSel) != NULL) {
             ps_swizzle_instance_method(sceneCls, sizeRestrSel, @selector(pm_ps_scene_sizeRestrictions));
+        }
+    }
+    Class winCls = objc_getClass("UIWindow");
+    if (winCls != Nil && class_getInstanceMethod(winCls, @selector(isKeyWindow)) != NULL) {
+        ps_swizzle_instance_method(winCls, @selector(isKeyWindow), @selector(pm_ps_window_isKeyWindow));
+    }
+    pt_register_hidden_class("PSNotifFilterProxy");
+    Class ncCls = objc_getClass("NSNotificationCenter");
+    if (ncCls != Nil) {
+        if (class_getInstanceMethod(ncCls, @selector(addObserverForName:object:queue:usingBlock:)) != NULL) {
+            ps_swizzle_instance_method(ncCls,
+                                       @selector(addObserverForName:object:queue:usingBlock:),
+                                       @selector(pm_ps_nc_addObserverForName:object:queue:usingBlock:));
+        }
+        if (class_getInstanceMethod(ncCls, @selector(addObserver:selector:name:object:)) != NULL) {
+            ps_swizzle_instance_method(ncCls,
+                                       @selector(addObserver:selector:name:object:),
+                                       @selector(pm_ps_nc_addObserver:selector:name:object:));
+        }
+        if (class_getInstanceMethod(ncCls, @selector(removeObserver:)) != NULL) {
+            ps_swizzle_instance_method(ncCls,
+                                       @selector(removeObserver:),
+                                       @selector(pm_ps_nc_removeObserver:));
+        }
+        if (class_getInstanceMethod(ncCls, @selector(removeObserver:name:object:)) != NULL) {
+            ps_swizzle_instance_method(ncCls,
+                                       @selector(removeObserver:name:object:),
+                                       @selector(pm_ps_nc_removeObserver:name:object:));
         }
     }
     Class menuBuilderCls = objc_getClass("_UIMenuBuilder");
@@ -2409,14 +2869,23 @@ void ps_install_dynamic_system_bundle_hooks(void) {
 __attribute__((visibility("hidden")))
 void ps_install_system_jailbreak_bypass_hooks(void) {
     // Device model & platform consistency
-    ps_replace_instance_method(objc_getClass("UIDevice"), @selector(platform), @selector(pm_hook_platform));
-    ps_replace_instance_method(objc_getClass("UIDevice"), @selector(hwModel), @selector(pm_hook_hwModel));
-    ps_replace_instance_method(objc_getClass("UIDevice"), @selector(name), @selector(pm_hook_deviceName));
-    ps_replace_instance_method(objc_getClass("UIDevice"), @selector(model), @selector(pm_hook_deviceModel));
-    ps_replace_instance_method(objc_getClass("UIDevice"), @selector(localizedModel), @selector(pm_hook_deviceLocalizedModel));
-    ps_replace_instance_method(objc_getClass("UIDevice"), @selector(systemName), @selector(pm_hook_systemName));
-    ps_swizzle_instance_method(objc_getClass("UIDevice"), @selector(systemVersion), @selector(pm_hook_systemVersion));
-    ps_swizzle_instance_method(objc_getClass("UIDevice"), @selector(userInterfaceIdiom), @selector(pm_hook_userInterfaceIdiom));
+    {
+        Class devCls = objc_getClass("UIDevice");
+        if (devCls != Nil) {
+            if (class_getInstanceMethod(devCls, @selector(platform)) != NULL) {
+                ps_swizzle_instance_method(devCls, @selector(platform), @selector(pm_hook_platform));
+            }
+            if (class_getInstanceMethod(devCls, @selector(hwModel)) != NULL) {
+                ps_swizzle_instance_method(devCls, @selector(hwModel), @selector(pm_hook_hwModel));
+            }
+            ps_swizzle_instance_method(devCls, @selector(name), @selector(pm_hook_deviceName));
+            ps_swizzle_instance_method(devCls, @selector(model), @selector(pm_hook_deviceModel));
+            ps_swizzle_instance_method(devCls, @selector(localizedModel), @selector(pm_hook_deviceLocalizedModel));
+            ps_swizzle_instance_method(devCls, @selector(systemName), @selector(pm_hook_systemName));
+            ps_swizzle_instance_method(devCls, @selector(systemVersion), @selector(pm_hook_systemVersion));
+            ps_swizzle_instance_method(devCls, @selector(userInterfaceIdiom), @selector(pm_hook_userInterfaceIdiom));
+        }
+    }
     {
         Class devCls = objc_getClass("UIDevice");
         if (devCls != Nil) {
@@ -2468,6 +2937,7 @@ void ps_install_system_jailbreak_bypass_hooks(void) {
             SEL sys4 = sel_registerName("systemImageNamed:variableValue:withConfiguration:");
             SEL priv1 = sel_registerName("_systemImageNamed:");
             SEL priv2 = sel_registerName("_systemImageNamed:withConfiguration:");
+            SEL priv3 = sel_registerName("_systemImageNamed:withConfiguration:allowPrivate:");
             if (class_getClassMethod(imgCls, sys1) != NULL) {
                 ps_swizzle_class_method(imgCls, sys1, @selector(pm_ps_uiimage_systemImageNamed:));
             }
@@ -2485,6 +2955,9 @@ void ps_install_system_jailbreak_bypass_hooks(void) {
             }
             if (class_getClassMethod(imgCls, priv2) != NULL) {
                 ps_swizzle_class_method(imgCls, priv2, @selector(pm_ps_uiimage_priv_systemImageNamed:withConfiguration:));
+            }
+            if (class_getClassMethod(imgCls, priv3) != NULL) {
+                ps_swizzle_class_method(imgCls, priv3, @selector(pm_ps_uiimage_priv_systemImageNamed:withConfiguration:allowPrivate:));
             }
         }
     }
