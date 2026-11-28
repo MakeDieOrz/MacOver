@@ -17,7 +17,6 @@ public enum AppSettingsPersistence {
         to url: URL,
         preservingExistingKeys: Bool
     ) throws -> AppSettingsData {
-        var updatedSnapshot = snapshot
         var diskDict: [String: Any]?
 
         if preservingExistingKeys,
@@ -26,17 +25,11 @@ public enum AppSettingsPersistence {
                from: diskData, options: [], format: nil
            ) as? [String: Any] {
             diskDict = plist
-            if let diskDisabledAt = plist["keymappingDisabledAt"] as? NSNumber {
-                let diskValue = diskDisabledAt.floatValue
-                if updatedSnapshot.keymappingDisabledAt != diskValue {
-                    updatedSnapshot.keymappingDisabledAt = diskValue
-                }
-            }
         }
 
         let encoder = PropertyListEncoder()
         encoder.outputFormat = .xml
-        let encodedData = try encoder.encode(updatedSnapshot)
+        let encodedData = try encoder.encode(snapshot)
 
         let outputData: Data
         if preservingExistingKeys,
@@ -47,10 +40,10 @@ public enum AppSettingsPersistence {
             for (key, value) in encodedDict {
                 merged[key] = value
             }
-            if updatedSnapshot.originalBundleName == nil {
+            if snapshot.originalBundleName == nil {
                 merged.removeValue(forKey: "originalBundleName")
             }
-            if updatedSnapshot.originalMinimumOSVersion == nil {
+            if snapshot.originalMinimumOSVersion == nil {
                 merged.removeValue(forKey: "originalMinimumOSVersion")
             }
             outputData = try PropertyListSerialization.data(
@@ -61,7 +54,7 @@ public enum AppSettingsPersistence {
         }
 
         try outputData.write(to: url, options: .atomic)
-        return updatedSnapshot
+        return snapshot
     }
 
     @discardableResult

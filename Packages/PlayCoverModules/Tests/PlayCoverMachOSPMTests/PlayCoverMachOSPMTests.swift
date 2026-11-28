@@ -113,13 +113,40 @@ struct PlayCoverMachOSPMTests {
             .write(to: storeDir.appendingPathComponent("Plugin.manifest.json"))
 
         let signed = Mutex<[String]>([])
-        try PlayTools.syncUserPlugins(from: storeDir, into: targetDir) { url in
+        let changed1 = try PlayTools.syncUserPlugins(from: storeDir, into: targetDir) { url in
             signed.withLock { $0.append(url.lastPathComponent) }
         }
+        #expect(changed1)
         #expect(signed.withLock { $0 } == ["Plugin.dylib"])
         #expect(FileManager.default.fileExists(atPath: targetDir.appendingPathComponent("Plugin.dylib").path))
         let manifestTarget = targetDir.appendingPathComponent("Plugin.manifest.json")
         #expect(FileManager.default.fileExists(atPath: manifestTarget.path))
+
+        // Extra built-in plugin dir must sync cleanly without touching user store
+        let extraDir = tmpDir.appendingPathComponent("CoverUseBridge", isDirectory: true)
+        try FileManager.default.createDirectory(at: extraDir, withIntermediateDirectories: true)
+        try Data([0xCF, 0xFA, 0xED, 0xFE, 0x01]).write(to: extraDir.appendingPathComponent("CoverUseBridge.dylib"))
+        try Data("{\"identifier\":\"app.makedie.macover.plugin.cover-use-bridge\"}".utf8)
+            .write(to: extraDir.appendingPathComponent("PluginManifest.json"))
+
+        let changed2 = try PlayTools.syncUserPlugins(
+            from: storeDir,
+            into: targetDir,
+            extraPluginDirectories: [extraDir]
+        ) { url in
+            signed.withLock { $0.append(url.lastPathComponent) }
+        }
+        #expect(changed2)
+        #expect(FileManager.default.fileExists(
+            atPath: targetDir.appendingPathComponent("CoverUseBridge/CoverUseBridge.dylib").path
+        ))
+        #expect(!FileManager.default.fileExists(
+            atPath: storeDir.appendingPathComponent("CoverUseBridge").path
+        ))
+
+        let changed3 = try PlayTools.syncUserPlugins(from: storeDir, into: targetDir) { _ in }
+        #expect(changed3)
+        #expect(!FileManager.default.fileExists(atPath: targetDir.appendingPathComponent("CoverUseBridge").path))
     }
 
     @Test
@@ -373,6 +400,234 @@ struct PlayCoverMachOSPMTests {
         }
     }
 
+    private func buildSyntheticArm64BinaryWithInstructions(
+        codeWords: [UInt32],
+        dicIndices: [Int] = [],
+        filetype: UInt32 = UInt32(MH_EXECUTE),
+        textSegmentVMAddr: UInt64 = 0x1_0000_0000
+    ) -> (data: Data, textFileStart: Int, dicOffset: Int) {
+        let textFileStart = 0x1000
+        let textSectionVMAddr = textSegmentVMAddr + UInt64(textFileStart)
+        let svcWord = InlineSyscallPatcher.svcInstruction
+        let nopWord: UInt32 = 0xD503_201F
+        var words = codeWords
+        let dicIdx = dicIndices.first ?? words.count
+        if dicIndices.isEmpty {
+            words.append(svcWord)
+        }
+        words.append(nopWord)
+
+        let codeSize = words.count * 4
+        let dataConstFileOffset = 0x2000
+        let linkeditFileOffset = 0x3000
+        let dicTableOffset = linkeditFileOffset
+        let dicTableSize = MemoryLayout<data_in_code_entry>.size
+        let totalSize = 0x4000
+
+        var textSeg = segment_command_64(
+            cmd: UInt32(LC_SEGMENT_64),
+            cmdsize: UInt32(MemoryLayout<segment_command_64>.size + MemoryLayout<section_64>.size),
+            segname: appendFixed16String("__TEXT"),
+            vmaddr: textSegmentVMAddr,
+            vmsize: 0x2000,
+            fileoff: 0,
+            filesize: 0x2000,
+            maxprot: VM_PROT_READ | VM_PROT_EXECUTE,
+            initprot: VM_PROT_READ | VM_PROT_EXECUTE,
+            nsects: 1,
+            flags: 0
+        )
+        var textSect = section_64(
+            sectname: appendFixed16String("__text"),
+            segname: appendFixed16String("__TEXT"),
+            addr: textSectionVMAddr,
+            size: UInt64(codeSize),
+            offset: UInt32(textFileStart),
+            align: 2,
+            reloff: 0,
+            nreloc: 0,
+            flags: UInt32(S_ATTR_PURE_INSTRUCTIONS) | UInt32(S_ATTR_SOME_INSTRUCTIONS),
+            reserved1: 0,
+            reserved2: 0,
+            reserved3: 0
+        )
+
+        var dataSeg = segment_command_64(
+            cmd: UInt32(LC_SEGMENT_64),
+            cmdsize: UInt32(MemoryLayout<segment_command_64>.size + MemoryLayout<section_64>.size),
+            segname: appendFixed16String("__DATA"),
+            vmaddr: textSegmentVMAddr + 0x2000,
+            vmsize: 0x1000,
+            fileoff: UInt64(dataConstFileOffset),
+            filesize: 0x1000,
+            maxprot: VM_PROT_READ | VM_PROT_WRITE,
+            initprot: VM_PROT_READ | VM_PROT_WRITE,
+            nsects: 1,
+            flags: 0
+        )
+        var dataSect = section_64(
+            sectname: appendFixed16String("__const"),
+            segname: appendFixed16String("__DATA"),
+            addr: textSegmentVMAddr + 0x2000,
+            size: 4,
+            offset: UInt32(dataConstFileOffset),
+            align: 2,
+            reloff: 0,
+            nreloc: 0,
+            flags: 0,
+            reserved1: 0,
+            reserved2: 0,
+            reserved3: 0
+        )
+
+        let dicRelOffset = textFileStart + dicIdx * 4
+        var dicCmd = linkedit_data_command(
+            cmd: UInt32(LC_DATA_IN_CODE),
+            cmdsize: UInt32(MemoryLayout<linkedit_data_command>.size),
+            dataoff: UInt32(dicTableOffset),
+            datasize: UInt32(dicTableSize)
+        )
+        var dicEntry = data_in_code_entry(
+            offset: UInt32(dicRelOffset),
+            length: 4,
+            kind: UInt16(DICE_KIND_DATA)
+        )
+        let sizeofCmds = textSeg.cmdsize + dataSeg.cmdsize + dicCmd.cmdsize
+        var mh = mach_header_64(
+            magic: MH_MAGIC_64,
+            cputype: CPU_TYPE_ARM64,
+            cpusubtype: CPU_SUBTYPE_ARM64_ALL,
+            filetype: filetype,
+            ncmds: 3,
+            sizeofcmds: sizeofCmds,
+            flags: 0,
+            reserved: 0
+        )
+
+        var data = Data(count: totalSize)
+        var cursor = 0
+        for item in [
+            withUnsafeBytes(of: &mh) { Data($0) },
+            withUnsafeBytes(of: &textSeg) { Data($0) },
+            withUnsafeBytes(of: &textSect) { Data($0) },
+            withUnsafeBytes(of: &dataSeg) { Data($0) },
+            withUnsafeBytes(of: &dataSect) { Data($0) },
+            withUnsafeBytes(of: &dicCmd) { Data($0) }
+        ] {
+            data.replaceSubrange(cursor..<(cursor + item.count), with: item)
+            cursor += item.count
+        }
+        for (idx, word) in words.enumerated() {
+            var le = word.littleEndian
+            let off = textFileStart + idx * 4
+            withUnsafeBytes(of: &le) { data.replaceSubrange(off..<(off + 4), with: $0) }
+        }
+        var dataConstWord = svcWord.littleEndian
+        withUnsafeBytes(of: &dataConstWord) {
+            data.replaceSubrange(dataConstFileOffset..<(dataConstFileOffset + 4), with: $0)
+        }
+        withUnsafeBytes(of: &dicEntry) {
+            data.replaceSubrange(dicTableOffset..<(dicTableOffset + $0.count), with: $0)
+        }
+        return (data, textFileStart, dicRelOffset)
+    }
+
+    @Test
+    func inlineSyscallPatcherSkipsBenignSyscallsAndUpgradesV1Manifest() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("svc-selective-test-\(UUID().uuidString)")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let appURL = root.appendingPathComponent("SelectApp.app", isDirectory: true)
+        let manifestURL = root.appendingPathComponent("SVCPatches/com.example.select.json")
+        try fm.createDirectory(at: appURL, withIntermediateDirectories: true)
+        let plist = try PropertyListSerialization.data(
+            fromPropertyList: ["CFBundleExecutable": "SelectApp"],
+            format: .xml,
+            options: 0
+        )
+        try plist.write(to: appURL.appendingPathComponent("Info.plist"))
+
+        let svcWord = InlineSyscallPatcher.svcInstruction
+        let brkWord = InlineSyscallPatcher.brkInstruction
+        let nopWord: UInt32 = 0xD503_201F
+        let retWord: UInt32 = 0xD65F_03C0
+        let movW16ThreadSelfId: UInt32 = 0x5280_0010 | (372 << 5) // mov w16, #372
+        let movX16Getpid: UInt32 = 0xD280_0010 | (20 << 5)        // mov x16, #20
+        let movW16Sysctl: UInt32 = 0x5280_0010 | (202 << 5)       // mov w16, #202
+        let movnX16MachMsg: UInt32 = 0x9280_0010 | (30 << 5)     // mov x16, #-31
+        let movX16FromX0: UInt32 = 0xAA00_03F0                    // mov x16, x0
+        let branchToIdx19: UInt32 = 0x1400_0003                   // b +12 (from idx 16 -> idx 19)
+
+        // Layout:
+        // 0: mov w16, #372 -> 1: svc (SKIP)
+        // 2: ret -> 3: mov x16, #20 -> 4: svc (SKIP)
+        // 5: ret -> 6: mov w16, #202 -> 7: nop -> 8: svc (PATCH)
+        // 9: ret -> 10: mov x16, #-31 -> 11: svc (PATCH)
+        // 12: ret -> 13: mov x16, x0 -> 14: svc (PATCH)
+        // 15: ret -> 16: b +12 (jumps to 19) -> 17: mov x16, #20 -> 18: nop -> 19: svc (branch into window -> PATCH)
+        let codeWords: [UInt32] = [
+            movW16ThreadSelfId, svcWord, retWord,
+            movX16Getpid, svcWord, retWord,
+            movW16Sysctl, nopWord, svcWord, retWord,
+            movnX16MachMsg, svcWord, retWord,
+            movX16FromX0, svcWord, retWord,
+            branchToIdx19, movX16Getpid, nopWord, svcWord
+        ]
+        let built = buildSyntheticArm64BinaryWithInstructions(codeWords: codeWords)
+        let execURL = appURL.appendingPathComponent("SelectApp")
+        try built.data.write(to: execURL)
+
+        // Simulate legacy v1 manifest having patched both benign (idx 1, 4) and intercepted (idx 8, 11, 14, 19) sites.
+        let v1SitesIndices = [1, 4, 8, 11, 14, 19]
+        var prePatched = built.data
+        let v1Sites = v1SitesIndices.map { idx -> SVCPatchSite in
+            let fileOff = UInt64(built.textFileStart + idx * 4)
+            var le = brkWord.littleEndian
+            withUnsafeBytes(of: &le) { prePatched.replaceSubrange(Int(fileOff)..<(Int(fileOff) + 4), with: $0) }
+            return SVCPatchSite(
+                sliceOffset: 0,
+                fileOffset: fileOff,
+                vmAddress: 0x1_0000_0000 + fileOff,
+                vmOffset: fileOff
+            )
+        }
+        try prePatched.write(to: execURL)
+        let v1Manifest = SVCPatchManifest(
+            schemaVersion: 1,
+            bundleIdentifier: "com.example.select",
+            files: [SVCPatchedFile(
+                relativePath: "SelectApp",
+                originalSHA256: "orig",
+                patchedSHA256: "patched",
+                sites: v1Sites
+            )]
+        )
+        try FileManager.default.createDirectory(
+            at: manifestURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try JSONEncoder().encode(v1Manifest).write(to: manifestURL)
+
+        let res = try InlineSyscallPatcher.reconcile(
+            appBundleURL: appURL,
+            bundleIdentifier: "com.example.select",
+            manifestURL: manifestURL,
+            enabled: true
+        )
+        #expect(res.modified)
+        #expect(res.patchedSiteCount == 4)
+        for benignIdx in [1, 4] {
+            #expect(try readUInt32LE(from: execURL, at: built.textFileStart + benignIdx * 4) == svcWord)
+        }
+        for patchedIdx in [8, 11, 14, 19] {
+            #expect(try readUInt32LE(from: execURL, at: built.textFileStart + patchedIdx * 4) == brkWord)
+        }
+        let upgraded = try JSONDecoder().decode(SVCPatchManifest.self, from: Data(contentsOf: manifestURL))
+        #expect(upgraded.schemaVersion == 2)
+    }
+
     @Test
     func inlineSyscallPatcherThinAndFatRoundTripAndExclusions() throws {
         let fm = FileManager.default
@@ -456,7 +711,7 @@ struct PlayCoverMachOSPMTests {
 
         let manifestData = try Data(contentsOf: manifestURL)
         let manifest = try JSONDecoder().decode(SVCPatchManifest.self, from: manifestData)
-        #expect(manifest.schemaVersion == 1)
+        #expect(manifest.schemaVersion == SVCPatchManifest.currentSchemaVersion)
         #expect(manifest.bundleIdentifier == "com.example.svc")
         #expect(manifest.originalInstruction == InlineSyscallPatcher.svcInstruction)
         #expect(manifest.patchInstruction == InlineSyscallPatcher.brkInstruction)
@@ -1058,5 +1313,226 @@ struct PlayCoverMachOSPMTests {
             validator: { _ in validations += 1 }
         )
         #expect(thirdInstalled && validations == 2)
+    }
+
+    @Test
+    func syncUserPluginsUsesSHA256WithoutResignThrash() throws {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PlayCoverPluginsSHA-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let storeDir = tmpDir.appendingPathComponent("Store", isDirectory: true)
+        let targetDir = tmpDir.appendingPathComponent("Target", isDirectory: true)
+        try FileManager.default.createDirectory(at: storeDir, withIntermediateDirectories: true)
+
+        let srcDylib = storeDir.appendingPathComponent("Tweak.dylib")
+        try Data([0xCF, 0xFA, 0xED, 0xFE, 0x11, 0x22, 0x33, 0x44]).write(to: srcDylib)
+
+        let signCount = Mutex(0)
+        let simulatingSigner: (URL) throws -> Void = { url in
+            signCount.withLock { $0 += 1 }
+            // Simulate codesign growing the binary size with an ad-hoc signature trailer
+            var bytes = try Data(contentsOf: url)
+            bytes.append(Data(repeating: 0xAA, count: 16))
+            try bytes.write(to: url)
+        }
+
+        let first = try PlayTools.syncUserPlugins(from: storeDir, into: targetDir, signMacho: simulatingSigner)
+        #expect(first)
+        #expect(signCount.withLock { $0 } == 1)
+
+        // Repeat sync with unchanged source must NOT thrash even though target size differs from source
+        let second = try PlayTools.syncUserPlugins(from: storeDir, into: targetDir, signMacho: simulatingSigner)
+        #expect(!second)
+        #expect(signCount.withLock { $0 } == 1)
+
+        // Same-size content rebuild must be detected via SHA-256 and re-synced
+        try Data([0xCF, 0xFA, 0xED, 0xFE, 0x99, 0x88, 0x77, 0x66]).write(to: srcDylib)
+        let third = try PlayTools.syncUserPlugins(from: storeDir, into: targetDir, signMacho: simulatingSigner)
+        #expect(third)
+        #expect(signCount.withLock { $0 } == 2)
+    }
+
+    @Test
+    func inlineSyscallPatcherDetectsWritebackX16AndDistantBranches() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("svc-x16-branch-\(UUID().uuidString)")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let appURL = root.appendingPathComponent("EdgeApp.app", isDirectory: true)
+        let manifestURL = root.appendingPathComponent("SVCPatches/com.example.edge.json")
+        try fm.createDirectory(at: appURL, withIntermediateDirectories: true)
+        try PropertyListSerialization.data(
+            fromPropertyList: ["CFBundleExecutable": "EdgeApp"],
+            format: .xml,
+            options: 0
+        ).write(to: appURL.appendingPathComponent("Info.plist"))
+
+        let svcWord = InlineSyscallPatcher.svcInstruction
+        let brkWord = InlineSyscallPatcher.brkInstruction
+        let nopWord: UInt32 = 0xD503_201F
+        let retWord: UInt32 = 0xD65F_03C0
+        let movX16Getpid: UInt32 = 0xD280_0010 | (20 << 5)
+        // ldr x0, [x16, #8]! (64-bit GP pre-index writeback, Rn = 16 -> clobbers x16)
+        let ldrPreIndexX16: UInt32 = 0xF840_8E00
+        // ldxp x0, x16, [x1] (exclusive pair load with Rt2 = 16 -> clobbers x16)
+        let ldxpRt2X16: UInt32 = 0xC87F_4020
+        // stxr w16, x0, [x1] (store-exclusive status in Ws = 16 -> clobbers w16)
+        let stxrWsX16: UInt32 = 0xC810_7C20
+
+        // Distant branch at idx 0 jumps +1200 instructions (+4800 bytes > 4096) to idx 1200 (the distant svc)
+        let distantBranchTo1200: UInt32 = 0x1400_0000 | 1200
+        var codeWords: [UInt32] = [
+            distantBranchTo1200,
+            movX16Getpid, svcWord, retWord,                         // idx 2: clean benign -> SKIP
+            movX16Getpid, ldrPreIndexX16, svcWord, retWord,         // idx 6: writeback clobbers x16 -> PATCH
+            movX16Getpid, ldxpRt2X16, svcWord, retWord,             // idx 10: ldxp Rt2==16 -> PATCH
+            movX16Getpid, stxrWsX16, svcWord, retWord               // idx 14: stxr Ws==16 -> PATCH
+        ]
+        while codeWords.count < 1198 {
+            codeWords.append(nopWord)
+        }
+        codeWords.append(movX16Getpid)                              // idx 1198
+        codeWords.append(nopWord)                                   // idx 1199
+        codeWords.append(svcWord)                                   // idx 1200: distant branch target -> PATCH
+        codeWords.append(retWord)
+
+        // Build synthetic binary with large enough __TEXT segment (0x4000 bytes for 1202+ instructions)
+        let textFileStart = 0x1000
+        let codeSize = codeWords.count * 4
+        let totalSize = 0x5000
+        var textSeg = segment_command_64(
+            cmd: UInt32(LC_SEGMENT_64),
+            cmdsize: UInt32(MemoryLayout<segment_command_64>.size + MemoryLayout<section_64>.size),
+            segname: appendFixed16String("__TEXT"),
+            vmaddr: 0x1_0000_0000,
+            vmsize: 0x4000,
+            fileoff: 0,
+            filesize: 0x4000,
+            maxprot: VM_PROT_READ | VM_PROT_EXECUTE,
+            initprot: VM_PROT_READ | VM_PROT_EXECUTE,
+            nsects: 1,
+            flags: 0
+        )
+        var textSect = section_64(
+            sectname: appendFixed16String("__text"),
+            segname: appendFixed16String("__TEXT"),
+            addr: 0x1_0000_0000 + UInt64(textFileStart),
+            size: UInt64(codeSize),
+            offset: UInt32(textFileStart),
+            align: 2,
+            reloff: 0,
+            nreloc: 0,
+            flags: UInt32(S_ATTR_PURE_INSTRUCTIONS) | UInt32(S_ATTR_SOME_INSTRUCTIONS),
+            reserved1: 0,
+            reserved2: 0,
+            reserved3: 0
+        )
+        var mh = mach_header_64(
+            magic: MH_MAGIC_64,
+            cputype: CPU_TYPE_ARM64,
+            cpusubtype: CPU_SUBTYPE_ARM64_ALL,
+            filetype: UInt32(MH_EXECUTE),
+            ncmds: 1,
+            sizeofcmds: textSeg.cmdsize,
+            flags: 0,
+            reserved: 0
+        )
+        var bin = Data(count: totalSize)
+        var cursor = 0
+        for item in [
+            withUnsafeBytes(of: &mh) { Data($0) },
+            withUnsafeBytes(of: &textSeg) { Data($0) },
+            withUnsafeBytes(of: &textSect) { Data($0) }
+        ] {
+            bin.replaceSubrange(cursor..<(cursor + item.count), with: item)
+            cursor += item.count
+        }
+        for (idx, word) in codeWords.enumerated() {
+            var le = word.littleEndian
+            let off = textFileStart + idx * 4
+            withUnsafeBytes(of: &le) { bin.replaceSubrange(off..<(off + 4), with: $0) }
+        }
+        let execURL = appURL.appendingPathComponent("EdgeApp")
+        try bin.write(to: execURL)
+
+        let res = try InlineSyscallPatcher.reconcile(
+            appBundleURL: appURL,
+            bundleIdentifier: "com.example.edge",
+            manifestURL: manifestURL,
+            enabled: true
+        )
+        #expect(res.modified)
+        #expect(res.patchedSiteCount == 4)
+        #expect(try readUInt32LE(from: execURL, at: textFileStart + 2 * 4) == svcWord)
+        for patchedIdx in [6, 10, 14, 1200] {
+            #expect(try readUInt32LE(from: execURL, at: textFileStart + patchedIdx * 4) == brkWord)
+        }
+    }
+
+    @Test
+    func machoPrefersArm64SliceOverPrecedingArm64EInFatBinary() throws {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MachOArm64Pref-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let arm64eIOS = makeSyntheticArm64MachO(platform: UInt32(PLATFORM_IOS))
+        let arm64Catalyst = makeSyntheticArm64MachO(platform: UInt32(PLATFORM_MACCATALYST))
+        let fat = buildFatBinaryWithArm64EAndArm64(arm64eSlice: arm64eIOS, arm64Slice: arm64Catalyst)
+        let fatURL = tmpDir.appendingPathComponent("UniversalBin")
+        try fat.data.write(to: fatURL)
+
+        let inspected = try Macho.inspectBinary(atURL: fatURL, playToolsPath: PlayTools.playToolsPath.path)
+        #expect(inspected.isCatalyst)
+
+        var strippedData = fat.data
+        try Macho.stripBinary(&strippedData)
+        #expect(strippedData == arm64Catalyst)
+        let strippedURL = tmpDir.appendingPathComponent("StrippedBin")
+        try strippedData.write(to: strippedURL)
+        #expect(try Macho.isMachoValidArch(strippedURL))
+    }
+
+    @Test
+    func ensureBuiltInCoverUseBridgeInstalledStagesAndCaches() throws {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("BridgeInstall-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let bundled = tmpDir.appendingPathComponent("Bundled/CoverUseBridge", isDirectory: true)
+        let installed = tmpDir.appendingPathComponent("Installed/BuiltInPlugins/CoverUseBridge", isDirectory: true)
+        try FileManager.default.createDirectory(at: bundled, withIntermediateDirectories: true)
+        try Data("{\"identifier\":\"cover-use-bridge\"}".utf8)
+            .write(to: bundled.appendingPathComponent("PluginManifest.json"))
+        try Data([0xCF, 0xFA, 0xED, 0xFE, 0x01]).write(to: bundled.appendingPathComponent("CoverUseBridge.dylib"))
+
+        let signCount = Mutex(0)
+        let first = try PlayTools.ensureBuiltInCoverUseBridgeInstalled(
+            bundledBridgeDirectory: bundled,
+            installedBridgeDirectory: installed,
+            signMacho: { _ in signCount.withLock { $0 += 1 } }
+        )
+        #expect(first == installed)
+        #expect(signCount.withLock { $0 } == 1)
+
+        let second = try PlayTools.ensureBuiltInCoverUseBridgeInstalled(
+            bundledBridgeDirectory: bundled,
+            installedBridgeDirectory: installed,
+            signMacho: { _ in signCount.withLock { $0 += 1 } }
+        )
+        #expect(second == installed)
+        #expect(signCount.withLock { $0 } == 1)
+
+        try Data([0xCF, 0xFA, 0xED, 0xFE, 0x02]).write(to: bundled.appendingPathComponent("CoverUseBridge.dylib"))
+        _ = try PlayTools.ensureBuiltInCoverUseBridgeInstalled(
+            bundledBridgeDirectory: bundled,
+            installedBridgeDirectory: installed,
+            signMacho: { _ in signCount.withLock { $0 += 1 } }
+        )
+        #expect(signCount.withLock { $0 } == 2)
     }
 }

@@ -24,21 +24,30 @@ public final class KeyCoverPreferences: @unchecked Sendable {
     @ObservationIgnored private let userDefaults: UserDefaults
     @ObservationIgnored private let stateLock: Mutex<State>
 
+    private func notifyMutation<T>(_ keyPath: KeyPath<KeyCoverPreferences, T> & Sendable) {
+        if Thread.isMainThread {
+            withMutation(keyPath: keyPath) {}
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.withMutation(keyPath: keyPath) {}
+            }
+        }
+    }
+
     public var keyCoverEnabled: KeyCoverStatus {
         get {
             access(keyPath: \.keyCoverEnabled)
             return stateLock.withLock { $0.keyCoverEnabled }
         }
         set {
-            withMutation(keyPath: \.keyCoverEnabled) {
-                let changed = stateLock.withLock { state -> Bool in
-                    guard state.keyCoverEnabled != newValue else { return false }
-                    state.keyCoverEnabled = newValue
-                    return true
-                }
-                if changed {
-                    userDefaults.set(newValue.rawValue, forKey: Keys.keyCoverEnabled)
-                }
+            let changed = stateLock.withLock { state -> Bool in
+                guard state.keyCoverEnabled != newValue else { return false }
+                state.keyCoverEnabled = newValue
+                return true
+            }
+            if changed {
+                userDefaults.set(newValue.rawValue, forKey: Keys.keyCoverEnabled)
+                notifyMutation(\.keyCoverEnabled)
             }
         }
     }
@@ -49,15 +58,14 @@ public final class KeyCoverPreferences: @unchecked Sendable {
             return stateLock.withLock { $0.promptForKeyCoverPasswordAtLaunch }
         }
         set {
-            withMutation(keyPath: \.promptForKeyCoverPasswordAtLaunch) {
-                let changed = stateLock.withLock { state -> Bool in
-                    guard state.promptForKeyCoverPasswordAtLaunch != newValue else { return false }
-                    state.promptForKeyCoverPasswordAtLaunch = newValue
-                    return true
-                }
-                if changed {
-                    userDefaults.set(newValue, forKey: Keys.promptAtLaunch)
-                }
+            let changed = stateLock.withLock { state -> Bool in
+                guard state.promptForKeyCoverPasswordAtLaunch != newValue else { return false }
+                state.promptForKeyCoverPasswordAtLaunch = newValue
+                return true
+            }
+            if changed {
+                userDefaults.set(newValue, forKey: Keys.promptAtLaunch)
+                notifyMutation(\.promptForKeyCoverPasswordAtLaunch)
             }
         }
     }
@@ -90,53 +98,122 @@ public final class InstallPreferences: @unchecked Sendable {
         static let showAppStorePopup = "ShowAppStorePopup"
     }
 
+    private struct State: Sendable {
+        var alwaysInstallPlayTools: Bool
+        var defaultAppType: LSApplicationCategoryType
+        var showInstallPopup: Bool
+        var showAppStorePopup: Bool
+    }
+
     @ObservationIgnored private let userDefaults: UserDefaults
+    @ObservationIgnored private let stateLock: Mutex<State>
+
+    private func notifyMutation<T>(_ keyPath: KeyPath<InstallPreferences, T> & Sendable) {
+        if Thread.isMainThread {
+            withMutation(keyPath: keyPath) {}
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.withMutation(keyPath: keyPath) {}
+            }
+        }
+    }
 
     public var alwaysInstallPlayTools: Bool {
-        didSet {
-            guard oldValue != alwaysInstallPlayTools else { return }
-            userDefaults.set(alwaysInstallPlayTools, forKey: Keys.alwaysInstallPlayTools)
+        get {
+            access(keyPath: \.alwaysInstallPlayTools)
+            return stateLock.withLock { $0.alwaysInstallPlayTools }
+        }
+        set {
+            let changed = stateLock.withLock { state -> Bool in
+                guard state.alwaysInstallPlayTools != newValue else { return false }
+                state.alwaysInstallPlayTools = newValue
+                return true
+            }
+            if changed {
+                userDefaults.set(newValue, forKey: Keys.alwaysInstallPlayTools)
+                notifyMutation(\.alwaysInstallPlayTools)
+            }
         }
     }
 
     public var defaultAppType: LSApplicationCategoryType {
-        didSet {
-            guard oldValue != defaultAppType else { return }
-            userDefaults.set(defaultAppType.rawValue, forKey: Keys.defaultAppType)
+        get {
+            access(keyPath: \.defaultAppType)
+            return stateLock.withLock { $0.defaultAppType }
+        }
+        set {
+            let changed = stateLock.withLock { state -> Bool in
+                guard state.defaultAppType != newValue else { return false }
+                state.defaultAppType = newValue
+                return true
+            }
+            if changed {
+                userDefaults.set(newValue.rawValue, forKey: Keys.defaultAppType)
+                notifyMutation(\.defaultAppType)
+            }
         }
     }
 
     public var showInstallPopup: Bool {
-        didSet {
-            guard oldValue != showInstallPopup else { return }
-            userDefaults.set(showInstallPopup, forKey: Keys.showInstallPopup)
+        get {
+            access(keyPath: \.showInstallPopup)
+            return stateLock.withLock { $0.showInstallPopup }
+        }
+        set {
+            let changed = stateLock.withLock { state -> Bool in
+                guard state.showInstallPopup != newValue else { return false }
+                state.showInstallPopup = newValue
+                return true
+            }
+            if changed {
+                userDefaults.set(newValue, forKey: Keys.showInstallPopup)
+                notifyMutation(\.showInstallPopup)
+            }
         }
     }
 
     public var showAppStorePopup: Bool {
-        didSet {
-            guard oldValue != showAppStorePopup else { return }
-            userDefaults.set(showAppStorePopup, forKey: Keys.showAppStorePopup)
+        get {
+            access(keyPath: \.showAppStorePopup)
+            return stateLock.withLock { $0.showAppStorePopup }
+        }
+        set {
+            let changed = stateLock.withLock { state -> Bool in
+                guard state.showAppStorePopup != newValue else { return false }
+                state.showAppStorePopup = newValue
+                return true
+            }
+            if changed {
+                userDefaults.set(newValue, forKey: Keys.showAppStorePopup)
+                notifyMutation(\.showAppStorePopup)
+            }
         }
     }
 
     public init(userDefaults: UserDefaults = .standard) {
         self.userDefaults = userDefaults
-        self.alwaysInstallPlayTools = userDefaults.object(forKey: Keys.alwaysInstallPlayTools) != nil
+        let initialAlways = userDefaults.object(forKey: Keys.alwaysInstallPlayTools) != nil
             ? userDefaults.bool(forKey: Keys.alwaysInstallPlayTools)
             : true
+        let initialCategory: LSApplicationCategoryType
         if let raw = userDefaults.string(forKey: Keys.defaultAppType),
            let category = LSApplicationCategoryType(rawValue: raw) {
-            self.defaultAppType = category
+            initialCategory = category
         } else {
-            self.defaultAppType = .none
+            initialCategory = .none
         }
-        self.showInstallPopup = userDefaults.object(forKey: Keys.showInstallPopup) != nil
+        let initialInstallPopup = userDefaults.object(forKey: Keys.showInstallPopup) != nil
             ? userDefaults.bool(forKey: Keys.showInstallPopup)
             : false
-        self.showAppStorePopup = userDefaults.object(forKey: Keys.showAppStorePopup) != nil
+        let initialAppStorePopup = userDefaults.object(forKey: Keys.showAppStorePopup) != nil
             ? userDefaults.bool(forKey: Keys.showAppStorePopup)
             : true
+        self.stateLock = Mutex(State(
+            alwaysInstallPlayTools: initialAlways,
+            defaultAppType: initialCategory,
+            showInstallPopup: initialInstallPopup,
+            showAppStorePopup: initialAppStorePopup
+        ))
     }
 }
 

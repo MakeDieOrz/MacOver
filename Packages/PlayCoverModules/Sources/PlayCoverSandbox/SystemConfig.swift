@@ -16,7 +16,9 @@ public class SystemConfig {
         set { isFirstTimePlaySignLock.withLock { $0 = newValue } }
     }
 
-    public static let isPlaySignActive: Bool = isSIPDisabled() && isRunningAMFIEnabled()
+    public static var isPlaySignActive: Bool {
+        isSIPDisabled() && isRunningAMFIEnabled()
+    }
 
     public static func preFlightStatus() -> PrivilegePreFlightStatus {
         DualTrackPrivilegeEscalator.preFlightStatus()
@@ -29,7 +31,7 @@ public class SystemConfig {
     public static func isSIPDisabled() -> Bool {
         do {
             let check = try Shell.run("/usr/bin/csrutil", "status")
-            return check.contains("unknown") || check.contains("disabled")
+            return DualTrackPrivilegeEscalator.parseSIPDisabled(from: check)
         } catch {
             return false
         }
@@ -38,10 +40,7 @@ public class SystemConfig {
     public static func isPRAMValid() -> Bool {
         do {
             let check = try Shell.run("/usr/sbin/nvram", "boot-args")
-            for option in NVRAM_OPTIONS where check.contains(option) {
-                return true
-            }
-            return false
+            return DualTrackPrivilegeEscalator.hasAMFIBootArg(in: check)
         } catch {
             return false
         }
@@ -61,13 +60,6 @@ public class SystemConfig {
             bytes: buffer.prefix(endIndex).map { UInt8(bitPattern: $0) },
             encoding: .utf8
         ) ?? ""
-        return NVRAM_OPTIONS.contains { bootArgs.contains($0) }
+        return DualTrackPrivilegeEscalator.hasAMFIBootArg(in: bootArgs)
     }
-
-    private static let NVRAM_OPTIONS = [
-        "amfi_get_out_of_my_way=1",
-        "amfi_get_out_of_my_way=0x1",
-        "amfi_get_out_of_my_way=1 ipc_control_port_options=0",
-        "amfi_get_out_of_my_way=0x1 ipc_control_port_options=0"
-    ]
 }

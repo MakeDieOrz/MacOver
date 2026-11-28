@@ -9,8 +9,10 @@ public final class TrafficCaptureStore: Sendable {
     private struct Storage {
         var entries: [MITMCaptureEntry] = []
         var observers: [UUID: @Sendable ([MITMCaptureEntry]) -> Void] = [:]
+        var observerOrder: [UUID] = []
     }
 
+    private static let maxObservers = 64
     private let storage = Mutex<Storage>(Storage())
 
     public init(bundleID: String, maxEntries: Int = 2000, maxBodyBytes: Int = 512 * 1024) {
@@ -96,8 +98,8 @@ public final class TrafficCaptureStore: Sendable {
         }
     }
 
-    public func exportHAR(appVersion: String = "1.0.8") throws -> Data {
-        try HARExporter.export(entries: entries(), appVersion: appVersion)
+    public func exportHAR(appVersion: String = "1.0.8", redactSensitive: Bool = true) throws -> Data {
+        try HARExporter.export(entries: entries(), appVersion: appVersion, redactSensitive: redactSensitive)
     }
 
     public func updates() -> AsyncStream<[MITMCaptureEntry]> {
@@ -107,12 +109,18 @@ public final class TrafficCaptureStore: Sendable {
                 state.observers[token] = { snapshot in
                     continuation.yield(snapshot)
                 }
+                state.observerOrder.append(token)
+                while state.observerOrder.count > Self.maxObservers {
+                    let evicted = state.observerOrder.removeFirst()
+                    state.observers.removeValue(forKey: evicted)
+                }
                 return state.entries
             }
             continuation.yield(initial)
             continuation.onTermination = { [weak self] _ in
                 self?.storage.withLock { state in
                     _ = state.observers.removeValue(forKey: token)
+                    state.observerOrder.removeAll { $0 == token }
                 }
             }
         }

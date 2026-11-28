@@ -155,6 +155,8 @@ public struct MITMServerConfiguration: Equatable, Sendable {
     public var blockedURLPatterns: [String]
     public var captureBodies: Bool
     public var hostOverrides: [String: String]
+    public var blockLoopbackTargets: Bool
+    public var requiredProxyAuthToken: String?
 
     public init(
         bundleID: String,
@@ -165,7 +167,9 @@ public struct MITMServerConfiguration: Equatable, Sendable {
         networkBlockMock200: Bool = true,
         blockedURLPatterns: [String] = [],
         captureBodies: Bool = true,
-        hostOverrides: [String: String] = [:]
+        hostOverrides: [String: String] = [:],
+        blockLoopbackTargets: Bool = false,
+        requiredProxyAuthToken: String? = nil
     ) {
         self.bundleID = bundleID
         self.listenPort = listenPort
@@ -176,6 +180,8 @@ public struct MITMServerConfiguration: Equatable, Sendable {
         self.blockedURLPatterns = blockedURLPatterns
         self.captureBodies = captureBodies
         self.hostOverrides = hostOverrides
+        self.blockLoopbackTargets = blockLoopbackTargets
+        self.requiredProxyAuthToken = requiredProxyAuthToken
     }
 }
 
@@ -328,21 +334,235 @@ public enum HARExporter {
         let receive: Double
     }
 
-    public static func export(entries: [MITMCaptureEntry], appVersion: String = "1.0.8") throws -> Data {
+    private static let redactedPlaceholder = "[REDACTED]"
+
+    private static let sensitiveHeaderExactNames: Set<String> = [
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+        "x-api-key",
+        "api-key",
+        "x-auth-token",
+        "x-csrf-token",
+        "x-xsrf-token",
+        "x-session-token",
+        "x-access-token",
+        "x-secret"
+    ]
+
+    private static let sensitiveKeySubstrings: [String] = [
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "apikey",
+        "api_key",
+        "api-key",
+        "auth",
+        "credential",
+        "session",
+        "cookie",
+        "private_key",
+        "private-key"
+    ]
+
+    private static let sensitiveQueryExactNames: Set<String> = [
+        "key",
+        "sig",
+        "signature",
+        "code",
+        "otp",
+        "pwd",
+        "sid",
+        "jwt",
+        "bearer",
+        "ticket"
+    ]
+
+    private static func isSensitiveHeaderName(_ name: String) -> Bool {
+        let lower = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if sensitiveHeaderExactNames.contains(lower) {
+            return true
+        }
+        return sensitiveKeySubstrings.contains { lower.contains($0) }
+    }
+
+    private static func isSensitiveKeyName(_ name: String) -> Bool {
+        let lower = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if sensitiveQueryExactNames.contains(lower) {
+            return true
+        }
+        return sensitiveKeySubstrings.contains { lower.contains($0) }
+    }
+
+    private static func redactURLString(_ urlString: String) -> String {
+        guard var comps = URLComponents(string: urlString) else {
+            return redactMalformedURL(urlString)
+        }
+        if comps.user != nil {
+            comps.user = redactedPlaceholder
+        }
+        if comps.password != nil {
+            comps.password = redactedPlaceholder
+        }
+        if let items = comps.queryItems, !items.isEmpty {
+            comps.queryItems = items.map { item in
+                if isSensitiveKeyName(item.name) {
+                    return URLQueryItem(name: item.name, value: redactedPlaceholder)
+                }
+                return item
+            }
+        }
+        if let frag = comps.fragment, frag.contains("=") {
+            comps.fragment = redactedPlaceholder
+        }
+        return comps.string ?? urlString
+    }
+
+    private static func redactMalformedURL(_ raw: String) -> String {
+        guard let qIdx = raw.firstIndex(of: "?") else { return raw }
+        let prefix = String(raw[..<qIdx])
+        let queryAndFrag = String(raw[raw.index(after: qIdx)...])
+        let parts = queryAndFrag.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)
+        let query = String(parts[0])
+        let redactedParams = query.split(separator: "&", omittingEmptySubsequences: false).map { pair -> String in
+            let kv = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard kv.count == 2 else { return String(pair) }
+            let key = String(kv[0])
+            if isSensitiveKeyName(key) {
+                return "\(key)=\(redactedPlaceholder)"
+            }
+            return String(pair)
+        }.joined(separator: "&")
+        if parts.count == 2 {
+            let frag = String(parts[1])
+            return "\(prefix)?\(redactedParams)#\(frag.contains("=") ? redactedPlaceholder : frag)"
+        }
+        return "\(prefix)?\(redactedParams)"
+    }
+
+    private static func redactJSONValue(_ value: Any) -> Any {
+        if let dict = value as? [String: Any] {
+            var out: [String: Any] = [:]
+            out.reserveCapacity(dict.count)
+            for (k, v) in dict {
+                if isSensitiveKeyName(k) {
+                    out[k] = redactedPlaceholder
+                } else {
+                    out[k] = redactJSONValue(v)
+                }
+            }
+            return out
+        }
+        if let arr = value as? [Any] {
+            return arr.map { redactJSONValue($0) }
+        }
+        if let str = value as? String {
+            if str.contains("://") && (str.contains("?") || str.contains("@") || str.contains("#")) {
+                return redactURLString(str)
+            }
+            return str
+        }
+        return value
+    }
+
+    private static func redactBodyText(_ text: String, mimeType: String) -> String {
+        let lowerMime = mimeType.lowercased()
+        if lowerMime.contains("json"),
+           let data = text.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
+            let sanitized = redactJSONValue(obj)
+            if JSONSerialization.isValidJSONObject(sanitized),
+               let encoded = try? JSONSerialization.data(withJSONObject: sanitized, options: [.sortedKeys]),
+               let redactedStr = String(data: encoded, encoding: .utf8) {
+                return redactedStr
+            }
+        }
+        if lowerMime.contains("x-www-form-urlencoded") {
+            return text.split(separator: "&", omittingEmptySubsequences: false).map { pair -> String in
+                let kv = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                guard kv.count == 2 else { return String(pair) }
+                let key = String(kv[0])
+                let decodedKey = key.removingPercentEncoding ?? key
+                if isSensitiveKeyName(decodedKey) {
+                    return "\(key)=\(redactedPlaceholder)"
+                }
+                return String(pair)
+            }.joined(separator: "&")
+        }
+        if text.contains("://"),
+           let urlRegex = try? NSRegularExpression(
+               pattern: #"[A-Za-z][A-Za-z0-9+.-]*://[^\s"'<>()\[\]{}]+"#
+           ) {
+            let nsText = text as NSString
+            let matches = urlRegex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
+            if !matches.isEmpty {
+                let mutable = NSMutableString(string: text)
+                for match in matches.reversed() {
+                    let candidate = nsText.substring(with: match.range)
+                    if candidate.contains("?") || candidate.contains("@") || candidate.contains("#") {
+                        mutable.replaceCharacters(in: match.range, with: redactURLString(candidate))
+                    }
+                }
+                return mutable as String
+            }
+        }
+        return text
+    }
+
+    private static func redactHeaderValue(name: String, value: String) -> String {
+        if isSensitiveHeaderName(name) {
+            return redactedPlaceholder
+        }
+        let lower = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if lower == "location" || lower == "referer" || lower == "referrer"
+            || (value.contains("://") && (value.contains("?") || value.contains("@") || value.contains("#"))) {
+            return redactURLString(value)
+        }
+        return value
+    }
+
+    public static func export(
+        entries: [MITMCaptureEntry],
+        appVersion: String = "1.0.8",
+        redactSensitive: Bool = true
+    ) throws -> Data {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 
         let harEntries: [HAREntry] = entries.map { entry in
             let reqHeaders = entry.requestHeaders.sorted { $0.key < $1.key }
-                .map { HARHeader(name: $0.key, value: $0.value) }
+                .map { pair in
+                    HARHeader(
+                        name: pair.key,
+                        value: redactSensitive
+                            ? redactHeaderValue(name: pair.key, value: pair.value)
+                            : pair.value
+                    )
+                }
             let respHeaders = entry.responseHeaders.sorted { $0.key < $1.key }
-                .map { HARHeader(name: $0.key, value: $0.value) }
+                .map { pair in
+                    HARHeader(
+                        name: pair.key,
+                        value: redactSensitive
+                            ? redactHeaderValue(name: pair.key, value: pair.value)
+                            : pair.value
+                    )
+                }
+
+            let exportedURL = redactSensitive ? redactURLString(entry.urlString) : entry.urlString
 
             let queryParams: [HARQueryParam] = {
                 guard let comps = URLComponents(string: entry.urlString), let items = comps.queryItems else {
                     return []
                 }
-                return items.map { HARQueryParam(name: $0.name, value: $0.value ?? "") }
+                return items.map { item in
+                    let val = (redactSensitive && isSensitiveKeyName(item.name))
+                        ? redactedPlaceholder
+                        : (item.value ?? "")
+                    return HARQueryParam(name: item.name, value: val)
+                }
             }()
 
             let reqMime = HTTPBodyDecoder.headerValue(
@@ -352,8 +572,15 @@ public enum HARExporter {
             let postData: HARPostData? = entry.requestBody.flatMap { body -> HARPostData? in
                 guard !body.isEmpty else { return nil }
                 let decoded = HTTPBodyDecoder.decode(body, headers: entry.requestHeaders)
-                let text = HTTPBodyDecoder.decodeText(decoded.data, contentType: reqMime)
-                    ?? decoded.data.base64EncodedString()
+                let rawText = HTTPBodyDecoder.decodeText(decoded.data, contentType: reqMime)
+                let text: String
+                if let rawText {
+                    text = redactSensitive ? redactBodyText(rawText, mimeType: reqMime) : rawText
+                } else if redactSensitive {
+                    text = redactedPlaceholder
+                } else {
+                    text = decoded.data.base64EncodedString()
+                }
                 return HARPostData(mimeType: reqMime, text: text)
             }
 
@@ -367,11 +594,19 @@ public enum HARExporter {
                 respContent = HARContent(size: 0, mimeType: respMime, text: "", encoding: nil)
             } else {
                 let decodedResp = HTTPBodyDecoder.decode(respBody, headers: entry.responseHeaders)
-                if let text = HTTPBodyDecoder.decodeText(decodedResp.data, contentType: respMime) {
+                if let rawText = HTTPBodyDecoder.decodeText(decodedResp.data, contentType: respMime) {
+                    let text = redactSensitive ? redactBodyText(rawText, mimeType: respMime) : rawText
                     respContent = HARContent(
                         size: decodedResp.data.count,
                         mimeType: respMime,
                         text: text,
+                        encoding: nil
+                    )
+                } else if redactSensitive {
+                    respContent = HARContent(
+                        size: decodedResp.data.count,
+                        mimeType: respMime,
+                        text: redactedPlaceholder,
                         encoding: nil
                     )
                 } else {
@@ -389,12 +624,20 @@ public enum HARExporter {
                 ? HTTPURLResponse.localizedString(forStatusCode: status)
                 : entry.disposition.rawValue
 
+            let rawRedirect = HTTPBodyDecoder.headerValue(
+                named: "location",
+                in: entry.responseHeaders
+            ) ?? ""
+            let exportedRedirect = (redactSensitive && !rawRedirect.isEmpty)
+                ? redactURLString(rawRedirect)
+                : rawRedirect
+
             return HAREntry(
                 startedDateTime: formatter.string(from: entry.timestamp),
                 time: max(0, entry.durationMs),
                 request: HARRequest(
                     method: entry.method,
-                    url: entry.urlString,
+                    url: exportedURL,
                     httpVersion: "HTTP/1.1",
                     headers: reqHeaders,
                     queryString: queryParams,
@@ -408,10 +651,7 @@ public enum HARExporter {
                     httpVersion: "HTTP/1.1",
                     headers: respHeaders,
                     content: respContent,
-                    redirectURL: HTTPBodyDecoder.headerValue(
-                        named: "location",
-                        in: entry.responseHeaders
-                    ) ?? "",
+                    redirectURL: exportedRedirect,
                     headersSize: -1,
                     bodySize: respBody.count
                 ),

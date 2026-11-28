@@ -53,6 +53,7 @@ public struct AppSettingsData: Codable, Equatable, Sendable {
     public var blockSleepSpamming = false
     public var ignoreUnityKeyboardInitializationError = false
     public var interceptInlineSyscalls = false
+    public var enableAutomationBridge = false
     public var enableNetworkRules = false
     public var networkBlockMock200 = true
     public var blockedURLPatterns: [String] = []
@@ -134,6 +135,9 @@ public struct AppSettingsData: Codable, Equatable, Sendable {
         )) ?? false
         interceptInlineSyscalls = (try? container.decodeIfPresent(
             Bool.self, forKey: .interceptInlineSyscalls
+        )) ?? false
+        enableAutomationBridge = (try? container.decodeIfPresent(
+            Bool.self, forKey: .enableAutomationBridge
         )) ?? false
         enableNetworkRules = (try? container.decodeIfPresent(Bool.self, forKey: .enableNetworkRules)) ?? false
         networkBlockMock200 = (try? container.decodeIfPresent(Bool.self, forKey: .networkBlockMock200)) ?? true
@@ -320,6 +324,112 @@ public struct AppSettingsData: Codable, Equatable, Sendable {
         effectivePixelBudget()
     }
 
+    public static func normalizedDimensions(
+        resolution: Int,
+        aspectRatio: Int,
+        customWidth: Int,
+        customHeight: Int,
+        autoResolution: (width: Int, height: Int) = (1920, 1080)
+    ) -> (width: Int, height: Int) {
+        func widthForAspect(_ ratioTag: Int, height: Int) -> Int {
+            let ratio: (width: Int, height: Int)
+            switch ratioTag {
+            case 0: ratio = (4, 3)
+            case 2: ratio = (16, 10)
+            default: ratio = (16, 9)
+            }
+            return (height / ratio.height) * ratio.width
+        }
+        switch resolution {
+        case 1:
+            return autoResolution
+        case 2:
+            return (widthForAspect(aspectRatio, height: 1080), 1080)
+        case 3:
+            return (widthForAspect(aspectRatio, height: 1440), 1440)
+        case 4:
+            return (widthForAspect(aspectRatio, height: 2160), 2160)
+        case 5:
+            return (max(1, customWidth), max(1, customHeight))
+        default:
+            return (max(1, customWidth), max(1, customHeight))
+        }
+    }
+
+    public static func normalizedResizableAspectRatio(
+        type: Int,
+        customWidth: Int,
+        customHeight: Int
+    ) -> (width: Int, height: Int) {
+        switch type {
+        case 0:
+            return (0, 0)
+        case 1:
+            return (max(1, customWidth), max(1, customHeight))
+        case 2:
+            return (4, 3)
+        case 3:
+            return (16, 9)
+        case 4:
+            return (16, 10)
+        default:
+            return (16, 9)
+        }
+    }
+
+    public mutating func normalizeDisplaySettings(
+        previous: AppSettingsData? = nil,
+        autoResolution: (width: Int, height: Int)? = nil
+    ) {
+        guard !strictEmulationMode else { return }
+
+        let resolutionChanged = previous == nil || resolution != previous?.resolution
+        let aspectRatioChanged = previous == nil || aspectRatio != previous?.aspectRatio
+        let sizeExplicitlyChanged = previous != nil && (
+            windowWidth != previous?.windowWidth || windowHeight != previous?.windowHeight
+        )
+        if (resolutionChanged || aspectRatioChanged) && !sizeExplicitlyChanged {
+            switch resolution {
+            case 1:
+                if let autoResolution {
+                    windowWidth = autoResolution.width
+                    windowHeight = autoResolution.height
+                }
+            case 2, 3, 4:
+                let dims = Self.normalizedDimensions(
+                    resolution: resolution,
+                    aspectRatio: aspectRatio,
+                    customWidth: windowWidth,
+                    customHeight: windowHeight
+                )
+                windowWidth = dims.width
+                windowHeight = dims.height
+            case 5:
+                windowWidth = max(1, windowWidth)
+                windowHeight = max(1, windowHeight)
+            default:
+                break
+            }
+        } else if resolution == 5 {
+            windowWidth = max(1, windowWidth)
+            windowHeight = max(1, windowHeight)
+        }
+
+        let resizableTypeChanged = previous == nil || resizableAspectRatioType != previous?.resizableAspectRatioType
+        if resizableTypeChanged {
+            let pair = Self.normalizedResizableAspectRatio(
+                type: resizableAspectRatioType,
+                customWidth: resizableAspectRatioWidth,
+                customHeight: resizableAspectRatioHeight
+            )
+            resizableAspectRatioWidth = pair.width
+            resizableAspectRatioHeight = pair.height
+        } else if resizableAspectRatioType == 0 {
+            resizableAspectRatioWidth = 0
+            resizableAspectRatioHeight = 0
+        }
+    }
+
     public func restartRequiredChanges(comparedTo snapshot: AppSettingsData) -> [PlayCoverRestartField] {
         var changed: [PlayCoverRestartField] = []
         if iosDeviceModel != snapshot.iosDeviceModel { changed.append(.iosDeviceModel) }
@@ -380,6 +490,15 @@ public struct AppSettingsData: Codable, Equatable, Sendable {
             mitmPort != snapshot.mitmPort {
             changed.append(.networkProxy)
         }
+        if enableCustomCertificates != snapshot.enableCustomCertificates {
+            changed.append(.enableCustomCertificates)
+        }
+        if mitmAllowPinningBypass != snapshot.mitmAllowPinningBypass {
+            changed.append(.mitmAllowPinningBypass)
+        }
+        if hideProxyFromApp != snapshot.hideProxyFromApp {
+            changed.append(.hideProxyFromApp)
+        }
         if keymapping != snapshot.keymapping || rightClickLongPress != snapshot.rightClickLongPress {
             changed.append(.keymapping)
         }
@@ -390,6 +509,9 @@ public struct AppSettingsData: Codable, Equatable, Sendable {
         }
         if effectiveInterceptInlineSyscalls != snapshot.effectiveInterceptInlineSyscalls {
             changed.append(.interceptInlineSyscalls)
+        }
+        if enableAutomationBridge != snapshot.enableAutomationBridge {
+            changed.append(.enableAutomationBridge)
         }
         return changed
     }

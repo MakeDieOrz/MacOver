@@ -127,4 +127,38 @@ struct PlayCoverUISPMTests {
         #expect(vm.inProgress)
         #expect(vm.status == .start)
     }
+
+    @Test
+    @MainActor
+    func toastVMOffMainShowAndImmediateDismissLeavesNoOrphanAndPrefsConcurrentSafe() async throws {
+        let toastVM = ToastVM()
+        let dismissedID = await Task.detached { () -> UUID in
+            let id = toastVM.showToast(toastType: .error, toastDetails: "Transient", timeRemaining: 5)
+            return id
+        }.value
+        toastVM.dismiss(id: dismissedID)
+        // Allow any queued MainActor showToast task to drain
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(toastVM.toasts.isEmpty)
+        #expect(!toastVM.hasToast(ofType: .error))
+
+        let suiteName = "PlayCoverUISPMTests.Concurrent.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let prefs = InstallPreferences(userDefaults: defaults)
+        await withTaskGroup(of: Void.self) { group in
+            for idx in 0..<16 {
+                group.addTask {
+                    prefs.showInstallPopup = (idx % 2 == 0)
+                    prefs.alwaysInstallPlayTools = (idx % 3 == 0)
+                    _ = prefs.showAppStorePopup
+                    _ = prefs.defaultAppType
+                }
+            }
+        }
+        _ = prefs.showInstallPopup
+    }
 }

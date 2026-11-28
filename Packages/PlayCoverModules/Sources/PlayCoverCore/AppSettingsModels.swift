@@ -447,6 +447,79 @@ public enum ReportedIOSVersionMode: String, Codable, CaseIterable, Equatable, Se
     public static let compat13_7KernelRelease = "19.6.0"
     public static let ios13CompatibleModels: Set<String> = ["iPad6,7", "iPad8,6", "iPhone12,5"]
 
+    private struct DeviceIOSProfile: Sendable {
+        let model: String
+        let isIPad: Bool
+        let minIOSMajor: Int
+        let maxIOSMajor: Int
+    }
+
+    // Keep ordered table and min/max bounds in exact parity with PTSystemSpoofer.m (kDeviceProfiles).
+    private static let orderedDeviceIOSProfiles: [DeviceIOSProfile] = [
+        DeviceIOSProfile(model: "iPad6,7", isIPad: true, minIOSMajor: 9, maxIOSMajor: 16),
+        DeviceIOSProfile(model: "iPad8,6", isIPad: true, minIOSMajor: 12, maxIOSMajor: 18),
+        DeviceIOSProfile(model: "iPad13,8", isIPad: true, minIOSMajor: 14, maxIOSMajor: 99),
+        DeviceIOSProfile(model: "iPad14,5", isIPad: true, minIOSMajor: 16, maxIOSMajor: 99),
+        DeviceIOSProfile(model: "iPad16,6", isIPad: true, minIOSMajor: 17, maxIOSMajor: 99),
+        DeviceIOSProfile(model: "iPad17,3", isIPad: true, minIOSMajor: 26, maxIOSMajor: 99),
+        DeviceIOSProfile(model: "iPhone12,5", isIPad: false, minIOSMajor: 13, maxIOSMajor: 99),
+        DeviceIOSProfile(model: "iPhone14,3", isIPad: false, minIOSMajor: 15, maxIOSMajor: 99),
+        DeviceIOSProfile(model: "iPhone15,3", isIPad: false, minIOSMajor: 16, maxIOSMajor: 99),
+        DeviceIOSProfile(model: "iPhone16,2", isIPad: false, minIOSMajor: 17, maxIOSMajor: 99),
+        DeviceIOSProfile(model: "iPhone17,2", isIPad: false, minIOSMajor: 18, maxIOSMajor: 99),
+        DeviceIOSProfile(model: "iPhone18,2", isIPad: false, minIOSMajor: 26, maxIOSMajor: 99)
+    ]
+
+    public static let deviceIOSMajorBounds: [String: (min: Int, max: Int)] = [
+        "iPad6,7": (9, 16),
+        "iPad8,6": (12, 18),
+        "iPad13,8": (14, 99),
+        "iPad14,5": (16, 99),
+        "iPad16,6": (17, 99),
+        "iPad17,3": (26, 99),
+        "iPhone12,5": (13, 99),
+        "iPhone14,3": (15, 99),
+        "iPhone15,3": (16, 99),
+        "iPhone16,2": (17, 99),
+        "iPhone17,2": (18, 99),
+        "iPhone18,2": (26, 99)
+    ]
+
+    private static func newestCompatibleModel(isIPhone: Bool, iosMajor: Int) -> String {
+        for profile in orderedDeviceIOSProfiles.reversed() where profile.isIPad == !isIPhone {
+            if iosMajor >= profile.minIOSMajor && iosMajor <= profile.maxIOSMajor {
+                return profile.model
+            }
+        }
+        return recommendedIOS13Model(isIPhone: isIPhone)
+    }
+
+    public static var currentHostIOSMajor: Int {
+        let macOSMajor = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+        if macOSMajor >= 26 {
+            return macOSMajor
+        }
+        return max(16, macOSMajor + 3)
+    }
+
+    public static func supportedIOSMajorRange(for deviceModel: String) -> (min: Int, max: Int)? {
+        let normalized = deviceModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let exact = deviceIOSMajorBounds[normalized] {
+            return exact
+        }
+        if normalized.hasPrefix("iPhone18,") || normalized.hasPrefix("iPad17,") {
+            return (26, 99)
+        }
+        return nil
+    }
+
+    public static func supportsIOSMajor(_ major: Int, deviceModel: String) -> Bool {
+        guard let bounds = supportedIOSMajorRange(for: deviceModel) else {
+            return true
+        }
+        return major >= bounds.min && major <= bounds.max
+    }
+
     public static func supportsIOS13(deviceModel: String) -> Bool {
         let normalized = deviceModel.trimmingCharacters(in: .whitespacesAndNewlines)
         return ios13CompatibleModels.contains(normalized)
@@ -461,13 +534,45 @@ public enum ReportedIOSVersionMode: String, Codable, CaseIterable, Equatable, Se
         return recommendedIOS13Model(isIPhone: normalized.hasPrefix("iPhone"))
     }
 
-    public static func effectiveDeviceModel(_ deviceModel: String, for mode: ReportedIOSVersionMode) -> String {
+    public static func supportsIOS18_3(deviceModel: String) -> Bool {
+        supportsIOSMajor(18, deviceModel: deviceModel)
+    }
+
+    public static func effectiveDeviceModel(
+        _ deviceModel: String,
+        for mode: ReportedIOSVersionMode,
+        hostIOSMajor: Int = currentHostIOSMajor
+    ) -> String {
         let normalized = deviceModel.trimmingCharacters(in: .whitespacesAndNewlines)
         let base = normalized.isEmpty ? "iPad13,8" : normalized
-        guard mode == .compat13_7, !supportsIOS13(deviceModel: base) else {
+        let isIPhone = base.hasPrefix("iPhone")
+        let targetIOSMajor: Int
+        switch mode {
+        case .compat13_7:
+            targetIOSMajor = 13
+        case .compat18_3:
+            targetIOSMajor = 18
+        case .automatic, .followHost:
+            targetIOSMajor = hostIOSMajor
+        }
+
+        guard let bounds = supportedIOSMajorRange(for: base) else {
+            return targetIOSMajor <= 13 ? recommendedIOS13Model(isIPhone: isIPhone) : base
+        }
+        if targetIOSMajor >= bounds.min && targetIOSMajor <= bounds.max {
             return base
         }
-        return recommendedIOS13Model(for: base)
+        if targetIOSMajor < bounds.min {
+            return newestCompatibleModel(isIPhone: isIPhone, iosMajor: targetIOSMajor)
+        }
+        // Device EOL (targetIOSMajor > bounds.max): match PTSystemSpoofer.m coercion table.
+        if !isIPhone {
+            return targetIOSMajor >= 14 ? "iPad13,8" : "iPad8,6"
+        }
+        if targetIOSMajor >= 18 {
+            return "iPhone17,2"
+        }
+        return newestCompatibleModel(isIPhone: true, iosMajor: targetIOSMajor)
     }
 
     public init(rawSetting: String?) {
@@ -551,11 +656,15 @@ public enum PlayCoverRestartField: String, CaseIterable, Equatable, Hashable, Se
     case enableNetworkRules
     case blockedURLPatterns
     case networkProxy
+    case enableCustomCertificates
+    case mitmAllowPinningBypass
+    case hideProxyFromApp
     case keymapping
     case disableBuiltinMouse
     case blockSleepSpamming
     case ignoreUnityKeyboardInitializationError
     case interceptInlineSyscalls
+    case enableAutomationBridge
     case strictEmulationMode
     case strictViewportOrientation
     case strictViewportScaleMode

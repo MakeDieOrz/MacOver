@@ -1,4 +1,5 @@
 import Foundation
+import PlayCoverCore
 
 public enum CertificateStoreError: Error, LocalizedError, Sendable {
     case invalidBundleIdentifier(String)
@@ -26,20 +27,83 @@ public struct PerAppCertificateStore: Sendable {
         self.appSettingsBaseURL = appSettingsBaseURL
     }
 
+    public static func isValidCertificateID(_ id: String) -> Bool {
+        guard !id.isEmpty, id.count <= 64 else {
+            return false
+        }
+        return id.unicodeScalars.allSatisfy { scalar in
+            let v = scalar.value
+            return (v >= 0x30 && v <= 0x39)
+                || (v >= 0x41 && v <= 0x5A)
+                || (v >= 0x61 && v <= 0x7A)
+                || v == 0x2D // -
+                || v == 0x5F // _
+        }
+    }
+
     public func appDirectoryURL(for bundleID: String) throws -> URL {
         let sanitized = bundleID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !sanitized.isEmpty,
-              !sanitized.contains("/"),
-              !sanitized.contains(".."),
-              !sanitized.contains("\\") else {
+        guard sanitized == bundleID,
+              Shell.isValidBundleIdentifier(sanitized) else {
             throw CertificateStoreError.invalidBundleIdentifier(bundleID)
         }
-        return certificatesBaseURL.appendingPathComponent(sanitized, isDirectory: true)
+        let dir = certificatesBaseURL.appendingPathComponent(sanitized, isDirectory: true)
+        guard dir.standardizedFileURL.deletingLastPathComponent() == certificatesBaseURL.standardizedFileURL else {
+            throw CertificateStoreError.invalidBundleIdentifier(bundleID)
+        }
+        return dir
+    }
+
+    private func validatedDERURL(id: String, in dir: URL) throws -> URL {
+        guard Self.isValidCertificateID(id) else {
+            throw CertificateStoreError.certificateNotFound(id)
+        }
+        let url = dir.appendingPathComponent("\(id).der")
+        guard url.standardizedFileURL.deletingLastPathComponent() == dir.standardizedFileURL else {
+            throw CertificateStoreError.certificateNotFound(id)
+        }
+        return url
     }
 
     public func runtimeBundleURL(for bundleID: String) throws -> URL {
+        let dir = try appDirectoryURL(for: bundleID)
+        return dir.appendingPathComponent("runtime.certs")
+    }
+
+    private func legacyRuntimeBundleURL(for bundleID: String) throws -> URL {
         _ = try appDirectoryURL(for: bundleID)
-        return appSettingsBaseURL.appendingPathComponent("\(bundleID).plist.certs")
+        let sanitized = bundleID.trimmingCharacters(in: .whitespacesAndNewlines)
+        return appSettingsBaseURL.appendingPathComponent("\(sanitized).plist.certs")
+    }
+
+    public func builtInRootCAMaterial(
+        for bundleID: String
+    ) -> (record: AppCertificateRecord, certificateDER: Data, privateKeyDER: Data)? {
+        guard let dir = try? appDirectoryURL(for: bundleID) else { return nil }
+        let keyURL = dir.appendingPathComponent("mitm-root-key.der")
+        let records = listCertificates(for: bundleID)
+        guard let existing = records.first(where: { $0.source == .generatedBuiltIn }),
+              let certURL = try? validatedDERURL(id: existing.id, in: dir),
+              let certDER = try? Data(contentsOf: certURL),
+              let keyDER = try? Data(contentsOf: keyURL) else {
+            return nil
+        }
+        return (existing, certDER, keyDER)
+    }
+
+    public func enabledCustomAnchorDERs(for bundleID: String) -> [Data] {
+        guard let dir = try? appDirectoryURL(for: bundleID) else { return [] }
+        let records = listCertificates(for: bundleID).filter { $0.enabled && $0.source == .imported }
+        var anchors: [Data] = []
+        for record in records {
+            guard let derURL = try? validatedDERURL(id: record.id, in: dir),
+                  let data = try? Data(contentsOf: derURL),
+                  SecCertificateCreateWithData(nil, data as CFData) != nil else {
+                continue
+            }
+            anchors.append(data)
+        }
+        return anchors
     }
 
     public func listCertificates(for bundleID: String) -> [AppCertificateRecord] {
@@ -105,7 +169,8 @@ public struct PerAppCertificateStore: Sendable {
         let records = listCertificates(for: bundleID)
 
         if let existing = records.first(where: { $0.source == .generatedBuiltIn }),
-           let certDER = try? Data(contentsOf: dir.appendingPathComponent("\(existing.id).der")),
+           let existingCertURL = try? validatedDERURL(id: existing.id, in: dir),
+           let certDER = try? Data(contentsOf: existingCertURL),
            let keyDER = try? Data(contentsOf: keyURL),
            !existing.isExpired {
             return (existing, certDER, keyDER)
@@ -124,7 +189,9 @@ public struct PerAppCertificateStore: Sendable {
 
         // Remove previous built-in CA entry + DER file so only one active built-in root exists per app.
         for old in records where old.source == .generatedBuiltIn {
-            try? fm.removeItem(at: dir.appendingPathComponent("\(old.id).der"))
+            if let oldCertURL = try? validatedDERURL(id: old.id, in: dir) {
+                try? fm.removeItem(at: oldCertURL)
+            }
         }
         records.removeAll { $0.source == .generatedBuiltIn }
 
@@ -138,13 +205,17 @@ public struct PerAppCertificateStore: Sendable {
             enabled: true
         )
 
-        let certURL = dir.appendingPathComponent("\(record.id).der")
+        let certURL = try validatedDERURL(id: record.id, in: dir)
         try generated.certificateDER.write(to: certURL, options: .atomic)
 
-        // Private key NEVER leaves host Certificates/<bundleID>/ and uses strict 0600 permissions.
+        // Private key NEVER leaves host Certificates/<bundleID>/ and is created atomically with 0600 permissions.
         let keyURL = dir.appendingPathComponent("mitm-root-key.der")
-        try generated.privateKeyDER.write(to: keyURL, options: .atomic)
-        try fm.setAttributes([.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: keyURL.path)
+        try SecureFileWriter.writeSecretFileAtomically(
+            generated.privateKeyDER,
+            to: keyURL,
+            directoryPermissions: 0o700,
+            filePermissions: 0o600
+        )
 
         records.insert(record, at: 0)
         try saveRecords(records, in: dir)
@@ -152,6 +223,9 @@ public struct PerAppCertificateStore: Sendable {
     }
 
     public func setCertificateEnabled(id: String, enabled: Bool, for bundleID: String) throws {
+        guard Self.isValidCertificateID(id) else {
+            throw CertificateStoreError.certificateNotFound(id)
+        }
         let dir = try ensureAppDirectory(for: bundleID)
         var records = listCertificates(for: bundleID)
         guard let idx = records.firstIndex(where: { $0.id == id }) else {
@@ -162,6 +236,9 @@ public struct PerAppCertificateStore: Sendable {
     }
 
     public func deleteCertificate(id: String, for bundleID: String) throws {
+        guard Self.isValidCertificateID(id) else {
+            throw CertificateStoreError.certificateNotFound(id)
+        }
         let dir = try appDirectoryURL(for: bundleID)
         let fm = FileManager.default
         var records = listCertificates(for: bundleID)
@@ -169,7 +246,9 @@ public struct PerAppCertificateStore: Sendable {
             throw CertificateStoreError.certificateNotFound(id)
         }
         let removed = records.remove(at: idx)
-        try? fm.removeItem(at: dir.appendingPathComponent("\(removed.id).der"))
+        if let derURL = try? validatedDERURL(id: removed.id, in: dir) {
+            try? fm.removeItem(at: derURL)
+        }
         if removed.source == .generatedBuiltIn {
             try? fm.removeItem(at: dir.appendingPathComponent("mitm-root-key.der"))
         }
@@ -178,18 +257,22 @@ public struct PerAppCertificateStore: Sendable {
 
     public func certificateDER(id: String, for bundleID: String) throws -> Data {
         let dir = try appDirectoryURL(for: bundleID)
-        let derURL = dir.appendingPathComponent("\(id).der")
+        let derURL = try validatedDERURL(id: id, in: dir)
         guard FileManager.default.fileExists(atPath: derURL.path) else {
             throw CertificateStoreError.certificateNotFound(id)
         }
         return try Data(contentsOf: derURL)
     }
 
-    /// Writes `<appSettingsBaseURL>/<bundleID>.plist.certs` containing ONLY enabled public DER certificates.
-    /// Private keys are never written to `appSettingsBaseURL` or inside app containers.
+    /// Writes `<certificatesBaseURL>/<bundleID>/runtime.certs` containing ONLY enabled public DER certificates.
+    /// Private keys are never included in `runtime.certs` or inside app containers.
     public func syncRuntimeCertificates(for bundleID: String, enabled: Bool) throws {
         let bundleURL = try runtimeBundleURL(for: bundleID)
         let fm = FileManager.default
+        if let legacyURL = try? legacyRuntimeBundleURL(for: bundleID),
+           fm.fileExists(atPath: legacyURL.path) {
+            try? fm.removeItem(at: legacyURL)
+        }
         if !enabled {
             try? fm.removeItem(at: bundleURL)
             return
@@ -199,8 +282,8 @@ public struct PerAppCertificateStore: Sendable {
         let records = listCertificates(for: bundleID).filter(\.enabled)
         var derBlobs: [Data] = []
         for record in records {
-            let derURL = dir.appendingPathComponent("\(record.id).der")
-            if let data = try? Data(contentsOf: derURL),
+            if let derURL = try? validatedDERURL(id: record.id, in: dir),
+               let data = try? Data(contentsOf: derURL),
                SecCertificateCreateWithData(nil, data as CFData) != nil {
                 derBlobs.append(data)
             }
@@ -211,7 +294,7 @@ public struct PerAppCertificateStore: Sendable {
             return
         }
 
-        try fm.createDirectory(at: appSettingsBaseURL, withIntermediateDirectories: true)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let plistDict: [String: Any] = ["certificates": derBlobs]
         let plistData = try PropertyListSerialization.data(
             fromPropertyList: plistDict,
@@ -229,11 +312,18 @@ public struct PerAppCertificateStore: Sendable {
         if let runtimeURL = try? runtimeBundleURL(for: bundleID) {
             try? fm.removeItem(at: runtimeURL)
         }
+        if let legacyURL = try? legacyRuntimeBundleURL(for: bundleID) {
+            try? fm.removeItem(at: legacyURL)
+        }
     }
 
     private func ensureAppDirectory(for bundleID: String) throws -> URL {
         let dir = try appDirectoryURL(for: bundleID)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: dir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
         return dir
     }
 

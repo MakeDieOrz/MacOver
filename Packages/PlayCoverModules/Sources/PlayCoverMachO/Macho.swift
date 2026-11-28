@@ -76,6 +76,7 @@ public class Macho {
         let mtimeSec: Int
         let mtimeNSec: Int
         let fileSize: UInt64
+        let inode: UInt64
     }
 
     public struct SliceContext {
@@ -108,7 +109,8 @@ public class Macho {
         return VerifiedBinaryStamp(
             mtimeSec: Int(st.st_mtimespec.tv_sec),
             mtimeNSec: Int(st.st_mtimespec.tv_nsec),
-            fileSize: UInt64(st.st_size)
+            fileSize: UInt64(st.st_size),
+            inode: UInt64(st.st_ino)
         )
     }
 
@@ -116,6 +118,19 @@ public class Macho {
         verifiedStampsLock.withLock {
             _ = $0.removeValue(forKey: url.path)
         }
+    }
+
+    private static func selectPreferredArm64Slice(
+        from candidates: [(offset: UInt64, size: UInt64, subtype: cpu_subtype_t)]
+    ) -> (offset: UInt64, size: UInt64)? {
+        guard !candidates.isEmpty else { return nil }
+        if let arm64All = candidates.first(where: { ($0.subtype & 0x00FF_FFFF) == CPU_SUBTYPE_ARM64_ALL }) {
+            return (arm64All.offset, arm64All.size)
+        }
+        if let nonArm64e = candidates.first(where: { ($0.subtype & 0x00FF_FFFF) != CPU_SUBTYPE_ARM64E }) {
+            return (nonArm64e.offset, nonArm64e.size)
+        }
+        return (candidates[0].offset, candidates[0].size)
     }
 
     public static func inspectArm64Slice(at url: URL) throws -> SliceContext {
@@ -170,7 +185,7 @@ public class Macho {
                 fatData = fullFat
             }
 
-            var foundArm64 = false
+            var candidates: [(offset: UInt64, size: UInt64, subtype: cpu_subtype_t)] = []
             for _ in 0..<fatHeader.nfat_arch {
                 if isFat64 {
                     var arch64 = try fatData.extract(fat_arch_64.self, offset: cursorOffset)
@@ -178,10 +193,7 @@ public class Macho {
                         MachOByteSwap.swapFatArch64(&arch64)
                     }
                     if arch64.cputype == CPU_TYPE_ARM64 {
-                        sliceOffset = arch64.offset
-                        sliceSize = arch64.size
-                        foundArm64 = true
-                        break
+                        candidates.append((arch64.offset, arch64.size, arch64.cpusubtype))
                     }
                 } else {
                     var arch = try fatData.extract(fat_arch.self, offset: cursorOffset)
@@ -189,17 +201,16 @@ public class Macho {
                         MachOByteSwap.swapFatArch(&arch)
                     }
                     if arch.cputype == CPU_TYPE_ARM64 {
-                        sliceOffset = UInt64(arch.offset)
-                        sliceSize = UInt64(arch.size)
-                        foundArm64 = true
-                        break
+                        candidates.append((UInt64(arch.offset), UInt64(arch.size), arch.cpusubtype))
                     }
                 }
                 cursorOffset += archSize
             }
-            if !foundArm64 {
+            guard let selected = selectPreferredArm64Slice(from: candidates) else {
                 throw PlayCoverError.failedToStripBinary
             }
+            sliceOffset = selected.offset
+            sliceSize = selected.size
         }
 
         let headerSize = MemoryLayout<mach_header_64>.size
@@ -715,6 +726,7 @@ public class Macho {
                   tableBytes <= totalCount - UInt64(offset) else {
                 throw PlayCoverError.failedToStripBinary
             }
+            var candidates: [(offset: UInt64, size: UInt64, subtype: cpu_subtype_t)] = []
             for _ in 0..<header.nfat_arch {
                 var arch = try binary.extract(fat_arch.self, offset: offset)
                 if shouldSwap {
@@ -727,12 +739,15 @@ public class Macho {
                           sliceSize <= totalCount - sliceOffset else {
                         throw PlayCoverError.failedToStripBinary
                     }
-                    binary = binary.subdata(in: Int(sliceOffset)..<Int(sliceOffset + sliceSize))
-                    return
+                    candidates.append((sliceOffset, sliceSize, arch.cpusubtype))
                 }
                 offset += archSize
             }
-            throw PlayCoverError.failedToStripBinary
+            guard let selected = selectPreferredArm64Slice(from: candidates) else {
+                throw PlayCoverError.failedToStripBinary
+            }
+            binary = binary.subdata(in: Int(selected.offset)..<Int(selected.offset + selected.size))
+            return
         } else if fatMagic == FAT_MAGIC_64 || fatMagic == FAT_CIGAM_64 {
             if shouldSwap {
                 MachOByteSwap.swapFatHeader(&header)
@@ -745,6 +760,7 @@ public class Macho {
                   tableBytes <= totalCount - UInt64(offset) else {
                 throw PlayCoverError.failedToStripBinary
             }
+            var candidates: [(offset: UInt64, size: UInt64, subtype: cpu_subtype_t)] = []
             for _ in 0..<header.nfat_arch {
                 var arch = try binary.extract(fat_arch_64.self, offset: offset)
                 if shouldSwap {
@@ -757,12 +773,15 @@ public class Macho {
                           sliceSize <= totalCount - sliceOffset else {
                         throw PlayCoverError.failedToStripBinary
                     }
-                    binary = binary.subdata(in: Int(sliceOffset)..<Int(sliceOffset + sliceSize))
-                    return
+                    candidates.append((sliceOffset, sliceSize, arch.cpusubtype))
                 }
                 offset += archSize
             }
-            throw PlayCoverError.failedToStripBinary
+            guard let selected = selectPreferredArm64Slice(from: candidates) else {
+                throw PlayCoverError.failedToStripBinary
+            }
+            binary = binary.subdata(in: Int(selected.offset)..<Int(selected.offset + selected.size))
+            return
         }
     }
 

@@ -29,8 +29,8 @@ public struct ToastInfo: Identifiable, Hashable, Sendable {
 
 @Observable
 public final class ToastVM: @unchecked Sendable {
-    public var toasts: [ToastInfo] = []
-    public var isShown: Bool = true
+    @MainActor public var toasts: [ToastInfo] = []
+    @MainActor public var isShown: Bool = true
 
     @ObservationIgnored private let activeTypesByID = Mutex<[UUID: ToastType]>([:])
 
@@ -44,24 +44,31 @@ public final class ToastVM: @unchecked Sendable {
     public func showToast(toastType: ToastType, toastDetails: String, timeRemaining: UInt64 = 2) -> UUID {
         let toast = ToastInfo(toastType: toastType, toastDetails: toastDetails, timeRemaining: timeRemaining)
         activeTypesByID.withLock { $0[toast.id] = toastType }
-        if Thread.isMainThread {
-            toasts.append(toast)
-        } else {
-            DispatchQueue.main.async { [weak self] in
-                self?.toasts.append(toast)
+        let applyOnMain: @MainActor @Sendable () -> Void = { [weak self] in
+            guard let self else { return }
+            let stillActive = self.activeTypesByID.withLock { $0[toast.id] != nil }
+            guard stillActive else { return }
+            if !self.toasts.contains(where: { $0.id == toast.id }) {
+                self.toasts.append(toast)
             }
+        }
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { applyOnMain() }
+        } else {
+            Task { @MainActor in applyOnMain() }
         }
         return toast.id
     }
 
     public func dismiss(id: UUID) {
         activeTypesByID.withLock { _ = $0.removeValue(forKey: id) }
+        let removeOnMain: @MainActor @Sendable () -> Void = { [weak self] in
+            self?.toasts.removeAll { $0.id == id }
+        }
         if Thread.isMainThread {
-            toasts.removeAll { $0.id == id }
+            MainActor.assumeIsolated { removeOnMain() }
         } else {
-            DispatchQueue.main.async { [weak self] in
-                self?.toasts.removeAll { $0.id == id }
-            }
+            Task { @MainActor in removeOnMain() }
         }
     }
 }

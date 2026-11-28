@@ -38,7 +38,7 @@ public struct SVCPatchedFile: Codable, Equatable, Sendable {
 }
 
 public struct SVCPatchManifest: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 1
+    public static let currentSchemaVersion = 2
 
     public let schemaVersion: Int
     public let bundleIdentifier: String
@@ -119,7 +119,7 @@ public enum InlineSyscallPatcher {
     }
 
     private struct SVCScanCache: Codable, Equatable {
-        static let currentSchemaVersion = 1
+        static let currentSchemaVersion = 2
 
         let schemaVersion: Int
         let bundleIdentifier: String
@@ -257,7 +257,9 @@ public enum InlineSyscallPatcher {
         }
 
         var existingByPath: [String: SVCPatchedFile] = [:]
+        var needsSchemaUpgrade = false
         if let existingManifest, existingManifest.bundleIdentifier == bundleIdentifier {
+            needsSchemaUpgrade = (existingManifest.schemaVersion < SVCPatchManifest.currentSchemaVersion)
             for entry in existingManifest.files {
                 existingByPath[entry.relativePath] = entry
             }
@@ -265,7 +267,8 @@ public enum InlineSyscallPatcher {
 
         // Fast idempotency check: every manifest file already holds brkInstruction at its sites,
         // and no candidate Mach-O has remaining unpatched svcInstruction sites.
-        if let existingManifest,
+        if !needsSchemaUpgrade,
+           let existingManifest,
            existingManifest.bundleIdentifier == bundleIdentifier,
            try isBundleAlreadyPatched(
                appBundleURL: appBundleURL,
@@ -291,10 +294,29 @@ public enum InlineSyscallPatcher {
             let originalFileData = try Data(contentsOf: candidate.url)
             var data = originalFileData
             let existingEntry = existingByPath[candidate.relativePath]
-            let newSites = try scanInstructionSites(in: data, matching: svcInstruction)
 
             if let existingEntry, !existingEntry.sites.isEmpty,
                verifyAllSites(in: data, sites: existingEntry.sites, expectedWord: brkInstruction) {
+                if needsSchemaUpgrade {
+                    try writeWord(svcInstruction, to: &data, sites: existingEntry.sites)
+                    let filteredSites = try scanInstructionSites(in: data, matching: svcInstruction)
+                    if filteredSites.isEmpty {
+                        stagedWrites.append((candidate.url, originalFileData, data))
+                        continue
+                    }
+                    let origSHA = sha256Hex(data)
+                    try writeWord(brkInstruction, to: &data, sites: filteredSites)
+                    let patchedSHA = sha256Hex(data)
+                    stagedWrites.append((candidate.url, originalFileData, data))
+                    nextEntries.append(SVCPatchedFile(
+                        relativePath: candidate.relativePath,
+                        originalSHA256: origSHA,
+                        patchedSHA256: patchedSHA,
+                        sites: filteredSites
+                    ))
+                    continue
+                }
+                let newSites = try scanInstructionSites(in: data, matching: svcInstruction)
                 if newSites.isEmpty {
                     nextEntries.append(existingEntry)
                     continue
@@ -319,6 +341,7 @@ public enum InlineSyscallPatcher {
                 continue
             }
 
+            let newSites = try scanInstructionSites(in: data, matching: svcInstruction)
             guard !newSites.isEmpty else {
                 continue
             }
@@ -337,6 +360,9 @@ public enum InlineSyscallPatcher {
 
         if nextEntries.isEmpty {
             try removeManifestIfExists(at: manifestURL)
+            for item in stagedWrites {
+                try writeAtomicPreservingPermissions(item.patched, to: item.url)
+            }
             saveScanCache(
                 at: cacheURL,
                 bundleIdentifier: bundleIdentifier,
@@ -344,9 +370,10 @@ public enum InlineSyscallPatcher {
                 manifestData: nil,
                 candidateFiles: candidateFiles
             )
+            let committed = stagedWrites.map { $0.url }
             return ReconcileResult(
-                modified: false,
-                modifiedBinaryURLs: [],
+                modified: !committed.isEmpty,
+                modifiedBinaryURLs: committed,
                 patchedSiteCount: 0
             )
         }
@@ -477,6 +504,9 @@ public enum InlineSyscallPatcher {
         manifest: SVCPatchManifest,
         existingByPath: [String: SVCPatchedFile]
     ) throws -> Bool {
+        guard manifest.schemaVersion == SVCPatchManifest.currentSchemaVersion else {
+            return false
+        }
         let candidatesByPath = Dictionary(uniqueKeysWithValues: candidateFiles.map { ($0.relativePath, $0.url) })
         for entry in manifest.files {
             guard let targetURL = candidatesByPath[entry.relativePath] ??
@@ -870,6 +900,7 @@ public enum InlineSyscallPatcher {
         let mergedDIC = mergeSortedRanges(rawDataInCodeRanges)
         let sortedSections = sections.sorted { $0.fileStart < $1.fileStart }
 
+        var rawCandidateSites: [(section: InstructionSection, cursor: UInt64)] = []
         var dicIndex = 0
         for section in sortedSections {
             let alignRem = section.fileStart & 3
@@ -879,7 +910,7 @@ public enum InlineSyscallPatcher {
             }
 
             data.withUnsafeBytes { rawBuffer in
-            guard let base = rawBuffer.baseAddress else { return }
+                guard let base = rawBuffer.baseAddress else { return }
                 while cursor + 4 <= section.fileEnd {
                     while dicIndex < mergedDIC.count && mergedDIC[dicIndex].upperBound <= cursor {
                         dicIndex += 1
@@ -894,24 +925,294 @@ public enum InlineSyscallPatcher {
                     let byteOffset = Int(cursor)
                     let word = UInt32(littleEndian: base.advanced(by: byteOffset).loadUnaligned(as: UInt32.self))
                     if word == targetWord {
-                        let deltaInSection = cursor - section.fileStart
-                        let vmAddr = section.vmAddress + deltaInSection
-                        if vmAddr >= baseTextVMAddr {
-                            let vmOffset = vmAddr - baseTextVMAddr
-                            if vmOffset <= baseTextVMSize - 4 {
-                                sites.append(SVCPatchSite(
-                                    sliceOffset: sliceOffset,
-                                    fileOffset: cursor,
-                                    vmAddress: vmAddr,
-                                    vmOffset: vmOffset
-                                ))
-                            }
-                        }
+                        rawCandidateSites.append((section: section, cursor: cursor))
                     }
                     cursor += 4
                 }
             }
         }
+
+        guard !rawCandidateSites.isEmpty else { return }
+
+        let branchTargets: Set<UInt64>
+        if targetWord == svcInstruction {
+            branchTargets = collectSectionBranchTargets(
+                in: data,
+                sections: sortedSections,
+                mergedDIC: mergedDIC
+            )
+        } else {
+            branchTargets = []
+        }
+
+        data.withUnsafeBytes { rawBuffer in
+            guard let base = rawBuffer.baseAddress else { return }
+            for candidate in rawCandidateSites {
+                let section = candidate.section
+                let cursor = candidate.cursor
+                let shouldPatch = (targetWord != svcInstruction) || shouldPatchSVCSite(
+                    base: base,
+                    section: section,
+                    svcCursor: cursor,
+                    mergedDIC: mergedDIC,
+                    branchTargets: branchTargets
+                )
+                if shouldPatch {
+                    let deltaInSection = cursor - section.fileStart
+                    let vmAddr = section.vmAddress + deltaInSection
+                    if vmAddr >= baseTextVMAddr {
+                        let vmOffset = vmAddr - baseTextVMAddr
+                        if vmOffset <= baseTextVMSize - 4 {
+                            sites.append(SVCPatchSite(
+                                sliceOffset: sliceOffset,
+                                fileOffset: cursor,
+                                vmAddress: vmAddr,
+                                vmOffset: vmOffset
+                            ))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private static let interceptedSyscallNumbers: Set<Int64> = [
+        -47, -32, -31, 0,
+        2, 4, 5, 6, 9, 10, 12, 13, 15, 16, 18, 26,
+        30, 31, 32, 33, 34, 37, 39, 41, 43, 47, 49, 54,
+        57, 58, 59, 66, 79, 90, 92, 98, 104, 121, 128, 133,
+        136, 137, 138, 142, 149, 151, 154, 157, 158, 169, 170,
+        188, 189, 190, 191, 192, 194, 196, 198, 200, 202,
+        214, 216, 217, 218, 220, 221, 222, 223, 225, 228, 229,
+        234, 235, 236, 237, 238, 239, 240, 241, 244, 274, 277,
+        279, 280, 281, 282, 284, 292, 310, 336, 338, 339, 340,
+        341, 342, 343, 344, 345, 346, 347, 348, 349, 353, 357,
+        363, 364, 369, 374, 375, 380, 381, 397, 398, 399, 404,
+        406, 409, 412, 413, 415, 425, 426, 427, 441, 442, 461,
+        462, 463, 464, 465, 466, 467, 468, 469, 470, 471, 472,
+        473, 474, 475, 476, 479, 483, 484, 488, 517, 524, 534,
+        538, 539, 545, 551
+    ]
+
+    private static func isOffsetInDIC(_ offset: UInt64, mergedDIC: [Range<UInt64>]) -> Bool {
+        var lo = 0
+        var hi = mergedDIC.count
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            let range = mergedDIC[mid]
+            if range.upperBound <= offset {
+                lo = mid + 1
+            } else if range.lowerBound > offset + 3 {
+                hi = mid
+            } else {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func isControlFlowOrBarrier(_ word: UInt32) -> Bool {
+        if (word & 0x7C00_0000) == 0x1400_0000 || // B / BL
+            (word & 0xFF00_0010) == 0x5400_0000 || // B.cond
+            (word & 0x7E00_0000) == 0x3400_0000 || // CBZ / CBNZ
+            (word & 0x7E00_0000) == 0x3600_0000 || // TBZ / TBNZ
+            (word & 0xFE00_0000) == 0xD600_0000 || // BR / BLR / RET
+            (word & 0xFF00_0000) == 0xD400_0000 { // SVC / HVC / SMC / BRK / HLT
+            return true
+        }
+        return (word & 0xFF00_0000) == 0xD500_0000 && word != 0xD503_201F
+    }
+
+    private static func potentiallyWritesX16(_ word: UInt32) -> Bool {
+        if word == 0xD503_201F { return false }
+        // Load register (literal): LDR Wt/Xt, LDRSW Xt, PRFM literal, and SIMD/FP literal loads.
+        // Only GP LDR/LDRSW write Rt (bits [4:0]); return early so imm19 in bits [23:5]
+        // cannot falsely match rn/rt2/rs writeback masks below.
+        if (word & 0x3B00_0000) == 0x1800_0000 {
+            if (word & 0xC000_0000) == 0xC000_0000 || (word & 0x0400_0000) != 0 {
+                return false
+            }
+            return (word & 0x1F) == 16
+        }
+        let isPureStore = ((word & 0x3B20_0000) == 0x3800_0000 && (word & 0x00C0_0000) == 0x0000_0000) ||
+            ((word & 0x3BC0_0000) == 0x2800_0000 && (word & 0x0040_0000) == 0)
+        if !isPureStore && (word & 0x1F) == 16 {
+            return true
+        }
+        let rn = (word >> 5) & 0x1F
+        let rt2 = (word >> 10) & 0x1F
+        let rs = (word >> 16) & 0x1F
+
+        // LDP / LDPSW write Rt2 in bits [14:10]
+        if (word & 0x3E40_0000) == 0x2840_0000 && rt2 == 16 {
+            return true
+        }
+        // LDXP / LDAXP write Rt2 in bits [14:10]
+        if (word & 0xBFE0_0000) == 0x8860_0000 && rt2 == 16 {
+            return true
+        }
+        // LDR / STR (GP + SIMD) immediate pre-index (11) / post-index (01) writeback to Rn in bits [9:5]
+        if (word & 0x3B20_0400) == 0x3800_0400 && rn == 16 {
+            return true
+        }
+        // LDP / STP / LDPSW (GP + SIMD) pre-index (011) / post-index (001) writeback to Rn in bits [9:5]
+        if (word & 0x3A80_0000) == 0x2880_0000 && rn == 16 {
+            return true
+        }
+        // SIMD LD1..LD4 / ST1..ST4 post-index writeback to Rn in bits [9:5]
+        if (word & 0x3E80_0000) == 0x0C80_0000 && rn == 16 {
+            return true
+        }
+        // STXR / STLXR / STXRB / STXRH / STXP / STLXP write status to Ws in bits [20:16]
+        if (word & 0x3FC0_0000) == 0x0800_0000 && rs == 16 {
+            return true
+        }
+        // CAS / CASA / CASL / CASAL / CASB / CASH write Rs in bits [20:16]
+        if (word & 0x3FA0_7C00) == 0x08A0_7C00 && rs == 16 {
+            return true
+        }
+        // CASP / CASPA / CASPL / CASPAL write pair (Rs, Rs+1) in bits [20:16]
+        if (word & 0xBFA0_7C00) == 0x0820_7C00 && (rs == 16 || rs == 15) {
+            return true
+        }
+        return false
+    }
+
+    private static func signExtend(_ value: UInt64, bits: Int) -> Int64 {
+        let shift = 64 - bits
+        return Int64(bitPattern: value << shift) >> shift
+    }
+
+    private static func branchTargetOffset(word: UInt32, pc: UInt64) -> UInt64? {
+        let rawOffset: Int64
+        if (word & 0x7C00_0000) == 0x1400_0000 {
+            rawOffset = signExtend(UInt64(word & 0x03FF_FFFF), bits: 26) * 4
+        } else if (word & 0xFF00_0010) == 0x5400_0000 || (word & 0x7E00_0000) == 0x3400_0000 {
+            rawOffset = signExtend(UInt64((word >> 5) & 0x0007_FFFF), bits: 19) * 4
+        } else if (word & 0x7E00_0000) == 0x3600_0000 {
+            rawOffset = signExtend(UInt64((word >> 5) & 0x0000_3FFF), bits: 14) * 4
+        } else {
+            return nil
+        }
+        let target = Int64(bitPattern: pc) &+ rawOffset
+        return target >= 0 ? UInt64(target) : nil
+    }
+
+    private static func collectSectionBranchTargets(
+        in data: Data,
+        sections: [InstructionSection],
+        mergedDIC: [Range<UInt64>]
+    ) -> Set<UInt64> {
+        guard let minFileStart = sections.first?.fileStart,
+              let maxFileEnd = sections.map(\.fileEnd).max() else {
+            return []
+        }
+        var targets = Set<UInt64>()
+        var dicIndex = 0
+        data.withUnsafeBytes { rawBuffer in
+            guard let base = rawBuffer.baseAddress else { return }
+            for section in sections {
+                let alignRem = section.fileStart & 3
+                var pos = alignRem == 0 ? section.fileStart : (section.fileStart + (4 - alignRem))
+                while pos + 4 <= section.fileEnd {
+                    while dicIndex < mergedDIC.count && mergedDIC[dicIndex].upperBound <= pos {
+                        dicIndex += 1
+                    }
+                    if dicIndex < mergedDIC.count &&
+                        pos + 4 > mergedDIC[dicIndex].lowerBound &&
+                        pos < mergedDIC[dicIndex].upperBound {
+                        pos += 4
+                        continue
+                    }
+                    let w = UInt32(littleEndian: base.advanced(by: Int(pos)).loadUnaligned(as: UInt32.self))
+                    if let target = branchTargetOffset(word: w, pc: pos),
+                       target >= minFileStart && target < maxFileEnd {
+                        targets.insert(target)
+                    }
+                    pos += 4
+                }
+            }
+        }
+        return targets
+    }
+
+    private static func anyBranchTargetsWindow(
+        windowStart: UInt64,
+        windowEnd: UInt64,
+        branchTargets: Set<UInt64>
+    ) -> Bool {
+        guard !branchTargets.isEmpty else { return false }
+        var addr = windowStart
+        while addr <= windowEnd {
+            if branchTargets.contains(addr) {
+                return true
+            }
+            addr += 4
+        }
+        return false
+    }
+
+    private static func shouldPatchSVCSite(
+        base: UnsafeRawPointer,
+        section: InstructionSection,
+        svcCursor: UInt64,
+        mergedDIC: [Range<UInt64>],
+        branchTargets: Set<UInt64>
+    ) -> Bool {
+        let alignedStart = (section.fileStart + 3) & ~UInt64(3)
+        var movks: [(shift: Int, imm16: UInt64, is64Bit: Bool)] = []
+        var steps = 0
+        var pos = svcCursor
+        while steps < 16 && pos >= alignedStart + 4 {
+            pos -= 4
+            steps += 1
+            if isOffsetInDIC(pos, mergedDIC: mergedDIC) {
+                return true
+            }
+            let w = UInt32(littleEndian: base.advanced(by: Int(pos)).loadUnaligned(as: UInt32.self))
+            if isControlFlowOrBarrier(w) {
+                return true
+            }
+            let opMasked = w & 0x7F80_001F
+            if opMasked == 0x7280_0010 { // MOVK w16/x16
+                let hw = Int((w >> 21) & 0x3)
+                let imm16 = UInt64((w >> 5) & 0xFFFF)
+                let is64 = (w & 0x8000_0000) != 0
+                if !is64 && hw >= 2 { return true }
+                movks.append((shift: hw * 16, imm16: imm16, is64Bit: is64))
+                continue
+            }
+            if opMasked == 0x5280_0010 || opMasked == 0x1280_0010 { // MOVZ / MOVN w16/x16
+                let isMovN = (opMasked == 0x1280_0010)
+                let is64 = (w & 0x8000_0000) != 0
+                let hw = Int((w >> 21) & 0x3)
+                if !is64 && hw >= 2 { return true }
+                let imm16 = UInt64((w >> 5) & 0xFFFF)
+                var val: UInt64 = imm16 << (hw * 16)
+                if isMovN {
+                    val = is64 ? ~val : (~val & 0xFFFF_FFFF)
+                }
+                for lane in movks.reversed() {
+                    let mask = UInt64(0xFFFF) << lane.shift
+                    val = (val & ~mask) | (lane.imm16 << lane.shift)
+                    if !lane.is64Bit { val &= 0xFFFF_FFFF }
+                }
+                if pos + 4 <= svcCursor && anyBranchTargetsWindow(
+                    windowStart: pos + 4,
+                    windowEnd: svcCursor,
+                    branchTargets: branchTargets
+                ) {
+                    return true
+                }
+                let signedVal = is64 ? Int64(bitPattern: val) : Int64(Int32(bitPattern: UInt32(val & 0xFFFF_FFFF)))
+                return interceptedSyscallNumbers.contains(signedVal) ||
+                    interceptedSyscallNumbers.contains(Int64(Int32(truncatingIfNeeded: signedVal)))
+            }
+            if potentiallyWritesX16(w) {
+                return true
+            }
+        }
+        return true
     }
 
     private static func mergeSortedRanges(_ ranges: [Range<UInt64>]) -> [Range<UInt64>] {
@@ -1008,7 +1309,8 @@ public enum InlineSyscallPatcher {
         }
         let data = try Data(contentsOf: manifestURL)
         let manifest = try JSONDecoder().decode(SVCPatchManifest.self, from: data)
-        guard manifest.schemaVersion == SVCPatchManifest.currentSchemaVersion else {
+        guard manifest.schemaVersion >= 1,
+              manifest.schemaVersion <= SVCPatchManifest.currentSchemaVersion else {
             return nil
         }
         return manifest

@@ -430,6 +430,7 @@ public final class X509LeafIssuer: Sendable {
     private let rootKey: P256.Signing.PrivateKey
     private let rootSKI: Data
     private let rootSubjectNameDER: Data
+    private let rootNotAfter: Date?
 
     private let leafKey: P256.Signing.PrivateKey
     private let leafKeyAttrData: Data
@@ -450,6 +451,7 @@ public final class X509LeafIssuer: Sendable {
         self.rootKey = parsedKey
         self.rootSKI = Data(SHA256.hash(data: parsedKey.publicKey.x963Representation).prefix(20))
         self.rootSubjectNameDER = try Self.extractSubjectNameDER(fromCertificateDER: rootCertificateDER)
+        self.rootNotAfter = (try? X509CertificateInspector.inspect(der: rootCertificateDER))?.notAfter
         self.leafKey = P256.Signing.PrivateKey()
         self.leafKeyAttrData = leafKey.x963Representation
     }
@@ -461,9 +463,10 @@ public final class X509LeafIssuer: Sendable {
         }
 
         let now = Date()
-        let notBefore = now.addingTimeInterval(-300)
-        // <= 397 days per Apple TLS certificate lifetime policy
-        let notAfter = now.addingTimeInterval(365 * 86_400)
+        // <= 397 days per Apple TLS certificate lifetime policy, clamped to Root CA notAfter.
+        let desiredNotAfter = now.addingTimeInterval(365 * 86_400)
+        let notAfter = rootNotAfter.map { min(desiredNotAfter, $0) } ?? desiredNotAfter
+        let notBefore = min(now.addingTimeInterval(-300), notAfter)
 
         let sigAlg = ASN1DER.sequence([try ASN1DER.oid(X509CertificateGenerator.oidECDSAWithSHA256)])
         let subject = ASN1DER.name(commonName: normalized, organization: "MacOver MITM")

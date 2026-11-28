@@ -66,13 +66,45 @@ public class Shell {
         try run("/usr/bin/codesign", "--verify", "--deep", "--strict", bundleURL.path)
     }
 
+    public static func isValidBundleIdentifier(_ bundleID: String) -> Bool {
+        guard bundleID.count >= 2, bundleID.count <= 128 else {
+            return false
+        }
+        guard bundleID.contains("."),
+              !bundleID.hasPrefix("."),
+              !bundleID.hasPrefix("-"),
+              !bundleID.hasSuffix("."),
+              !bundleID.contains("..") else {
+            return false
+        }
+        return bundleID.unicodeScalars.allSatisfy { scalar in
+            let v = scalar.value
+            return (v >= 0x30 && v <= 0x39)
+                || (v >= 0x41 && v <= 0x5A)
+                || (v >= 0x61 && v <= 0x7A)
+                || v == 0x2E
+                || v == 0x2D
+                || v == 0x5F
+        }
+    }
+
     public static func setMetalHUD(_ bundleID: String, enabled: Bool) throws {
+        guard isValidBundleIdentifier(bundleID) else {
+            throw PlayCoverError.playToolsError(
+                "Refused to update Metal HUD for invalid bundle identifier: \(bundleID)"
+            )
+        }
         try run("/usr/bin/defaults", "write", bundleID,
                 "MetalForceHudEnabled", "-bool", String(enabled))
     }
 
-    public static func lldb(_ url: URL, withTerminalWindow: Bool = false) throws {
+    public static func lldb(
+        _ url: URL,
+        withTerminalWindow: Bool = false,
+        onExit: (@Sendable (Bool) -> Void)? = nil
+    ) throws {
         Task(priority: .utility) {
+            var launchedSuccessfully = false
             do {
                 if withTerminalWindow {
                     let command = "/usr/bin/lldb -o run \(url.esc) -o exit"
@@ -95,12 +127,15 @@ public class Shell {
                             .joined(separator: "; ")
                         throw PlayCoverError.appleScriptFailed(desc.isEmpty ? "AppleScript error" : desc)
                     }
+                    launchedSuccessfully = true
                 } else {
                     try run("/usr/bin/lldb", "-o", "run", url.path, "-o", "exit")
+                    launchedSuccessfully = true
                 }
             } catch {
                 PlayCoverDiagnostics.reportError(error)
             }
+            onExit?(launchedSuccessfully)
         }
     }
 }

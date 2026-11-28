@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 import Synchronization
 import Testing
 @testable import PlayCoverCore
@@ -331,12 +332,16 @@ struct PlayCoverCoreSPMTests {
         #expect(!ReportedIOSVersionMode.isMinimumOSVersion("12.4", higherThan: 13, minor: 7))
         #expect(!ReportedIOSVersionMode.isMinimumOSVersion("", higherThan: 13, minor: 7))
 
-        #expect(PlayCoverRestartField.allCases.count == 29)
+        #expect(PlayCoverRestartField.allCases.count == 33)
         #expect(PlayCoverRestartField.allCases.contains(.networkProxy))
         #expect(PlayCoverRestartField.allCases.contains(.windowCompatibility))
         #expect(PlayCoverRestartField.allCases.contains(.frameRateTarget))
         #expect(PlayCoverRestartField.allCases.contains(.reportedIOSVersion))
         #expect(PlayCoverRestartField.allCases.contains(.interceptInlineSyscalls))
+        #expect(PlayCoverRestartField.allCases.contains(.enableAutomationBridge))
+        #expect(PlayCoverRestartField.allCases.contains(.enableCustomCertificates))
+        #expect(PlayCoverRestartField.allCases.contains(.mitmAllowPinningBypass))
+        #expect(PlayCoverRestartField.allCases.contains(.hideProxyFromApp))
         #expect(PlayCoverRestartField.allCases.contains(.strictEmulationMode))
         #expect(PlayCoverRestartField.allCases.contains(.strictViewportOrientation))
         #expect(PlayCoverRestartField.allCases.contains(.strictViewportScaleMode))
@@ -506,5 +511,379 @@ struct PlayCoverCoreSPMTests {
 
         let fgRunning = AppRunState.running(isActive: true)
         #expect(fgRunning.isRunning && fgRunning.isActive && fgRunning.sortRank == 0)
+    }
+
+    @Test
+    func reportedIOS183CoercionDisplayNormalizationAndNewRestartFields() {
+        #expect(ReportedIOSVersionMode.supportsIOS18_3(deviceModel: "iPhone17,2"))
+        #expect(!ReportedIOSVersionMode.supportsIOS18_3(deviceModel: "iPhone18,2"))
+        #expect(ReportedIOSVersionMode.supportsIOS18_3(deviceModel: "iPad16,6"))
+        #expect(!ReportedIOSVersionMode.supportsIOS18_3(deviceModel: "iPad17,3"))
+        #expect(ReportedIOSVersionMode.effectiveDeviceModel("iPhone18,2", for: .compat18_3) == "iPhone17,2")
+        #expect(ReportedIOSVersionMode.effectiveDeviceModel("iPad17,3", for: .compat18_3) == "iPad16,6")
+        #expect(ReportedIOSVersionMode.effectiveDeviceModel("iPhone18,2", for: .automatic) == "iPhone18,2")
+
+        let base = AppSettingsData()
+        var updated = base
+        updated.resolution = 2
+        updated.aspectRatio = 2
+        updated.normalizeDisplaySettings(previous: base)
+        #expect(updated.windowWidth == 1728)
+        #expect(updated.windowHeight == 1080)
+
+        var customResize = base
+        customResize.resizableAspectRatioType = 3
+        customResize.normalizeDisplaySettings(previous: base)
+        #expect(customResize.resizableAspectRatioWidth == 16)
+        #expect(customResize.resizableAspectRatioHeight == 9)
+
+        var resetResize = customResize
+        resetResize.resizableAspectRatioType = 0
+        resetResize.normalizeDisplaySettings(previous: customResize)
+        #expect(resetResize.resizableAspectRatioWidth == 0)
+        #expect(resetResize.resizableAspectRatioHeight == 0)
+
+        var explicitWidth = base
+        explicitWidth.windowWidth = 2560
+        explicitWidth.normalizeDisplaySettings(previous: base)
+        #expect(explicitWidth.windowWidth == 2560)
+
+        var netChanged = base
+        netChanged.enableCustomCertificates = true
+        netChanged.mitmAllowPinningBypass = true
+        netChanged.hideProxyFromApp = false
+        let restartFields = netChanged.restartRequiredChanges(comparedTo: base)
+        #expect(restartFields.contains(.enableCustomCertificates))
+        #expect(restartFields.contains(.mitmAllowPinningBypass))
+        #expect(restartFields.contains(.hideProxyFromApp))
+    }
+
+    @Test
+    func shellBundleIdentifierValidationRejectsFlagsAndTraversal() {
+        #expect(Shell.isValidBundleIdentifier("com.example.game"))
+        #expect(Shell.isValidBundleIdentifier("app.makedie.MacOver"))
+        #expect(Shell.isValidBundleIdentifier("com.a-b.c_1"))
+        #expect(!Shell.isValidBundleIdentifier(""))
+        #expect(!Shell.isValidBundleIdentifier("-globalDomain"))
+        #expect(!Shell.isValidBundleIdentifier(".leading"))
+        #expect(!Shell.isValidBundleIdentifier("trailing."))
+        #expect(!Shell.isValidBundleIdentifier("nodot"))
+        #expect(!Shell.isValidBundleIdentifier("com..double"))
+        #expect(!Shell.isValidBundleIdentifier("../escape"))
+        #expect(!Shell.isValidBundleIdentifier("com.bad/slash"))
+        #expect(!Shell.isValidBundleIdentifier(String(repeating: "a.", count: 70)))
+
+        #expect(throws: (any Error).self) {
+            try Shell.setMetalHUD("-globalDomain", enabled: true)
+        }
+    }
+
+    @Test
+    func canonicalNetworkRuleEngineMatchesRuntimeSemantics() {
+        let engine = CanonicalNetworkRuleEngine(rawPatterns: [
+            "DOMAIN,exact.example.com",
+            "DOMAIN-SUFFIX,suffix.example.com",
+            "DOMAIN-KEYWORD,telemetry",
+            "URL-REGEX,^https://api\\.example\\.com/v[0-9]{1,3}/events$,MOCK-200",
+            "DOMAIN,drop.example.com,REJECT-DROP",
+            "||ads.example.com^$third-party",
+            "@@||safe.ads.example.com",
+            "#!OFF DOMAIN,disabled.example.com"
+        ])
+
+        #expect(
+            engine.evaluate(host: "exact.example.com", urlString: "https://exact.example.com/")
+                == .block(.defaultBlock)
+        )
+        #expect(
+            engine.evaluate(host: "sub.exact.example.com", urlString: "https://sub.exact.example.com/")
+                == .pass
+        )
+        #expect(
+            engine.evaluate(host: "a.suffix.example.com", urlString: "https://a.suffix.example.com/")
+                == .block(.defaultBlock)
+        )
+        #expect(
+            engine.evaluate(host: "notsuffix.example.com", urlString: "https://notsuffix.example.com/")
+                == .pass
+        )
+
+        // DOMAIN-KEYWORD must inspect host only, not URL path
+        #expect(
+            engine.evaluate(host: "telemetry.app.com", urlString: "https://telemetry.app.com/")
+                == .block(.defaultBlock)
+        )
+        #expect(
+            engine.evaluate(host: "safe.app.com", urlString: "https://safe.app.com/telemetry/ping")
+                == .pass
+        )
+
+        // URL-REGEX preserves commas inside quantifiers and honors per-rule action
+        #expect(
+            engine.evaluate(host: "api.example.com", urlString: "https://api.example.com/v12/events")
+                == .block(.forceMock200)
+        )
+        #expect(
+            engine.evaluate(host: "drop.example.com", urlString: "https://drop.example.com/ping")
+                == .block(.forceFail)
+        )
+
+        // Adblock || with $options and @@ allow override
+        #expect(
+            engine.evaluate(host: "sub.ads.example.com", urlString: "https://sub.ads.example.com/ad")
+                == .block(.defaultBlock)
+        )
+        #expect(
+            engine.evaluate(host: "safe.ads.example.com", urlString: "https://safe.ads.example.com/ok")
+                == .allow
+        )
+        #expect(
+            engine.evaluate(host: "disabled.example.com", urlString: "https://disabled.example.com/")
+                == .pass
+        )
+
+        // Tunnel host-level decision
+        #expect(engine.evaluateHostForTunnel(host: "exact.example.com") == .block(.defaultBlock))
+        #expect(engine.evaluateHostForTunnel(host: "sub.exact.example.com") == .pass)
+        #expect(engine.evaluateHostForTunnel(host: "safe.ads.example.com") == .allow)
+    }
+
+    @Test
+    func keyCoverVaultCheckpointsRealSQLiteWALAndRejectsTamperedGCM() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("KeyCoverWAL-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let key = KeyCoverKey(appBundleID: "com.example.wal", playChainDirectory: root)
+        var db: OpaquePointer?
+        #expect(sqlite3_open(key.decryptedKeyDB.path, &db) == SQLITE_OK)
+        #expect(sqlite3_exec(db, "PRAGMA journal_mode=WAL;", nil, nil, nil) == SQLITE_OK)
+        #expect(sqlite3_exec(db, "CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT);", nil, nil, nil) == SQLITE_OK)
+        #expect(sqlite3_exec(db, "INSERT INTO kv VALUES ('token', 'super-secret-wal');", nil, nil, nil) == SQLITE_OK)
+        // Hold WAL contents on disk by disabling auto-checkpoint before closing
+        #expect(sqlite3_exec(db, "PRAGMA wal_autocheckpoint=0;", nil, nil, nil) == SQLITE_OK)
+        #expect(sqlite3_exec(db, "INSERT INTO kv VALUES ('token2', 'wal-only-row');", nil, nil, nil) == SQLITE_OK)
+        sqlite3_close(db)
+
+        try key.encryptKeyDB(plainTextKey: "pass-123")
+        #expect(key.chainEncryptionStatus)
+        let encData = try Data(contentsOf: key.encryptedKeyDB)
+        #expect(encData.starts(with: Data("MCKV1\0\0\0".utf8)))
+        let encPerms = (try FileManager.default.attributesOfItem(
+            atPath: key.encryptedKeyDB.path
+        )[.posixPermissions] as? NSNumber)?.intValue
+        #expect(encPerms == 0o600)
+
+        // Wrong password must throw without deleting .keyCover
+        #expect(throws: (any Error).self) {
+            try key.decryptKeyDB(plainTextKey: "wrong-pass")
+        }
+        #expect(FileManager.default.fileExists(atPath: key.encryptedKeyDB.path))
+
+        // Tampered ciphertext must fail authentication without deleting .keyCover
+        var tampered = encData
+        tampered[tampered.count - 1] ^= 0xFF
+        try tampered.write(to: key.encryptedKeyDB)
+        #expect(!key.canDecrypt(plainTextKey: "pass-123"))
+        #expect(throws: (any Error).self) {
+            try key.decryptKeyDB(plainTextKey: "pass-123")
+        }
+        #expect(FileManager.default.fileExists(atPath: key.encryptedKeyDB.path))
+
+        // Restore valid ciphertext, plant stale -wal sidecar, and verify decrypt removes it and keeps WAL rows
+        try encData.write(to: key.encryptedKeyDB)
+        let staleWAL = URL(fileURLWithPath: key.decryptedKeyDB.path + "-wal")
+        try Data("stale-garbage-wal".utf8).write(to: staleWAL)
+
+        try key.decryptKeyDB(plainTextKey: "pass-123")
+        #expect(!FileManager.default.fileExists(atPath: staleWAL.path))
+        let decPerms = (try FileManager.default.attributesOfItem(
+            atPath: key.decryptedKeyDB.path
+        )[.posixPermissions] as? NSNumber)?.intValue
+        #expect(decPerms == 0o600)
+
+        var reopened: OpaquePointer?
+        #expect(sqlite3_open_v2(key.decryptedKeyDB.path, &reopened, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK)
+        defer { if let reopened { sqlite3_close(reopened) } }
+        var stmt: OpaquePointer?
+        #expect(sqlite3_prepare_v2(reopened, "SELECT v FROM kv WHERE k = 'token2';", -1, &stmt, nil) == SQLITE_OK)
+        defer { sqlite3_finalize(stmt) }
+        #expect(sqlite3_step(stmt) == SQLITE_ROW)
+        let value = sqlite3_column_text(stmt, 0).map { String(cString: $0) }
+        #expect(value == "wal-only-row")
+    }
+
+    @Test
+    func appInfoDefaultInstallGenerationKeyMatchesInstaller() {
+        let missingPlist = URL(fileURLWithPath: "/nonexistent/Info.plist")
+        let lazyInfo = AppInfo(
+            cachedPlistURL: missingPlist,
+            cachedFields: AppInfo.CachedFields(
+                bundleIdentifier: "com.example.gen",
+                bundleName: "Gen",
+                displayName: "Gen",
+                bundleVersion: "1.0",
+                cfBundleVersion: "1",
+                executableName: "Gen",
+                installGeneration: "gen-42",
+                primaryIconName: "AppIcon"
+            )
+        )
+        #expect(lazyInfo[string: "PCInstallGeneration"] == "gen-42")
+    }
+
+    @Test
+    func reportedIOSVersionModeEnforcesDeviceModelMinMaxBounds() {
+        // iPad6,7 max iPadOS 16 -> coerced on 18.3 and 26, valid on 13.7
+        #expect(ReportedIOSVersionMode.effectiveDeviceModel("iPad6,7", for: .compat13_7) == "iPad6,7")
+        #expect(!ReportedIOSVersionMode.supportsIOS18_3(deviceModel: "iPad6,7"))
+        #expect(ReportedIOSVersionMode.effectiveDeviceModel("iPad6,7", for: .compat18_3) == "iPad13,8")
+        #expect(
+            ReportedIOSVersionMode.effectiveDeviceModel("iPad6,7", for: .automatic, hostIOSMajor: 26) == "iPad13,8"
+        )
+
+        // iPad8,6 valid on 18.3, coerced on iOS 26; iPhone12,5 valid on 13.7, 18.3, and 26 (PTSystemSpoofer parity)
+        #expect(ReportedIOSVersionMode.effectiveDeviceModel("iPad8,6", for: .compat18_3) == "iPad8,6")
+        #expect(ReportedIOSVersionMode.effectiveDeviceModel("iPhone12,5", for: .compat18_3) == "iPhone12,5")
+        #expect(
+            ReportedIOSVersionMode.effectiveDeviceModel("iPad8,6", for: .automatic, hostIOSMajor: 26) == "iPad13,8"
+        )
+        let iphone12On26 = ReportedIOSVersionMode.effectiveDeviceModel(
+            "iPhone12,5",
+            for: .followHost,
+            hostIOSMajor: 26
+        )
+        #expect(iphone12On26 == "iPhone12,5")
+
+        // iPhone18,2 / iPad17,3 min iOS 26 -> coerced to newest compatible model on iOS 17/18 and preserved on 26
+        #expect(
+            ReportedIOSVersionMode.effectiveDeviceModel("iPhone18,2", for: .automatic, hostIOSMajor: 18) == "iPhone17,2"
+        )
+        #expect(
+            ReportedIOSVersionMode.effectiveDeviceModel("iPhone18,2", for: .automatic, hostIOSMajor: 17) == "iPhone16,2"
+        )
+        #expect(
+            ReportedIOSVersionMode.effectiveDeviceModel("iPad17,3", for: .automatic, hostIOSMajor: 18) == "iPad16,6"
+        )
+        #expect(
+            ReportedIOSVersionMode.effectiveDeviceModel("iPad17,3", for: .automatic, hostIOSMajor: 16) == "iPad14,5"
+        )
+        #expect(
+            ReportedIOSVersionMode.effectiveDeviceModel("iPhone18,2", for: .compat13_7) == "iPhone12,5"
+        )
+        #expect(
+            ReportedIOSVersionMode.effectiveDeviceModel("iPhone18,2", for: .automatic, hostIOSMajor: 26) == "iPhone18,2"
+        )
+        #expect(
+            ReportedIOSVersionMode.effectiveDeviceModel("iPad17,3", for: .automatic, hostIOSMajor: 26) == "iPad17,3"
+        )
+    }
+
+    @Test
+    func appIntegrityDetectsCaseInsensitiveApplicationsPath() throws {
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent("AppIntegrityTest-\(UUID().uuidString)")
+        let fakeApps = tempRoot.appendingPathComponent("Applications", isDirectory: true)
+        let fakeDownloads = tempRoot.appendingPathComponent("Downloads", isDirectory: true)
+        try fm.createDirectory(at: fakeApps, withIntermediateDirectories: true)
+        try fm.createDirectory(at: fakeDownloads, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+
+        let lowerApp = fakeApps.appendingPathComponent("macover.app", isDirectory: true)
+        let expectedApp = fakeApps.appendingPathComponent("MacOver.app", isDirectory: true)
+        let downloadsApp = fakeDownloads.appendingPathComponent("MacOver.app", isDirectory: true)
+        try fm.createDirectory(at: lowerApp, withIntermediateDirectories: true)
+        try fm.createDirectory(at: downloadsApp, withIntermediateDirectories: true)
+
+        #expect(AppIntegrity.isURLInsideApplications(
+            lowerApp,
+            expectedAppURL: expectedApp,
+            applicationsDirURL: fakeApps
+        ))
+        #expect(!AppIntegrity.isURLInsideApplications(
+            downloadsApp,
+            expectedAppURL: expectedApp,
+            applicationsDirURL: fakeApps
+        ))
+    }
+
+    @Test
+    func appInfoConcurrentHydrationAndMutationIsThreadSafe() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AppInfoConcurrency-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let plistURL = dir.appendingPathComponent("Info.plist")
+        let plistData = try PropertyListSerialization.data(
+            fromPropertyList: [
+                "CFBundleIdentifier": "com.example.concurrent",
+                "CFBundleName": "Concurrent",
+                "CFBundleDisplayName": "Concurrent",
+                "CFBundleShortVersionString": "1.0",
+                "CFBundleExecutable": "Concurrent",
+                "MinimumOSVersion": "15.0",
+                "CFBundleIcons": ["CFBundlePrimaryIcon": ["CFBundleIconFiles": ["AppIcon60x60"]]]
+            ],
+            format: .xml,
+            options: 0
+        )
+        try plistData.write(to: plistURL)
+
+        let info = AppInfo(
+            cachedPlistURL: plistURL,
+            cachedFields: AppInfo.CachedFields(
+                bundleIdentifier: "com.example.concurrent",
+                bundleName: "Concurrent",
+                displayName: "Concurrent",
+                bundleVersion: "1.0",
+                cfBundleVersion: "1",
+                executableName: "Concurrent",
+                installGeneration: "1",
+                primaryIconName: "AppIcon"
+            )
+        )
+
+        await withTaskGroup(of: Void.self) { group in
+            for idx in 0..<24 {
+                group.addTask {
+                    _ = info.minimumOSVersion
+                    _ = info.primaryIconName
+                    _ = info.lsEnvironment
+                    _ = info.bundleIdentifier
+                    info[string: "CustomKey\(idx % 4)"] = "val-\(idx)"
+                }
+            }
+        }
+        #expect(info.minimumOSVersion == "15.0")
+        #expect(info.primaryIconName == "AppIcon60x60")
+    }
+
+    @Test
+    func canonicalNetworkRuleEngineAllowRegexMatchesPTNetworkRulesParity() {
+        // Grouped scheme+host allow regex exempts only matching hosts from tunnel block
+        let grouped = CanonicalNetworkRuleEngine(rawPatterns: [
+            "example.com",
+            "@@/^https?://(api|cdn)\\.example\\.com(:443)?/v1/"
+        ])
+        #expect(grouped.evaluateHostForTunnel(host: "api.example.com") == .allow)
+        #expect(grouped.evaluateHostForTunnel(host: "cdn.example.com") == .allow)
+        #expect(grouped.evaluateHostForTunnel(host: "ads.example.com") == .block(.defaultBlock))
+
+        // Scheme-less host-bounded allow regex exempts matching host without failing open globally
+        let schemeless = CanonicalNetworkRuleEngine(rawPatterns: [
+            "example.com",
+            "@@/safe\\.example\\.com:8443/health/"
+        ])
+        #expect(schemeless.evaluateHostForTunnel(host: "safe.example.com") == .allow)
+        #expect(schemeless.evaluateHostForTunnel(host: "tracker.example.com") == .block(.defaultBlock))
+
+        // Broad canary-matching regex fails open (hostless) so tunnel isn't falsely blocked
+        let canary = CanonicalNetworkRuleEngine(rawPatterns: [
+            "example.com",
+            "@@/^https?://.*/allow/"
+        ])
+        #expect(canary.evaluateHostForTunnel(host: "any.example.com") == .pass)
     }
 }

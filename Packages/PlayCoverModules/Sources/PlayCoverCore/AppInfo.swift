@@ -6,7 +6,7 @@
 import Foundation
 import Synchronization
 
-public class AppInfo {
+public class AppInfo: @unchecked Sendable {
     public struct CachedFields: Sendable {
         public let bundleIdentifier: String
         public let bundleName: String
@@ -38,17 +38,31 @@ public class AppInfo {
         }
     }
 
+    private final class StorageState: @unchecked Sendable {
+        var rawStorage: NSMutableDictionary
+        var wasBinaryPlist: Bool
+        var isHydrated: Bool
+        var cachedPrimaryIconName: String?
+
+        init(
+            rawStorage: NSMutableDictionary,
+            wasBinaryPlist: Bool,
+            isHydrated: Bool,
+            cachedPrimaryIconName: String?
+        ) {
+            self.rawStorage = rawStorage
+            self.wasBinaryPlist = wasBinaryPlist
+            self.isHydrated = isHydrated
+            self.cachedPrimaryIconName = cachedPrimaryIconName
+        }
+    }
+
     public let url: URL
-    fileprivate var rawStorage: NSMutableDictionary
-    private var wasBinaryPlist: Bool = false
-    private let hydrationLock: Mutex<Bool>
+    private let stateLock: Mutex<StorageState>
     private let unhydratedStringKeys: Set<String>
-    private var cachedPrimaryIconName: String?
 
     public init(contentsOf url: URL) {
-        self.hydrationLock = Mutex(true)
         self.unhydratedStringKeys = []
-        self.cachedPrimaryIconName = nil
         do {
             let data = try Data(contentsOf: url)
             var format: PropertyListSerialization.PropertyListFormat = .xml
@@ -58,26 +72,38 @@ public class AppInfo {
                 format: &format
             )
             if let dict = parsed as? NSMutableDictionary {
-                wasBinaryPlist = (format == .binary)
-                rawStorage = dict
                 self.url = url
+                self.stateLock = Mutex(StorageState(
+                    rawStorage: dict,
+                    wasBinaryPlist: format == .binary,
+                    isHydrated: true,
+                    cachedPrimaryIconName: nil
+                ))
             } else {
-                wasBinaryPlist = false
-                rawStorage = NSMutableDictionary()
                 self.url = URL(fileURLWithPath: "")
+                self.stateLock = Mutex(StorageState(
+                    rawStorage: NSMutableDictionary(),
+                    wasBinaryPlist: false,
+                    isHydrated: true,
+                    cachedPrimaryIconName: nil
+                ))
             }
         } catch {
             PlayCoverDiagnostics.reportError(error)
-            wasBinaryPlist = false
-            rawStorage = NSMutableDictionary()
             self.url = URL(fileURLWithPath: "")
+            self.stateLock = Mutex(StorageState(
+                rawStorage: NSMutableDictionary(),
+                wasBinaryPlist: false,
+                isHydrated: true,
+                cachedPrimaryIconName: nil
+            ))
         }
     }
 
     public init(
         cachedPlistURL url: URL,
         cachedFields: CachedFields,
-        installGenerationKey: String = "MacOverInstallGeneration"
+        installGenerationKey: String = "PCInstallGeneration"
     ) {
         let storage = NSMutableDictionary()
         storage["CFBundleIdentifier"] = cachedFields.bundleIdentifier
@@ -88,9 +114,12 @@ public class AppInfo {
         storage["CFBundleExecutable"] = cachedFields.executableName
         storage[installGenerationKey] = cachedFields.installGeneration
         self.url = url
-        self.rawStorage = storage
-        self.wasBinaryPlist = false
-        self.hydrationLock = Mutex(false)
+        self.stateLock = Mutex(StorageState(
+            rawStorage: storage,
+            wasBinaryPlist: false,
+            isHydrated: false,
+            cachedPrimaryIconName: cachedFields.primaryIconName
+        ))
         self.unhydratedStringKeys = [
             "CFBundleIdentifier",
             "CFBundleName",
@@ -100,58 +129,63 @@ public class AppInfo {
             "CFBundleExecutable",
             installGenerationKey
         ]
-        self.cachedPrimaryIconName = cachedFields.primaryIconName
     }
 
     private init(url: URL, rawStorage: NSMutableDictionary, wasBinaryPlist: Bool = false) {
         self.url = url
-        self.rawStorage = rawStorage
-        self.wasBinaryPlist = wasBinaryPlist
-        self.hydrationLock = Mutex(true)
+        self.stateLock = Mutex(StorageState(
+            rawStorage: rawStorage,
+            wasBinaryPlist: wasBinaryPlist,
+            isHydrated: true,
+            cachedPrimaryIconName: nil
+        ))
         self.unhydratedStringKeys = []
-        self.cachedPrimaryIconName = nil
     }
 
-    private func ensureHydratedFromDisk() {
-        hydrationLock.withLock { isHydrated in
-            guard !isHydrated else { return }
-            defer { isHydrated = true }
-            cachedPrimaryIconName = nil
-            guard !url.path.isEmpty else { return }
-            do {
-                let data = try Data(contentsOf: url)
-                var format: PropertyListSerialization.PropertyListFormat = .xml
-                let parsed = try PropertyListSerialization.propertyList(
-                    from: data,
-                    options: .mutableContainersAndLeaves,
-                    format: &format
-                )
-                if let dict = parsed as? NSMutableDictionary {
-                    wasBinaryPlist = (format == .binary)
-                    rawStorage = dict
-                }
-            } catch {
-                PlayCoverDiagnostics.reportError(error)
+    private func hydrateLocked(_ state: StorageState) {
+        guard !state.isHydrated else { return }
+        defer { state.isHydrated = true }
+        state.cachedPrimaryIconName = nil
+        guard !url.path.isEmpty else { return }
+        do {
+            let data = try Data(contentsOf: url)
+            var format: PropertyListSerialization.PropertyListFormat = .xml
+            let parsed = try PropertyListSerialization.propertyList(
+                from: data,
+                options: .mutableContainersAndLeaves,
+                format: &format
+            )
+            if let dict = parsed as? NSMutableDictionary {
+                state.wasBinaryPlist = (format == .binary)
+                state.rawStorage = dict
             }
+        } catch {
+            PlayCoverDiagnostics.reportError(error)
         }
     }
 
     public func retargeted(toURL url: URL) -> AppInfo {
-        ensureHydratedFromDisk()
-        guard let copy = rawStorage.mutableCopy() as? NSMutableDictionary
-        else { fatalError("Failed to copy rawStorage") }
-        return AppInfo(url: url, rawStorage: copy, wasBinaryPlist: wasBinaryPlist)
+        let (copy, wasBinary) = stateLock.withLock { state -> (NSMutableDictionary, Bool) in
+            hydrateLocked(state)
+            guard let cloned = state.rawStorage.mutableCopy() as? NSMutableDictionary else {
+                fatalError("Failed to copy rawStorage")
+            }
+            return (cloned, state.wasBinaryPlist)
+        }
+        return AppInfo(url: url, rawStorage: copy, wasBinaryPlist: wasBinary)
     }
 
     /// Write a serialized representation of this info to the given URL, preserving binary format if originally binary
     public func write(toURL url: URL) throws {
-        ensureHydratedFromDisk()
-        let format: PropertyListSerialization.PropertyListFormat = wasBinaryPlist ? .binary : .xml
-        let data = try PropertyListSerialization.data(
-            fromPropertyList: rawStorage,
-            format: format,
-            options: 0
-        )
+        let data = try stateLock.withLock { state -> Data in
+            hydrateLocked(state)
+            let format: PropertyListSerialization.PropertyListFormat = state.wasBinaryPlist ? .binary : .xml
+            return try PropertyListSerialization.data(
+                fromPropertyList: state.rawStorage,
+                format: format,
+                options: 0
+            )
+        }
         try data.write(to: url, options: .atomic)
     }
 
@@ -162,116 +196,156 @@ public class AppInfo {
 
     public subscript(string index: String) -> String? {
         get {
-            if !unhydratedStringKeys.contains(index) {
-                ensureHydratedFromDisk()
+            stateLock.withLock { state in
+                if !unhydratedStringKeys.contains(index) {
+                    hydrateLocked(state)
+                }
+                return state.rawStorage[index] as? String
             }
-            return rawStorage[index] as? String
         }
         set {
-            ensureHydratedFromDisk()
-            rawStorage[index] = newValue
+            stateLock.withLock { state in
+                hydrateLocked(state)
+                state.rawStorage[index] = newValue
+            }
         }
     }
 
     public subscript(object index: String) -> NSObject? {
         get {
-            ensureHydratedFromDisk()
-            return rawStorage[index] as? NSObject
+            stateLock.withLock { state in
+                hydrateLocked(state)
+                let raw = state.rawStorage[index] as? NSObject
+                return (raw as? NSCopying)?.copy(with: nil) as? NSObject ?? raw
+            }
         }
         set {
-            ensureHydratedFromDisk()
-            rawStorage[index] = newValue
+            stateLock.withLock { state in
+                hydrateLocked(state)
+                state.rawStorage[index] = newValue
+            }
         }
     }
 
     public subscript(dictionary index: String) -> NSMutableDictionary? {
         get {
-            ensureHydratedFromDisk()
-            return rawStorage[index] as? NSMutableDictionary
+            stateLock.withLock { state in
+                hydrateLocked(state)
+                return (state.rawStorage[index] as? NSMutableDictionary)?.mutableCopy() as? NSMutableDictionary
+            }
         }
         set {
-            ensureHydratedFromDisk()
-            rawStorage[index] = newValue
+            stateLock.withLock { state in
+                hydrateLocked(state)
+                state.rawStorage[index] = newValue?.mutableCopy() as? NSMutableDictionary
+            }
         }
     }
 
     public subscript(strings index: String) -> [String]? {
         get {
-            ensureHydratedFromDisk()
-            return rawStorage[index] as? [String]
+            stateLock.withLock { state in
+                hydrateLocked(state)
+                return state.rawStorage[index] as? [String]
+            }
         }
         set {
-            ensureHydratedFromDisk()
-            rawStorage[index] = newValue
+            stateLock.withLock { state in
+                hydrateLocked(state)
+                state.rawStorage[index] = newValue
+            }
         }
     }
 
     public subscript(array index: String) -> NSMutableArray? {
         get {
-            ensureHydratedFromDisk()
-            return rawStorage[index] as? NSMutableArray
+            stateLock.withLock { state in
+                hydrateLocked(state)
+                return (state.rawStorage[index] as? NSMutableArray)?.mutableCopy() as? NSMutableArray
+            }
         }
         set {
-            ensureHydratedFromDisk()
-            rawStorage[index] = newValue
+            stateLock.withLock { state in
+                hydrateLocked(state)
+                state.rawStorage[index] = newValue?.mutableCopy() as? NSMutableArray
+            }
         }
     }
 
     public subscript(numbers index: String) -> [NSNumber]? {
         get {
-            ensureHydratedFromDisk()
-            return rawStorage[index] as? [NSNumber]
+            stateLock.withLock { state in
+                hydrateLocked(state)
+                return state.rawStorage[index] as? [NSNumber]
+            }
         }
         set {
-            ensureHydratedFromDisk()
-            rawStorage[index] = newValue
+            stateLock.withLock { state in
+                hydrateLocked(state)
+                state.rawStorage[index] = newValue
+            }
         }
     }
 
     public subscript(ints index: String) -> [Int]? {
         get {
-            ensureHydratedFromDisk()
-            return rawStorage[index] as? [Int]
+            stateLock.withLock { state in
+                hydrateLocked(state)
+                return state.rawStorage[index] as? [Int]
+            }
         }
         set {
-            ensureHydratedFromDisk()
-            rawStorage[index] = newValue
+            stateLock.withLock { state in
+                hydrateLocked(state)
+                state.rawStorage[index] = newValue
+            }
         }
     }
 
     public subscript(doubles index: String) -> [Double]? {
         get {
-            ensureHydratedFromDisk()
-            return rawStorage[index] as? [Double]
+            stateLock.withLock { state in
+                hydrateLocked(state)
+                return state.rawStorage[index] as? [Double]
+            }
         }
         set {
-            ensureHydratedFromDisk()
-            rawStorage[index] = newValue
+            stateLock.withLock { state in
+                hydrateLocked(state)
+                state.rawStorage[index] = newValue
+            }
         }
     }
 
     public subscript(bool index: String) -> Bool? {
         get {
-            ensureHydratedFromDisk()
-            return rawStorage[index] as? Bool
+            stateLock.withLock { state in
+                hydrateLocked(state)
+                return state.rawStorage[index] as? Bool
+            }
         }
         set {
-            ensureHydratedFromDisk()
-            rawStorage[index] = newValue
+            stateLock.withLock { state in
+                hydrateLocked(state)
+                state.rawStorage[index] = newValue
+            }
         }
     }
 
     public func setApplicationCategoryType(_ newValue: LSApplicationCategoryType, persist: Bool) {
-        ensureHydratedFromDisk()
-        let current = self[string: "LSApplicationCategoryType"]
-        if newValue == .none {
-            guard current != nil else { return }
-            rawStorage.removeObject(forKey: "LSApplicationCategoryType")
-        } else {
-            guard current != newValue.rawValue else { return }
-            self[string: "LSApplicationCategoryType"] = newValue.rawValue
+        let changed = stateLock.withLock { state -> Bool in
+            hydrateLocked(state)
+            let current = state.rawStorage["LSApplicationCategoryType"] as? String
+            if newValue == .none {
+                guard current != nil else { return false }
+                state.rawStorage.removeObject(forKey: "LSApplicationCategoryType")
+                return true
+            }
+            guard current != newValue.rawValue else { return false }
+            state.rawStorage["LSApplicationCategoryType"] = newValue.rawValue
+            return true
         }
-        if persist {
+        if changed && persist {
             do {
                 try write()
             } catch {
@@ -329,52 +403,58 @@ public class AppInfo {
     }
 
     public var primaryIconName: String {
-        let unhydratedCached = hydrationLock.withLock { isHydrated -> String? in
-            guard !isHydrated else { return nil }
-            return cachedPrimaryIconName
-        }
-        if let unhydratedCached, !unhydratedCached.isEmpty {
-            return unhydratedCached
-        }
+        stateLock.withLock { state in
+            if !state.isHydrated, let cached = state.cachedPrimaryIconName, !cached.isEmpty {
+                return cached
+            }
+            hydrateLocked(state)
 
-        if let bundleIconDict = self[dictionary: "CFBundleIcons~ipad"],
-           let primaryBundleIconDict = bundleIconDict["CFBundlePrimaryIcon"] as? [String: Any],
-           let bundleIconFiles = primaryBundleIconDict["CFBundleIconFiles"] as? [String],
-           let primaryIconName = bundleIconFiles.last {
-            return primaryIconName
-        }
+            if let bundleIconDict = state.rawStorage["CFBundleIcons~ipad"] as? [String: Any],
+               let primaryBundleIconDict = bundleIconDict["CFBundlePrimaryIcon"] as? [String: Any],
+               let bundleIconFiles = primaryBundleIconDict["CFBundleIconFiles"] as? [String],
+               let primaryIconName = bundleIconFiles.last {
+                return primaryIconName
+            }
 
-        if let bundleIconDict = self[dictionary: "CFBundleIcons"],
-           let primaryBundleIconDict = bundleIconDict["CFBundlePrimaryIcon"] as? [String: Any],
-           let bundleIconFiles = primaryBundleIconDict["CFBundleIconFiles"] as? [String],
-           let primaryIconName = bundleIconFiles.last {
-            return primaryIconName
-        }
+            if let bundleIconDict = state.rawStorage["CFBundleIcons"] as? [String: Any],
+               let primaryBundleIconDict = bundleIconDict["CFBundlePrimaryIcon"] as? [String: Any],
+               let bundleIconFiles = primaryBundleIconDict["CFBundleIconFiles"] as? [String],
+               let primaryIconName = bundleIconFiles.last {
+                return primaryIconName
+            }
 
-        if let bundleIconFiles = self[strings: "CFBundleIconFiles"],
-           let primaryIconName = bundleIconFiles.last {
-            return primaryIconName
-        }
+            if let bundleIconFiles = state.rawStorage["CFBundleIconFiles"] as? [String],
+               let primaryIconName = bundleIconFiles.last {
+                return primaryIconName
+            }
 
-        return "AppIcon"
+            return "AppIcon"
+        }
     }
 
     public var lsEnvironment: [String: String] {
         get {
-            self[dictionary: "LSEnvironment"] as? [String: String] ?? [:]
+            stateLock.withLock { state in
+                hydrateLocked(state)
+                return state.rawStorage["LSEnvironment"] as? [String: String] ?? [:]
+            }
         }
         set {
-            ensureHydratedFromDisk()
-            var filtered = newValue
-            if let dyldPath = filtered["DYLD_LIBRARY_PATH"], dyldPath.isEmpty {
-                filtered.removeValue(forKey: "DYLD_LIBRARY_PATH")
+            let changed = stateLock.withLock { state -> Bool in
+                hydrateLocked(state)
+                var filtered = newValue
+                if let dyldPath = filtered["DYLD_LIBRARY_PATH"], dyldPath.isEmpty {
+                    filtered.removeValue(forKey: "DYLD_LIBRARY_PATH")
+                }
+                if filtered.isEmpty {
+                    guard state.rawStorage["LSEnvironment"] != nil else { return false }
+                    state.rawStorage.removeObject(forKey: "LSEnvironment")
+                    return true
+                }
+                state.rawStorage["LSEnvironment"] = NSMutableDictionary(dictionary: filtered)
+                return true
             }
-            if filtered.isEmpty {
-                guard rawStorage["LSEnvironment"] != nil else { return }
-                rawStorage.removeObject(forKey: "LSEnvironment")
-            } else {
-                self[dictionary: "LSEnvironment"] = NSMutableDictionary(dictionary: filtered)
-            }
+            guard changed else { return }
             do {
                 try write()
             } catch {

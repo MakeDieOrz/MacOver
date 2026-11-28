@@ -9,13 +9,6 @@ public enum DualTrackPrivilegeEscalator {
     public static let helperDaemonPlistName = "app.makedie.MacOver.Helper.plist"
     public static let amfiBootArgs = "amfi_get_out_of_my_way=0x1 ipc_control_port_options=0"
 
-    private static let nvramAMFIOptions = [
-        "amfi_get_out_of_my_way=1",
-        "amfi_get_out_of_my_way=0x1",
-        "amfi_get_out_of_my_way=1 ipc_control_port_options=0",
-        "amfi_get_out_of_my_way=0x1 ipc_control_port_options=0"
-    ]
-
     public static func selectTrack(
         macOS13OrNewer: Bool,
         hasDeveloperIDTeam: Bool,
@@ -103,20 +96,86 @@ public enum DualTrackPrivilegeEscalator {
         return "do shell script \"\(appleScriptEscaped(shellCommand))\" with administrator privileges"
     }
 
+    public static func parseSIPDisabled(from csrOutput: String) -> Bool {
+        var filesystemDisabled = false
+        var debuggingDisabled = false
+        for rawLine in csrOutput.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if line == "system integrity protection status: disabled."
+                || line == "system integrity protection status: disabled" {
+                return true
+            }
+            if line == "filesystem protections: disabled" {
+                filesystemDisabled = true
+            } else if line == "debugging restrictions: disabled" {
+                debuggingDisabled = true
+            }
+        }
+        return filesystemDisabled && debuggingDisabled
+    }
+
+    public static func parseNVRAMWritable(from csrOutput: String) -> Bool {
+        if parseSIPDisabled(from: csrOutput) {
+            return true
+        }
+        for rawLine in csrOutput.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if line == "nvram protections: disabled" {
+                return true
+            }
+        }
+        return false
+    }
+
+    public static func bootArgTokens(from rawOutput: String) -> [String] {
+        var trimmed = rawOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("kern.bootargs:") {
+            trimmed = String(trimmed.dropFirst("kern.bootargs:".count))
+        } else if trimmed.hasPrefix("boot-args") {
+            let remainder = trimmed.dropFirst("boot-args".count)
+            if remainder.isEmpty || remainder.first?.isWhitespace == true {
+                trimmed = String(remainder)
+            }
+        }
+        return trimmed.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+    }
+
+    public static func hasAMFIBootArg(in rawOutput: String) -> Bool {
+        let tokens = bootArgTokens(from: rawOutput)
+        return tokens.contains("amfi_get_out_of_my_way=1") || tokens.contains("amfi_get_out_of_my_way=0x1")
+    }
+
+    public static func mergedAMFIBootArgs(existingOutput: String?) -> String {
+        var tokens = existingOutput.map { bootArgTokens(from: $0) } ?? []
+        if let idx = tokens.firstIndex(where: { $0.hasPrefix("amfi_get_out_of_my_way=") }) {
+            let current = tokens[idx]
+            if current != "amfi_get_out_of_my_way=1" && current != "amfi_get_out_of_my_way=0x1" {
+                tokens[idx] = "amfi_get_out_of_my_way=0x1"
+            }
+        } else {
+            tokens.append("amfi_get_out_of_my_way=0x1")
+        }
+
+        if let idx = tokens.firstIndex(where: { $0.hasPrefix("ipc_control_port_options=") }) {
+            tokens[idx] = "ipc_control_port_options=0"
+        } else {
+            tokens.append("ipc_control_port_options=0")
+        }
+        return tokens.joined(separator: " ")
+    }
+
     public static func preFlightStatus() -> PrivilegePreFlightStatus {
         let csrOutput = (try? runReadOnlyProcess("/usr/bin/csrutil", arguments: ["status"])) ?? ""
-        let sipDisabled = csrOutput.contains("unknown") || csrOutput.contains("disabled")
+        let sipDisabled = parseSIPDisabled(from: csrOutput)
 
         let nvramResult = try? runReadOnlyProcess("/usr/sbin/nvram", arguments: ["boot-args"])
-        let amfiInNVRAM = nvramResult.map { out in
-            nvramAMFIOptions.contains(where: { out.contains($0) })
-        } ?? false
+        let amfiInNVRAM = nvramResult.map { hasAMFIBootArg(in: $0) } ?? false
 
         // Without SIP NVRAM bypass, modifying boot-args fails even with root privileges.
-        let nvramWritable = sipDisabled || csrOutput.contains("NVRAM Protections: disabled")
+        let nvramWritable = parseNVRAMWritable(from: csrOutput)
 
         let sysctlOutput = (try? runReadOnlyProcess("/usr/sbin/sysctl", arguments: ["kern.bootargs"])) ?? ""
-        let amfiInRunningOS = nvramAMFIOptions.contains(where: { sysctlOutput.contains($0) })
+        let amfiInRunningOS = hasAMFIBootArg(in: sysctlOutput)
 
         return PrivilegePreFlightStatus(
             sipDisabled: sipDisabled,
@@ -144,15 +203,22 @@ public enum DualTrackPrivilegeEscalator {
                 proxy.configureAMFIBootArgs(completion: done)
             }
         case .appleScriptGUI:
+            let existing = try? runReadOnlyProcess("/usr/sbin/nvram", arguments: ["boot-args"])
+            let merged = mergedAMFIBootArgs(existingOutput: existing)
             try await executeAppleScriptAdminCommand(
                 binary: "/usr/sbin/nvram",
-                arguments: ["boot-args=\(amfiBootArgs)"]
+                arguments: ["boot-args=\(merged)"]
             )
         }
     }
 
     public static func repairContainerPermissions(at path: String) async throws {
-        guard let validatedPath = HelperSecurityValidator.validateContainerPath(path) else {
+        let userHomeRoot = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
+        guard let validatedPath = HelperSecurityValidator.validateContainerPath(
+            path,
+            userHomeRoot: userHomeRoot,
+            requireExisting: true
+        ) else {
             throw PlayCoverError.privilegeEscalationFailed("Refused permission repair for invalid container path.")
         }
 
@@ -162,16 +228,31 @@ public enum DualTrackPrivilegeEscalator {
                 proxy.repairContainerPermissions(at: validatedPath, completion: done)
             }
         case .appleScriptGUI:
-            try await executeAppleScriptAdminCommand(
-                binary: "/bin/chmod",
-                arguments: ["-R", "u+rwX", validatedPath]
-            )
+            // Prefer in-process descriptor-pinned repair first (no symlink traversal); only
+            // escalate via AppleScript if an ownership/permission error prevents local repair.
+            do {
+                try HelperSecurityValidator.repairContainerPermissionsSecurely(
+                    at: validatedPath,
+                    userHomeRoot: userHomeRoot
+                )
+            } catch let error as PlayCoverError {
+                // Never escalate security rejections (symlinks, hardlinks, depth limits, invalid paths)
+                // to a root-privileged chmod command.
+                throw error
+            } catch {
+                try await executeAppleScriptAdminCommand(
+                    binary: "/bin/chmod",
+                    arguments: ["-RP", "u+rwX", validatedPath]
+                )
+            }
         }
     }
 
     public static func manageTCCPermissions(for bundleID: String, reset: Bool) async throws {
-        guard HelperSecurityValidator.validateBundleIdentifier(bundleID) else {
-            throw PlayCoverError.privilegeEscalationFailed("Refused TCC change for invalid bundle identifier.")
+        guard HelperSecurityValidator.validateGuestBundleIdentifier(bundleID) else {
+            throw PlayCoverError.privilegeEscalationFailed(
+                "Refused TCC change for invalid or reserved bundle identifier."
+            )
         }
         guard reset else { return }
 
