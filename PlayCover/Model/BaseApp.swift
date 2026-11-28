@@ -19,7 +19,7 @@ nonisolated public class BaseApp {
 
     public var entitlements: URL {
         Entitlements.playCoverEntitlementsDir
-            .appendingPathComponent(info.bundleIdentifier)
+            .appendingEscapedPathComponent(info.bundleIdentifier)
             .appendingPathExtension("plist")
     }
 
@@ -32,11 +32,13 @@ nonisolated public class BaseApp {
     }
 
     public static func svcPatchManifestURL(forBundleIdentifier bundleIdentifier: String) -> URL {
-        svcPatchesRoot.appendingPathComponent("\(bundleIdentifier).json")
+        svcPatchesRoot
+            .appendingEscapedPathComponent(bundleIdentifier)
+            .appendingPathExtension("json")
     }
 
     public var appBackupsDir: URL {
-        Self.appBackupsRoot.appendingPathComponent(info.bundleIdentifier)
+        Self.appBackupsRoot.appendingEscapedPathComponent(info.bundleIdentifier)
     }
 
     public var svcPatchManifestURL: URL {

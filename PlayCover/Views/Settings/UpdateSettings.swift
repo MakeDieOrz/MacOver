@@ -8,20 +8,30 @@ import SwiftUI
 
 struct UpdateSettings: View {
     var updaterViewModel: UpdaterViewModel
-    @AppStorage("SUEnableAutomaticChecks") var autoUpdate = false
 
     var body: some View {
+        @Bindable var updaterViewModel = updaterViewModel
         Form {
             Section {
-                Toggle("preferences.toggle.automaticUpdates", isOn: $autoUpdate)
+                Toggle(
+                    "preferences.toggle.automaticUpdates",
+                    isOn: $updaterViewModel.automaticallyCheckForUpdates
+                )
+                .disabled(!updaterViewModel.isUpdateVerificationConfigured)
+
                 Button("preferences.button.checkForUpdates") {
                     updaterViewModel.checkForUpdates()
+                }
+                .disabled(!updaterViewModel.canCheckForUpdates)
+
+                if !updaterViewModel.isUpdateVerificationConfigured {
+                    Label("preferences.updates.unsignedDisabledNote", systemImage: "lock.shield")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
         .formStyle(.grouped)
-        .onChange(of: autoUpdate) { _, value in
-            updaterViewModel.automaticallyCheckForUpdates = value
-        }
     }
 }

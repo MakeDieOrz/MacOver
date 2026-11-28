@@ -101,6 +101,10 @@ struct StoreAppIconView: View {
     @State private var localIcon: NSImage?
     @State private var finishedFallbackWait = false
 
+    private var taskKey: String {
+        "\(app.bundleID)|\(app.itunesLookup)"
+    }
+
     private var placeholderView: some View {
         Group {
             if let localIcon {
@@ -120,9 +124,10 @@ struct StoreAppIconView: View {
                                 .controlSize(.small)
                         }
                     }
-                    .task(id: app.bundleID) {
+                    .task(id: taskKey) {
                         finishedFallbackWait = false
                         try? await Task.sleep(nanoseconds: 4_000_000_000)
+                        guard !Task.isCancelled else { return }
                         finishedFallbackWait = true
                     }
             }
@@ -142,19 +147,74 @@ struct StoreAppIconView: View {
         .frame(width: size, height: size)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .shadow(color: .black.opacity(0.14), radius: 2, y: 1)
-        .task(id: app.itunesLookup) {
+        .task(id: taskKey) {
+            onlineIcon = nil
             loadedRemoteImage = nil
-            let cache = dependencies.cacher.cache
-            if !cache.hasData(forKey: app.itunesLookup) {
-                await dependencies.cacher.resolveITunesData(app.itunesLookup)
+            localIcon = nil
+            finishedFallbackWait = false
+
+            let cacher = dependencies.cacher
+            let cache = cacher.cache
+            let lookup = app.itunesLookup.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !lookup.isEmpty {
+                let hasCachedLookup = await Task.detached(priority: .utility) {
+                    cache.hasData(forKey: lookup)
+                }.value
+                if !hasCachedLookup {
+                    await cacher.resolveITunesData(lookup)
+                }
+                guard !Task.isCancelled else { return }
+                let artwork = await Task.detached(priority: .utility) { () -> String? in
+                    let response: ITunesResponse? = try? cache.readCodable(forKey: lookup)
+                    return response?.results.first?.artworkUrl512
+                }.value
+                guard !Task.isCancelled else { return }
+                if let artwork {
+                    onlineIcon = artwork
+                    let remote = await cacher.loadRemoteImage(from: artwork)
+                    guard !Task.isCancelled else { return }
+                    if let remote {
+                        loadedRemoteImage = remote
+                        return
+                    }
+                }
             }
-            if let response: ITunesResponse = try? cache.readCodable(forKey: app.itunesLookup),
-               let artwork = response.results.first?.artworkUrl512 {
-                onlineIcon = artwork
-                loadedRemoteImage = await dependencies.cacher.loadRemoteImage(from: artwork)
-            } else {
-                localIcon = dependencies.cacher.getLocalIcon(bundleId: app.bundleID)
+
+            let bundleID = app.bundleID
+            if let installed = dependencies.appsVM.apps.first(where: { $0.info.bundleIdentifier == bundleID }) {
+                if let cached = cacher.getCachedMemoryIcon(
+                    bundleIdentifier: installed.info.bundleIdentifier,
+                    bundleVersion: installed.info.bundleVersion
+                ) {
+                    localIcon = cached
+                    return
+                }
+                let iconCG = await cacher.loadLocalIcon(
+                    at: installed.url,
+                    bundleIdentifier: installed.info.bundleIdentifier,
+                    bundleVersion: installed.info.bundleVersion,
+                    primaryIconName: installed.info.primaryIconName
+                )
+                guard !Task.isCancelled else { return }
+                if let iconCG {
+                    localIcon = NSImage(cgImage: iconCG, size: NSSize(width: iconCG.width, height: iconCG.height))
+                    return
+                }
+            } else if !bundleID.isEmpty {
+                let diskCG = await Task.detached(priority: .utility) { () -> CGImage? in
+                    let data = cache.readData(forKey: "icon-data:\(bundleID)")
+                        ?? cache.readData(forKey: bundleID)
+                    guard let data else { return nil }
+                    return Cacher.downsampleCGImage(from: data, maxPixelSize: 256)
+                }.value
+                guard !Task.isCancelled else { return }
+                if let diskCG {
+                    localIcon = NSImage(cgImage: diskCG, size: NSSize(width: diskCG.width, height: diskCG.height))
+                    return
+                }
             }
+
+            finishedFallbackWait = true
         }
     }
 }

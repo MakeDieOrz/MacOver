@@ -41,8 +41,12 @@ struct PlayCoverSettingsView: View {
             Tab("preferences.tab.uninstall", systemImage: "trash.square") {
                 UninstallSettings()
             }
+
+            Tab("settings.tab.mcp", systemImage: "cpu") {
+                MCPSettingsView()
+            }
         }
-        .frame(minWidth: 620, minHeight: 400)
+        .frame(minWidth: 680, minHeight: 440)
     }
 }
 

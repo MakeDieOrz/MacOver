@@ -42,6 +42,7 @@ nonisolated class PlayApp: BaseApp, Identifiable, Hashable, @unchecked Sendable 
         let codeResMTimeNSec: Int
         let playToolsMTimeSec: Int
         let playToolsMTimeNSec: Int
+        let userPluginsDigest: String?
     }
 
     private static let verifiedBundleStamps = Mutex<[String: VerifiedBundleStamp]>([:])
@@ -56,6 +57,9 @@ nonisolated class PlayApp: BaseApp, Identifiable, Hashable, @unchecked Sendable 
         let exec = fileStamp(for: executableURL)
         let codeRes = fileStamp(for: bundleURL.appendingPathComponent("_CodeSignature/CodeResources"))
         let playTools = fileStamp(for: PlayTools.playToolsPath)
+        let userPluginsDigest = PlayTools.directoryTreeDigest(
+            at: bundleURL.appendingPathComponent("Frameworks/UserPlugins", isDirectory: true)
+        )
         return VerifiedBundleStamp(
             execMTimeSec: exec.sec,
             execMTimeNSec: exec.nsec,
@@ -63,11 +67,12 @@ nonisolated class PlayApp: BaseApp, Identifiable, Hashable, @unchecked Sendable 
             codeResMTimeSec: codeRes.sec,
             codeResMTimeNSec: codeRes.nsec,
             playToolsMTimeSec: playTools.sec,
-            playToolsMTimeNSec: playTools.nsec
+            playToolsMTimeNSec: playTools.nsec,
+            userPluginsDigest: userPluginsDigest
         )
     }
 
-    private static func invalidateVerifiedBundleStamp(for bundleURL: URL) {
+    static func invalidateVerifiedBundleStamp(for bundleURL: URL) {
         verifiedBundleStamps.withLock {
             _ = $0.removeValue(forKey: bundleURL.path)
         }
@@ -146,14 +151,31 @@ nonisolated class PlayApp: BaseApp, Identifiable, Hashable, @unchecked Sendable 
     }
 
     // MARK: - Init
-    init(appUrl: URL, dependencies: PlayCoverDependencies? = nil) {
+    init(appUrl: URL, dependencies: PlayCoverDependencies? = nil, settings: AppSettings? = nil) {
         self.dependencies = dependencies
         super.init(appUrl: appUrl)
+        if let settings {
+            attachInitialSettings(settings)
+        }
     }
 
-    init(appUrl: URL, info: AppInfo, dependencies: PlayCoverDependencies? = nil) {
+    init(appUrl: URL, info: AppInfo, dependencies: PlayCoverDependencies? = nil, settings: AppSettings? = nil) {
         self.dependencies = dependencies
         super.init(appUrl: appUrl, info: info)
+        if let settings {
+            attachInitialSettings(settings)
+        }
+    }
+
+    private func attachInitialSettings(_ initialSettings: AppSettings) {
+        settingsLock.withLock { cached in
+            cached = initialSettings
+        }
+        syncSettingsSummary(from: initialSettings.settings)
+        _ = initialSettings.addChangeObserver { [weak self, weak initialSettings] in
+            guard let self, let initialSettings else { return }
+            self.syncSettingsSummary(from: initialSettings.settings)
+        }
     }
 
     func applySettingsSummary(
@@ -247,19 +269,29 @@ nonisolated class PlayApp: BaseApp, Identifiable, Hashable, @unchecked Sendable 
 
     // MARK: - Launch
     @concurrent
-    func launch(safeModeOneShot: Bool = false) async {
+    func launch(
+        safeModeOneShot: Bool = false,
+        automationOneShot: Bool = false,
+        captureDebugLog: Bool = false,
+        extraEnvironment: [String: String] = [:]
+    ) async {
         guard await beginLaunchIfIdle() else { return }
         let launchSpan = PerformanceSignpost.beginInterval("AppLaunchTotal")
         defer {
             PerformanceSignpost.endInterval("AppLaunchTotal", launchSpan)
-            if !currentRunState().isRunning {
-                Task { @MainActor in
-                    self.setRunState(.idle)
-                }
+            Task { @MainActor [weak self] in
+                guard let self, !self.runState.isRunning && !self.runState.isTerminating else { return }
+                self.setRunState(.idle)
             }
         }
 
         do {
+            let launchBundleID = info.bundleIdentifier
+            guard HelperSecurityValidator.validateGuestBundleIdentifier(launchBundleID) else {
+                throw PlayCoverError.playToolsError(
+                    "Refused to launch app with invalid or reserved bundle identifier: \(launchBundleID)"
+                )
+            }
             if prohibitedToPlay {
                 await clearAllCache()
                 throw PlayCoverError.appProhibited
@@ -279,13 +311,32 @@ nonisolated class PlayApp: BaseApp, Identifiable, Hashable, @unchecked Sendable 
             let launchInfo = AppInfo(
                 contentsOf: url.appendingPathComponent("Info").appendingPathExtension("plist")
             )
-            let launchBackupsDir = launchInfo.bundleIdentifier.isEmpty
-                ? appBackupsDir
-                : BaseApp.appBackupsRoot.appendingPathComponent(launchInfo.bundleIdentifier)
+            let diskBundleID = launchInfo.bundleIdentifier
+            guard HelperSecurityValidator.validateGuestBundleIdentifier(diskBundleID),
+                  diskBundleID == launchBundleID else {
+                throw PlayCoverError.playToolsError(
+                    "Refused to launch app with invalid or mismatched Info.plist bundle identifier: \(diskBundleID)"
+                )
+            }
+            let launchBackupsDir = BaseApp.appBackupsRoot.appendingEscapedPathComponent(diskBundleID)
             try Installer.validateOrInvalidateAppBackupsForLaunch(at: launchBackupsDir, for: launchInfo)
+            try prepareLaunchDirectories(bundleID: diskBundleID)
 
-            let svcBundleID = launchInfo.bundleIdentifier.isEmpty ? info.bundleIdentifier : launchInfo.bundleIdentifier
+            let svcBundleID = diskBundleID
             let currentSettings = settings.settings
+            // Only copy CoverUseBridge into Frameworks/UserPlugins when the persistent setting is enabled.
+            // One-shot automation (automationOneShot == true) loads CoverUseBridge from the read-only
+            // PlayTools.framework/Versions/A/Frameworks/BuiltInPlugins/CoverUseBridge directory without
+            // mutating or re-signing the target .app bundle on disk.
+            let wantsBundleBridge = !safeModeOneShot && currentSettings.enableAutomationBridge
+            let wantsAutomationEnv = !safeModeOneShot
+                && (currentSettings.enableAutomationBridge || automationOneShot)
+            let stagedBridgePath = url
+                .appendingPathComponent("Frameworks/UserPlugins/CoverUseBridge/CoverUseBridge.dylib")
+                .path
+            let stagedBridgeExists = FileManager.default.fileExists(atPath: stagedBridgePath)
+            let stagedBridgeMatchesForPlayTools = stagedBridgeExists == wantsBundleBridge
+            let stagedBridgeMatchesWithoutPlayTools = !stagedBridgeExists
 
             await PlayTools.waitForSystemInstall()
 
@@ -297,7 +348,7 @@ nonisolated class PlayApp: BaseApp, Identifiable, Hashable, @unchecked Sendable 
             )
             var fastPathHit = false
             var cachedUsesPlayTools = true
-            if !safeModeOneShot,
+            if !safeModeOneShot && stagedBridgeMatchesForPlayTools,
                let candidateStamp = AppLaunchFingerprintStore.currentStamp(
                    target: stampTarget,
                    settings: currentSettings,
@@ -307,7 +358,7 @@ nonisolated class PlayApp: BaseApp, Identifiable, Hashable, @unchecked Sendable 
                AppLaunchFingerprintStore.shared.matches(candidateStamp, for: url.path) {
                 fastPathHit = true
                 cachedUsesPlayTools = candidateStamp.usesPlayTools
-            } else if !safeModeOneShot,
+            } else if !safeModeOneShot && stagedBridgeMatchesWithoutPlayTools,
                       let nonPTStamp = AppLaunchFingerprintStore.currentStamp(
                           target: stampTarget,
                           settings: currentSettings,
@@ -340,16 +391,23 @@ nonisolated class PlayApp: BaseApp, Identifiable, Hashable, @unchecked Sendable 
                 }
 
                 var pluginsModified = false
-                if usesPlayTools {
-                    pluginsModified = try PlayTools.installPluginInIPA(url)
+                if usesPlayTools && !safeModeOneShot {
+                    let componentModified = try PlayTools.installPluginInIPA(url)
+                    let bridgeDirs = wantsBundleBridge
+                        ? [PlayTools.builtInCoverUseBridgeDirectory()].compactMap { $0 }
+                        : []
+                    let userPluginsModified = try PlayTools.syncUserDylibs(
+                        bundleIdentifier: svcBundleID,
+                        into: executable,
+                        extraPluginDirectories: bridgeDirs
+                    )
+                    pluginsModified = componentModified || userPluginsModified
                 }
 
                 let binaryModified = try Macho.fixLibrariesIfNeeded(atURL: executable)
-                let shouldInterceptSVC = usesPlayTools
-                    && !safeModeOneShot
-                    && currentSettings.effectiveInterceptInlineSyscalls
                 let svcResult: InlineSyscallPatcher.ReconcileResult
-                if !svcBundleID.isEmpty {
+                if !safeModeOneShot && !svcBundleID.isEmpty {
+                    let shouldInterceptSVC = usesPlayTools && currentSettings.effectiveInterceptInlineSyscalls
                     svcResult = try InlineSyscallPatcher.reconcile(
                         appBundleURL: url,
                         bundleIdentifier: svcBundleID,
@@ -446,12 +504,13 @@ nonisolated class PlayApp: BaseApp, Identifiable, Hashable, @unchecked Sendable 
                 return
             }
 
+            if usesPlayTools && wantsAutomationEnv && !wantsBundleBridge {
+                try? PlayTools.ensureBuiltInCoverUseBridgeInstalled()
+            }
+
             await setRunState(.preparing(.unlocking))
             // Wait for keychain unlock to finish before continuing
             await unlockKeyCover()
-
-            // Clear any debug-related env vars that could affect the launched app
-            self.clearDebugAffectingEnvironment()
 
             let hadContainer = container.doesExist()
             if settings.settings.discordActivity.enable {
@@ -470,13 +529,59 @@ nonisolated class PlayApp: BaseApp, Identifiable, Hashable, @unchecked Sendable 
                 }
                 settings.flush()
                 if !safeModeOneShot && settings.effectiveOpenWithLLDB {
-                    try Shell.lldb(executable, withTerminalWindow: settings.openLLDBWithTerminal)
+                    let launchDate = Date()
+                    let launchedSettings = settings.settings
+                    let discordAlreadyLinked = hadContainer && launchedSettings.discordActivity.enable
+                    let monitor = dependencies?.runningAppsMonitor
+                    let openWithTerminal = settings.openLLDBWithTerminal
+                    if let monitor {
+                        await monitor.registerPendingHostLaunch(
+                            app: self,
+                            launchDate: launchDate,
+                            launchSnapshot: launchedSettings,
+                            discordAlreadyLinked: discordAlreadyLinked
+                        )
+                    }
+                    try Shell.lldb(
+                        executable,
+                        withTerminalWindow: openWithTerminal,
+                        onExit: { [weak self] launchedSuccessfully in
+                            guard let self else { return }
+                            // For non-terminal LLDB, onExit fires when the debugger process exits;
+                            // for Terminal AppleScript, onExit fires immediately, so only clean up on error.
+                            guard !openWithTerminal || !launchedSuccessfully else { return }
+                            Task { @MainActor [weak self] in
+                                guard let self else { return }
+                                let clearedPending = monitor?.clearPendingHostLaunchIfNotRunning(for: self) ?? true
+                                if clearedPending && !self.runState.isRunning {
+                                    self.releaseDiscordIPC()
+                                    self.lockKeyCover()
+                                }
+                            }
+                        }
+                    )
                 } else {
                     ensureAliasUpToDate()
 
+                    var mergedExtraEnv = extraEnvironment
+                    if captureDebugLog && mergedExtraEnv["PLAYTOOLS_DEBUG_LOG"] == nil {
+                        mergedExtraEnv["PLAYTOOLS_DEBUG_LOG"] = "1"
+                    }
+                    if usesPlayTools && wantsAutomationEnv {
+                        if mergedExtraEnv["MACOVER_AUTOMATION_TOKEN"] == nil,
+                           let bridgeEnv = await dependencies?.mcpCoordinator.prepareAutomationEnvironment(
+                               for: svcBundleID
+                           ) {
+                            for (envKey, envValue) in bridgeEnv where mergedExtraEnv[envKey] == nil {
+                                mergedExtraEnv[envKey] = envValue
+                            }
+                        }
+                    }
+
                     try await runAppExec(
                         discordAlreadyLinked: hadContainer && settings.settings.discordActivity.enable,
-                        safeModeOneShot: safeModeOneShot
+                        safeModeOneShot: safeModeOneShot,
+                        extraEnvironment: mergedExtraEnv
                     )
                 }
             } catch {
@@ -511,8 +616,10 @@ nonisolated extension PlayApp {
         "MTLCaptureEnabled"
     ]
 
-    // clear environment variables that can force debug wrappers or validation layers
-    func clearDebugAffectingEnvironment() {
+    // Clear debug-affecting host environment variables once at startup on the main thread
+    // (unsetenv(3) is not thread-safe and must never be called concurrently from background tasks).
+    @MainActor
+    static func clearDebugAffectingEnvironmentOnMainActor() {
         for (key, _) in ProcessInfo.processInfo.environment where key.hasPrefix("DYLD_") {
             unsetenv(key)
         }
@@ -521,15 +628,24 @@ nonisolated extension PlayApp {
         }
     }
 
-    func runAppExec(discordAlreadyLinked: Bool = false, safeModeOneShot: Bool = false) async throws {
+    func runAppExec(
+        discordAlreadyLinked: Bool = false,
+        safeModeOneShot: Bool = false,
+        extraEnvironment: [String: String] = [:]
+    ) async throws {
         let launchDate = Date()
         if let mitmCoordinator = dependencies?.mitmCoordinator {
             try await mitmCoordinator.prepareForLaunch(app: self, safeModeOneShot: safeModeOneShot)
         }
         let config = NSWorkspace.OpenConfiguration()
-        if safeModeOneShot {
+        if safeModeOneShot || !extraEnvironment.isEmpty {
             var env = config.environment
-            env["PLAYTOOLS_SAFE_MODE"] = "1"
+            for (key, value) in extraEnvironment {
+                env[key] = value
+            }
+            if safeModeOneShot {
+                env["PLAYTOOLS_SAFE_MODE"] = "1"
+            }
             config.environment = env
         }
         let launchedSettings = settings.settings
@@ -695,9 +811,19 @@ nonisolated extension PlayApp {
     }
 
     @concurrent
-    func restart(safeModeOneShot: Bool = false) async {
+    func restart(
+        safeModeOneShot: Bool = false,
+        automationOneShot: Bool = false,
+        captureDebugLog: Bool = false,
+        extraEnvironment: [String: String] = [:]
+    ) async {
         await terminate()
-        await launch(safeModeOneShot: safeModeOneShot)
+        await launch(
+            safeModeOneShot: safeModeOneShot,
+            automationOneShot: automationOneShot,
+            captureDebugLog: captureDebugLog,
+            extraEnvironment: extraEnvironment
+        )
     }
 
     func deletePreferences() {
@@ -958,25 +1084,107 @@ nonisolated extension PlayApp {
         }.value
     }
 
+    private static func ensureSecureDirectory(at url: URL, permissions: Int = 0o700) throws {
+        var st = Darwin.stat()
+        if Darwin.lstat(url.path, &st) == 0 {
+            guard (st.st_mode & S_IFMT) == S_IFDIR else {
+                throw PlayCoverError.playToolsError(
+                    "Refused to use non-directory or symlink path: \(url.path)"
+                )
+            }
+            return
+        }
+        do {
+            try FileManager.default.createDirectory(
+                at: url,
+                withIntermediateDirectories: false,
+                attributes: [.posixPermissions: permissions]
+            )
+        } catch let error as CocoaError where error.code == .fileWriteFileExists {
+            // Re-verify existing directory via lstat below.
+        }
+        if Darwin.lstat(url.path, &st) != 0 || (st.st_mode & S_IFMT) != S_IFDIR {
+            throw PlayCoverError.playToolsError(
+                "Failed to verify secure directory: \(url.path)"
+            )
+        }
+    }
+
+    private func prepareLaunchDirectories(bundleID: String) throws {
+        let containerRoot = PlayTools.playCoverContainer
+        if !FileManager.default.fileExists(atPath: containerRoot.path) {
+            try FileManager.default.createDirectory(
+                at: containerRoot,
+                withIntermediateDirectories: true
+            )
+        }
+        var rootStat = Darwin.stat()
+        guard Darwin.lstat(containerRoot.path, &rootStat) == 0,
+              (rootStat.st_mode & S_IFMT) == S_IFDIR else {
+            throw PlayCoverError.playToolsError(
+                "Refused to prepare directories under non-directory container root."
+            )
+        }
+
+        let keymappingRoot = containerRoot.appendingPathComponent("Keymapping", isDirectory: true)
+        try Self.ensureSecureDirectory(at: keymappingRoot)
+        let appKeymapDir = keymappingRoot.appendingPathComponent(bundleID, isDirectory: true)
+        try Self.ensureSecureDirectory(at: appKeymapDir)
+
+        if FileManager.default.fileExists(atPath: entitlements.path),
+           let entDict = try? [String: Any].read(entitlements) {
+            let declaredGroups = EntitlementsComposer.declaredApplicationGroups(from: entDict)
+                .filter { EntitlementsComposer.isSafeDeclaredGroupIdentifier($0) }
+            if !declaredGroups.isEmpty {
+                let appGroupsRoot = containerRoot.appendingPathComponent("AppGroups", isDirectory: true)
+                try Self.ensureSecureDirectory(at: appGroupsRoot)
+                let appGroupsBundleDir = appGroupsRoot.appendingPathComponent(bundleID, isDirectory: true)
+                try Self.ensureSecureDirectory(at: appGroupsBundleDir)
+                for groupID in declaredGroups {
+                    let groupDir = appGroupsBundleDir.appendingPathComponent(groupID, isDirectory: true)
+                    try Self.ensureSecureDirectory(at: groupDir)
+                }
+            }
+        }
+    }
+
+    private static func isPlayChainVersionBackup(_ fileName: String, baseName: String) -> Bool {
+        guard fileName.hasSuffix(".bak") else { return false }
+        let stem = fileName.dropLast(".bak".count)
+        for prefix in [baseName + ".db.v", baseName + ".v"] where stem.hasPrefix(prefix) {
+            let versionDigits = stem.dropFirst(prefix.count)
+            if !versionDigits.isEmpty,
+               versionDigits.unicodeScalars.allSatisfy({ $0.value >= 0x30 && $0.value <= 0x39 }) {
+                return true
+            }
+        }
+        return false
+    }
+
     func clearPlayChain() {
         FileManager.default.delete(at: playChainURL)
         FileManager.default.delete(at: playChainURL.appendingPathExtension("keyCover"))
         FileManager.default.delete(at: playChainURL.appendingPathExtension("db"))
         FileManager.default.delete(at: URL(fileURLWithPath: playChainURL.path + ".db-wal"))
         FileManager.default.delete(at: URL(fileURLWithPath: playChainURL.path + ".db-shm"))
-        let dbPrefix = playChainURL.lastPathComponent + ".db.v"
+        FileManager.default.delete(at: URL(fileURLWithPath: playChainURL.path + ".db-journal"))
+        let baseName = playChainURL.lastPathComponent
         if let entries = try? FileManager.default.contentsOfDirectory(
             at: KeyCover.playChainPath,
             includingPropertiesForKeys: nil,
             options: []
         ) {
-            for entry in entries where entry.lastPathComponent.hasPrefix(dbPrefix) {
+            for entry in entries where Self.isPlayChainVersionBackup(entry.lastPathComponent, baseName: baseName) {
                 FileManager.default.delete(at: entry)
             }
         }
     }
 
     func deleteApp() {
+        if let cachedSettings = settingsLock.withLock({ $0 }),
+           !FileManager.default.fileExists(atPath: cachedSettings.settingsUrl.path) {
+            cachedSettings.discardPendingWrites()
+        }
         Self.invalidateVerifiedBundleStamp(for: url)
         FileManager.default.delete(at: URL(fileURLWithPath: url.path))
         if let appsVM = dependencies?.appsVM {

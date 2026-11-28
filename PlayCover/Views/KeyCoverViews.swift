@@ -13,6 +13,7 @@ struct KeyCoverUnlockingPrompt: View {
 
     @State private var password = ""
     @State private var passwordError = false
+    @State private var isUnlocking = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -27,6 +28,7 @@ struct KeyCoverUnlockingPrompt: View {
 
             SecureField("keycover.masterPassword", text: $password)
                 .textFieldStyle(.roundedBorder)
+                .disabled(isUnlocking)
                 .onSubmit {
                     unlock()
                 }
@@ -40,17 +42,23 @@ struct KeyCoverUnlockingPrompt: View {
             Divider()
 
             HStack(spacing: 10) {
+                if isUnlocking {
+                    ProgressView()
+                        .controlSize(.small)
+                }
                 Spacer()
                 Button("button.Cancel") {
                     keyCoverObserved.isKeyCoverUnlockingPromptShown = false
                 }
                 .keyboardShortcut(.cancelAction)
+                .disabled(isUnlocking)
 
                 Button("button.Unlock") {
                     unlock()
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
+                .disabled(isUnlocking)
             }
         }
         .padding(20)
@@ -58,13 +66,26 @@ struct KeyCoverUnlockingPrompt: View {
     }
 
     func unlock() {
-        if dependencies.keyCoverPassword.validatePassword(password) {
-            // if Smart Unlock is enabled, store the masterKey
-            dependencies.keyCover.keyCoverPlainTextKey = password
-        } else {
-            passwordError = true
-            return
+        guard !isUnlocking else { return }
+        passwordError = false
+        let enteredPassword = password
+        let passwordStore = dependencies.keyCoverPassword
+        let keyCover = dependencies.keyCover
+        Task { @MainActor in
+            isUnlocking = true
+            defer { isUnlocking = false }
+
+            let valid = await Task.detached(priority: .userInitiated) {
+                passwordStore.validatePassword(enteredPassword)
+            }.value
+
+            if valid {
+                // if Smart Unlock is enabled, store the masterKey
+                keyCover.keyCoverPlainTextKey = enteredPassword
+                keyCoverObserved.isKeyCoverUnlockingPromptShown = false
+            } else {
+                passwordError = true
+            }
         }
-        keyCoverObserved.isKeyCoverUnlockingPromptShown = false
     }
 }

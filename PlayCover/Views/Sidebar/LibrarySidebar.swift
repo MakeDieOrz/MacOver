@@ -91,13 +91,16 @@ private struct SidebarRunningAppRow: View {
                 .accessibilityLabel(Text("action.bringToFront"))
             }
             Button {
-                Task { await app.terminate() }
+                Task {
+                    guard app.isRunning, !app.isBusy else { return }
+                    await app.terminate()
+                }
             } label: {
                 Image(systemName: "xmark.circle.fill")
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
-            .disabled(app.isTerminating)
+            .disabled(!app.isRunning || app.isBusy)
             .help("sidebar.quit")
             .accessibilityLabel(Text("sidebar.quit"))
         }
@@ -123,9 +126,12 @@ private struct SidebarRunningAppRow: View {
                 navState.openConfiguration(for: app, pane: .overview)
             }
             Button("action.quit", systemImage: "stop.fill", role: .destructive) {
-                Task { await app.terminate() }
+                Task {
+                    guard app.isRunning, !app.isBusy else { return }
+                    await app.terminate()
+                }
             }
-            .disabled(app.isTerminating)
+            .disabled(!app.isRunning || app.isBusy)
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Text(app.name))

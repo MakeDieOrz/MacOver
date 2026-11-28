@@ -5,6 +5,7 @@
 //  Created by Александр Дорофеев on 24.11.2021.
 //
 
+import AppKit
 import Darwin
 import Foundation
 import Synchronization
@@ -119,6 +120,15 @@ nonisolated class Installer {
                 unzipProgressTask.cancel()
                 installVM.updateProgress(0.45)
 
+                let extractedBundleID = app.info.bundleIdentifier
+                guard !extractedBundleID.isEmpty,
+                      isSafeBundleIdentifierForStorage(extractedBundleID),
+                      !HelperSecurityValidator.isReservedBundleIdentifier(extractedBundleID) else {
+                    throw PlayCoverError.playToolsError(
+                        "Invalid or reserved bundle identifier: \(extractedBundleID)"
+                    )
+                }
+
                 if await ipa.checkOfficialMacOS(
                     app: IPA.Application.base(app),
                     alertPresenter: alertPresenter,
@@ -136,10 +146,10 @@ nonisolated class Installer {
                     throw PlayCoverError.appEncrypted
                 }
 
-                if !app.info.bundleIdentifier.isEmpty,
-                   !isSafeBundleIdentifierForStorage(app.info.bundleIdentifier) {
-                    throw PlayCoverError.playToolsError(
-                        "Invalid bundle identifier for local storage: \(app.info.bundleIdentifier)"
+                if !export, !app.info.bundleIdentifier.isEmpty {
+                    try await ensureTargetAppNotRunning(
+                        bundleIdentifier: app.info.bundleIdentifier,
+                        dependencies: dependencies
                     )
                 }
 
@@ -255,6 +265,13 @@ nonisolated class Installer {
                         },
                         beforeSwap: {
                             if !targetBundleID.isEmpty,
+                               !findRunningInstances(bundleIdentifier: targetBundleID).isEmpty {
+                                throw PlayCoverError.playToolsError(
+                                    "Cannot replace \(targetBundleID) while it is running. " +
+                                        "Quit the app and try again."
+                                )
+                            }
+                            if !targetBundleID.isEmpty,
                                let quarantinedDir = try quarantineAppBackups(
                                    at: targetBackupsDir,
                                    bundleIdentifier: targetBundleID
@@ -263,9 +280,11 @@ nonisolated class Installer {
                             }
                         },
                         afterSwap: { publishedURL in
+                            PlayApp.invalidateVerifiedBundleStamp(for: publishedURL)
                             let installedApp = PlayApp(appUrl: publishedURL, dependencies: dependencies)
                             let installedBundleID = installedApp.info.bundleIdentifier
                             if !installedBundleID.isEmpty {
+                                dependencies?.cacher.invalidateLocalIcon(bundleIdentifier: installedBundleID)
                                 try finalizeAppBackupsAfterSwap(
                                     backupStagingResult,
                                     for: installedApp,
@@ -413,13 +432,91 @@ nonisolated class Installer {
         return BaseApp(appUrl: url)
     }
 
+    private static let nonExecutableAssetExtensions: Set<String> = [
+        "png", "jpg", "jpeg", "gif", "webp", "heic", "svg", "pdf", "icns", "ico",
+        "bmp", "tiff", "tif", "car", "nib", "storyboardc", "mom", "momd", "omo",
+        "plist", "strings", "stringsdict", "xcstrings", "json", "xml", "yaml", "yml",
+        "txt", "md", "html", "htm", "css", "js", "map", "csv", "tsv", "mp3", "mp4",
+        "m4a", "m4v", "mov", "wav", "caf", "ogg", "aac", "flac", "aiff", "ttf", "otf",
+        "woff", "woff2", "ttc", "shader", "metallib", "scn", "dae", "obj", "fbx",
+        "usdz", "ktx", "pvr", "astc", "dds", "zip", "gz", "tar", "lz4", "zst", "db",
+        "sqlite", "sqlite3", "realm", "pak", "wem", "bnk", "lua", "luac", "pem",
+        "cer", "crt", "der", "mobileprovision", "entitlements", "h", "m", "mm", "c",
+        "cc", "cpp", "swift", "py", "sh", "rb", "cert", "enc", "log"
+    ]
+
+    private static func isMachOFile(at url: URL) -> Bool {
+        let fd = Darwin.open(url.path, O_RDONLY | O_CLOEXEC)
+        guard fd >= 0 else { return false }
+        defer { Darwin.close(fd) }
+
+        var magic = [UInt8](repeating: 0, count: 4)
+        let bytesRead = Darwin.read(fd, &magic, 4)
+        guard bytesRead == 4 else { return false }
+
+        switch magic {
+        case [202, 254, 186, 190], [190, 186, 254, 202],
+             [202, 254, 186, 191], [191, 186, 254, 202],
+             [207, 250, 237, 254], [254, 237, 250, 207]:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func findRunningInstances(bundleIdentifier: String) -> [NSRunningApplication] {
+        guard !bundleIdentifier.isEmpty else { return [] }
+        return NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
+            .filter { !$0.isTerminated }
+    }
+
+    private static func ensureTargetAppNotRunning(
+        bundleIdentifier: String,
+        dependencies: PlayCoverDependencies?
+    ) async throws {
+        guard !bundleIdentifier.isEmpty else { return }
+        if let trackedApp = await MainActor.run(body: {
+            dependencies?.appsVM.apps.first(where: { $0.info.bundleIdentifier == bundleIdentifier })
+        }), await MainActor.run(body: { trackedApp.isRunning || trackedApp.isBusy }) {
+            await trackedApp.terminate()
+        }
+
+        let running = findRunningInstances(bundleIdentifier: bundleIdentifier)
+        if !running.isEmpty {
+            for app in running where !app.isTerminated {
+                _ = app.terminate()
+            }
+            let gracefulDeadline = Date().addingTimeInterval(3.0)
+            while Date() < gracefulDeadline && !findRunningInstances(bundleIdentifier: bundleIdentifier).isEmpty {
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            let stubborn = findRunningInstances(bundleIdentifier: bundleIdentifier)
+            if !stubborn.isEmpty {
+                for app in stubborn where !app.isTerminated {
+                    _ = app.forceTerminate()
+                }
+                let forceDeadline = Date().addingTimeInterval(1.0)
+                while Date() < forceDeadline && !findRunningInstances(bundleIdentifier: bundleIdentifier).isEmpty {
+                    try? await Task.sleep(for: .milliseconds(50))
+                }
+            }
+        }
+
+        if !findRunningInstances(bundleIdentifier: bundleIdentifier).isEmpty {
+            throw PlayCoverError.playToolsError(
+                "Cannot overwrite \(bundleIdentifier) while it is still running. Quit the app and try again."
+            )
+        }
+    }
+
     /// Returns an array of URLs to MachO files within the app
     static func resolveValidMachOs(_ baseApp: BaseApp) -> [URL] {
         if let validMachOs = baseApp.validMachOs {
             return validMachOs
         }
 
-        let resolved = Mutex<[URL]>([])
+        let mainExecCanonical = baseApp.executable.standardizedFileURL.resolvingSymlinksInPath()
+        let state = Mutex<(urls: [URL], seen: Set<String>)>(([], []))
 
         baseApp.url.enumerateContents { url, attributes in
             let path = url.path
@@ -430,29 +527,32 @@ nonisolated class Installer {
                 return
             }
 
-            if !url.pathExtension.isEmpty && url.pathExtension != "dylib" {
-                return
+            let ext = url.pathExtension.lowercased()
+            if !ext.isEmpty && nonExecutableAssetExtensions.contains(ext) {
+                let canonical = url.standardizedFileURL.resolvingSymlinksInPath()
+                guard canonical == mainExecCanonical else { return }
             }
 
-            let fd = Darwin.open(path, O_RDONLY | O_CLOEXEC)
-            guard fd >= 0 else { return }
-            defer { Darwin.close(fd) }
-
-            var magic = [UInt8](repeating: 0, count: 4)
-            let bytesRead = Darwin.read(fd, &magic, 4)
-            guard bytesRead == 4 else { return }
-
-            switch magic {
-            case [202, 254, 186, 190], [190, 186, 254, 202],
-                 [202, 254, 186, 191], [191, 186, 254, 202],
-                 [207, 250, 237, 254], [254, 237, 250, 207]:
-                resolved.withLock { $0.append(url) }
-            default:
-                return
+            guard isMachOFile(at: url) else { return }
+            let canonicalPath = url.standardizedFileURL.resolvingSymlinksInPath().path
+            state.withLock { current in
+                if current.seen.insert(canonicalPath).inserted {
+                    current.urls.append(url)
+                }
             }
         }
 
-        return resolved.withLock { $0 }
+        let mainPath = mainExecCanonical.path
+        let alreadyHasMain = state.withLock { $0.seen.contains(mainPath) }
+        if !alreadyHasMain && isMachOFile(at: baseApp.executable) {
+            state.withLock { current in
+                if current.seen.insert(mainPath).inserted {
+                    current.urls.insert(baseApp.executable, at: 0)
+                }
+            }
+        }
+
+        return state.withLock { $0.urls }
     }
 
     /// Wrapper for codesign, applies the given entitlements to the application and all of its contents

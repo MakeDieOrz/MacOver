@@ -18,6 +18,10 @@ struct ConfigInfoPane: View {
     @State private var showClearPreferencesAlert = false
     @State private var showClearPlayChainAlert = false
 
+    private var isAppActiveOrBusy: Bool {
+        app.isRunning || app.isBusy
+    }
+
     init(app: PlayApp, hasPlayTools: Bool, blockingTask: Binding<ConfigBlockingTask>) {
         self.app = app
         self.hasPlayTools = hasPlayTools
@@ -27,6 +31,10 @@ struct ConfigInfoPane: View {
 
     var body: some View {
         Form {
+            if isAppActiveOrBusy {
+                runningLockNoticeSection
+            }
+
             Section("settings.tab.info") {
                 infoRow("settings.info.displayName", value: app.info.displayName)
                 infoRow("settings.info.bundleName", value: app.info.bundleName)
@@ -60,16 +68,24 @@ struct ConfigInfoPane: View {
                         }
                     }
                 }
+                .disabled(isAppActiveOrBusy || blockingTask != .none)
                 .onChange(of: applicationCategoryType) { _, newCategory in
                     guard app.info.applicationCategoryType != newCategory else { return }
+                    guard !isAppActiveOrBusy else {
+                        applicationCategoryType = app.info.applicationCategoryType
+                        return
+                    }
                     blockingTask = .applicationCategoryType
                     app.info.applicationCategoryType = newCategory
+                    PlayApp.invalidateVerifiedBundleStamp(for: app.url)
                     let executableURL = app.executable
+                    let bundleURL = app.url
                     Task { @MainActor in
                         defer { blockingTask = .none }
                         do {
                             try await Task.detached(priority: .userInitiated) {
                                 try Shell.signApp(executableURL)
+                                PlayApp.invalidateVerifiedBundleStamp(for: bundleURL)
                             }.value
                         } catch {
                             PlayCoverDiagnostics.reportError(error)
@@ -87,6 +103,7 @@ struct ConfigInfoPane: View {
                 HStack {
                     Spacer(minLength: 0)
                     Button(role: .destructive) {
+                        guard !isAppActiveOrBusy else { return }
                         Task {
                             let didUninstall = await Uninstaller.uninstallPopup(app, dependencies: dependencies)
                             if didUninstall {
@@ -98,6 +115,7 @@ struct ConfigInfoPane: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(.red)
+                    .disabled(isAppActiveOrBusy || blockingTask != .none)
                 }
             }
         }
@@ -108,15 +126,51 @@ struct ConfigInfoPane: View {
         }
         .alert("alert.app.preferences", isPresented: $showClearPreferencesAlert) {
             Button("button.Proceed", role: .destructive) {
+                guard !isAppActiveOrBusy else { return }
                 app.deletePreferences()
             }
             Button("button.Cancel", role: .cancel) {}
         }
         .alert("alert.app.clearPlayChain", isPresented: $showClearPlayChainAlert) {
             Button("button.Proceed", role: .destructive) {
+                guard !isAppActiveOrBusy else { return }
                 app.clearPlayChain()
+                Self.removeResidualPlayChainArtifacts(for: app.info.bundleIdentifier)
             }
             Button("button.Cancel", role: .cancel) {}
+        }
+    }
+
+    private var runningLockNoticeSection: some View {
+        Section {
+            AdaptiveLeadingTrailingLayout(horizontalSpacing: 10, verticalSpacing: 8) {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.title3)
+                        .foregroundStyle(.orange)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("config.runningLock.title")
+                            .font(.callout.weight(.semibold))
+                        Text("config.runningLock.infoNote")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                if app.isRunning {
+                    Button("action.quit", role: .destructive) {
+                        Task {
+                            guard app.isRunning, !app.isBusy else { return }
+                            await app.terminate()
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(app.isBusy)
+                    .fixedSize()
+                }
+            }
         }
     }
 
@@ -173,19 +227,76 @@ struct ConfigInfoPane: View {
 
     private var clearCacheButton: some View {
         Button("playapp.clearCache") {
+            guard !isAppActiveOrBusy else { return }
             Task { await Uninstaller.clearCachePopup(app, dependencies: dependencies) }
         }
+        .disabled(isAppActiveOrBusy || blockingTask != .none)
     }
 
     private var clearPreferencesButton: some View {
         Button("playapp.clearPreferences") {
+            guard !isAppActiveOrBusy else { return }
             showClearPreferencesAlert = true
         }
+        .disabled(isAppActiveOrBusy || blockingTask != .none)
     }
 
     private var clearPlayChainButton: some View {
         Button("playapp.clearPlayChain") {
+            guard !isAppActiveOrBusy else { return }
             showClearPlayChainAlert = true
         }
+        .disabled(isAppActiveOrBusy || blockingTask != .none)
+    }
+
+    nonisolated static func removeResidualPlayChainArtifacts(
+        for bundleID: String,
+        in playChainDirectory: URL = KeyCover.playChainPath
+    ) {
+        guard !bundleID.isEmpty else { return }
+        let fm = FileManager.default
+        let exactNames: Set<String> = [
+            bundleID,
+            "\(bundleID).keyCover",
+            "\(bundleID).db",
+            "\(bundleID).db-wal",
+            "\(bundleID).db-shm",
+            "\(bundleID).db-journal"
+        ]
+        for name in exactNames {
+            let candidate = playChainDirectory.appendingPathComponent(name)
+            if fm.fileExists(atPath: candidate.path) {
+                fm.delete(at: candidate)
+            }
+        }
+        guard let entries = try? fm.contentsOfDirectory(
+            at: playChainDirectory,
+            includingPropertiesForKeys: nil,
+            options: []
+        ) else {
+            return
+        }
+        for entry in entries where isPlayChainVersionedBackupFile(
+            entry.lastPathComponent,
+            bundleID: bundleID
+        ) {
+            fm.delete(at: entry)
+        }
+    }
+
+    nonisolated private static func isPlayChainVersionedBackupFile(
+        _ fileName: String,
+        bundleID: String
+    ) -> Bool {
+        guard fileName.hasSuffix(".bak") else { return false }
+        let stem = fileName.dropLast(".bak".count)
+        let prefixes = ["\(bundleID).db.v", "\(bundleID).v"]
+        for prefix in prefixes where stem.hasPrefix(prefix) {
+            let versionSlice = stem.dropFirst(prefix.count)
+            if !versionSlice.isEmpty && versionSlice.allSatisfy({ $0.isASCII && $0.isNumber }) {
+                return true
+            }
+        }
+        return false
     }
 }

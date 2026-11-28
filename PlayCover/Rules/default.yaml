@@ -130,21 +130,30 @@ blacklist:
     - ${HomeDirectory}/Library/Containers/app.makedie.MacOver/CACHE
     - ${HomeDirectory}/Library/Containers/app.makedie.MacOver/VERSION
     - ${HomeDirectory}/Library/Containers/app.makedie.MacOver/Sources.plist
+    - ${HomeDirectory}/Library/Containers/app.makedie.MacOver/KeyCover
+    - ${HomeDirectory}/Library/Containers/app.makedie.MacOver/Certificates
+    - ${HomeDirectory}/Library/Containers/app.makedie.MacOver/PlayChain
+    - ${HomeDirectory}/Library/Containers/app.makedie.MacOver/PlayTools/UserPlugins
+    - ${HomeDirectory}/Library/Containers/app.makedie.MacOver/Data
     - ${HomeDirectory}/Library/Containers/io.playcover.PlayCover/CACHE
     - ${HomeDirectory}/Library/Containers/io.playcover.PlayCover/VERSION
     - ${HomeDirectory}/Library/Containers/io.playcover.PlayCover/Sources.plist
+    - ${HomeDirectory}/Library/Containers/io.playcover.PlayCover/KeyCover
+    - ${HomeDirectory}/Library/Containers/io.playcover.PlayCover/Certificates
+    - ${HomeDirectory}/Library/Containers/io.playcover.PlayCover/PlayChain
+    - ${HomeDirectory}/Library/Containers/io.playcover.PlayCover/PlayTools/UserPlugins
+    - ${HomeDirectory}/Library/Containers/io.playcover.PlayCover/Data
 
 whitelist:
     - ${HomeDirectory}/Library/Containers/${BundleID}
 
 allow:
-    - (allow user-preference-write (preference-domain ".GlobalPreferences"))
     - (allow user-preference-read (preference-domain ".GlobalPreferences"))
-    - (allow file-read-metadata (literal "${HomeDirectory}/Library/Containers") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/Applications") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/Frameworks") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/App Settings") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/AppBackups") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/AppBackups/${BundleID}") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/SVCPatches") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/Entitlements") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/Keymapping") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/PlayChain") (literal "${HomeDirectory}/Library/Group Containers"))
+    - (allow file-read-metadata (literal "${HomeDirectory}/Library/Containers") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/Applications") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/Frameworks") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/Frameworks/BuiltInPlugins") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/App Settings") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/AppBackups") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/AppBackups/${BundleID}") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/SVCPatches") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/Entitlements") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/Keymapping") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/PlayChain") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/Certificates") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/Certificates/${BundleID}") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/AppGroups") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/AppGroups/${BundleID}"))
     - (allow file-read* file-read-metadata file-ioctl file-map-executable (subpath "${HomeDirectory}/Library/Containers/app.makedie.MacOver/Applications/${BundleID}.app"))
-    - (allow file-read* file-read-metadata file-ioctl (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/Entitlements/${BundleID}.plist") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/SVCPatches/${BundleID}.json") (subpath "${HomeDirectory}/Library/Containers/app.makedie.MacOver/AppBackups/${BundleID}"))
-    - (allow file* file-read* file-write* file-write-data file-read-metadata file-ioctl (subpath "${HomeDirectory}/Library/Containers/${BundleID}") (prefix "${HomeDirectory}/Library/Containers/app.makedie.MacOver/App Settings/${BundleID}.plist") (subpath "${HomeDirectory}/Library/Containers/app.makedie.MacOver/Keymapping/${BundleID}") (prefix "${HomeDirectory}/Library/Containers/app.makedie.MacOver/PlayChain/${BundleID}.db"))
-    - (allow file-read* file-read-metadata file-ioctl file-map-executable (subpath "${HomeDirectory}/Library/Containers/app.makedie.MacOver/Frameworks/PlayTools.framework"))
+    - (allow file-read* file-read-metadata file-ioctl (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/App Settings/${BundleID}.plist") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/Entitlements/${BundleID}.plist") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/SVCPatches/${BundleID}.json") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/Certificates/${BundleID}/runtime.certs") (subpath "${HomeDirectory}/Library/Containers/app.makedie.MacOver/AppBackups/${BundleID}"))
+    - (allow file* file-read* file-write* file-write-data file-read-metadata file-ioctl (subpath "${HomeDirectory}/Library/Containers/${BundleID}") (subpath "${HomeDirectory}/Library/Containers/app.makedie.MacOver/Keymapping/${BundleID}") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/PlayChain/${BundleID}.db") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/PlayChain/${BundleID}.db-wal") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/PlayChain/${BundleID}.db-shm") (literal "${HomeDirectory}/Library/Containers/app.makedie.MacOver/PlayChain/${BundleID}.db-journal"))
+    - (allow file-read* file-read-metadata file-ioctl file-map-executable (subpath "${HomeDirectory}/Library/Containers/app.makedie.MacOver/Frameworks/PlayTools.framework") (subpath "${HomeDirectory}/Library/Containers/app.makedie.MacOver/Frameworks/BuiltInPlugins"))
 
 bypass:
     - (allow file-read* file-read-metadata file-ioctl (literal "/Library/Caches/com.apple.iconservices.store"))

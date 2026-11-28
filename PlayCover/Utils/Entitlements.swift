@@ -211,6 +211,9 @@ nonisolated class Entitlements {
     }
 
     public static func getBundleRules(_ bundleID: String) throws -> PlayRules? {
+        guard Shell.isValidBundleIdentifier(bundleID) else {
+            return nil
+        }
         var path: URL
         let yamlURL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".config")
@@ -237,10 +240,8 @@ nonisolated class Entitlements {
     }
 
     public static func isAppRequireUnsandbox(_ app: BaseApp) -> Bool {
-        unsandboxedApps.contains(app.info.bundleIdentifier)
+        false
     }
-
-    private static let unsandboxedApps = ["com.devsisters.ck"]
 
     static let entitlements_template = """
         <?xml version="1.0" encoding="UTF-8"?>

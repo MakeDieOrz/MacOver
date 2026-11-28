@@ -16,46 +16,94 @@ import SwiftUI
 final class UpdaterViewModel {
     @ObservationIgnored private let updaterController: SPUStandardUpdaterController
     @ObservationIgnored private var canCheckForUpdatesObservation: NSKeyValueObservation?
+    @ObservationIgnored private var automaticallyChecksObservation: NSKeyValueObservation?
+    @ObservationIgnored private var automaticallyCheckStorage = false
 
+    let isUpdateVerificationConfigured: Bool
     var canCheckForUpdates = false
 
     var automaticallyCheckForUpdates: Bool {
         get {
-            updaterController.updater.automaticallyChecksForUpdates
+            access(keyPath: \.automaticallyCheckForUpdates)
+            return isUpdateVerificationConfigured ? automaticallyCheckStorage : false
         }
         set(newValue) {
-            updaterController.updater.automaticallyChecksForUpdates = newValue
+            guard isUpdateVerificationConfigured else { return }
+            withMutation(keyPath: \.automaticallyCheckForUpdates) {
+                automaticallyCheckStorage = newValue
+            }
+            if updaterController.updater.automaticallyChecksForUpdates != newValue {
+                updaterController.updater.automaticallyChecksForUpdates = newValue
+            }
         }
     }
 
-    init(startUpdater: Bool = !ProcessInfo.isRunningUnitTests) {
-        // If you want to start the updater manually, pass false to startingUpdater and call .startUpdater() later
-        // This is where you can also pass an updater delegate if you need one
+    static func hasConfiguredPublicEDKey(in infoDictionary: [String: Any]?) -> Bool {
+        guard let rawKey = infoDictionary?["SUPublicEDKey"] as? String else {
+            return false
+        }
+        return !rawKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    init(
+        startUpdater: Bool = !ProcessInfo.isRunningUnitTests,
+        bundle: Bundle = .main
+    ) {
+        let hasPublicEDKey = Self.hasConfiguredPublicEDKey(in: bundle.infoDictionary)
+        self.isUpdateVerificationConfigured = hasPublicEDKey
+        let effectiveStartUpdater = startUpdater && hasPublicEDKey && !ProcessInfo.isRunningUnitTests
+
+        // Keep Sparkle inactive on ad-hoc builds without SUPublicEDKey so remote feeds
+        // cannot be checked or applied without EdDSA signature verification.
         updaterController = SPUStandardUpdaterController(
-            startingUpdater: startUpdater,
+            startingUpdater: effectiveStartUpdater,
             updaterDelegate: nil,
             userDriverDelegate: nil)
 
-        canCheckForUpdatesObservation = updaterController.updater.observe(
-            \.canCheckForUpdates,
-            options: [.initial, .new]
-        ) { [weak self] _, change in
-            guard let canCheck = change.newValue else { return }
-            Task { @MainActor [weak self] in
-                self?.canCheckForUpdates = canCheck
+        if effectiveStartUpdater {
+            automaticallyCheckStorage = updaterController.updater.automaticallyChecksForUpdates
+            canCheckForUpdatesObservation = updaterController.updater.observe(
+                \.canCheckForUpdates,
+                options: [.initial, .new]
+            ) { [weak self] _, change in
+                guard let canCheck = change.newValue else { return }
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.canCheckForUpdates = self.isUpdateVerificationConfigured && canCheck
+                }
             }
-        }
 
-        if startUpdater, automaticallyCheckForUpdates {
-            Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .seconds(3))
-                self?.updaterController.updater.checkForUpdatesInBackground()
+            automaticallyChecksObservation = updaterController.updater.observe(
+                \.automaticallyChecksForUpdates,
+                options: [.initial, .new]
+            ) { [weak self] _, change in
+                guard let autoCheck = change.newValue else { return }
+                Task { @MainActor [weak self] in
+                    guard let self, self.automaticallyCheckStorage != autoCheck else { return }
+                    self.withMutation(keyPath: \.automaticallyCheckForUpdates) {
+                        self.automaticallyCheckStorage = autoCheck
+                    }
+                }
+            }
+
+            if automaticallyCheckForUpdates {
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: .seconds(3))
+                    guard let self, self.isUpdateVerificationConfigured, self.canCheckForUpdates else { return }
+                    self.updaterController.updater.checkForUpdatesInBackground()
+                }
+            }
+        } else {
+            canCheckForUpdates = false
+            automaticallyCheckStorage = false
+            if !ProcessInfo.isRunningUnitTests && updaterController.updater.automaticallyChecksForUpdates {
+                updaterController.updater.automaticallyChecksForUpdates = false
             }
         }
     }
 
     func checkForUpdates() {
-        guard !ProcessInfo.isRunningUnitTests else { return }
+        guard !ProcessInfo.isRunningUnitTests, isUpdateVerificationConfigured, canCheckForUpdates else { return }
         updaterController.checkForUpdates(nil)
     }
 }

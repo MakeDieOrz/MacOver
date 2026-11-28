@@ -7,10 +7,20 @@ import SwiftUI
 
 @main
 struct PlayCoverApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @State var updaterViewModel = UpdaterViewModel()
-    @State private var navState = AppNavigationState()
+    @NSApplicationDelegateAdaptor private var appDelegate: AppDelegate
+    @State var updaterViewModel: UpdaterViewModel
+    @State private var navState: AppNavigationState
     @AppStorage("showMenuBarExtra") private var showMenuBarExtra = true
+
+    init() {
+        if !ProcessInfo.isRunningUnitTests {
+            PlayApp.clearDebugAffectingEnvironmentOnMainActor()
+            UpdateScheme.checkForUpdate()
+        }
+        _updaterViewModel = State(initialValue: UpdaterViewModel())
+        _navState = State(initialValue: AppNavigationState())
+        _appDelegate = NSApplicationDelegateAdaptor(AppDelegate.self)
+    }
 
     private var deps: PlayCoverDependencies { appDelegate.dependencies }
 
@@ -36,6 +46,8 @@ struct PlayCoverApp: App {
                     .environment(deps.urlObservable)
                     .environment(deps.modifierKeyObserver)
                     .environment(deps.mitmCoordinator)
+                    .environment(deps.mcpCoordinator)
+                    .environment(deps.mcpPreferences)
                     .environment(navState)
                     .onAppear {
                         NSWindow.allowsAutomaticWindowTabbing = false
@@ -68,6 +80,8 @@ struct PlayCoverApp: App {
                     .environment(deps.urlObservable)
                     .environment(deps.modifierKeyObserver)
                     .environment(deps.mitmCoordinator)
+                    .environment(deps.mcpCoordinator)
+                    .environment(deps.mcpPreferences)
                     .environment(navState)
             }
         }

@@ -109,6 +109,15 @@
 		AA72B0022F00002000623C15 /* PlayCoverHelperService.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA72B0112F00002000623C15 /* PlayCoverHelperService.swift */; };
 		AA72B0032F00002000623C15 /* PlayCoverCore in Frameworks */ = {isa = PBXBuildFile; productRef = AA72B0212F00002000623C15 /* PlayCoverCore */; };
 		AA72B0042F00002000623C15 /* PlayCoverSandbox in Frameworks */ = {isa = PBXBuildFile; productRef = AA72B0222F00002000623C15 /* PlayCoverSandbox */; };
+		AA72C0012F00006000623C15 /* MCPPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA72C0112F00006000623C15 /* MCPPreferences.swift */; };
+		AA72C0022F00006000623C15 /* AXAccessibilityEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA72C0122F00006000623C15 /* AXAccessibilityEngine.swift */; };
+		AA72C0032F00006000623C15 /* MCPHostCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA72C0132F00006000623C15 /* MCPHostCoordinator.swift */; };
+		AA72C0042F00006000623C15 /* MCPSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA72C0142F00006000623C15 /* MCPSettingsView.swift */; };
+		AA72C0052F00006000623C15 /* PlayCoverMCP in Frameworks */ = {isa = PBXBuildFile; productRef = AA72C0212F00006000623C15 /* PlayCoverMCP */; };
+		AA72C0062F00006000623C15 /* MacOverMCPMain.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA72C0152F00006000623C15 /* MacOverMCPMain.swift */; };
+		AA72C0072F00006000623C15 /* PlayCoverMCP in Frameworks */ = {isa = PBXBuildFile; productRef = AA72C0222F00006000623C15 /* PlayCoverMCP */; };
+		AA72C0082F00006000623C15 /* PlayCoverCore in Frameworks */ = {isa = PBXBuildFile; productRef = AA72C0232F00006000623C15 /* PlayCoverCore */; };
+		AA72C0092F00006000623C15 /* PlayCoverMachO in Frameworks */ = {isa = PBXBuildFile; productRef = AA72C0242F00006000623C15 /* PlayCoverMachO */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -153,6 +162,13 @@
 			proxyType = 1;
 			remoteGlobalIDString = AA72B0402F00002000623C15;
 			remoteInfo = PlayCoverHelper;
+		};
+		AA72C0302F00006000623C15 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 8783CFEF26B8C52D00171041 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = AA72C0402F00006000623C15;
+			remoteInfo = "macover-mcp";
 		};
 /* End PBXContainerItemProxy section */
 
@@ -268,6 +284,12 @@
 		AA72B0122F00002000623C15 /* app.makedie.MacOver.Helper.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = app.makedie.MacOver.Helper.plist; sourceTree = "<group>"; };
 		AA72B0132F00002000623C15 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		AA72B0142F00002000623C15 /* PlayCoverHelper */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = PlayCoverHelper; sourceTree = BUILT_PRODUCTS_DIR; };
+		AA72C0112F00006000623C15 /* MCPPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPPreferences.swift; sourceTree = "<group>"; };
+		AA72C0122F00006000623C15 /* AXAccessibilityEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AXAccessibilityEngine.swift; sourceTree = "<group>"; };
+		AA72C0132F00006000623C15 /* MCPHostCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPHostCoordinator.swift; sourceTree = "<group>"; };
+		AA72C0142F00006000623C15 /* MCPSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPSettingsView.swift; sourceTree = "<group>"; };
+		AA72C0152F00006000623C15 /* MacOverMCPMain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacOverMCPMain.swift; sourceTree = "<group>"; };
+		AA72C0162F00006000623C15 /* macover-mcp */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = "macover-mcp"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -285,6 +307,7 @@
 				AA72A0252F00001000623C15 /* PlayCoverUI in Frameworks */,
 				AA72A0262F00001000623C15 /* PlayCoverNetwork in Frameworks */,
 				AA72A0272F00001000623C15 /* PlayCoverInstaller in Frameworks */,
+				AA72C0052F00006000623C15 /* PlayCoverMCP in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -311,6 +334,16 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		AA72C0422F00006000623C15 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AA72C0072F00006000623C15 /* PlayCoverMCP in Frameworks */,
+				AA72C0082F00006000623C15 /* PlayCoverCore in Frameworks */,
+				AA72C0092F00006000623C15 /* PlayCoverMachO in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -323,6 +356,7 @@
 				6ED6379C28DAAAC100B506FA /* IPASourceSettings.swift */,
 				B6825C3428F3D23600E3015A /* InstallSettings.swift */,
 				ABDAD80929893EA300DC164F /* KeyCoverSettings.swift */,
+				AA72C0142F00006000623C15 /* MCPSettingsView.swift */,
 			);
 			path = Settings;
 			sourceTree = "<group>";
@@ -541,6 +575,7 @@
 				6E66B0D0289F57B00099B907 /* Documentation.docc */,
 				8783CFF926B8C52D00171041 /* PlayCover */,
 				AA72B0152F00002000623C15 /* PlayCoverHelper */,
+				AA72C0172F00006000623C15 /* PlayCoverMCPCLI */,
 				AA71A05E2F00000500623C15 /* PlayCoverMachOTests */,
 				AA71A05F2F00000500623C15 /* PlayCoverCoreTests */,
 				AA71A0202F00000200623C15 /* PlayTools.xcodeproj */,
@@ -595,6 +630,7 @@
 			children = (
 				8783CFF726B8C52D00171041 /* MacOver.app */,
 				AA72B0142F00002000623C15 /* PlayCoverHelper */,
+				AA72C0162F00006000623C15 /* macover-mcp */,
 				AA71A0522F00000500623C15 /* PlayCoverMachOTests.xctest */,
 				AA71A0532F00000500623C15 /* PlayCoverCoreTests.xctest */,
 			);
@@ -649,8 +685,19 @@
 				AA72A0372F00001000623C15 /* PlayCoverDependencies.swift */,
 				AA72A0392F00001000623C15 /* MITMProxyCoordinator.swift */,
 				AA72A03F2F00004000623C15 /* RunningAppsMonitor.swift */,
+				AA72C0112F00006000623C15 /* MCPPreferences.swift */,
+				AA72C0122F00006000623C15 /* AXAccessibilityEngine.swift */,
+				AA72C0132F00006000623C15 /* MCPHostCoordinator.swift */,
 			);
 			path = AppLifecycle;
+			sourceTree = "<group>";
+		};
+		AA72C0172F00006000623C15 /* PlayCoverMCPCLI */ = {
+			isa = PBXGroup;
+			children = (
+				AA72C0152F00006000623C15 /* MacOverMCPMain.swift */,
+			);
+			path = PlayCoverMCPCLI;
 			sourceTree = "<group>";
 		};
 		AA72B0152F00002000623C15 /* PlayCoverHelper */ = {
@@ -676,6 +723,7 @@
 				8783CFF526B8C52D00171041 /* Resources */,
 				AA71A0282F00000200623C15 /* Embed PlayTools */,
 				AA72B0602F00002000623C15 /* Embed Privileged Helper */,
+				AA72C0602F00006000623C15 /* Embed MCP CLI */,
 				AAC28F222899A05B005057FB /* Codesign sparkle */,
 				36E7AB27288A0B64004C0C3A /* SwiftLint */,
 			);
@@ -684,6 +732,7 @@
 			dependencies = (
 				AA71A0252F00000200623C15 /* PBXTargetDependency */,
 				AA72B0312F00002000623C15 /* PBXTargetDependency */,
+				AA72C0312F00006000623C15 /* PBXTargetDependency */,
 			);
 			name = PlayCover;
 			packageProductDependencies = (
@@ -696,6 +745,7 @@
 				AA72A0152F00001000623C15 /* PlayCoverUI */,
 				AA72A0162F00001000623C15 /* PlayCoverNetwork */,
 				AA72A0172F00001000623C15 /* PlayCoverInstaller */,
+				AA72C0212F00006000623C15 /* PlayCoverMCP */,
 			);
 			productName = PlayCover;
 			productReference = 8783CFF726B8C52D00171041 /* MacOver.app */;
@@ -757,6 +807,27 @@
 			productReference = AA72B0142F00002000623C15 /* PlayCoverHelper */;
 			productType = "com.apple.product-type.tool";
 		};
+		AA72C0402F00006000623C15 /* macover-mcp */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AA72C0502F00006000623C15 /* Build configuration list for PBXNativeTarget "macover-mcp" */;
+			buildPhases = (
+				AA72C0412F00006000623C15 /* Sources */,
+				AA72C0422F00006000623C15 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "macover-mcp";
+			packageProductDependencies = (
+				AA72C0222F00006000623C15 /* PlayCoverMCP */,
+				AA72C0232F00006000623C15 /* PlayCoverCore */,
+				AA72C0242F00006000623C15 /* PlayCoverMachO */,
+			);
+			productName = "macover-mcp";
+			productReference = AA72C0162F00006000623C15 /* macover-mcp */;
+			productType = "com.apple.product-type.tool";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -780,6 +851,9 @@
 						TestTargetID = 8783CFF626B8C52D00171041;
 					};
 					AA72B0402F00002000623C15 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+					AA72C0402F00006000623C15 = {
 						CreatedOnToolsVersion = 15.0;
 					};
 				};
@@ -830,6 +904,7 @@
 			targets = (
 				8783CFF626B8C52D00171041 /* PlayCover */,
 				AA72B0402F00002000623C15 /* PlayCoverHelper */,
+				AA72C0402F00006000623C15 /* macover-mcp */,
 				AA71A06A2F00000500623C15 /* PlayCoverMachOTests */,
 				AA71A06B2F00000500623C15 /* PlayCoverCoreTests */,
 			);
@@ -943,9 +1018,24 @@
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverUI/StartupAlertCenter.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverUI/ToastVM.swift",
 				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverUI/ViewExtensions.swift",
+				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverMCP/AXTreeCompactor.swift",
+				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverMCP/BodyExtractor.swift",
+				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverMCP/CoordinateMapper.swift",
+				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverMCP/HeaderRedactor.swift",
+				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverMCP/LoopbackIPCChannel.swift",
+				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverMCP/MCPCLIRunner.swift",
+				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverMCP/MCPJSONValue.swift",
+				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverMCP/MCPProtocol.swift",
+				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverMCP/MCPToolRegistry.swift",
+				"$(SRCROOT)/Packages/PlayCoverModules/Sources/PlayCoverMCP/UITreeModels.swift",
+				"$(SRCROOT)/Packages/PlayCoverModules/Sources/macover-mcp/main.swift",
+				"$(SRCROOT)/PlayCoverMCPCLI/MacOverMCPMain.swift",
 				"$(SRCROOT)/PlayCover/AppInstaller/Downloader.swift",
 				"$(SRCROOT)/PlayCover/AppInstaller/Installer.swift",
+				"$(SRCROOT)/PlayCover/AppLifecycle/AXAccessibilityEngine.swift",
 				"$(SRCROOT)/PlayCover/AppLifecycle/AppDelegate.swift",
+				"$(SRCROOT)/PlayCover/AppLifecycle/MCPHostCoordinator.swift",
+				"$(SRCROOT)/PlayCover/AppLifecycle/MCPPreferences.swift",
 				"$(SRCROOT)/PlayCover/AppLifecycle/MITMProxyCoordinator.swift",
 				"$(SRCROOT)/PlayCover/AppLifecycle/PlayCoverDependencies.swift",
 				"$(SRCROOT)/PlayCover/AppLifecycle/RunningAppsMonitor.swift",
@@ -1007,6 +1097,7 @@
 				"$(SRCROOT)/PlayCover/Views/Settings/IPASourceSettings.swift",
 				"$(SRCROOT)/PlayCover/Views/Settings/InstallSettings.swift",
 				"$(SRCROOT)/PlayCover/Views/Settings/KeyCoverSettings.swift",
+				"$(SRCROOT)/PlayCover/Views/Settings/MCPSettingsView.swift",
 				"$(SRCROOT)/PlayCover/Views/Settings/PlayCoverSettingsView.swift",
 				"$(SRCROOT)/PlayCover/Views/Settings/UninstallSettings.swift",
 				"$(SRCROOT)/PlayCover/Views/Settings/UpdateSettings.swift",
@@ -1040,6 +1131,13 @@
 				"$(BUILT_PRODUCTS_DIR)/PlayTools.xcframework/Info.plist",
 				"$(BUILT_PRODUCTS_DIR)/PlayTools.xcframework/ios-arm64-maccatalyst/PlayTools.framework/Versions/A/PlayTools",
 				"$(BUILT_PRODUCTS_DIR)/PlayTools.xcframework/ios-arm64-maccatalyst/PlayTools.framework/Versions/A/PlugIns/AKInterface.bundle/Contents/MacOS/AKInterface",
+				"$(BUILT_PRODUCTS_DIR)/BuiltInPlugins/CoverUseBridge/CoverUseBridge.dylib",
+				"$(BUILT_PRODUCTS_DIR)/BuiltInPlugins/CoverUseBridge/PluginManifest.json",
+				"$(SRCROOT)/agent-plugin/macover-cover-use/plugin.json",
+				"$(SRCROOT)/agent-plugin/macover-cover-use/mcp_config.json",
+				"$(SRCROOT)/agent-plugin/macover-cover-use/skills/cover-use/SKILL.md",
+				"$(SRCROOT)/agent-plugin/macover-cover-use/skills/cover-use/references/compatibility-debugging.md",
+				"$(SRCROOT)/agent-plugin/macover-cover-use/skills/cover-use/references/keymap-authoring.md",
 			);
 			name = "Embed PlayTools";
 			outputFileListPaths = (
@@ -1047,11 +1145,18 @@
 			outputPaths = (
 				"$(BUILT_PRODUCTS_DIR)/$(FRAMEWORKS_FOLDER_PATH)/PlayTools.framework/Versions/A/PlayTools",
 				"$(BUILT_PRODUCTS_DIR)/$(FRAMEWORKS_FOLDER_PATH)/PlayTools.framework/Versions/A/PlugIns/AKInterface.bundle/Contents/MacOS/AKInterface",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/BuiltInPlugins/CoverUseBridge/CoverUseBridge.dylib",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/BuiltInPlugins/CoverUseBridge/PluginManifest.json",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/AgentPlugin/macover-cover-use/plugin.json",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/AgentPlugin/macover-cover-use/mcp_config.json",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/AgentPlugin/macover-cover-use/skills/cover-use/SKILL.md",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/AgentPlugin/macover-cover-use/skills/cover-use/references/compatibility-debugging.md",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/AgentPlugin/macover-cover-use/skills/cover-use/references/keymap-authoring.md",
 				"$(DERIVED_FILE_DIR)/embed_playtools.stamp",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/zsh;
-			shellScript = "set -euo pipefail\n\nSRC_FW=\"${BUILT_PRODUCTS_DIR}/PlayTools.xcframework/ios-arm64-maccatalyst/PlayTools.framework\"\nDST_FW=\"${BUILT_PRODUCTS_DIR}/${FRAMEWORKS_FOLDER_PATH}/PlayTools.framework\"\n\nif [ ! -d \"${SRC_FW}\" ]; then\n  echo \"error: PlayTools.framework missing in XCFramework at ${SRC_FW}\" >&2\n  exit 1\nfi\n\nmkdir -p \"$(dirname \"${DST_FW}\")\" \"${DERIVED_FILE_DIR}\"\nrm -rf \"${DST_FW}\"\nditto \"${SRC_FW}\" \"${DST_FW}\"\n\ntouch \"${DST_FW}/Versions/A/PlayTools\" \\\n      \"${DST_FW}/Versions/A/PlugIns/AKInterface.bundle/Contents/MacOS/AKInterface\" \\\n      \"${DERIVED_FILE_DIR}/embed_playtools.stamp\"\n";
+			shellScript = "set -euo pipefail\n\nSRC_FW=\"${BUILT_PRODUCTS_DIR}/PlayTools.xcframework/ios-arm64-maccatalyst/PlayTools.framework\"\nDST_FW=\"${BUILT_PRODUCTS_DIR}/${FRAMEWORKS_FOLDER_PATH}/PlayTools.framework\"\nSRC_BRIDGE=\"${BUILT_PRODUCTS_DIR}/BuiltInPlugins/CoverUseBridge\"\nDST_BRIDGE=\"${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Resources/BuiltInPlugins/CoverUseBridge\"\nSRC_PLUGIN=\"${SRCROOT}/agent-plugin/macover-cover-use\"\nDST_PLUGIN=\"${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Resources/AgentPlugin/macover-cover-use\"\n\nif [ ! -d \"${SRC_FW}\" ]; then\n  echo \"error: PlayTools.framework missing in XCFramework at ${SRC_FW}\" >&2\n  exit 1\nfi\nif [ ! -f \"${SRC_BRIDGE}/CoverUseBridge.dylib\" ]; then\n  echo \"error: CoverUseBridge.dylib missing at ${SRC_BRIDGE}/CoverUseBridge.dylib\" >&2\n  exit 1\nfi\n\nmkdir -p \"$(dirname \"${DST_FW}\")\" \"$(dirname \"${DST_BRIDGE}\")\" \"$(dirname \"${DST_PLUGIN}\")\" \"${DERIVED_FILE_DIR}\"\nrm -rf \"${DST_FW}\" \"${DST_BRIDGE}\" \"${DST_PLUGIN}\"\nditto \"${SRC_FW}\" \"${DST_FW}\"\nditto \"${SRC_BRIDGE}\" \"${DST_BRIDGE}\"\nditto \"${SRC_PLUGIN}\" \"${DST_PLUGIN}\"\n\ntouch \"${DST_FW}/Versions/A/PlayTools\" \\\n      \"${DST_FW}/Versions/A/PlugIns/AKInterface.bundle/Contents/MacOS/AKInterface\" \\\n      \"${DST_BRIDGE}/CoverUseBridge.dylib\" \\\n      \"${DST_BRIDGE}/PluginManifest.json\" \\\n      \"${DST_PLUGIN}/plugin.json\" \\\n      \"${DST_PLUGIN}/mcp_config.json\" \\\n      \"${DST_PLUGIN}/skills/cover-use/SKILL.md\" \\\n      \"${DST_PLUGIN}/skills/cover-use/references/compatibility-debugging.md\" \\\n      \"${DST_PLUGIN}/skills/cover-use/references/keymap-authoring.md\" \\\n      \"${DERIVED_FILE_DIR}/embed_playtools.stamp\"\n";
 		};
 		AA72B0602F00002000623C15 /* Embed Privileged Helper */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -1076,6 +1181,27 @@
 			shellPath = /bin/zsh;
 			shellScript = "set -euo pipefail\n\nSRC_BIN=\"${BUILT_PRODUCTS_DIR}/PlayCoverHelper\"\nSRC_PLIST=\"${SRCROOT}/PlayCoverHelper/app.makedie.MacOver.Helper.plist\"\nDST_TOOLS_DIR=\"${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Library/HelperTools\"\nDST_DAEMONS_DIR=\"${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Library/LaunchDaemons\"\nDST_BIN=\"${DST_TOOLS_DIR}/PlayCoverHelper\"\nDST_PLIST=\"${DST_DAEMONS_DIR}/app.makedie.MacOver.Helper.plist\"\n\nif [ ! -f \"${SRC_BIN}\" ]; then\n  echo \"error: PlayCoverHelper binary missing at ${SRC_BIN}\" >&2\n  exit 1\nfi\nif [ ! -f \"${SRC_PLIST}\" ]; then\n  echo \"error: Helper launchd plist missing at ${SRC_PLIST}\" >&2\n  exit 1\nfi\n\nmkdir -p \"${DST_TOOLS_DIR}\" \"${DST_DAEMONS_DIR}\" \"${DERIVED_FILE_DIR}\"\nditto \"${SRC_BIN}\" \"${DST_BIN}\"\nchmod 755 \"${DST_BIN}\"\nditto \"${SRC_PLIST}\" \"${DST_PLIST}\"\nchmod 644 \"${DST_PLIST}\"\n\ntouch \"${DST_BIN}\" \"${DST_PLIST}\" \"${DERIVED_FILE_DIR}/embed_helper.stamp\"\n";
 		};
+		AA72C0602F00006000623C15 /* Embed MCP CLI */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/macover-mcp",
+			);
+			name = "Embed MCP CLI";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/MacOS/macover-mcp",
+				"$(DERIVED_FILE_DIR)/embed_mcp_cli.stamp",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/zsh;
+			shellScript = "set -euo pipefail\n\nSRC_BIN=\"${BUILT_PRODUCTS_DIR}/macover-mcp\"\nDST_DIR=\"${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/MacOS\"\nDST_BIN=\"${DST_DIR}/macover-mcp\"\n\nif [ ! -f \"${SRC_BIN}\" ]; then\n  echo \"error: macover-mcp binary missing at ${SRC_BIN}\" >&2\n  exit 1\nfi\n\nmkdir -p \"${DST_DIR}\" \"${DERIVED_FILE_DIR}\"\nditto \"${SRC_BIN}\" \"${DST_BIN}\"\nchmod 755 \"${DST_BIN}\"\n\ntouch \"${DST_BIN}\" \"${DERIVED_FILE_DIR}/embed_mcp_cli.stamp\"\n";
+		};
 		AAC28F222899A05B005057FB /* Codesign sparkle */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
@@ -1087,7 +1213,12 @@
 				"$(BUILT_PRODUCTS_DIR)/$(FRAMEWORKS_FOLDER_PATH)/PlayTools.framework/Versions/A/PlayTools",
 				"$(BUILT_PRODUCTS_DIR)/$(FRAMEWORKS_FOLDER_PATH)/PlayTools.framework/Versions/A/PlugIns/AKInterface.bundle/Contents/MacOS/AKInterface",
 				"$(BUILT_PRODUCTS_DIR)/$(FRAMEWORKS_FOLDER_PATH)/Sparkle.framework/Versions/B/Sparkle",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Library/HelperTools/PlayCoverHelper",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/MacOS/macover-mcp",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/BuiltInPlugins/CoverUseBridge/CoverUseBridge.dylib",
+				"$(DERIVED_FILE_DIR)/embed_playtools.stamp",
 				"$(DERIVED_FILE_DIR)/embed_helper.stamp",
+				"$(DERIVED_FILE_DIR)/embed_mcp_cli.stamp",
 			);
 			name = "Codesign sparkle";
 			outputFileListPaths = (
@@ -1097,7 +1228,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -euo pipefail\n\nIDENTITY=\"${EXPANDED_CODE_SIGN_IDENTITY_NAME:-}\"\nRAW_IDENTITY=\"${EXPANDED_CODE_SIGN_IDENTITY:-}\"\nif [ \"${CODE_SIGNING_ALLOWED:-NO}\" != \"YES\" ] || [ -z \"${RAW_IDENTITY}\" ] || [ \"${RAW_IDENTITY}\" = \"-\" ] || [ -z \"${IDENTITY}\" ] || [ \"${IDENTITY}\" = \"-\" ] || [ \"${IDENTITY}\" = \"Sign to Run Locally\" ]; then\n    echo \"Skipping Codesign sparkle (CODE_SIGNING_ALLOWED=${CODE_SIGNING_ALLOWED:-NO}, identity='${IDENTITY}', raw='${RAW_IDENTITY}')\"\n    mkdir -p \"${DERIVED_FILE_DIR}\"\n    touch \"${DERIVED_FILE_DIR}/codesign_sparkle.stamp\"\n    exit 0\nfi\n\necho \"Signing identity ${IDENTITY}\"\nFW_DIR=\"${BUILT_PRODUCTS_DIR}/${FRAMEWORKS_FOLDER_PATH}\"\nHELPER_BIN=\"${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Library/HelperTools/PlayCoverHelper\"\n\nif [ -f \"${HELPER_BIN}\" ]; then\n    codesign --verbose --force -o runtime --sign \"${IDENTITY}\" \"${HELPER_BIN}\"\nfi\n\ncodesign --verbose --force --deep --sign \"${IDENTITY}\" \"${FW_DIR}/PlayTools.framework/PlugIns/AKInterface.bundle\"\ncodesign --verbose --force --deep --sign \"${IDENTITY}\" \"${FW_DIR}/PlayTools.framework\"\n\nLOCATION=\"${FW_DIR}/Sparkle.framework\"\nif [ -d \"${LOCATION}\" ]; then\n    echo \"Sparkle Signing location ${LOCATION}\"\n    codesign -f -o runtime -s \"${IDENTITY}\" \"${LOCATION}/Versions/B/Autoupdate\"\n    codesign -f -o runtime -s \"${IDENTITY}\" \"${LOCATION}/Versions/B/Updater.app\"\n    codesign -f -o runtime -s \"${IDENTITY}\" \"${LOCATION}/Versions/B/XPCServices/Downloader.xpc\"\n    codesign -f -o runtime -s \"${IDENTITY}\" \"${LOCATION}/Versions/B/XPCServices/Installer.xpc\"\n    codesign -f -o runtime -s \"${IDENTITY}\" \"${LOCATION}\"\nfi\n\nmkdir -p \"${DERIVED_FILE_DIR}\"\ntouch \"${DERIVED_FILE_DIR}/codesign_sparkle.stamp\"\n";
+			shellScript = "set -euo pipefail\n\nIDENTITY=\"${EXPANDED_CODE_SIGN_IDENTITY_NAME:-}\"\nRAW_IDENTITY=\"${EXPANDED_CODE_SIGN_IDENTITY:-}\"\nif [ \"${CODE_SIGNING_ALLOWED:-NO}\" != \"YES\" ] || [ -z \"${RAW_IDENTITY}\" ] || [ \"${RAW_IDENTITY}\" = \"-\" ] || [ -z \"${IDENTITY}\" ] || [ \"${IDENTITY}\" = \"-\" ] || [ \"${IDENTITY}\" = \"Sign to Run Locally\" ]; then\n    echo \"Skipping Codesign sparkle (CODE_SIGNING_ALLOWED=${CODE_SIGNING_ALLOWED:-NO}, identity='${IDENTITY}', raw='${RAW_IDENTITY}')\"\n    mkdir -p \"${DERIVED_FILE_DIR}\"\n    touch \"${DERIVED_FILE_DIR}/codesign_sparkle.stamp\"\n    exit 0\nfi\n\necho \"Signing identity ${IDENTITY}\"\nFW_DIR=\"${BUILT_PRODUCTS_DIR}/${FRAMEWORKS_FOLDER_PATH}\"\nHELPER_BIN=\"${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Library/HelperTools/PlayCoverHelper\"\nMCP_BIN=\"${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/MacOS/macover-mcp\"\nBRIDGE_BIN=\"${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Resources/BuiltInPlugins/CoverUseBridge/CoverUseBridge.dylib\"\n\ntest -x \"${HELPER_BIN}\"\ntest -x \"${MCP_BIN}\"\ntest -f \"${BRIDGE_BIN}\"\n\ncodesign --verbose --force -o runtime --sign \"${IDENTITY}\" \"${HELPER_BIN}\"\ncodesign --verbose --force -o runtime --sign \"${IDENTITY}\" \"${MCP_BIN}\"\ncodesign --verbose --force --sign \"${IDENTITY}\" \"${BRIDGE_BIN}\"\n\ncodesign --verbose --force --deep --sign \"${IDENTITY}\" \"${FW_DIR}/PlayTools.framework/PlugIns/AKInterface.bundle\"\ncodesign --verbose --force --deep --sign \"${IDENTITY}\" \"${FW_DIR}/PlayTools.framework\"\n\nLOCATION=\"${FW_DIR}/Sparkle.framework\"\nif [ -d \"${LOCATION}\" ]; then\n    echo \"Sparkle Signing location ${LOCATION}\"\n    codesign -f -o runtime -s \"${IDENTITY}\" \"${LOCATION}/Versions/B/Autoupdate\"\n    codesign -f -o runtime -s \"${IDENTITY}\" \"${LOCATION}/Versions/B/Updater.app\"\n    codesign -f -o runtime -s \"${IDENTITY}\" \"${LOCATION}/Versions/B/XPCServices/Downloader.xpc\"\n    codesign -f -o runtime -s \"${IDENTITY}\" \"${LOCATION}/Versions/B/XPCServices/Installer.xpc\"\n    codesign -f -o runtime -s \"${IDENTITY}\" \"${LOCATION}\"\nfi\n\nmkdir -p \"${DERIVED_FILE_DIR}\"\ntouch \"${DERIVED_FILE_DIR}/codesign_sparkle.stamp\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -1180,6 +1311,10 @@
 				AA51001D2F00003000623C15 /* ConfigOverviewPane.swift in Sources */,
 				AA51001E2F00003000623C15 /* ConfigPluginsPane.swift in Sources */,
 				AA51001F2F00003000623C15 /* MITMTrafficMonitorView.swift in Sources */,
+				AA72C0012F00006000623C15 /* MCPPreferences.swift in Sources */,
+				AA72C0022F00006000623C15 /* AXAccessibilityEngine.swift in Sources */,
+				AA72C0032F00006000623C15 /* MCPHostCoordinator.swift in Sources */,
+				AA72C0042F00006000623C15 /* MCPSettingsView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1214,6 +1349,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		AA72C0412F00006000623C15 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AA72C0062F00006000623C15 /* MacOverMCPMain.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -1236,6 +1379,11 @@
 			isa = PBXTargetDependency;
 			target = AA72B0402F00002000623C15 /* PlayCoverHelper */;
 			targetProxy = AA72B0302F00002000623C15 /* PBXContainerItemProxy */;
+		};
+		AA72C0312F00006000623C15 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = AA72C0402F00006000623C15 /* macover-mcp */;
+			targetProxy = AA72C0302F00006000623C15 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -1437,6 +1585,7 @@
 				CREATE_INFOPLIST_SECTION_IN_BINARY = YES;
 				ENABLE_HARDENED_RUNTIME = NO;
 				INFOPLIST_FILE = PlayCoverHelper/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = /usr/lib/swift;
 				PRODUCT_BUNDLE_IDENTIFIER = app.makedie.MacOver.Helper;
 				PRODUCT_NAME = PlayCoverHelper;
 				SKIP_INSTALL = YES;
@@ -1452,6 +1601,7 @@
 				CREATE_INFOPLIST_SECTION_IN_BINARY = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				INFOPLIST_FILE = PlayCoverHelper/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = /usr/lib/swift;
 				PRODUCT_BUNDLE_IDENTIFIER = app.makedie.MacOver.Helper;
 				PRODUCT_NAME = PlayCoverHelper;
 				SKIP_INSTALL = YES;
@@ -1467,8 +1617,54 @@
 				CREATE_INFOPLIST_SECTION_IN_BINARY = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				INFOPLIST_FILE = PlayCoverHelper/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = /usr/lib/swift;
 				PRODUCT_BUNDLE_IDENTIFIER = app.makedie.MacOver.Helper;
 				PRODUCT_NAME = PlayCoverHelper;
+				SKIP_INSTALL = YES;
+			};
+			name = Nightly;
+		};
+		AA72C0512F00006000623C15 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = AA71A0422F00000400623C15 /* App.xcconfig */;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CREATE_INFOPLIST_SECTION_IN_BINARY = YES;
+				ENABLE_HARDENED_RUNTIME = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = app.makedie.MacOver.MCP;
+				PRODUCT_NAME = "macover-mcp";
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
+		AA72C0522F00006000623C15 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = AA71A0422F00000400623C15 /* App.xcconfig */;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "Developer ID Application";
+				CODE_SIGN_STYLE = Manual;
+				CREATE_INFOPLIST_SECTION_IN_BINARY = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = app.makedie.MacOver.MCP;
+				PRODUCT_NAME = "macover-mcp";
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
+		AA72C0532F00006000623C15 /* Nightly */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = AA71A0422F00000400623C15 /* App.xcconfig */;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "Developer ID Application";
+				CODE_SIGN_STYLE = Manual;
+				CREATE_INFOPLIST_SECTION_IN_BINARY = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = app.makedie.MacOver.MCP;
+				PRODUCT_NAME = "macover-mcp";
 				SKIP_INSTALL = YES;
 			};
 			name = Nightly;
@@ -1522,6 +1718,16 @@
 				AA72B0512F00002000623C15 /* Debug */,
 				AA72B0522F00002000623C15 /* Release */,
 				AA72B0532F00002000623C15 /* Nightly */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		AA72C0502F00006000623C15 /* Build configuration list for PBXNativeTarget "macover-mcp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AA72C0512F00006000623C15 /* Debug */,
+				AA72C0522F00006000623C15 /* Release */,
+				AA72C0532F00006000623C15 /* Nightly */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
@@ -1610,6 +1816,26 @@
 			isa = XCSwiftPackageProductDependency;
 			package = AA72A0012F00001000623C15 /* XCLocalSwiftPackageReference "Packages/PlayCoverModules" */;
 			productName = PlayCoverSandbox;
+		};
+		AA72C0212F00006000623C15 /* PlayCoverMCP */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA72A0012F00001000623C15 /* XCLocalSwiftPackageReference "Packages/PlayCoverModules" */;
+			productName = PlayCoverMCP;
+		};
+		AA72C0222F00006000623C15 /* PlayCoverMCP */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA72A0012F00001000623C15 /* XCLocalSwiftPackageReference "Packages/PlayCoverModules" */;
+			productName = PlayCoverMCP;
+		};
+		AA72C0232F00006000623C15 /* PlayCoverCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA72A0012F00001000623C15 /* XCLocalSwiftPackageReference "Packages/PlayCoverModules" */;
+			productName = PlayCoverCore;
+		};
+		AA72C0242F00006000623C15 /* PlayCoverMachO */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA72A0012F00001000623C15 /* XCLocalSwiftPackageReference "Packages/PlayCoverModules" */;
+			productName = PlayCoverMachO;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

@@ -152,26 +152,17 @@ struct MITMTrafficMonitorView: View {
     }
 
     private var filterBar: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 10) {
-                searchField
-                    .frame(minWidth: 200, maxWidth: 280)
-                dispositionPicker
-                    .fixedSize()
-                Spacer(minLength: 8)
-                entryCountBadge
-            }
-
-            VStack(spacing: 8) {
-                HStack(spacing: 10) {
-                    searchField
-                    entryCountBadge
-                }
-                HStack {
-                    dispositionPicker
-                    Spacer(minLength: 0)
-                }
-            }
+        AdaptiveWrappingRowLayout(
+            horizontalSpacing: 10,
+            verticalSpacing: 8,
+            pinLastToTrailingWhenSingleRow: true
+        ) {
+            searchField
+                .frame(minWidth: 200, idealWidth: 240, maxWidth: 280)
+            dispositionPicker
+                .fixedSize()
+            entryCountBadge
+                .fixedSize()
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)

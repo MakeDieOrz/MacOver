@@ -91,17 +91,12 @@ nonisolated final class NativeDownloadManager: NSObject, URLSessionDownloadDeleg
                 at: entry.destinationDirectory,
                 withIntermediateDirectories: true
             )
-            let suggested = downloadTask.response?.suggestedFilename
-            let fallbackName = downloadTask.originalRequest?.url?.lastPathComponent
-            let fileName: String
-            if let suggested, !suggested.isEmpty {
-                fileName = suggested
-            } else if let fallbackName, !fallbackName.isEmpty {
-                fileName = fallbackName
-            } else {
-                fileName = "download.ipa"
+            let fileName = "\(UUID().uuidString).ipa"
+            let targetURL = entry.destinationDirectory.appendingPathComponent(fileName, isDirectory: false)
+            guard targetURL.standardizedFileURL.deletingLastPathComponent()
+                == entry.destinationDirectory.standardizedFileURL else {
+                throw PlayCoverError.appCorrupted
             }
-            let targetURL = entry.destinationDirectory.appendingPathComponent(fileName)
             if fileManager.fileExists(atPath: targetURL.path) {
                 try fileManager.removeItem(at: targetURL)
             }
@@ -265,6 +260,11 @@ nonisolated final class DownloadApp: Sendable {
     }
 
     private func proceedDownload(_ finalURL: URL) {
+        guard let scheme = finalURL.scheme?.lowercased(),
+              scheme == "https" || scheme == "http" else {
+            PlayCoverDiagnostics.log("Refused download for unsupported URL scheme: \(finalURL)", isError: true)
+            return
+        }
         Task { @MainActor in
             self.downloadVM.storeAppData = self.app
             self.downloadVM.next(.downloading, 0.0, 0.85)

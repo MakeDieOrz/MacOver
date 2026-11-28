@@ -57,6 +57,7 @@ nonisolated final class AppSettings: @unchecked Sendable {
     @ObservationIgnored private let ioQueue = DispatchQueue(label: "app.makedie.MacOver.AppSettings.io", qos: .utility)
     @ObservationIgnored private var pendingSaveWorkItem: DispatchWorkItem?
     @ObservationIgnored private var hasPendingWrite = false
+    @ObservationIgnored private var didExistOnDisk = false
     @ObservationIgnored let debounceInterval: TimeInterval
     @ObservationIgnored private let metalHUDExecutor: @Sendable (String, Bool) throws -> Void
     @ObservationIgnored private let usesDefaultMetalHUDExecutor: Bool
@@ -117,7 +118,7 @@ nonisolated final class AppSettings: @unchecked Sendable {
         enabled: Bool,
         executor: (@Sendable (String, Bool) throws -> Void)? = nil
     ) async {
-        guard !bundleID.isEmpty else { return }
+        guard Shell.isValidBundleIdentifier(bundleID) else { return }
         let generation = reserveMetalHUDGeneration(for: bundleID)
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             metalHUDQueue.async {
@@ -166,7 +167,13 @@ nonisolated final class AppSettings: @unchecked Sendable {
     }
 
     private func notifyChangedOnMain() {
-        withMutation(keyPath: \.settings) {}
+        if Thread.isMainThread {
+            withMutation(keyPath: \.settings) {}
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.withMutation(keyPath: \.settings) {}
+            }
+        }
         fireChangeObservers()
     }
 
@@ -217,7 +224,27 @@ nonisolated final class AppSettings: @unchecked Sendable {
     }
 
     deinit {
-        _ = flush()
+        let shouldFlush = lock.withLock { _ -> Bool in
+            pendingSaveWorkItem?.cancel()
+            pendingSaveWorkItem = nil
+            guard hasPendingWrite else { return false }
+            if didExistOnDisk && !FileManager.default.fileExists(atPath: settingsUrl.path) {
+                hasPendingWrite = false
+                return false
+            }
+            return true
+        }
+        if shouldFlush {
+            _ = flush()
+        }
+    }
+
+    func discardPendingWrites() {
+        lock.withLock { _ in
+            pendingSaveWorkItem?.cancel()
+            pendingSaveWorkItem = nil
+            hasPendingWrite = false
+        }
     }
 
     private func reserveMetalHUDIfNeededLocked(
@@ -225,7 +252,7 @@ nonisolated final class AppSettings: @unchecked Sendable {
         to current: AppSettingsData
     ) -> PendingMetalHUDUpdate? {
         guard previous.effectiveMetalHUD != current.effectiveMetalHUD,
-              !current.bundleIdentifier.isEmpty else {
+              Shell.isValidBundleIdentifier(current.bundleIdentifier) else {
             return nil
         }
         let generation = Self.reserveMetalHUDGeneration(for: current.bundleIdentifier)
@@ -241,6 +268,14 @@ nonisolated final class AppSettings: @unchecked Sendable {
             let previous = _settings
             var updated = _settings
             mutate(&updated)
+            if !info.bundleIdentifier.isEmpty {
+                updated.bundleIdentifier = info.bundleIdentifier
+            }
+            let autoRes: (width: Int, height: Int)? =
+                (updated.resolution == 1 && previous.resolution != 1)
+                ? Self.autoResolution()
+                : nil
+            updated.normalizeDisplaySettings(previous: previous, autoResolution: autoRes)
             guard updated != previous else {
                 return nil
             }
@@ -280,6 +315,10 @@ nonisolated final class AppSettings: @unchecked Sendable {
         lock.withLock { _ in
             guard hasPendingWrite else { return }
             pendingSaveWorkItem = nil
+            if didExistOnDisk && !FileManager.default.fileExists(atPath: settingsUrl.path) {
+                hasPendingWrite = false
+                return
+            }
             _ = encodeLocked()
             hasPendingWrite = false
         }
@@ -359,6 +398,7 @@ nonisolated final class AppSettings: @unchecked Sendable {
                 suppressPersistence = true
                 _settings = decoded
                 suppressPersistence = false
+                didExistOnDisk = true
                 return .success(())
             } catch {
                 suppressPersistence = false
@@ -401,6 +441,7 @@ nonisolated final class AppSettings: @unchecked Sendable {
             if _settings.keymappingDisabledAt != persisted.keymappingDisabledAt {
                 _settings.keymappingDisabledAt = persisted.keymappingDisabledAt
             }
+            didExistOnDisk = true
             return true
         } catch {
             PlayCoverDiagnostics.log(

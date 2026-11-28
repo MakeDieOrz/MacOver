@@ -3,23 +3,40 @@ import Foundation
 import PlayCoverCore
 import PlayCoverSandbox
 
-final class PlayCoverHelperService: NSObject, NSXPCListenerDelegate, PlayCoverHelperProtocol {
+final class PlayCoverHelperService: NSObject, NSXPCListenerDelegate {
     func listener(
         _ listener: NSXPCListener,
         shouldAcceptNewConnection newConnection: NSXPCConnection
     ) -> Bool {
-        guard HelperSecurityValidator.verifyIncomingConnection(newConnection) else {
+        guard let identity = HelperSecurityValidator.verifyIncomingConnectionIdentity(newConnection) else {
             return false
         }
+        let session = PlayCoverHelperClientSession(identity: identity)
         newConnection.exportedInterface = NSXPCInterface(with: PlayCoverHelperProtocol.self)
-        newConnection.exportedObject = self
+        newConnection.exportedObject = session
         newConnection.resume()
         return true
+    }
+}
+
+private final class PlayCoverHelperClientSession: NSObject, PlayCoverHelperProtocol {
+    private let identity: VerifiedXPCClientIdentity
+
+    private var managedAppsDirectory: URL {
+        URL(fileURLWithPath: identity.homeDirectory)
+            .appendingPathComponent("Library/Containers/app.makedie.MacOver/Applications", isDirectory: true)
+    }
+
+    init(identity: VerifiedXPCClientIdentity) {
+        self.identity = identity
+        super.init()
     }
 
     func configureAMFIBootArgs(completion: @escaping (NSError?) -> Void) {
         do {
-            try runTool("/usr/sbin/nvram", arguments: ["boot-args=\(DualTrackPrivilegeEscalator.amfiBootArgs)"])
+            let existing = try? runToolCapturingOutput("/usr/sbin/nvram", arguments: ["boot-args"])
+            let merged = DualTrackPrivilegeEscalator.mergedAMFIBootArgs(existingOutput: existing)
+            try runTool("/usr/sbin/nvram", arguments: ["boot-args=\(merged)"])
             completion(nil)
         } catch {
             completion(error as NSError)
@@ -27,24 +44,14 @@ final class PlayCoverHelperService: NSObject, NSXPCListenerDelegate, PlayCoverHe
     }
 
     func repairContainerPermissions(at path: String, completion: @escaping (NSError?) -> Void) {
-        guard let validatedPath = HelperSecurityValidator.validateContainerPath(path) else {
-            completion(
-                PlayCoverError.privilegeEscalationFailed("Rejected invalid container path for permission repair.")
-                    as NSError
-            )
-            return
-        }
-        guard FileManager.default.fileExists(atPath: validatedPath) else {
-            completion(
-                PlayCoverError.privilegeEscalationFailed("Container directory does not exist at path.") as NSError
-            )
-            return
-        }
         do {
-            if let owner = Self.resolveHomeOwner(fromContainerPath: validatedPath) {
-                try runTool("/usr/sbin/chown", arguments: ["-R", "\(owner.uid):\(owner.gid)", validatedPath])
-            }
-            try runTool("/bin/chmod", arguments: ["-R", "u+rwX", validatedPath])
+            try HelperSecurityValidator.repairContainerPermissionsSecurely(
+                at: path,
+                userHomeRoot: identity.homeDirectory,
+                ownerUID: identity.uid,
+                ownerGID: identity.gid,
+                managedAppsDirectory: managedAppsDirectory
+            )
             completion(nil)
         } catch {
             completion(error as NSError)
@@ -52,10 +59,11 @@ final class PlayCoverHelperService: NSObject, NSXPCListenerDelegate, PlayCoverHe
     }
 
     func manageTCCPermissions(for bundleID: String, reset: Bool, completion: @escaping (NSError?) -> Void) {
-        guard HelperSecurityValidator.validateBundleIdentifier(bundleID) else {
+        guard HelperSecurityValidator.isManagedAppBundleID(bundleID, in: managedAppsDirectory) else {
             completion(
-                PlayCoverError.privilegeEscalationFailed("Rejected invalid bundle identifier for TCC management.")
-                    as NSError
+                PlayCoverError.privilegeEscalationFailed(
+                    "Rejected unmanaged or reserved bundle identifier for TCC management."
+                ) as NSError
             )
             return
         }
@@ -71,20 +79,11 @@ final class PlayCoverHelperService: NSObject, NSXPCListenerDelegate, PlayCoverHe
         }
     }
 
-    private static func resolveHomeOwner(fromContainerPath path: String) -> (uid: uid_t, gid: gid_t)? {
-        let components = URL(fileURLWithPath: path).pathComponents
-        guard components.count >= 3, components[1] == "Users" else {
-            return nil
-        }
-        let userHome = "/Users/\(components[2])"
-        var st = Darwin.stat()
-        guard stat(userHome, &st) == 0 else {
-            return nil
-        }
-        return (st.st_uid, st.st_gid)
+    private func runTool(_ binary: String, arguments: [String]) throws {
+        _ = try runToolCapturingOutput(binary, arguments: arguments)
     }
 
-    private func runTool(_ binary: String, arguments: [String]) throws {
+    private func runToolCapturingOutput(_ binary: String, arguments: [String]) throws -> String {
         let process = Process()
         let errPipe = Pipe()
         process.executableURL = URL(fileURLWithPath: binary)
@@ -99,13 +98,14 @@ final class PlayCoverHelperService: NSObject, NSXPCListenerDelegate, PlayCoverHe
         try? errPipe.fileHandleForWriting.close()
         let outData = (try? errPipe.fileHandleForReading.readToEnd()) ?? Data()
         process.waitUntilExit()
+        let output = String(data: outData, encoding: .utf8) ?? ""
         if process.terminationStatus != 0 {
-            let output = String(data: outData, encoding: .utf8) ?? ""
             throw PlayCoverError.shellExecutionFailed(
                 binary: binary,
                 status: process.terminationStatus,
                 output: output
             )
         }
+        return output
     }
 }

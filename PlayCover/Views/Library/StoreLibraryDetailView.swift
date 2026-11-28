@@ -22,6 +22,7 @@ struct StoreLibraryDetailView: View {
     @State private var sortAlphabetical = UserDefaults.standard.bool(forKey: "IPASourceAlphabetically")
     @State private var addSourcePresented = false
     @State private var isConnected: Bool?
+    @State private var scrollViewportSize: CGSize = .zero
 
     private let gridColumns = [
         GridItem(.adaptive(minimum: 148, maximum: 170), spacing: 14)
@@ -110,43 +111,54 @@ struct StoreLibraryDetailView: View {
                 }
             } else {
                 ScrollView {
-                    if isList {
-                        LazyVStack(spacing: 6) {
-                            ForEach(visibleApps, id: \.self) { app in
-                                StoreItemTileView(
-                                    app: app,
-                                    isList: true,
-                                    isSelected: navState.selectedStoreApp == app,
-                                    appearsActive: appearsActive,
-                                    onSelect: { navState.selectedStoreApp = app },
-                                    onDownload: { startDownload(for: app) },
-                                    onCopyBundleID: { copyBundleID(for: app) }
-                                )
+                    Group {
+                        if isList {
+                            LazyVStack(spacing: 6) {
+                                ForEach(visibleApps, id: \.self) { app in
+                                    StoreItemTileView(
+                                        app: app,
+                                        isList: true,
+                                        isSelected: navState.selectedStoreApp == app,
+                                        appearsActive: appearsActive,
+                                        onSelect: { navState.selectedStoreApp = app },
+                                        onDownload: { startDownload(for: app) },
+                                        onCopyBundleID: { copyBundleID(for: app) }
+                                    )
+                                }
                             }
-                        }
-                        .padding(16)
-                    } else {
-                        LazyVGrid(columns: gridColumns, spacing: 14) {
-                            ForEach(visibleApps, id: \.self) { app in
-                                StoreItemTileView(
-                                    app: app,
-                                    isList: false,
-                                    isSelected: navState.selectedStoreApp == app,
-                                    appearsActive: appearsActive,
-                                    onSelect: { navState.selectedStoreApp = app },
-                                    onDownload: { startDownload(for: app) },
-                                    onCopyBundleID: { copyBundleID(for: app) }
-                                )
+                            .padding(16)
+                        } else {
+                            LazyVGrid(columns: gridColumns, spacing: 14) {
+                                ForEach(visibleApps, id: \.self) { app in
+                                    StoreItemTileView(
+                                        app: app,
+                                        isList: false,
+                                        isSelected: navState.selectedStoreApp == app,
+                                        appearsActive: appearsActive,
+                                        onSelect: { navState.selectedStoreApp = app },
+                                        onDownload: { startDownload(for: app) },
+                                        onCopyBundleID: { copyBundleID(for: app) }
+                                    )
+                                }
                             }
+                            .padding(18)
                         }
-                        .padding(18)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: scrollViewportSize.height, alignment: .top)
+                    .background {
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                navState.selectedStoreApp = nil
+                            }
                     }
                 }
-                .scrollEdgeEffectStyle(.soft, for: .top)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    navState.selectedStoreApp = nil
+                .onGeometryChange(for: CGSize.self) { geo in
+                    geo.size
+                } action: { newSize in
+                    scrollViewportSize = newSize
                 }
+                .scrollEdgeEffectStyle(.soft, for: .top)
             }
         }
         .navigationTitle(navigationTitleText)
@@ -400,13 +412,19 @@ private struct StoreItemTileView: View {
         .accessibilityAction(named: Text("store.downloadInstall")) {
             onDownload()
         }
-        .gesture(TapGesture(count: 2).onEnded {
-            onSelect()
-            onDownload()
-        })
-        .simultaneousGesture(TapGesture().onEnded {
-            onSelect()
-        })
+        .gesture(
+            TapGesture(count: 2)
+                .exclusively(before: TapGesture(count: 1))
+                .onEnded { result in
+                    switch result {
+                    case .first:
+                        onSelect()
+                        onDownload()
+                    case .second:
+                        onSelect()
+                    }
+                }
+        )
         .contextMenu {
             Button("store.downloadInstall", systemImage: "arrow.down.circle") {
                 onDownload()

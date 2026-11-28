@@ -9,6 +9,7 @@ import AppKit
 import CryptoKit
 import Foundation
 import ImageIO
+import PlayCoverMachO
 import Synchronization
 import UniformTypeIdentifiers
 
@@ -18,6 +19,18 @@ nonisolated final class LocalDataCache: Sendable {
     private let cacheDirectory: URL?
     private let writeLock = Mutex<Void>(())
     private let dirReady = Mutex<Bool>(false)
+    private let cleanAllObservers = Mutex<[UUID: @Sendable () -> Void]>([:])
+
+    @discardableResult
+    func addCleanAllObserver(_ observer: @escaping @Sendable () -> Void) -> UUID {
+        let id = UUID()
+        cleanAllObservers.withLock { $0[id] = observer }
+        return id
+    }
+
+    func removeCleanAllObserver(_ id: UUID) {
+        cleanAllObservers.withLock { _ = $0.removeValue(forKey: id) }
+    }
 
     init(name: String, cacheDirectory: URL? = nil) {
         if let cacheDirectory {
@@ -100,10 +113,15 @@ nonisolated final class LocalDataCache: Sendable {
     }
 
     func cleanAll() {
-        guard let cacheDirectory else { return }
-        writeLock.withLock { _ in
-            try? FileManager.default.removeItem(at: cacheDirectory)
-            dirReady.withLock { $0 = false }
+        if let cacheDirectory {
+            writeLock.withLock { _ in
+                try? FileManager.default.removeItem(at: cacheDirectory)
+                dirReady.withLock { $0 = false }
+            }
+        }
+        let observers = cleanAllObservers.withLock { Array($0.values) }
+        for observer in observers {
+            observer()
         }
     }
 }
@@ -122,7 +140,9 @@ nonisolated final class Cacher: @unchecked Sendable {
         c.countLimit = 256
         return c
     }()
+    private let latestIconKeyByBaseKey = Mutex<[String: String]>([:])
     private let inFlightLocalIcons = Mutex<[String: Task<CGImage?, Never>]>([:])
+    private var cleanAllObserverID: UUID?
     private let imageURLSession: URLSession = {
         let config = URLSessionConfiguration.default
         config.urlCache = URLCache.iconCache
@@ -130,10 +150,84 @@ nonisolated final class Cacher: @unchecked Sendable {
         return URLSession(configuration: config)
     }()
 
-    func removeImageCache() {
+    init() {
+        cleanAllObserverID = cache.addCleanAllObserver { [weak self] in
+            self?.clearMemoryCaches()
+        }
+    }
+
+    deinit {
+        if let cleanAllObserverID {
+            cache.removeCleanAllObserver(cleanAllObserverID)
+        }
+    }
+
+    private func clearMemoryCaches() {
         remoteImageMemoryCache.removeAllObjects()
         memoryIconCache.removeAllObjects()
+        latestIconKeyByBaseKey.withLock { $0.removeAll() }
         URLCache.iconCache.removeAllCachedResponses()
+    }
+
+    func removeImageCache() {
+        clearMemoryCaches()
+        cache.cleanAll()
+    }
+
+    private static func baseIconKey(bundleIdentifier: String, bundleVersion: String) -> String {
+        "\(bundleIdentifier)\u{1F}\(bundleVersion)"
+    }
+
+    private static func diskFreshnessKey(bundleIdentifier: String) -> String {
+        "icon-freshness:\(bundleIdentifier)"
+    }
+
+    private static func diskIconDataKey(bundleIdentifier: String) -> String {
+        "icon-data:\(bundleIdentifier)"
+    }
+
+    private static func fullIconKey(
+        bundleIdentifier: String,
+        bundleVersion: String,
+        cfBundleVersion: String,
+        installGeneration: String,
+        infoPlistStamp: PlayTools.FileStatStamp?
+    ) -> String {
+        let stampPart: String
+        if let stamp = infoPlistStamp {
+            stampPart = "\(stamp.inode):\(stamp.size):\(stamp.mtimeSec).\(stamp.mtimeNSec)"
+        } else {
+            stampPart = ""
+        }
+        return [
+            "v2",
+            bundleIdentifier,
+            bundleVersion,
+            cfBundleVersion,
+            installGeneration,
+            stampPart
+        ].joined(separator: "\u{1F}")
+    }
+
+    func invalidateLocalIcon(bundleIdentifier: String) {
+        guard !bundleIdentifier.isEmpty else { return }
+        let prefix = bundleIdentifier + "\u{1F}"
+        let evictedKeys = latestIconKeyByBaseKey.withLock { map -> [String] in
+            let matchingBaseKeys = map.keys.filter { $0.hasPrefix(prefix) }
+            var fullKeys: [String] = []
+            for baseKey in matchingBaseKeys {
+                if let full = map.removeValue(forKey: baseKey) {
+                    fullKeys.append(full)
+                }
+            }
+            return fullKeys
+        }
+        for key in evictedKeys {
+            memoryIconCache.removeObject(forKey: key as NSString)
+        }
+        cache.clean(byKey: Self.diskFreshnessKey(bundleIdentifier: bundleIdentifier))
+        cache.clean(byKey: Self.diskIconDataKey(bundleIdentifier: bundleIdentifier))
+        cache.clean(byKey: bundleIdentifier)
     }
 
     @concurrent
@@ -166,8 +260,29 @@ nonisolated final class Cacher: @unchecked Sendable {
         }
     }
 
-    func getCachedMemoryIcon(bundleIdentifier: String, bundleVersion: String) -> NSImage? {
-        memoryIconCache.object(forKey: (bundleIdentifier + bundleVersion) as NSString)
+    func getCachedMemoryIcon(
+        bundleIdentifier: String,
+        bundleVersion: String,
+        cfBundleVersion: String = "",
+        installGeneration: String = ""
+    ) -> NSImage? {
+        let baseKey = Self.baseIconKey(bundleIdentifier: bundleIdentifier, bundleVersion: bundleVersion)
+        guard let latestFullKey = latestIconKeyByBaseKey.withLock({ $0[baseKey] }) else {
+            return nil
+        }
+        if !cfBundleVersion.isEmpty || !installGeneration.isEmpty {
+            let expectedPrefix = [
+                "v2",
+                bundleIdentifier,
+                bundleVersion,
+                cfBundleVersion,
+                installGeneration
+            ].joined(separator: "\u{1F}") + "\u{1F}"
+            guard latestFullKey.hasPrefix(expectedPrefix) else {
+                return nil
+            }
+        }
+        return memoryIconCache.object(forKey: latestFullKey as NSString)
     }
 
     func resolveLocalIcon(_ app: PlayApp) -> NSImage? {
@@ -175,7 +290,9 @@ nonisolated final class Cacher: @unchecked Sendable {
             at: app.url,
             bundleIdentifier: app.info.bundleIdentifier,
             bundleVersion: app.info.bundleVersion,
-            primaryIconName: app.info.primaryIconName
+            primaryIconName: app.info.primaryIconName,
+            cfBundleVersion: app.info[string: "CFBundleVersion"] ?? "",
+            installGeneration: app.info[string: Installer.installGenerationInfoKey] ?? ""
         )
     }
 
@@ -183,13 +300,17 @@ nonisolated final class Cacher: @unchecked Sendable {
         at url: URL,
         bundleIdentifier: String,
         bundleVersion: String,
-        primaryIconName: String
+        primaryIconName: String,
+        cfBundleVersion: String = "",
+        installGeneration: String = ""
     ) -> NSImage? {
         guard let cgImage = resolveLocalIconCGImage(
             at: url,
             bundleIdentifier: bundleIdentifier,
             bundleVersion: bundleVersion,
-            primaryIconName: primaryIconName
+            primaryIconName: primaryIconName,
+            cfBundleVersion: cfBundleVersion,
+            installGeneration: installGeneration
         ) else {
             return nil
         }
@@ -200,29 +321,41 @@ nonisolated final class Cacher: @unchecked Sendable {
         at url: URL,
         bundleIdentifier: String,
         bundleVersion: String,
-        primaryIconName: String
+        primaryIconName: String,
+        cfBundleVersion: String = "",
+        installGeneration: String = ""
     ) async -> CGImage? {
-        let compareStr = bundleIdentifier + bundleVersion
-        if let memImage = memoryIconCache.object(forKey: compareStr as NSString),
+        let infoPlistURL = url.appendingPathComponent("Info").appendingPathExtension("plist")
+        let infoStamp = PlayTools.fileStamp(for: infoPlistURL)
+        let fullKey = Self.fullIconKey(
+            bundleIdentifier: bundleIdentifier,
+            bundleVersion: bundleVersion,
+            cfBundleVersion: cfBundleVersion,
+            installGeneration: installGeneration,
+            infoPlistStamp: infoStamp
+        )
+        if let memImage = memoryIconCache.object(forKey: fullKey as NSString),
            let memCG = memImage.cgImage(forProposedRect: nil, context: nil, hints: nil) {
             return memCG
         }
         let task = inFlightLocalIcons.withLock { inflight -> Task<CGImage?, Never> in
-            if let existing = inflight[compareStr] {
+            if let existing = inflight[fullKey] {
                 return existing
             }
             let created = Task.detached(priority: .utility) { [weak self] () -> CGImage? in
                 defer {
-                    self?.inFlightLocalIcons.withLock { _ = $0.removeValue(forKey: compareStr) }
+                    self?.inFlightLocalIcons.withLock { _ = $0.removeValue(forKey: fullKey) }
                 }
                 return self?.resolveLocalIconCGImage(
                     at: url,
                     bundleIdentifier: bundleIdentifier,
                     bundleVersion: bundleVersion,
-                    primaryIconName: primaryIconName
+                    primaryIconName: primaryIconName,
+                    cfBundleVersion: cfBundleVersion,
+                    installGeneration: installGeneration
                 )
             }
-            inflight[compareStr] = created
+            inflight[fullKey] = created
             return created
         }
         return await task.value
@@ -232,13 +365,17 @@ nonisolated final class Cacher: @unchecked Sendable {
         at url: URL,
         bundleIdentifier: String,
         bundleVersion: String,
-        primaryIconName: String
+        primaryIconName: String,
+        cfBundleVersion: String = "",
+        installGeneration: String = ""
     ) -> Data? {
         resolveLocalIcon(
             at: url,
             bundleIdentifier: bundleIdentifier,
             bundleVersion: bundleVersion,
-            primaryIconName: primaryIconName
+            primaryIconName: primaryIconName,
+            cfBundleVersion: cfBundleVersion,
+            installGeneration: installGeneration
         )?.tiffRepresentation
     }
 
@@ -311,19 +448,34 @@ nonisolated final class Cacher: @unchecked Sendable {
         at url: URL,
         bundleIdentifier: String,
         bundleVersion: String,
-        primaryIconName: String
+        primaryIconName: String,
+        cfBundleVersion: String = "",
+        installGeneration: String = ""
     ) -> CGImage? {
-        let compareStr = bundleIdentifier + bundleVersion
-        let memKey = compareStr as NSString
+        let infoPlistURL = url.appendingPathComponent("Info").appendingPathExtension("plist")
+        let infoStamp = PlayTools.fileStamp(for: infoPlistURL)
+        let fullKey = Self.fullIconKey(
+            bundleIdentifier: bundleIdentifier,
+            bundleVersion: bundleVersion,
+            cfBundleVersion: cfBundleVersion,
+            installGeneration: installGeneration,
+            infoPlistStamp: infoStamp
+        )
+        let baseKey = Self.baseIconKey(bundleIdentifier: bundleIdentifier, bundleVersion: bundleVersion)
+        let memKey = fullKey as NSString
         if let memImage = memoryIconCache.object(forKey: memKey),
            let memCG = memImage.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            latestIconKeyByBaseKey.withLock { $0[baseKey] = fullKey }
             return memCG
         }
-        if cache.readString(forKey: compareStr) != nil,
-           let cachedData = cache.readData(forKey: bundleIdentifier),
+        let freshnessKey = Self.diskFreshnessKey(bundleIdentifier: bundleIdentifier)
+        let dataKey = Self.diskIconDataKey(bundleIdentifier: bundleIdentifier)
+        if cache.readString(forKey: freshnessKey) == fullKey,
+           let cachedData = cache.readData(forKey: dataKey),
            let diskCG = Self.downsampleCGImage(from: cachedData, maxPixelSize: 256) {
             let memImg = NSImage(cgImage: diskCG, size: NSSize(width: diskCG.width, height: diskCG.height))
             memoryIconCache.setObject(memImg, forKey: memKey)
+            latestIconKeyByBaseKey.withLock { $0[baseKey] = fullKey }
             return diskCG
         }
 
@@ -385,26 +537,31 @@ nonisolated final class Cacher: @unchecked Sendable {
             }
         }
 
-        cache.write(string: compareStr, forKey: compareStr)
         if let chosenCG {
             let memImg = NSImage(cgImage: chosenCG, size: NSSize(width: chosenCG.width, height: chosenCG.height))
             memoryIconCache.setObject(memImg, forKey: memKey)
+            latestIconKeyByBaseKey.withLock { $0[baseKey] = fullKey }
             if let pngData = Self.encodePNG(from: chosenCG) {
-                cache.write(data: pngData, forKey: bundleIdentifier)
+                cache.write(data: pngData, forKey: dataKey)
+                cache.write(string: fullKey, forKey: freshnessKey)
             }
             return chosenCG
         }
+        invalidateLocalIcon(bundleIdentifier: bundleIdentifier)
         return nil
     }
 
     @MainActor
     func getLocalIcon(bundleId: String) -> NSImage? {
         if let app = appsVM?.apps.first(where: { $0.info.bundleIdentifier == bundleId }) {
-            let key = (app.info.bundleIdentifier + app.info.bundleVersion) as NSString
-            if let memImage = memoryIconCache.object(forKey: key) {
+            if let memImage = getCachedMemoryIcon(
+                bundleIdentifier: app.info.bundleIdentifier,
+                bundleVersion: app.info.bundleVersion
+            ) {
                 return memImage
             }
-            return cache.readImage(forKey: app.info.bundleIdentifier)
+            return cache.readImage(forKey: Self.diskIconDataKey(bundleIdentifier: app.info.bundleIdentifier))
+                ?? cache.readImage(forKey: app.info.bundleIdentifier)
         } else {
             return nil
         }

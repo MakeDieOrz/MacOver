@@ -5,6 +5,7 @@
 //  Created by TheMoonThatRises on 9/26/22.
 //
 
+import Darwin
 import Synchronization
 import SwiftUI
 
@@ -17,12 +18,14 @@ nonisolated class Uninstaller {
     private static let libraryUrl = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library")
     private static let pruneURLs: [URL] = [
         PlayTools.playCoverContainer.appendingPathComponent("App Settings"),
+        PlayTools.playCoverContainer.appendingPathComponent("AppGroups"),
         PlayTools.playCoverContainer.appendingPathComponent("Certificates"),
         PlayTools.playCoverContainer.appendingPathComponent("AppBackups"),
         PlayTools.playCoverContainer.appendingPathComponent("Entitlements"),
         PlayTools.playCoverContainer.appendingPathComponent("Keymapping"),
         PlayTools.playCoverContainer.appendingPathComponent("PlayChain"),
-        PlayTools.playCoverContainer.appendingPathComponent("SVCPatches")
+        PlayTools.playCoverContainer.appendingPathComponent("SVCPatches"),
+        PlayTools.playCoverContainer.appendingPathComponent("PlayTools").appendingPathComponent("UserPlugins")
     ]
     private static let cacheURLs: [URL] = [
         Uninstaller.libraryUrl.appendingPathComponent("Containers"),
@@ -159,6 +162,12 @@ nonisolated class Uninstaller {
         var uninstallNum = 0
         var clearError: Error?
 
+        // Always terminate running app instances before deleting the bundle or host metadata.
+        let bundleID = app.info.bundleIdentifier
+        if !bundleID.isEmpty {
+            await terminateRunningAppIfNeeded(bundleID)
+        }
+
         if clearAppData {
             clearError = await app.clearAllCache()
             uninstallNum += 1
@@ -253,14 +262,17 @@ nonisolated class Uninstaller {
         }
 
         app.removeAlias()
-        if !app.info.bundleIdentifier.isEmpty {
+        if !bundleID.isEmpty {
             FileManager.default.delete(at: app.appBackupsDir)
             Installer.cleanupInvalidatedAppBackups(
                 primary: nil,
                 in: BaseApp.appBackupsRoot,
-                bundleIdentifier: app.info.bundleIdentifier
+                bundleIdentifier: bundleID
             )
             FileManager.default.delete(at: app.svcPatchManifestURL)
+            if Shell.isValidBundleIdentifier(bundleID) {
+                FileManager.default.delete(at: PlayTools.userPluginsStoreURL(bundleIdentifier: bundleID))
+            }
         }
         app.deleteApp()
 
@@ -512,13 +524,76 @@ nonisolated class Uninstaller {
         }
     }
 
+    private static func hasExternalNativeApp(
+        bundleId: String,
+        managedAppsRoot: URL = AppsVM.appDirectory
+    ) -> Bool {
+        let managedPrefix = managedAppsRoot.resolvingSymlinksInPath().standardizedFileURL.path + "/"
+        let registeredApps = NSWorkspace.shared.urlsForApplications(withBundleIdentifier: bundleId)
+        for appURL in registeredApps {
+            let resolved = appURL.resolvingSymlinksInPath().standardizedFileURL.path
+            if !resolved.hasPrefix(managedPrefix) {
+                return true
+            }
+        }
+        return false
+    }
+
+    static func isSafeToClearHostCaches(
+        for bundleId: String,
+        managedAppsRoot: URL = AppsVM.appDirectory
+    ) -> Bool {
+        guard HelperSecurityValidator.validateGuestBundleIdentifier(bundleId) else {
+            return false
+        }
+        return !hasExternalNativeApp(bundleId: bundleId, managedAppsRoot: managedAppsRoot)
+    }
+
     @discardableResult
     static func clearExternalCache(_ bundleId: String,
                                    appBundleURL: URL? = nil) async -> Error? {
         guard !bundleId.isEmpty else { return nil }
-        await terminateRunningAppIfNeeded(bundleId)
+        guard HelperSecurityValidator.validateGuestBundleIdentifier(bundleId) else {
+            PlayCoverDiagnostics.log(
+                "Skipped clearing host caches for \(bundleId): invalid or reserved bundle identifier.",
+                isError: true
+            )
+            return nil
+        }
 
         var firstError: Error?
+        let isSafeHostCaches = isSafeToClearHostCaches(for: bundleId)
+        if isSafeHostCaches {
+            await terminateRunningAppIfNeeded(bundleId)
+        }
+
+        // Remove MacOver-owned namespaced AppGroups/<bundleID> directory even when a native macOS app
+        // shares the bundle ID, since MacOver/AppGroups is exclusively managed by MacOver.
+        let appGroupsDir = PlayTools.playCoverContainer
+            .appendingPathComponent("AppGroups", isDirectory: true)
+            .appendingPathComponent(bundleId, isDirectory: true)
+        var appGroupsStat = Darwin.stat()
+        if Darwin.lstat(appGroupsDir.path, &appGroupsStat) == 0 {
+            do {
+                if (appGroupsStat.st_mode & S_IFMT) == S_IFLNK {
+                    try FileManager.default.removeItem(at: appGroupsDir)
+                } else {
+                    try removeOrTrashItem(appGroupsDir)
+                }
+            } catch {
+                PlayCoverDiagnostics.log("Failed to clear AppGroups \(appGroupsDir.path): \(error)", isError: true)
+                firstError = error
+            }
+        }
+
+        guard isSafeHostCaches else {
+            PlayCoverDiagnostics.log(
+                "Skipped clearing host caches for \(bundleId): matches a native macOS app.",
+                isError: true
+            )
+            return firstError
+        }
+
         let targetIds = AppContainer.targetContainerIdentifiers(for: bundleId, appBundleURL: appBundleURL)
 
         // Group Containers under ~/Library/Group Containers may be shared with native macOS apps,
@@ -589,7 +664,18 @@ nonisolated class Uninstaller {
                 name = String(name.dropLast(suffix.count))
                 break
             }
-            return URL(fileURLWithPath: name).deletingPathExtension().lastPathComponent
+            if name.hasSuffix(".keyCover") {
+                name = String(name.dropLast(".keyCover".count))
+            }
+            if let bakMatch = name.firstMatch(of: /\.v\d+\.bak$/) {
+                name = String(name[..<bakMatch.range.lowerBound])
+            } else if name.hasSuffix(".bak") {
+                name = String(name.dropLast(".bak".count))
+            }
+            if name.hasSuffix(".db") {
+                name = String(name.dropLast(".db".count))
+            }
+            return name
         case "Saved Application State":
             return file.pathExtension == "savedState"
                 ? file.deletingPathExtension().lastPathComponent
@@ -623,12 +709,23 @@ nonisolated class Uninstaller {
 
                     let prunedIdsBox = Mutex<Set<String>>([])
 
+                    let hostCacheDirNames: Set<String> = [
+                        "Containers",
+                        "Application Scripts",
+                        "Caches",
+                        "HTTPStorages",
+                        "Saved Application State"
+                    ]
                     for url in fullPruneURLs {
                         let dirName = url.lastPathComponent
                         let isContainersDir = (dirName == "Containers")
+                        let isHostCacheDir = hostCacheDirNames.contains(dirName)
                         url.enumerateContents(options: [.skipsSubdirectoryDescendants]) { file, _ in
                             let resolvedId = resolvePruneBundleIdentifier(for: file, in: dirName)
                             if danglingItems.contains(resolvedId) {
+                                if isHostCacheDir && !isSafeToClearHostCaches(for: resolvedId) {
+                                    return
+                                }
                                 if isContainersDir {
                                     try clearAppContainer(file, bundleId: resolvedId)
                                 } else {

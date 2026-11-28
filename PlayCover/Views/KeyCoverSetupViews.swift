@@ -18,6 +18,7 @@ struct KeyCoverInitialSetupView: View {
 
     @State private var keyCoverPasswordError = false
     @State private var keyCoverConfirmError = false
+    @State private var saveFailedError = false
 
     @State private var keyOption = KeyCoverStatus.selfGeneratedPassword
 
@@ -36,6 +37,7 @@ struct KeyCoverInitialSetupView: View {
             .onChange(of: keyOption) { _, newValue in
                 keyCoverPasswordError = false
                 keyCoverConfirmError = false
+                saveFailedError = false
                 switch newValue {
                 case .selfGeneratedPassword:
                     keyCoverPassword = dependencies.keyCoverPassword.generateVerySecurePassword()
@@ -66,6 +68,13 @@ struct KeyCoverInitialSetupView: View {
             }
             .disabled(keyOption != .userProvidedPassword)
 
+            if saveFailedError {
+                Text("keycover.error.saveFailed")
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             Divider()
 
             HStack(spacing: 10) {
@@ -82,6 +91,7 @@ struct KeyCoverInitialSetupView: View {
                 Button("button.OK") {
                     keyCoverPasswordError = false
                     keyCoverConfirmError = false
+                    saveFailedError = false
                     if keyCoverPassword.isEmpty {
                         keyCoverPasswordError = true
                         return
@@ -116,6 +126,7 @@ struct KeyCoverInitialSetupView: View {
                             dependencies.keyCoverObservable.update()
                             isPresented = false
                         } else {
+                            saveFailedError = true
                             log.error("Failed to store KeyCover password configuration.")
                         }
                     }
@@ -148,6 +159,7 @@ struct KeyCoverUpdatePasswordView: View {
     @State private var oldKeyCoverPasswordError = false
     @State private var keyCoverPasswordError = false
     @State private var keyCoverPasswordConfirmError = false
+    @State private var saveFailedError = false
 
     @State private var keyOption = KeyCoverStatus.userProvidedPassword
 
@@ -171,6 +183,7 @@ struct KeyCoverUpdatePasswordView: View {
             .onChange(of: keyOption) { _, newValue in
                 keyCoverPasswordError = false
                 keyCoverPasswordConfirmError = false
+                saveFailedError = false
                 switch newValue {
                 case .selfGeneratedPassword:
                     keyCoverPassword = dependencies.keyCoverPassword.generateVerySecurePassword()
@@ -206,6 +219,12 @@ struct KeyCoverUpdatePasswordView: View {
                     .font(.callout)
                     .foregroundStyle(.red)
             }
+            if saveFailedError {
+                Text("keycover.error.saveFailed")
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             Divider()
 
@@ -224,6 +243,7 @@ struct KeyCoverUpdatePasswordView: View {
                     oldKeyCoverPasswordError = false
                     keyCoverPasswordError = false
                     keyCoverPasswordConfirmError = false
+                    saveFailedError = false
 
                     let oldPassword = oldKeyCoverPassword
                     let newPassword = keyCoverPassword
@@ -302,6 +322,7 @@ struct KeyCoverUpdatePasswordView: View {
                             dependencies.keyCoverObservable.update()
                             isPresented = false
                         } else {
+                            saveFailedError = true
                             log.error("Failed to update KeyCover password configuration.")
                         }
                     }

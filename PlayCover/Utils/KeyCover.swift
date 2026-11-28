@@ -124,8 +124,9 @@ nonisolated final class KeyCover: Sendable {
     }
 
     func lockChain(_ keychain: KeyCoverKey) throws {
-        if keyCoverPlainTextKey == nil && preferences.keyCoverEnabled == .selfGeneratedPassword {
-            _ = passwordStore.resolveSelfGeneratedPassword(allowLegacyKeychainMigration: true)
+        if keyCoverPlainTextKey == nil && preferences.keyCoverEnabled == .selfGeneratedPassword,
+           let resolved = passwordStore.resolveSelfGeneratedPassword(allowLegacyKeychainMigration: true) {
+            keyCoverPlainTextKey = resolved
         }
         guard let key = keyCoverPlainTextKey else {
             return
@@ -140,10 +141,26 @@ nonisolated final class KeyCover: Sendable {
         }
     }
 
+    func lockAllChainsSynchronously(excluding runningBundleIDs: Set<String> = []) {
+        guard isKeyCoverEnabled() else { return }
+        if keyCoverPlainTextKey == nil && preferences.keyCoverEnabled == .selfGeneratedPassword,
+           let resolved = passwordStore.resolveSelfGeneratedPassword(allowLegacyKeychainMigration: true) {
+            keyCoverPlainTextKey = resolved
+        }
+        guard let key = keyCoverPlainTextKey else { return }
+        for keychain in listKeychains() where !keychain.chainEncryptionStatus {
+            if runningBundleIDs.contains(keychain.appBundleID) {
+                continue
+            }
+            try? keychain.encryptKeyDB(plainTextKey: key)
+        }
+    }
+
     func lockAllChainsAsync() {
         Task {
-            if keyCoverPlainTextKey == nil && preferences.keyCoverEnabled == .selfGeneratedPassword {
-                _ = passwordStore.resolveSelfGeneratedPassword(allowLegacyKeychainMigration: true)
+            if keyCoverPlainTextKey == nil && preferences.keyCoverEnabled == .selfGeneratedPassword,
+               let resolved = passwordStore.resolveSelfGeneratedPassword(allowLegacyKeychainMigration: true) {
+                keyCoverPlainTextKey = resolved
             }
             for keychain in listKeychains() where !keychain.chainEncryptionStatus {
                 try? lockChain(keychain)
@@ -368,6 +385,7 @@ nonisolated final class KeyCoverPassword: Sendable {
 
         let allChains = KeyCover.listKeychains(in: playChainDirectory)
         let encryptedChains = allChains.filter(\.chainEncryptionStatus)
+        let existingRecord = readRecord()
 
         let resolvedOldKey: String?
         if let currentPassword, !currentPassword.isEmpty {
@@ -380,6 +398,15 @@ nonisolated final class KeyCoverPassword: Sendable {
             resolvedOldKey = legacyKeychainReader()
         } else {
             resolvedOldKey = nil
+        }
+
+        // Always verify existing keycover.json credentials before replacing the record,
+        // even when no encrypted PlayChain databases currently exist.
+        if let existingRecord {
+            guard let oldKey = resolvedOldKey,
+                  vaultStore.verify(password: oldKey, against: existingRecord) else {
+                return false
+            }
         }
 
         if !encryptedChains.isEmpty && resolvedOldKey == nil {
@@ -450,12 +477,29 @@ nonisolated final class KeyCoverPassword: Sendable {
             activeKey = nil
         }
 
+        if let record = readRecord() {
+            guard let activeKey, vaultStore.verify(password: activeKey, against: record) else {
+                return false
+            }
+        }
+
         if !encryptedChains.isEmpty {
             guard let activeKey else { return false }
+            if readRecord() == nil {
+                guard validatePassword(activeKey) else { return false }
+            }
+            guard encryptedChains.allSatisfy({ $0.canDecrypt(plainTextKey: activeKey) }) else {
+                return false
+            }
+            var decryptedChains: [KeyCoverKey] = []
             for chain in encryptedChains {
                 do {
                     try chain.decryptKeyDB(plainTextKey: activeKey)
+                    decryptedChains.append(chain)
                 } catch {
+                    for rolledBack in decryptedChains {
+                        try? rolledBack.encryptKeyDB(plainTextKey: activeKey)
+                    }
                     return false
                 }
             }

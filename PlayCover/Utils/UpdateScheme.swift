@@ -8,7 +8,47 @@
 nonisolated class UpdateScheme {
     public static let versionsFile = PlayTools.playCoverContainer.appendingPathComponent("VERSION")
     public static var currentVersion: String {
-        (try? String(contentsOf: UpdateScheme.versionsFile, encoding: .utf8)) ?? "3.1"
+        if let raw = try? String(contentsOf: UpdateScheme.versionsFile, encoding: .utf8) {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+        return inferVersionWithoutMarker(
+            containerRoot: PlayTools.playCoverContainer,
+            keymappingRoot: Keymapping.keymappingDir
+        )
+    }
+
+    static func inferVersionWithoutMarker(containerRoot: URL, keymappingRoot: URL) -> String {
+        let fm = FileManager.default
+        if let rootItems = try? fm.contentsOfDirectory(
+            at: containerRoot,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            let hasRootV2Apps = rootItems.contains { item in
+                item.pathExtension == "app"
+                    && fm.fileExists(atPath: item.appendingPathComponent("Info.plist").path)
+            }
+            if hasRootV2Apps {
+                return "2"
+            }
+        }
+        if let kmItems = try? fm.contentsOfDirectory(
+            at: keymappingRoot,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            let hasFlatV3Keymaps = kmItems.contains { item in
+                let isDir = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+                return !isDir && item.pathExtension == "plist"
+            }
+            if hasFlatV3Keymaps {
+                return "3"
+            }
+        }
+        return "3.1"
     }
     struct Version: Hashable {
         let components: [Int]
@@ -66,59 +106,83 @@ nonisolated class UpdateScheme {
     }
 
     private static func updateFromV2ToV3() throws {
-        try FileManager.default.createDirectory(at: AppsVM.appDirectory, withIntermediateDirectories: true)
+        let fm = FileManager.default
+        try fm.createDirectory(at: AppsVM.appDirectory, withIntermediateDirectories: true)
 
-        let directoryContents = try FileManager.default
-            .contentsOfDirectory(at: PlayTools.playCoverContainer, includingPropertiesForKeys: nil, options: [])
+        let directoryContents = try fm.contentsOfDirectory(
+            at: PlayTools.playCoverContainer,
+            includingPropertiesForKeys: nil,
+            options: []
+        )
 
         let subdirs = directoryContents.filter { $0.hasDirectoryPath }
 
         for sub in subdirs {
-            if sub.pathExtension.contains("app") &&
-                FileManager.default.fileExists(atPath: sub.appendingPathComponent("Info")
-                    .appendingPathExtension("plist")
-                    .path) {
+            if sub.pathExtension == "app" &&
+                fm.fileExists(atPath: sub.appendingPathComponent("Info").appendingPathExtension("plist").path) {
                 let app = PlayApp(appUrl: sub)
+                let bundleID = app.info.bundleIdentifier
+                guard Shell.isValidBundleIdentifier(bundleID) else {
+                    continue
+                }
+                let targetURL = AppsVM.appDirectory
+                    .appendingPathComponent(bundleID)
+                    .appendingPathExtension("app")
                 app.removeAlias()
-                try FileManager.default.moveItem(at: app.url,
-                                                 to: AppsVM.appDirectory
-                    .appendingPathComponent(app.info.bundleIdentifier)
-                    .appendingPathExtension("app"))
+                // Idempotent/merge-safe: skip if already migrated rather than aborting mid-migration.
+                if fm.fileExists(atPath: targetURL.path) {
+                    continue
+                }
+                try fm.moveItem(at: app.url, to: targetURL)
             }
         }
 
-        try "3".write(to: UpdateScheme.versionsFile, atomically: false, encoding: .utf8)
+        try "3".write(to: UpdateScheme.versionsFile, atomically: true, encoding: .utf8)
     }
 
     private static func updateFromV3ToV3p1() throws {
+        let fm = FileManager.default
         let encoder = PropertyListEncoder()
         encoder.outputFormat = .xml
 
-        let directoryContents = try FileManager.default
-            .contentsOfDirectory(at: Keymapping.keymappingDir, includingPropertiesForKeys: nil, options: [])
+        let directoryContents = try fm.contentsOfDirectory(
+            at: Keymapping.keymappingDir,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )
 
-        for file in directoryContents where file.pathExtension.contains("plist") {
+        for file in directoryContents where file.pathExtension == "plist" {
+            let isDir = (try? file.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+            if isDir { continue }
             let bundleId = file.deletingPathExtension().lastPathComponent
-            let appKeymapDir = Keymapping.keymappingDir.appendingPathComponent(bundleId)
-            let keymapFileURL = appKeymapDir.appendingPathComponent("default")
-                                            .appendingPathExtension("plist")
+            guard Shell.isValidBundleIdentifier(bundleId) else {
+                continue
+            }
+            let appKeymapDir = Keymapping.keymappingDir.appendingPathComponent(bundleId, isDirectory: true)
+            let keymapFileURL = appKeymapDir
+                .appendingPathComponent("default")
+                .appendingPathExtension("plist")
 
-            try FileManager.default.createDirectory(at: appKeymapDir,
-                                                    withIntermediateDirectories: true)
+            try fm.createDirectory(at: appKeymapDir, withIntermediateDirectories: true)
 
-            try FileManager.default.moveItem(at: file, to: keymapFileURL
-            )
+            if !fm.fileExists(atPath: keymapFileURL.path) {
+                try fm.moveItem(at: file, to: keymapFileURL)
+            } else {
+                try? fm.removeItem(at: file)
+            }
 
-            do {
-                let data = try encoder.encode(KeymapConfig(defaultKm: keymapFileURL, keymapOrder: [keymapFileURL]))
-                try data.write(to: appKeymapDir.appendingPathComponent(".config")
-                                               .appendingPathExtension("plist"))
-            } catch {
-                print(error)
+            let configURL = appKeymapDir.appendingPathComponent(".config").appendingPathExtension("plist")
+            if !fm.fileExists(atPath: configURL.path) {
+                do {
+                    let data = try encoder.encode(KeymapConfig(defaultKm: keymapFileURL, keymapOrder: [keymapFileURL]))
+                    try data.write(to: configURL, options: [.atomic])
+                } catch {
+                    print(error)
+                }
             }
         }
 
-        try "3.1".write(to: UpdateScheme.versionsFile, atomically: false, encoding: .utf8)
+        try "3.1".write(to: UpdateScheme.versionsFile, atomically: true, encoding: .utf8)
     }
 
 }

@@ -59,6 +59,11 @@ final class MITMProxyCoordinator {
         do {
             try certificateStore.syncRuntimeCertificates(for: bundleID, enabled: shouldInject)
             bumpCertificateRevision(for: bundleID)
+            if servers[bundleID] != nil {
+                Task { [weak self] in
+                    await self?.reloadRootCAIfNeeded(for: bundleID)
+                }
+            }
         } catch {
             PlayCoverDiagnostics.log(
                 "Failed to sync runtime certificates for \(bundleID): \(error.localizedDescription)",
@@ -102,11 +107,14 @@ final class MITMProxyCoordinator {
 
         let store = captureStore(for: bundleID)
         let serverConfig = makeServerConfiguration(bundleID: bundleID, settings: currentSettings)
+        let customAnchors = certificateStore.enabledCustomAnchorDERs(for: bundleID)
         let server = try LocalMITMProxyServer(
             rootCertificateDER: rootCA.certificateDER,
             rootPrivateKeyDER: rootCA.privateKeyDER,
             configuration: serverConfig,
-            captureStore: store
+            captureStore: store,
+            upstreamCustomAnchorDERs: customAnchors,
+            allowedClientAppBundleURL: app.url
         )
 
         let boundPort = try await server.start()
@@ -150,9 +158,7 @@ final class MITMProxyCoordinator {
         servers.removeAll()
         activePorts.removeAll()
         for server in runningServers {
-            Task.detached(priority: .userInitiated) {
-                await server.stop()
-            }
+            server.stopImmediately()
         }
     }
 
@@ -162,6 +168,43 @@ final class MITMProxyCoordinator {
         if let server = servers[bundleID] {
             let serverConfig = makeServerConfiguration(bundleID: bundleID, settings: settings)
             await server.updateConfiguration(serverConfig)
+            await reloadRootCAIfNeeded(for: bundleID)
+        }
+    }
+
+    private func reloadRootCAIfNeeded(for bundleID: String) async {
+        guard let server = servers[bundleID] else {
+            return
+        }
+        let customAnchors = certificateStore.enabledCustomAnchorDERs(for: bundleID)
+        await server.updateUpstreamCustomAnchors(customAnchors)
+
+        let material: (record: AppCertificateRecord, certificateDER: Data, privateKeyDER: Data)
+        if let existing = certificateStore.builtInRootCAMaterial(for: bundleID) {
+            material = existing
+        } else {
+            do {
+                material = try certificateStore.ensureBuiltInRootCA(for: bundleID)
+                try certificateStore.syncRuntimeCertificates(for: bundleID, enabled: true)
+                bumpCertificateRevision(for: bundleID)
+            } catch {
+                PlayCoverDiagnostics.log(
+                    "Failed to regenerate deleted MITM Root CA for \(bundleID): \(error.localizedDescription)",
+                    isError: true
+                )
+                return
+            }
+        }
+        do {
+            try await server.updateRootCA(
+                certificateDER: material.certificateDER,
+                privateKeyDER: material.privateKeyDER
+            )
+        } catch {
+            PlayCoverDiagnostics.log(
+                "Failed to reload MITM Root CA for \(bundleID): \(error.localizedDescription)",
+                isError: true
+            )
         }
     }
 
@@ -195,7 +238,8 @@ final class MITMProxyCoordinator {
             enableNetworkRules: settings.enableNetworkRules,
             networkBlockMock200: settings.networkBlockMock200,
             blockedURLPatterns: settings.blockedURLPatterns,
-            captureBodies: settings.mitmCaptureBodies
+            captureBodies: settings.mitmCaptureBodies,
+            blockLoopbackTargets: true
         )
     }
 }

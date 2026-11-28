@@ -10,7 +10,7 @@ import PlayCoverMachO
 import Synchronization
 
 nonisolated struct LaunchFastPathStamp: Codable, Equatable, Sendable {
-    static let currentSchemaVersion = 1
+    static let currentSchemaVersion = 3
 
     let schemaVersion: Int
     let exec: PlayTools.FileStatStamp
@@ -24,9 +24,61 @@ nonisolated struct LaunchFastPathStamp: Codable, Equatable, Sendable {
     let isCatalyst: Bool
     let strictEmulationMode: Bool
     let interceptInlineSyscalls: Bool
+    let enableAutomationBridge: Bool
+    let coverUseBridge: PlayTools.FileStatStamp?
+    let coverUseBridgeStaged: Bool
     let storedHasIntrospection: Bool
     let storedHasIosFrameworks: Bool
     let entitlementsInputsHash: String
+    let userPluginsStoreDigest: String?
+    let bundledUserPluginsDigest: String?
+    let svcPatchManifest: PlayTools.FileStatStamp?
+
+    init(
+        schemaVersion: Int,
+        exec: PlayTools.FileStatStamp,
+        infoPlist: PlayTools.FileStatStamp,
+        codeResources: PlayTools.FileStatStamp?,
+        frameworksDir: PlayTools.FileStatStamp?,
+        plugInsDir: PlayTools.FileStatStamp?,
+        akExec: PlayTools.FileStatStamp?,
+        playTools: PlayTools.FileStatStamp,
+        usesPlayTools: Bool,
+        isCatalyst: Bool,
+        strictEmulationMode: Bool,
+        interceptInlineSyscalls: Bool,
+        enableAutomationBridge: Bool,
+        coverUseBridge: PlayTools.FileStatStamp?,
+        coverUseBridgeStaged: Bool,
+        storedHasIntrospection: Bool,
+        storedHasIosFrameworks: Bool,
+        entitlementsInputsHash: String,
+        userPluginsStoreDigest: String? = nil,
+        bundledUserPluginsDigest: String? = nil,
+        svcPatchManifest: PlayTools.FileStatStamp? = nil
+    ) {
+        self.schemaVersion = schemaVersion
+        self.exec = exec
+        self.infoPlist = infoPlist
+        self.codeResources = codeResources
+        self.frameworksDir = frameworksDir
+        self.plugInsDir = plugInsDir
+        self.akExec = akExec
+        self.playTools = playTools
+        self.usesPlayTools = usesPlayTools
+        self.isCatalyst = isCatalyst
+        self.strictEmulationMode = strictEmulationMode
+        self.interceptInlineSyscalls = interceptInlineSyscalls
+        self.enableAutomationBridge = enableAutomationBridge
+        self.coverUseBridge = coverUseBridge
+        self.coverUseBridgeStaged = coverUseBridgeStaged
+        self.storedHasIntrospection = storedHasIntrospection
+        self.storedHasIosFrameworks = storedHasIosFrameworks
+        self.entitlementsInputsHash = entitlementsInputsHash
+        self.userPluginsStoreDigest = userPluginsStoreDigest
+        self.bundledUserPluginsDigest = bundledUserPluginsDigest
+        self.svcPatchManifest = svcPatchManifest
+    }
 }
 
 nonisolated final class AppLaunchFingerprintStore: Sendable {
@@ -144,6 +196,10 @@ nonisolated final class AppLaunchFingerprintStore: Sendable {
         let frameworksURL = target.appURL.appendingPathComponent("Frameworks")
         let plugInsURL = target.appURL.appendingPathComponent("PlugIns")
         let akExecURL = target.appURL.appendingPathComponent("PlugIns/AKInterface.bundle/Contents/MacOS/AKInterface")
+        let stagedBridgeDylibURL = frameworksURL
+            .appendingPathComponent("UserPlugins/CoverUseBridge/CoverUseBridge.dylib")
+        let builtInBridgeDylibStamp = PlayTools.builtInCoverUseBridgeDirectory()
+            .flatMap { PlayTools.fileStamp(for: $0.appendingPathComponent("CoverUseBridge.dylib")) }
 
         let inputsHash = entitlementsInputsDigest(
             bundleID: target.bundleID,
@@ -151,6 +207,15 @@ nonisolated final class AppLaunchFingerprintStore: Sendable {
             settings: settings,
             appEntitlementsURL: target.appEntitlementsURL
         )
+        let userPluginsStoreDigest: String? = target.bundleID.isEmpty
+            ? nil
+            : PlayTools.directoryTreeDigest(at: PlayTools.userPluginsStoreURL(bundleIdentifier: target.bundleID))
+        let bundledUserPluginsDigest = PlayTools.directoryTreeDigest(
+            at: frameworksURL.appendingPathComponent("UserPlugins", isDirectory: true)
+        )
+        let svcPatchManifestStamp: PlayTools.FileStatStamp? = target.bundleID.isEmpty
+            ? nil
+            : PlayTools.fileStamp(for: BaseApp.svcPatchManifestURL(forBundleIdentifier: target.bundleID))
 
         return LaunchFastPathStamp(
             schemaVersion: LaunchFastPathStamp.currentSchemaVersion,
@@ -165,9 +230,15 @@ nonisolated final class AppLaunchFingerprintStore: Sendable {
             isCatalyst: isCatalyst,
             strictEmulationMode: settings.strictEmulationMode,
             interceptInlineSyscalls: settings.effectiveInterceptInlineSyscalls,
+            enableAutomationBridge: settings.enableAutomationBridge,
+            coverUseBridge: builtInBridgeDylibStamp,
+            coverUseBridgeStaged: FileManager.default.fileExists(atPath: stagedBridgeDylibURL.path),
             storedHasIntrospection: settings.storedHasIntrospection,
             storedHasIosFrameworks: settings.storedHasIosFrameworks,
-            entitlementsInputsHash: inputsHash
+            entitlementsInputsHash: inputsHash,
+            userPluginsStoreDigest: userPluginsStoreDigest,
+            bundledUserPluginsDigest: bundledUserPluginsDigest,
+            svcPatchManifest: svcPatchManifestStamp
         )
     }
 
@@ -190,7 +261,7 @@ nonisolated final class AppLaunchFingerprintStore: Sendable {
             }
         }
 
-        feed("v1")
+        feed("v2")
         feed(bundleID)
         feed(bundlePath)
         feed("effectiveBypass=\(settings.effectiveBypass)")

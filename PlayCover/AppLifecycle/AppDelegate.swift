@@ -47,6 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard !ProcessInfo.isRunningUnitTests else { return }
 
+        PlayApp.clearDebugAffectingEnvironmentOnMainActor()
         UpdateScheme.checkForUpdate()
 
         UserDefaults.standard.register(
@@ -71,6 +72,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         guard !ProcessInfo.isRunningUnitTests else { return false }
+        if let mainWindow = dedicatedMainWindow(in: sender) {
+            if !flag || !mainWindow.isVisible || mainWindow.isMiniaturized {
+                activateWindow(mainWindow, in: sender)
+                return false
+            }
+            return true
+        }
         if !flag, bringMainWindowToFront(in: sender) {
             return false
         }
@@ -84,11 +92,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         guard !ProcessInfo.isRunningUnitTests else { return }
         let apps = dependencies.appsVM.apps
+        let stillRunningBundleIDs = Set(
+            NSWorkspace.shared.runningApplications
+                .filter { !$0.isTerminated }
+                .compactMap(\.bundleIdentifier)
+        )
         dependencies.runningAppsMonitor.shutdown()
+        dependencies.keyCover.lockAllChainsSynchronously(excluding: stillRunningBundleIDs)
         dependencies.mitmCoordinator.prepareForHostTermination(apps: apps)
+        dependencies.mcpCoordinator.prepareForHostTermination()
         for app in apps {
             app.settings.flush()
         }
+        _ = AppLaunchFingerprintStore.shared.flushSynchronously()
     }
 
     @objc func powerStateChanged(_ notification: Notification) {
@@ -110,23 +126,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @discardableResult
-    private func bringMainWindowToFront(in application: NSApplication) -> Bool {
-        let primaryWindow = application.windows.first(where: { window in
+    private func dedicatedMainWindow(in application: NSApplication) -> NSWindow? {
+        application.windows.first(where: { window in
             guard window.canBecomeMain && !(window is NSPanel) else { return false }
             let identifier = window.identifier?.rawValue ?? ""
             return identifier == "main" || identifier.hasPrefix("main")
-        }) ?? application.windows.first(where: { window in
+        })
+    }
+
+    private func activateWindow(_ window: NSWindow, in application: NSApplication) {
+        if window.isMiniaturized {
+            window.deminiaturize(nil)
+        }
+        window.makeKeyAndOrderFront(nil)
+        application.activate()
+    }
+
+    @discardableResult
+    private func bringMainWindowToFront(in application: NSApplication) -> Bool {
+        let primaryWindow = dedicatedMainWindow(in: application) ?? application.windows.first(where: { window in
             window.canBecomeMain && !(window is NSPanel)
         })
         guard let mainWindow = primaryWindow else {
             return false
         }
-        if mainWindow.isMiniaturized {
-            mainWindow.deminiaturize(nil)
-        }
-        mainWindow.makeKeyAndOrderFront(nil)
-        application.activate()
+        activateWindow(mainWindow, in: application)
         return true
     }
 }

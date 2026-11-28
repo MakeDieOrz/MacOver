@@ -57,16 +57,23 @@ struct PlayAppContextMenu: View {
         }
         Divider()
         Button("playapp.clearCache", systemImage: "clear") {
+            guard !app.isRunning, !app.isBusy else { return }
             Task { await Uninstaller.clearCachePopup(app, dependencies: dependencies) }
         }
+        .disabled(app.isRunning || app.isBusy)
         Button("playapp.clearPreferences", systemImage: "clear") {
+            guard !app.isRunning, !app.isBusy else { return }
             onClearPreferences(app)
         }
+        .disabled(app.isRunning || app.isBusy)
         Button("playapp.clearPlayChain", systemImage: "clear") {
+            guard !app.isRunning, !app.isBusy else { return }
             onClearPlayChain(app)
         }
+        .disabled(app.isRunning || app.isBusy)
         Divider()
         Button("playapp.delete", systemImage: "trash", role: .destructive) {
+            guard !app.isRunning, !app.isBusy else { return }
             Task {
                 let didUninstall = await Uninstaller.uninstallPopup(app, dependencies: dependencies)
                 if didUninstall && navState.selectedAppID == app.id {
@@ -74,6 +81,7 @@ struct PlayAppContextMenu: View {
                 }
             }
         }
+        .disabled(app.isRunning || app.isBusy)
     }
 }
 
@@ -85,11 +93,11 @@ struct AppCardView: View {
     var app: PlayApp
 
     let isSelected: Bool
+    let onSelect: () -> Void
     let onClearPreferences: (PlayApp) -> Void
     let onClearPlayChain: (PlayApp) -> Void
 
     @Namespace private var actionNamespace
-    @FocusState private var isFocused: Bool
     @State private var isHovered = false
 
     private var showsHeaderActions: Bool {
@@ -131,26 +139,13 @@ struct AppCardView: View {
         .background(cardBackground)
         .overlay(cardBorder)
         .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        // Only the selected card takes key focus, so macOS' automatic initial focus can
-        // never highlight a second, unselected card alongside the selection.
-        .focusable(isSelected)
-        .focused($isFocused)
-        .focusEffectDisabled()
-        .onKeyPress(.return) {
-            launchOrActivateApp()
-            return .handled
-        }
-        .onKeyPress(.space) {
-            navState.selectedAppID = app.id
-            return .handled
-        }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(app.name))
         .accessibilityValue(Text(accessibilityStatus))
         .accessibilityHint(Text(app.isRunning ? "action.quit" : "action.launch"))
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
         .accessibilityAction {
-            navState.selectedAppID = app.id
+            onSelect()
         }
         .accessibilityAction(named: Text(app.isRunning ? "action.quit" : "action.launch")) {
             Task(priority: .userInitiated) {
@@ -171,25 +166,25 @@ struct AppCardView: View {
         }
         .animation(.snappy(duration: 0.16), value: isSelected)
         .animation(.snappy(duration: 0.18), value: app.runState)
-        .gesture(TapGesture(count: 2).onEnded {
-            navState.selectedAppID = app.id
-            launchOrActivateApp()
-        })
-        .simultaneousGesture(TapGesture().onEnded {
-            navState.selectedAppID = app.id
-            DispatchQueue.main.async { isFocused = true }
-        })
+        .gesture(
+            TapGesture(count: 2)
+                .exclusively(before: TapGesture(count: 1))
+                .onEnded { result in
+                    switch result {
+                    case .first:
+                        onSelect()
+                        launchOrActivateApp()
+                    case .second:
+                        onSelect()
+                    }
+                }
+        )
         .contextMenu {
             PlayAppContextMenu(
                 app: app,
                 onClearPreferences: onClearPreferences,
                 onClearPlayChain: onClearPlayChain
             )
-        }
-        .onAppear {
-            // Give the selected card key focus on appear so Return launches it immediately.
-            guard isSelected else { return }
-            DispatchQueue.main.async { isFocused = true }
         }
     }
 
@@ -270,7 +265,7 @@ struct AppCardView: View {
             fillColor = Color.green.opacity(app.runState.isActive ? 0.11 : 0.06)
         } else if app.isBusy {
             fillColor = Color.accentColor.opacity(0.08)
-        } else if isHovered || isFocused {
+        } else if isHovered {
             fillColor = Color.secondary.opacity(0.08)
         } else {
             fillColor = Color.clear
@@ -290,9 +285,6 @@ struct AppCardView: View {
         } else if app.isBusy {
             strokeColor = Color.accentColor.opacity(0.45)
             lineWidth = 1.25
-        } else if isFocused {
-            strokeColor = Color.accentColor.opacity(0.55)
-            lineWidth = 1.5
         } else if isHovered {
             strokeColor = Color.primary.opacity(0.08)
             lineWidth = 1

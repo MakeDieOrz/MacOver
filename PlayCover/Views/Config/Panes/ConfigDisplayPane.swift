@@ -93,6 +93,16 @@ struct ConfigDisplayPane: View {
         .onChange(of: settings.settings.resizableAspectRatioType) {
             syncResizableRatioPresets()
         }
+        .onChange(of: settings.settings.resizableAspectRatioWidth) { _, newValue in
+            if settings.settings.resizableAspectRatioType == 1, customAspectWidth != newValue, newValue > 0 {
+                customAspectWidth = newValue
+            }
+        }
+        .onChange(of: settings.settings.resizableAspectRatioHeight) { _, newValue in
+            if settings.settings.resizableAspectRatioType == 1, customAspectHeight != newValue, newValue > 0 {
+                customAspectHeight = newValue
+            }
+        }
         .onChange(of: customAspectWidth) { _, newValue in
             let clamped = max(1, newValue)
             if !isStrictMode,
@@ -356,6 +366,10 @@ struct ConfigDisplayPane: View {
             customWidth: customWidth,
             customHeight: customHeight
         )
+        guard settings.settings.windowWidth != dims.width
+            || settings.settings.windowHeight != dims.height else {
+            return
+        }
         settings.update { updated in
             updated.windowWidth = dims.width
             updated.windowHeight = dims.height
@@ -372,6 +386,10 @@ struct ConfigDisplayPane: View {
         case 3: pair = (16, 9)
         case 4: pair = (16, 10)
         default: pair = (16, 9)
+        }
+        guard settings.settings.resizableAspectRatioWidth != pair.width
+            || settings.settings.resizableAspectRatioHeight != pair.height else {
+            return
         }
         settings.update { updated in
             updated.resizableAspectRatioWidth = pair.width

@@ -176,10 +176,12 @@ struct ConfigNetworkPane: View {
         let certsOrMITMActive = mode == .builtInMITM || settings.settings.enableCustomCertificates
 
         return Section {
-            Picker("settings.network.proxyMode", selection: proxyModeBinding) {
+            Picker(selection: proxyModeBinding) {
                 Text("settings.network.proxyMode.direct").tag(NetworkProxyMode.direct)
                 Text("settings.network.proxyMode.external").tag(NetworkProxyMode.external)
                 Text("settings.network.proxyMode.builtInMITM").tag(NetworkProxyMode.builtInMITM)
+            } label: {
+                restartLabel("settings.network.proxyMode")
             }
 
             if mode == .external {
@@ -249,7 +251,7 @@ struct ConfigNetworkPane: View {
             if mode != .direct {
                 Toggle(isOn: $settings.settings.hideProxyFromApp) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("settings.network.hideProxy")
+                        restartLabel("settings.network.hideProxy")
                         Text("settings.network.hideProxy.help")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -261,7 +263,7 @@ struct ConfigNetworkPane: View {
             if certsOrMITMActive {
                 Toggle(isOn: $settings.settings.mitmAllowPinningBypass) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("settings.network.allowPinningBypass")
+                        restartLabel("settings.network.allowPinningBypass")
                         Text("settings.network.allowPinningBypass.help")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -325,8 +327,10 @@ struct ConfigNetworkPane: View {
         let hasBuiltInCA = certificates.contains { $0.source == .generatedBuiltIn }
 
         return Section {
-            Toggle("settings.network.enableCustomCerts", isOn: customCertsEnabledBinding)
-                .disabled(mode == .builtInMITM)
+            Toggle(isOn: customCertsEnabledBinding) {
+                restartLabel("settings.network.enableCustomCerts")
+            }
+            .disabled(mode == .builtInMITM)
 
             HStack(spacing: 8) {
                 Button("settings.network.importCert") {
@@ -430,7 +434,9 @@ struct ConfigNetworkPane: View {
 
     private func rulesToggleSection(stats: NetworkRuleStats) -> some View {
         Section {
-            Toggle("settings.network.enable", isOn: $settings.settings.enableNetworkRules)
+            Toggle(isOn: $settings.settings.enableNetworkRules) {
+                restartLabel("settings.network.enable")
+            }
             Toggle("settings.network.mock200", isOn: $settings.settings.networkBlockMock200)
                 .disabled(!settings.settings.enableNetworkRules)
             LabeledContent("config.pane.network") {
@@ -443,6 +449,13 @@ struct ConfigNetworkPane: View {
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    private func restartLabel(_ titleKey: LocalizedStringKey) -> some View {
+        HStack(spacing: 6) {
+            Text(titleKey)
+            RestartFieldBadge()
         }
     }
 

@@ -31,7 +31,6 @@ struct PresetCard: View {
                     .font(.headline)
                     .foregroundStyle(.primary)
                     .lineLimit(2)
-                    .minimumScaleFactor(0.85)
                     .fixedSize(horizontal: false, vertical: true)
 
                 Text(LocalizedStringKey(preset.subtitleKey))
@@ -294,16 +293,14 @@ struct AdaptiveLeadingTrailingLayout: Layout {
         }
         let leading = subviews[0]
         let trailing = subviews[1]
-        if proposal.width == 0 {
-            let lMin = leading.sizeThatFits(.zero)
-            let tMin = trailing.sizeThatFits(.zero)
-            return CGSize(
-                width: max(lMin.width, tMin.width),
-                height: lMin.height + verticalSpacing + tMin.height
-            )
-        }
         let lIdeal = leading.sizeThatFits(.unspecified)
         let tIdeal = trailing.sizeThatFits(.unspecified)
+        if proposal.width == 0 {
+            return CGSize(
+                width: 0,
+                height: lIdeal.height + verticalSpacing + tIdeal.height
+            )
+        }
         guard let width = proposal.width, width.isFinite else {
             return CGSize(
                 width: lIdeal.width + horizontalSpacing + tIdeal.width,

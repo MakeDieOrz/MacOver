@@ -50,13 +50,16 @@ struct RootSplitView: View {
                 .padding(.horizontal, 10)
                 .padding(.bottom, 10)
             }
-            .navigationSplitViewColumnWidth(min: 210, ideal: 236, max: 300)
+            .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+            .navigationSplitViewColumnWidth(min: 210, ideal: 224, max: 300)
         } detail: {
             detailContent
-                .navigationSplitViewColumnWidth(min: 420, ideal: 560)
+                .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+                .navigationSplitViewColumnWidth(min: 420, ideal: 500)
                 .inspector(isPresented: $navState.showInspector) {
                     InspectorRouter()
-                        .inspectorColumnWidth(min: 260, ideal: 296, max: 360)
+                        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+                        .inspectorColumnWidth(min: 260, ideal: 280, max: 360)
                 }
         }
         .overlay(alignment: .bottom) {

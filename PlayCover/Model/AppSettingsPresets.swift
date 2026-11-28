@@ -191,7 +191,7 @@ nonisolated extension AppSettingsData {
             ignoreUnityKeyboardInitializationError,
             effectiveMetalHUD,
             effectiveHasIntrospection(hasIntrospection),
-            hasIosFrameworks,
+            effectiveHasIosFrameworks(hasIosFrameworks),
             effectiveOpenWithLLDB(openWithLLDB)
         ]
         return flags.filter { $0 }.count

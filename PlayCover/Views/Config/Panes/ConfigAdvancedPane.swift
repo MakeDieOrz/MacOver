@@ -23,6 +23,10 @@ struct ConfigAdvancedPane: View {
         settings.settings.strictEmulationMode
     }
 
+    private var isAppActiveOrBusy: Bool {
+        app.isRunning || app.isBusy
+    }
+
     init(
         app: PlayApp,
         settings: AppSettings,
@@ -275,13 +279,20 @@ struct ConfigAdvancedPane: View {
         }
         .disabled(!settings.settings.playChain || !hasPlayTools || isStrictMode)
 
+        if isAppActiveOrBusy {
+            Label("config.runningLock.advancedNote", systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+
         Toggle(
             isOn: Binding(
                 get: {
                     settings.settings.effectiveHasIntrospection(hasIntrospection)
                 },
                 set: { enabled in
-                    guard !isStrictMode, blockingTask == .none else {
+                    guard !isStrictMode, !isAppActiveOrBusy, blockingTask == .none else {
                         syncDyldStates()
                         return
                     }
@@ -294,8 +305,17 @@ struct ConfigAdvancedPane: View {
                     }
                     hasIntrospection = enabled
                     blockingTask = .introspection
+                    PlayApp.invalidateVerifiedBundleStamp(for: app.url)
                     Task {
+                        guard !app.isRunning, !app.isBusy else {
+                            await MainActor.run {
+                                syncDyldStates()
+                                blockingTask = .none
+                            }
+                            return
+                        }
                         _ = await app.changeDyldLibraryPath(set: enabled, path: PlayApp.introspection)
+                        PlayApp.invalidateVerifiedBundleStamp(for: app.url)
                         await MainActor.run {
                             syncDyldStates()
                             blockingTask = .none
@@ -308,7 +328,7 @@ struct ConfigAdvancedPane: View {
         }
         .help("settings.toggle.introspection.help")
         .toggleStyle(ConfigAsyncToggleStyle(activeTask: $blockingTask, role: .introspection))
-        .disabled(!hasPlayTools || isStrictMode)
+        .disabled(!hasPlayTools || isStrictMode || isAppActiveOrBusy)
 
         Toggle(
             isOn: Binding(
@@ -316,7 +336,7 @@ struct ConfigAdvancedPane: View {
                     settings.settings.effectiveHasIosFrameworks(hasIosFrameworks)
                 },
                 set: { enabled in
-                    guard !isStrictMode, blockingTask == .none else {
+                    guard !isStrictMode, !isAppActiveOrBusy, blockingTask == .none else {
                         syncDyldStates()
                         return
                     }
@@ -329,8 +349,17 @@ struct ConfigAdvancedPane: View {
                     }
                     hasIosFrameworks = enabled
                     blockingTask = .iosFrameworks
+                    PlayApp.invalidateVerifiedBundleStamp(for: app.url)
                     Task {
+                        guard !app.isRunning, !app.isBusy else {
+                            await MainActor.run {
+                                syncDyldStates()
+                                blockingTask = .none
+                            }
+                            return
+                        }
                         _ = await app.changeDyldLibraryPath(set: enabled, path: PlayApp.iosFrameworks)
+                        PlayApp.invalidateVerifiedBundleStamp(for: app.url)
                         await MainActor.run {
                             syncDyldStates()
                             blockingTask = .none
@@ -343,7 +372,7 @@ struct ConfigAdvancedPane: View {
         }
         .help("settings.toggle.iosFrameworks.help")
         .toggleStyle(ConfigAsyncToggleStyle(activeTask: $blockingTask, role: .iosFrameworks))
-        .disabled(!hasPlayTools || isStrictMode)
+        .disabled(!hasPlayTools || isStrictMode || isAppActiveOrBusy)
 
         Toggle("settings.toggle.checkMicPermissionSync", isOn: $settings.settings.checkMicPermissionSync)
             .help("settings.toggle.checkMicPermissionSync.help")

@@ -29,6 +29,8 @@ nonisolated final class PlayCoverDependencies: Sendable {
     let appIntegrity: AppIntegrity
     let mitmCoordinator: MITMProxyCoordinator
     let runningAppsMonitor: RunningAppsMonitor
+    let mcpPreferences: MCPPreferences
+    let mcpCoordinator: MCPHostCoordinator
     @ObservationIgnored private let deferredStartupStarted = Mutex<Bool>(false)
 
     @MainActor
@@ -74,6 +76,8 @@ nonisolated final class PlayCoverDependencies: Sendable {
         let appIntegrity = AppIntegrity()
         let mitmCoordinator = MITMProxyCoordinator()
         let runningAppsMonitor = RunningAppsMonitor(observeWorkspace: loadInitialData)
+        let mcpPreferences = MCPPreferences(userDefaults: userDefaults)
+        let mcpCoordinator = MCPHostCoordinator(preferences: mcpPreferences)
 
         self.alertPresenter = alertPresenter
         self.startupAlerts = startupAlerts
@@ -99,12 +103,15 @@ nonisolated final class PlayCoverDependencies: Sendable {
         self.appIntegrity = appIntegrity
         self.mitmCoordinator = mitmCoordinator
         self.runningAppsMonitor = runningAppsMonitor
+        self.mcpPreferences = mcpPreferences
+        self.mcpCoordinator = mcpCoordinator
 
         appsVM.dependencies = self
         versionCheck.dependencies = self
         urlHandler.dependencies = self
         cacher.appsVM = appsVM
         runningAppsMonitor.dependencies = self
+        mcpCoordinator.dependencies = self
 
         if configureDiagnostics {
             let logRef = log
@@ -167,5 +174,6 @@ nonisolated final class PlayCoverDependencies: Sendable {
         keyCoverObservable.refreshAsync()
         soundDeviceService.prepareSoundDevice()
         notifyService.allowNotify()
+        mcpCoordinator.startIfEnabled()
     }
 }

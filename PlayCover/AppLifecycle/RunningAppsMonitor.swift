@@ -28,6 +28,10 @@ final class RunningAppsMonitor {
 
     @ObservationIgnored weak var dependencies: PlayCoverDependencies?
     @ObservationIgnored private var trackedByBundleURL: [URL: TrackedProcess] = [:]
+    @ObservationIgnored private var pendingHostLaunches: [
+        URL: (context: HostLaunchContext, snapshot: AppSettingsData, app: PlayApp?)
+    ] = [:]
+    @ObservationIgnored private var pendingLaunchWatchdogs: [URL: Task<Void, Never>] = [:]
     @ObservationIgnored private var workspaceObservers: [NSObjectProtocol] = []
     @ObservationIgnored private var appObservers: [NSObjectProtocol] = []
     @ObservationIgnored private var isStarted = false
@@ -86,12 +90,42 @@ final class RunningAppsMonitor {
         disableTimeoutEnabled && runState == .running(isActive: true)
     }
 
-    static func isProcessAlive(pid: pid_t, isTerminated: Bool) -> Bool {
+    static func isProcessAlive(
+        pid: pid_t,
+        isTerminated: Bool,
+        expectedBundlePath: String? = nil
+    ) -> Bool {
         guard !isTerminated, pid > 0 else { return false }
-        if kill(pid, 0) == 0 {
-            return true
+        // Guest apps always run under our UID. Any non-zero kill(pid, 0) result
+        // (ESRCH = exited, EPERM = PID recycled by a different user/root process)
+        // means our guest process is no longer alive.
+        guard kill(pid, 0) == 0 else {
+            return false
         }
-        return errno != ESRCH
+        if let expectedBundlePath, !expectedBundlePath.isEmpty {
+            let expectedCanonical = URL(fileURLWithPath: expectedBundlePath)
+                .standardizedFileURL.resolvingSymlinksInPath().path
+            if let running = NSRunningApplication(processIdentifier: pid) {
+                if running.isTerminated {
+                    return false
+                }
+                if let actualPath = running.bundleURL?.standardizedFileURL.resolvingSymlinksInPath().path,
+                   actualPath != expectedCanonical {
+                    return false
+                }
+            }
+            var pathBuf = [CChar](repeating: 0, count: 4096)
+            let pathLen = proc_pidpath(pid, &pathBuf, UInt32(pathBuf.count))
+            if pathLen > 0 {
+                let execPath = String(cString: pathBuf)
+                let canonicalPrefix = expectedCanonical.hasSuffix("/") ? expectedCanonical : expectedCanonical + "/"
+                let rawPrefix = expectedBundlePath.hasSuffix("/") ? expectedBundlePath : expectedBundlePath + "/"
+                if !execPath.hasPrefix(canonicalPrefix) && !execPath.hasPrefix(rawPrefix) {
+                    return false
+                }
+            }
+        }
+        return true
     }
 
     private static func hasManagedOrAliasPrefix(_ path: String?) -> Bool {
@@ -257,7 +291,12 @@ final class RunningAppsMonitor {
 
         for trackedKey in Array(trackedByBundleURL.keys) where !seenApps.contains(trackedKey) {
             guard let entry = trackedByBundleURL[trackedKey] else { continue }
-            if !Self.isProcessAlive(pid: entry.pid, isTerminated: entry.runningApplication.isTerminated) {
+            let expectedPath = entry.app?.url.path ?? trackedKey.path
+            if !Self.isProcessAlive(
+                pid: entry.pid,
+                isTerminated: entry.runningApplication.isTerminated,
+                expectedBundlePath: expectedPath
+            ) {
                 finalizeTermination(for: trackedKey, pid: entry.pid)
             }
         }
@@ -265,7 +304,11 @@ final class RunningAppsMonitor {
         for app in apps where !seenApps.contains(app.url) && trackedByBundleURL[app.url] == nil {
             guard app.isRunning || app.isTerminating else { continue }
             let isAlive = app.snapshotRunningApplication().map {
-                Self.isProcessAlive(pid: $0.processIdentifier, isTerminated: $0.isTerminated)
+                Self.isProcessAlive(
+                    pid: $0.processIdentifier,
+                    isTerminated: $0.isTerminated,
+                    expectedBundlePath: app.url.path
+                )
             } ?? false
             if !isAlive {
                 app.clearRunningApplication()
@@ -297,6 +340,8 @@ final class RunningAppsMonitor {
         launchSnapshot: AppSettingsData,
         discordAlreadyLinked: Bool
     ) {
+        cancelPendingLaunchWatchdog(for: app.url)
+        pendingHostLaunches.removeValue(forKey: app.url)
         app.launchSnapshot = launchSnapshot
         let context = HostLaunchContext(launchDate: launchDate, discordLinked: discordAlreadyLinked)
         attachProcess(runningApplication, to: app, hostContext: context)
@@ -307,7 +352,57 @@ final class RunningAppsMonitor {
         }
     }
 
+    func registerPendingHostLaunch(
+        app: PlayApp,
+        launchDate: Date,
+        launchSnapshot: AppSettingsData,
+        discordAlreadyLinked: Bool,
+        watchdogTimeout: Duration = .seconds(120)
+    ) {
+        let appURL = app.url
+        cancelPendingLaunchWatchdog(for: appURL)
+        pendingHostLaunches[appURL] = (
+            HostLaunchContext(launchDate: launchDate, discordLinked: discordAlreadyLinked),
+            launchSnapshot,
+            app
+        )
+        pendingLaunchWatchdogs[appURL] = Task { @MainActor [weak self, weak app] in
+            try? await Task.sleep(for: watchdogTimeout)
+            guard !Task.isCancelled, let self else { return }
+            self.pendingLaunchWatchdogs.removeValue(forKey: appURL)
+            guard self.trackedByBundleURL[appURL] == nil,
+                  let expired = self.pendingHostLaunches.removeValue(forKey: appURL) else {
+                return
+            }
+            let targetApp = app ?? expired.app
+            if let targetApp, !targetApp.runState.isRunning {
+                targetApp.releaseDiscordIPC()
+                targetApp.lockKeyCover()
+                targetApp.setRunState(.idle)
+            }
+        }
+    }
+
+    private func cancelPendingLaunchWatchdog(for appURL: URL) {
+        pendingLaunchWatchdogs.removeValue(forKey: appURL)?.cancel()
+    }
+
+    @discardableResult
+    func clearPendingHostLaunchIfNotRunning(for app: PlayApp) -> Bool {
+        cancelPendingLaunchWatchdog(for: app.url)
+        guard trackedByBundleURL[app.url] == nil else {
+            pendingHostLaunches.removeValue(forKey: app.url)
+            return false
+        }
+        return pendingHostLaunches.removeValue(forKey: app.url) != nil
+    }
+
     func shutdown() {
+        for task in pendingLaunchWatchdogs.values {
+            task.cancel()
+        }
+        pendingLaunchWatchdogs.removeAll()
+        pendingHostLaunches.removeAll()
         for (url, entry) in trackedByBundleURL {
             entry.terminationObservation?.invalidate()
             if let settingsObserverID = entry.settingsObserverID {
@@ -397,11 +492,25 @@ final class RunningAppsMonitor {
         to app: PlayApp,
         hostContext: HostLaunchContext?
     ) {
+        var resolvedHostContext = hostContext
+        var adoptedPendingContext = false
+        if resolvedHostContext == nil, let pending = pendingHostLaunches.removeValue(forKey: app.url) {
+            cancelPendingLaunchWatchdog(for: app.url)
+            if Date().timeIntervalSince(pending.context.launchDate) <= 120 {
+                resolvedHostContext = pending.context
+                app.launchSnapshot = pending.snapshot
+                adoptedPendingContext = true
+            }
+        } else if resolvedHostContext != nil {
+            cancelPendingLaunchWatchdog(for: app.url)
+            pendingHostLaunches.removeValue(forKey: app.url)
+        }
+
         let pid = runningApplication.processIdentifier
         if let existing = trackedByBundleURL[app.url], existing.pid == pid {
-            if let hostContext {
+            if let resolvedHostContext {
                 var updated = existing
-                updated.hostContext = hostContext
+                updated.hostContext = resolvedHostContext
                 trackedByBundleURL[app.url] = updated
             }
             let nextState: AppRunState = .running(isActive: runningApplication.isActive)
@@ -409,6 +518,9 @@ final class RunningAppsMonitor {
                 app.setRunState(nextState)
             }
             syncDisplaySleepPolicy(for: app, runningApplication: runningApplication)
+            if adoptedPendingContext {
+                linkDiscordIfNeeded(for: app)
+            }
             return
         }
 
@@ -453,10 +565,13 @@ final class RunningAppsMonitor {
             pid: pid,
             terminationObservation: kvoToken,
             settingsObserverID: settingsObserverID,
-            hostContext: hostContext
+            hostContext: resolvedHostContext
         )
 
         syncDisplaySleepPolicy(for: app, runningApplication: runningApplication)
+        if adoptedPendingContext {
+            linkDiscordIfNeeded(for: app)
+        }
     }
 
     private func syncDisplaySleepPolicy(for app: PlayApp, runningApplication: NSRunningApplication) {
@@ -499,6 +614,7 @@ final class RunningAppsMonitor {
             app.setRunState(.idle)
             app.launchSnapshot = nil
         }
+        dependencies?.mcpCoordinator.handleAppTerminated(bundleID: app.info.bundleIdentifier)
 
         app.enableTimeOut()
 

@@ -8,28 +8,44 @@
 import Foundation
 import Synchronization
 
-nonisolated final class RedirectHandler: NSObject, URLSessionTaskDelegate {
+nonisolated final class RedirectHandler: NSObject, URLSessionDataDelegate {
+    private static let maxInterstitialHTMLBytes = 256 * 1024
     private let redirectedGoogleDriveURL = Mutex<URL?>(nil)
+
+    static func isTrustedGoogleHost(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "https",
+              let host = url.host?.lowercased(),
+              !host.isEmpty else {
+            return false
+        }
+        return host == "google.com"
+            || host.hasSuffix(".google.com")
+            || host == "googleusercontent.com"
+            || host.hasSuffix(".googleusercontent.com")
+    }
 
     static func resolveDirectDownloadURL(
         for url: URL,
         session: URLSession? = nil,
         timeout: TimeInterval = 5
     ) async -> URL {
-        if url.absoluteString.contains("drive.google.com") {
+        let lowerHost = url.host?.lowercased()
+        if lowerHost == "drive.google.com" && url.scheme?.lowercased() == "https" {
             if let converted = convertGoogleDriveLink(url.absoluteString) {
                 return await scrapeDownloadLink(from: converted, session: session, timeout: timeout) ?? url
             }
             return url
         }
-        if url.absoluteString.contains("drive.usercontent.google.com") {
+        if lowerHost == "drive.usercontent.google.com" && url.scheme?.lowercased() == "https" {
             return await scrapeDownloadLink(from: url, session: session, timeout: timeout) ?? url
         }
 
         let handler = RedirectHandler()
-        let configuration = URLSessionConfiguration.default
+        let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = timeout
         configuration.timeoutIntervalForResource = timeout
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
         let ownedSession = session == nil
         let activeSession = session ?? URLSession(configuration: configuration, delegate: handler, delegateQueue: nil)
         defer {
@@ -39,7 +55,9 @@ nonisolated final class RedirectHandler: NSObject, URLSessionTaskDelegate {
         }
 
         var request = URLRequest(url: url, timeoutInterval: timeout)
-        request.httpMethod = "GET"
+        request.httpMethod = "HEAD"
+        // For non-Google URLs, probe only headers/redirects; if a test session ignores delegate cancellation,
+        // HEAD prevents buffering a multi-GB IPA payload in RAM.
         _ = try? await activeSession.data(for: request)
 
         if let redirected = handler.takeRedirectedGoogleDriveURL() {
@@ -49,19 +67,40 @@ nonisolated final class RedirectHandler: NSObject, URLSessionTaskDelegate {
     }
 
     static func convertGoogleDriveLink(_ originalLink: String) -> URL? {
-        guard let fileIdRange = originalLink.range(of: "/file/d/") else {
+        guard let originalURL = URL(string: originalLink),
+              originalURL.scheme?.lowercased() == "https",
+              originalURL.host?.lowercased() == "drive.google.com" else {
+            return nil
+        }
+        let path = originalURL.path
+        guard let fileIdRange = path.range(of: "/file/d/") else {
             return nil
         }
         let startIndex = fileIdRange.upperBound
-        guard let endIndex = originalLink[startIndex...].firstIndex(of: "/") else {
+        let tail = path[startIndex...]
+        let fileIdSubstring = tail.firstIndex(of: "/").map { tail[..<$0] } ?? tail
+        let fileId = String(fileIdSubstring)
+        guard !fileId.isEmpty,
+              fileId.count <= 256,
+              fileId.unicodeScalars.allSatisfy({ scalar in
+                  let v = scalar.value
+                  return (v >= 0x30 && v <= 0x39)
+                      || (v >= 0x41 && v <= 0x5A)
+                      || (v >= 0x61 && v <= 0x7A)
+                      || v == 0x2D || v == 0x5F
+              }) else {
             return nil
         }
-        let fileId = originalLink[startIndex..<endIndex]
-        guard !fileId.isEmpty else {
-            return nil
-        }
-        let newLink = "https://drive.usercontent.google.com/download?id=\(fileId)&export=download&authuser=0"
-        return URL(string: newLink)
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "drive.usercontent.google.com"
+        components.path = "/download"
+        components.queryItems = [
+            URLQueryItem(name: "id", value: fileId),
+            URLQueryItem(name: "export", value: "download"),
+            URLQueryItem(name: "authuser", value: "0")
+        ]
+        return components.url
     }
 
     static func extractDownloadLink(from htmlContent: String) -> URL? {
@@ -73,7 +112,12 @@ nonisolated final class RedirectHandler: NSObject, URLSessionTaskDelegate {
               !actionRaw.isEmpty else {
             return nil
         }
-        let action = decodeHTMLEntities(actionRaw)
+        let action = decodeHTMLEntities(actionRaw).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let actionURL = URL(string: action),
+              isTrustedGoogleHost(actionURL),
+              var components = URLComponents(url: actionURL, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
         let formBody = htmlContent[formRange.body]
 
         var inputs: [String: String] = [:]
@@ -93,7 +137,15 @@ nonisolated final class RedirectHandler: NSObject, URLSessionTaskDelegate {
         let id = inputs["id"] ?? ""
         let confirm = inputs["confirm"] ?? ""
         let uuid = inputs["uuid"] ?? ""
-        return URL(string: "\(action)?id=\(id)&confirm=\(confirm)&uuid=\(uuid)")
+        components.queryItems = [
+            URLQueryItem(name: "id", value: id),
+            URLQueryItem(name: "confirm", value: confirm),
+            URLQueryItem(name: "uuid", value: uuid)
+        ]
+        guard let finalURL = components.url, isTrustedGoogleHost(finalURL) else {
+            return nil
+        }
+        return finalURL
     }
 
     private static func findDownloadFormRange(
@@ -146,7 +198,27 @@ nonisolated final class RedirectHandler: NSObject, URLSessionTaskDelegate {
         session: URLSession?,
         timeout: TimeInterval
     ) async -> URL? {
-        let activeSession = session ?? URLSession.shared
+        guard isTrustedGoogleHost(url) else {
+            return nil
+        }
+        let ownedSession = session == nil
+        let activeSession: URLSession
+        if let session {
+            activeSession = session
+        } else {
+            let config = URLSessionConfiguration.ephemeral
+            config.timeoutIntervalForRequest = timeout
+            config.timeoutIntervalForResource = timeout
+            config.httpCookieStorage = nil
+            config.httpShouldSetCookies = false
+            activeSession = URLSession(configuration: config)
+        }
+        defer {
+            if ownedSession {
+                activeSession.finishTasksAndInvalidate()
+            }
+        }
+
         var request = URLRequest(url: url, timeoutInterval: timeout)
         request.httpMethod = "GET"
         request.setValue(
@@ -155,15 +227,52 @@ nonisolated final class RedirectHandler: NSObject, URLSessionTaskDelegate {
             forHTTPHeaderField: "User-Agent"
         )
 
-        guard let (data, _) = try? await activeSession.data(for: request),
-              let html = String(data: data, encoding: .utf8) else {
+        do {
+            let (bytes, response) = try await activeSession.bytes(for: request)
+            if let http = response as? HTTPURLResponse {
+                if let finalURL = http.url, !isTrustedGoogleHost(finalURL) {
+                    return nil
+                }
+                if let contentType = http.value(forHTTPHeaderField: "Content-Type")?.lowercased(),
+                   !contentType.contains("text/html"),
+                   !contentType.contains("application/xhtml") {
+                    // Direct binary IPA download — do not buffer into RAM.
+                    return nil
+                }
+                if http.expectedContentLength > Int64(maxInterstitialHTMLBytes) {
+                    return nil
+                }
+            }
+
+            var buffer = Data()
+            buffer.reserveCapacity(min(32_768, maxInterstitialHTMLBytes))
+            for try await byte in bytes {
+                buffer.append(byte)
+                if buffer.count > maxInterstitialHTMLBytes {
+                    return nil
+                }
+            }
+            guard let html = String(data: buffer, encoding: .utf8) else {
+                return nil
+            }
+            return extractDownloadLink(from: html)
+        } catch {
             return nil
         }
-        return extractDownloadLink(from: html)
     }
 
     private func takeRedirectedGoogleDriveURL() -> URL? {
         redirectedGoogleDriveURL.withLock { $0 }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        // Never buffer response body bytes while probing redirects.
+        completionHandler(.cancel)
     }
 
     func urlSession(

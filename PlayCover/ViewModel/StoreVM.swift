@@ -13,6 +13,7 @@ class StoreVM {
     private let plistSource: URL
 
     private var isDecoding = false
+    private var suppressEncode = false
 
     init(resolveOnInit: Bool = !ProcessInfo.isRunningUnitTests) {
         plistSource = PlayTools.playCoverContainer
@@ -27,7 +28,7 @@ class StoreVM {
 
     var sourcesList: [SourceData] {
         didSet {
-            if !isDecoding {
+            if !isDecoding && !suppressEncode {
                 encode()
             }
         }
@@ -83,48 +84,47 @@ class StoreVM {
 
     //
     func moveSourceUp(_ selectedSource: inout Set<UUID>) {
-        let selected = sourcesList.filter {
-            selectedSource.contains($0.id)
-        }
-        if let first = sourcesList.first,
-           let data = selected.first {
-            if data != first {
-                if var index = sourcesList.firstIndex(of: data) {
-                    index -= 1
-                    sourcesList.removeAll {
-                        selectedSource.contains($0.id)
-                    }
-                    sourcesList.insert(contentsOf: selected, at: index)
-                }
-                resolveSources()
+        guard !selectedSource.isEmpty, sourcesList.count > 1 else { return }
+        var updated = sourcesList
+        var moved = false
+        for index in 1..<updated.count {
+            if selectedSource.contains(updated[index].id) && !selectedSource.contains(updated[index - 1].id) {
+                updated.swapAt(index - 1, index)
+                moved = true
             }
         }
+        guard moved else { return }
+        sourcesList = updated
+        resolveSources()
     }
 
     //
     func moveSourceDown(_ selectedSource: inout Set<UUID>) {
-        let selected = sourcesList.filter {
-            selectedSource.contains($0.id)
-        }
-
-        if let last = sourcesList.last,
-           let data = selected.first {
-            if data != last {
-                if var index = sourcesList.firstIndex(of: data) {
-                    index += 1
-                    sourcesList.removeAll {
-                        selectedSource.contains($0.id)
-                    }
-                    sourcesList.insert(contentsOf: selected, at: index)
-                }
-                resolveSources()
+        guard !selectedSource.isEmpty, sourcesList.count > 1 else { return }
+        var updated = sourcesList
+        var moved = false
+        for index in stride(from: updated.count - 2, through: 0, by: -1) {
+            if selectedSource.contains(updated[index].id) && !selectedSource.contains(updated[index + 1].id) {
+                updated.swapAt(index, index + 1)
+                moved = true
             }
         }
+        guard moved else { return }
+        sourcesList = updated
+        resolveSources()
     }
 
     func resolveSourcesIfNeeded() {
         guard !hasResolvedInitialSources else { return }
         resolveSources()
+    }
+
+    private func updateSourceStatus(id: UUID, status: SourceValidation) {
+        guard let index = sourcesList.firstIndex(where: { $0.id == id }) else { return }
+        guard sourcesList[index].status != status else { return }
+        suppressEncode = true
+        defer { suppressEncode = false }
+        sourcesList[index].status = status
     }
 
     //
@@ -140,20 +140,20 @@ class StoreVM {
             let isConnected = await NetworkVM.isConnectedToNetworkAsync()
             if Task.isCancelled { return }
 
-            let sourcesCount = sourcesList.count
+            let snapshot = sourcesList.map { (id: $0.id, source: $0.source) }
             sourcesData.removeAll()
 
-            for index in sourcesList.indices {
+            for item in snapshot {
                 if Task.isCancelled { return }
-                sourcesList[index].status = .checking
+                updateSourceStatus(id: item.id, status: .checking)
                 let (sourceJson, sourceState) = await getSourceData(
-                    sourceLink: sourcesList[index].source,
-                    sourceId: sourcesList[index].id,
+                    sourceLink: item.source,
+                    sourceId: item.id,
                     isConnected: isConnected
                 )
                 if Task.isCancelled { return }
-                guard sourcesCount == sourcesList.count else { return }
-                sourcesList[index].status = sourceState
+                guard sourcesList.contains(where: { $0.id == item.id }) else { continue }
+                updateSourceStatus(id: item.id, status: sourceState)
                 if sourceState == .valid, let sourceJson {
                     sourcesData.append(sourceJson)
                 }

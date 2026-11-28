@@ -18,8 +18,16 @@ struct ConfigPluginsPane: View {
     @State private var showCustomPluginWarning = false
     @State private var showRemovePlayToolsConfirm = false
 
+    private var isAppActiveOrBusy: Bool {
+        app.isRunning || app.isBusy
+    }
+
     var body: some View {
         Form {
+            if isAppActiveOrBusy {
+                runningLockNoticeSection
+            }
+
             Section {
                 if userDylibs.isEmpty {
                     Text("settings.customPlugins.empty")
@@ -39,6 +47,7 @@ struct ConfigPluginsPane: View {
                                 Image(systemName: "minus.circle")
                             }
                             .buttonStyle(.borderless)
+                            .disabled(isAppActiveOrBusy || blockingTask != .none)
                             .accessibilityLabel(dylib.lastPathComponent)
                         }
                     }
@@ -57,7 +66,7 @@ struct ConfigPluginsPane: View {
                         Label("settings.customPlugins.add", systemImage: "plus")
                     }
                     .controlSize(.small)
-                    .disabled(!hasPlayTools)
+                    .disabled(!hasPlayTools || isAppActiveOrBusy || blockingTask != .none)
                 }
             }
 
@@ -79,6 +88,26 @@ struct ConfigPluginsPane: View {
                     Label("action.launchSafeMode", systemImage: "shield.lefthalf.filled")
                 }
                 .disabled(app.isBusy)
+            }
+
+            Section("settings.plugins.automationBridge") {
+                Toggle(isOn: Binding(
+                    get: { app.settings.settings.enableAutomationBridge },
+                    set: { enabled in
+                        app.settings.update { $0.enableAutomationBridge = enabled }
+                    }
+                )) {
+                    HStack(spacing: 6) {
+                        Text("settings.plugins.enableAutomationBridge")
+                        RestartFieldBadge()
+                    }
+                }
+                .disabled(!hasPlayTools)
+
+                Text("settings.plugins.automationBridgeNote")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Section("PlayTools") {
@@ -106,7 +135,7 @@ struct ConfigPluginsPane: View {
                         }
                         .buttonStyle(.borderedProminent)
                         .tint(hasPlayTools ? .red : .accentColor)
-                        .disabled(isBusy)
+                        .disabled(isBusy || isAppActiveOrBusy)
                     }
                 }
             }
@@ -133,29 +162,65 @@ struct ConfigPluginsPane: View {
         }
     }
 
-    private func reloadUserDylibs() {
-        userDylibs = PlayTools.userDylibs(bundleIdentifier: app.info.bundleIdentifier)
-    }
-
-    private func selectAndAddDylib() {
-        NSOpenPanel.selectDylib { result in
-            guard case .success(let url) = result else { return }
-            let bundleID = app.info.bundleIdentifier
-            let executable = app.executable
-            Task.detached(priority: .userInitiated) {
-                do {
-                    try PlayTools.addUserDylib(at: url, bundleIdentifier: bundleID, appExecutable: executable)
-                } catch {
-                    PlayCoverDiagnostics.reportError(error)
+    private var runningLockNoticeSection: some View {
+        Section {
+            AdaptiveLeadingTrailingLayout(horizontalSpacing: 10, verticalSpacing: 8) {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.title3)
+                        .foregroundStyle(.orange)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("config.runningLock.title")
+                            .font(.callout.weight(.semibold))
+                        Text("config.runningLock.pluginsNote")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
-                await MainActor.run {
-                    reloadUserDylibs()
+                if app.isRunning {
+                    Button("action.quit", role: .destructive) {
+                        Task {
+                            guard app.isRunning, !app.isBusy else { return }
+                            await app.terminate()
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(app.isBusy)
+                    .fixedSize()
                 }
             }
         }
     }
 
+    private func reloadUserDylibs() {
+        userDylibs = PlayTools.userDylibs(bundleIdentifier: app.info.bundleIdentifier)
+    }
+
+    private func selectAndAddDylib() {
+        guard !isAppActiveOrBusy, blockingTask == .none else { return }
+        NSOpenPanel.selectDylib { result in
+            guard case .success(let url) = result else { return }
+            Task { @MainActor in
+                guard !app.isRunning, !app.isBusy, blockingTask == .none else { return }
+                let bundleID = app.info.bundleIdentifier
+                let executable = app.executable
+                await Task.detached(priority: .userInitiated) {
+                    do {
+                        try PlayTools.addUserDylib(at: url, bundleIdentifier: bundleID, appExecutable: executable)
+                    } catch {
+                        PlayCoverDiagnostics.reportError(error)
+                    }
+                }.value
+                reloadUserDylibs()
+            }
+        }
+    }
+
     private func removeDylib(_ url: URL) {
+        guard !isAppActiveOrBusy, blockingTask == .none else { return }
         let name = url.lastPathComponent
         let bundleID = app.info.bundleIdentifier
         let executable = app.executable
@@ -176,6 +241,7 @@ struct ConfigPluginsPane: View {
     }
 
     private func togglePlayTools() {
+        guard !isAppActiveOrBusy, blockingTask == .none else { return }
         blockingTask = .playTools
         let executable = app.executable
         let bundleURL = app.url

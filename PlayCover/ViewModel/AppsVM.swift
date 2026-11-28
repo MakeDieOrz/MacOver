@@ -6,6 +6,7 @@
 import Foundation
 import Observation
 
+@MainActor
 @Observable
 class AppsVM {
 
@@ -130,10 +131,10 @@ class AppsVM {
         execStamp: PlayTools.FileStatStamp?
     ) -> Bool {
         if let cachedEntry,
-           cachedEntry.infoPlistMTimeSec == (infoPlistStamp?.mtimeSec ?? -1),
-           cachedEntry.execMTimeSec == (execStamp?.mtimeSec ?? -1),
-           cachedEntry.execInode == (execStamp?.inode ?? 0),
-           cachedEntry.execSize == (execStamp?.size ?? -1) {
+           let infoPlistStamp,
+           let execStamp,
+           cachedEntry.infoPlistStamp == infoPlistStamp,
+           cachedEntry.execStamp == execStamp {
             return cachedEntry.hasPlayTools
         }
         return (try? PlayTools.installedInExec(atURL: app.executable)) ?? true
@@ -143,7 +144,8 @@ class AppsVM {
         let strictEmulationMode: Bool
         let effectiveIOSDeviceModel: String
         let pixelBudgetRatio: Double
-        let settingsPlistMTimeSec: Int
+        let settingsPlistStamp: PlayTools.FileStatStamp?
+        var settingsPlistMTimeSec: Int { settingsPlistStamp?.mtimeSec ?? -1 }
     }
 
     private nonisolated static func resolveSettingsSummary(
@@ -155,20 +157,20 @@ class AppsVM {
                 strictEmulationMode: false,
                 effectiveIOSDeviceModel: "iPad13,8",
                 pixelBudgetRatio: 0,
-                settingsPlistMTimeSec: -1
+                settingsPlistStamp: nil
             )
         }
         let settingsURL = AppSettings.settingsURL(forBundleIdentifier: bundleIdentifier)
         let settingsStamp = PlayTools.fileStamp(for: settingsURL)
-        let mtime = settingsStamp?.mtimeSec ?? -1
         if let cachedEntry,
            cachedEntry.bundleIdentifier == bundleIdentifier,
-           cachedEntry.settingsPlistMTimeSec == mtime {
+           let settingsStamp,
+           cachedEntry.settingsPlistStamp == settingsStamp {
             return ResolvedAppSettingsSummary(
                 strictEmulationMode: cachedEntry.strictEmulationMode,
                 effectiveIOSDeviceModel: cachedEntry.effectiveIOSDeviceModel,
                 pixelBudgetRatio: cachedEntry.pixelBudgetRatio,
-                settingsPlistMTimeSec: mtime
+                settingsPlistStamp: settingsStamp
             )
         }
         if let data = try? Data(contentsOf: settingsURL),
@@ -177,7 +179,7 @@ class AppsVM {
                 strictEmulationMode: decoded.strictEmulationMode,
                 effectiveIOSDeviceModel: decoded.effectiveIOSDeviceModel,
                 pixelBudgetRatio: decoded.pixelBudget.ratio,
-                settingsPlistMTimeSec: mtime
+                settingsPlistStamp: settingsStamp
             )
         }
         let defaults = AppSettingsData()
@@ -185,7 +187,7 @@ class AppsVM {
             strictEmulationMode: defaults.strictEmulationMode,
             effectiveIOSDeviceModel: defaults.effectiveIOSDeviceModel,
             pixelBudgetRatio: defaults.pixelBudget.ratio,
-            settingsPlistMTimeSec: -1
+            settingsPlistStamp: nil
         )
     }
 
@@ -193,21 +195,17 @@ class AppsVM {
         hasStartedInitialFetch = true
         fetchTask?.cancel()
         let deps = self.dependencies
-        fetchTask = Task(priority: .userInitiated) { [weak self] in
+        fetchTask = Task(priority: .userInitiated) { @MainActor [weak self] in
             guard let self else { return }
             let span = PerformanceSignpost.beginInterval("AppsFetchReconcile")
             defer { PerformanceSignpost.endInterval("AppsFetchReconcile", span) }
 
-            await MainActor.run {
-                if self.apps.isEmpty {
-                    self.updatingApps = true
-                }
+            if self.apps.isEmpty {
+                self.updatingApps = true
             }
 
-            let existingByURL = await MainActor.run {
-                Dictionary(self.apps.map { ($0.url, $0) }, uniquingKeysWith: { first, _ in first })
-            }
-            let cachedEntriesSnapshot = await MainActor.run { self.cachedIndexByPath }
+            let existingByURL = Dictionary(self.apps.map { ($0.url, $0) }, uniquingKeysWith: { first, _ in first })
+            let cachedEntriesSnapshot = self.cachedIndexByPath
 
             let result: [(
                 app: PlayApp,
@@ -241,7 +239,7 @@ class AppsVM {
                                 if let existing = existingByURL[sub] {
                                     if let cachedEntry,
                                        let infoStamp,
-                                       infoStamp.mtimeSec == cachedEntry.infoPlistMTimeSec {
+                                       cachedEntry.infoPlistStamp == infoStamp {
                                         app = existing
                                     } else if AppsVM.shouldReuseExistingApp(existing, at: sub) {
                                         app = existing
@@ -283,7 +281,10 @@ class AppsVM {
                                     settingsPlistMTimeSec: settingsSummary.settingsPlistMTimeSec,
                                     execMTimeSec: execStamp?.mtimeSec ?? -1,
                                     execInode: execStamp?.inode ?? 0,
-                                    execSize: execStamp?.size ?? -1
+                                    execSize: execStamp?.size ?? -1,
+                                    infoPlistStamp: infoStamp,
+                                    settingsPlistStamp: settingsSummary.settingsPlistStamp,
+                                    execStamp: execStamp
                                 )
                                 discovered.append((
                                     app: app,
@@ -336,21 +337,19 @@ class AppsVM {
                 uniquingKeysWith: { first, _ in first }
             )
 
-            await MainActor.run {
-                for item in result {
-                    item.app.hasPlayToolsCached = item.hasPlayTools
-                    item.app.applySettingsSummary(
-                        strictEmulationMode: item.settingsSummary.strictEmulationMode,
-                        effectiveIOSDeviceModel: item.settingsSummary.effectiveIOSDeviceModel,
-                        pixelBudgetRatio: item.settingsSummary.pixelBudgetRatio
-                    )
-                }
-                self.cachedIndexByPath = updatedMap
-                self.apps = loadedApps
-                self.dependencies?.runningAppsMonitor.reconcile(apps: loadedApps)
-                self.applyFilter()
-                self.updatingApps = false
+            for item in result {
+                item.app.hasPlayToolsCached = item.hasPlayTools
+                item.app.applySettingsSummary(
+                    strictEmulationMode: item.settingsSummary.strictEmulationMode,
+                    effectiveIOSDeviceModel: item.settingsSummary.effectiveIOSDeviceModel,
+                    pixelBudgetRatio: item.settingsSummary.pixelBudgetRatio
+                )
             }
+            self.cachedIndexByPath = updatedMap
+            self.apps = loadedApps
+            self.dependencies?.runningAppsMonitor.reconcile(apps: loadedApps)
+            self.applyFilter()
+            self.updatingApps = false
 
             Task.detached(priority: .background) {
                 _ = AppLibraryIndexCache.save(updatedEntries)

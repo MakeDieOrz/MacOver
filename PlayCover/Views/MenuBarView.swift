@@ -69,11 +69,19 @@ struct PlayCoverHelpMenuView: Commands {
 }
 
 struct PlayCoverViewMenuView: Commands {
+    @Environment(\.openWindow) private var openWindow
     var navState: AppNavigationState
     let dependencies: PlayCoverDependencies
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {}
+        CommandGroup(after: .windowList) {
+            Button("menubar.mainWindow", systemImage: "macwindow") {
+                NSApp.activate()
+                openWindow(id: "main")
+            }
+            .keyboardShortcut("0", modifiers: .command)
+        }
         CommandGroup(replacing: .importExport) {
             Button("menubar.importIPA", systemImage: "plus.app") {
                 navState.pendingImportIPATrigger = UUID()
@@ -195,9 +203,12 @@ struct PlayCoverMenuBarExtraContent: View {
                             _ = app.activateRunningApplication()
                         }
                         Button("action.quit") {
-                            Task { await app.terminate() }
+                            Task {
+                                guard app.isRunning, !app.isBusy else { return }
+                                await app.terminate()
+                            }
                         }
-                        .disabled(app.isTerminating)
+                        .disabled(!app.isRunning || app.isBusy)
                     }
                 }
             }

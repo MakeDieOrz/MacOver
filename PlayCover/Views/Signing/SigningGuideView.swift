@@ -10,6 +10,7 @@ struct SigningGuideView: View {
     @Binding var isSigningSetupShown: Bool
 
     @State private var sipEnabled = true
+    @State private var nvramWritable = false
     @State private var amfiDisabledInNVRAM = false
     @State private var amfiDisabledInRunningOS = false
     @State private var isLoadingStatus = true
@@ -162,11 +163,10 @@ struct SigningGuideView: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(sipEnabled || isApplyingAMFI)
+                .disabled(!nvramWritable || isApplyingAMFI)
 
                 Button("configSigning.action.copyCommand") {
-                    let disableCommand =
-                        "sudo nvram boot-args=\"amfi_get_out_of_my_way=0x1 ipc_control_port_options=0\" && sudo reboot"
+                    let disableCommand = Self.buildSafeAMFICopyCommand()
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(disableCommand, forType: .string)
                     commandCopiedAlert = true
@@ -177,6 +177,13 @@ struct SigningGuideView: View {
                 }
             }
             .padding(.top, 6)
+
+            if !isLoadingStatus && !nvramWritable {
+                Text("signing.wizard.nvramProtectedNote")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -197,13 +204,85 @@ struct SigningGuideView: View {
     }
 
     private func refreshStatus() async {
-        let result = await Task.detached(priority: .userInitiated) {
-            SystemConfig.preFlightStatus()
+        let (result, csrOutput) = await Task.detached(priority: .userInitiated) {
+            let status = SystemConfig.preFlightStatus()
+            let rawCSR = Self.readCSRUtilStatusOutput()
+            return (status, rawCSR)
         }.value
-        sipEnabled = !result.sipDisabled
+        if let csrOutput {
+            let parsed = Self.parseCSRUtilStatus(csrOutput)
+            sipEnabled = !parsed.sipDisabled
+            nvramWritable = parsed.nvramWritable
+        } else {
+            sipEnabled = !result.sipDisabled
+            nvramWritable = result.nvramWritable
+        }
         amfiDisabledInNVRAM = result.amfiDisabledInNVRAM
         amfiDisabledInRunningOS = result.amfiDisabledInRunningOS
         isLoadingStatus = false
+    }
+
+    nonisolated static func parseCSRUtilStatus(_ output: String) -> (sipDisabled: Bool, nvramWritable: Bool) {
+        let normalizedLines = output
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+
+        let globalDisabled = normalizedLines.contains { line in
+            line == "system integrity protection status: disabled."
+                || line == "system integrity protection status: disabled"
+                || line == "system integrity protection status: unknown."
+                || line == "system integrity protection status: unknown"
+        }
+        let filesystemDisabled = normalizedLines.contains { line in
+            line == "filesystem protections: disabled"
+                || line == "filesystem protections: disabled."
+        }
+        let debuggingDisabled = normalizedLines.contains { line in
+            line == "debugging restrictions: disabled"
+                || line == "debugging restrictions: disabled."
+        }
+        let nvramDisabled = normalizedLines.contains { line in
+            line == "nvram protections: disabled"
+                || line == "nvram protections: disabled."
+        }
+
+        let sipDisabled = globalDisabled || (filesystemDisabled && debuggingDisabled)
+        let nvramWritable = globalDisabled || nvramDisabled
+        return (sipDisabled, nvramWritable)
+    }
+
+    nonisolated static func buildSafeAMFICopyCommand() -> String {
+        "CURRENT_ARGS=\"$(nvram boot-args 2>/dev/null | sed -E "
+            + "'s/^boot-args([[:space:]]+|$)//; "
+            + "s/(^|[[:space:]])amfi_get_out_of_my_way=[^[:space:]]*//g; "
+            + "s/(^|[[:space:]])ipc_control_port_options=[^[:space:]]*//g; "
+            + "s/[[:space:]]+/ /g; s/^ //; s/ $//')\"; "
+            + "sudo nvram boot-args=\"${CURRENT_ARGS:+${CURRENT_ARGS} }"
+            + "amfi_get_out_of_my_way=0x1 ipc_control_port_options=0\" && sudo reboot"
+    }
+
+    nonisolated private static func readCSRUtilStatusOutput() -> String? {
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/csrutil")
+        process.arguments = ["status"]
+        process.standardOutput = pipe
+        process.standardError = pipe
+        defer {
+            try? pipe.fileHandleForReading.close()
+            try? pipe.fileHandleForWriting.close()
+        }
+        do {
+            try process.run()
+            try? pipe.fileHandleForWriting.close()
+            let data = try pipe.fileHandleForReading.readToEnd() ?? Data()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return nil }
+            return String(data: data, encoding: .utf8)
+        } catch {
+            return nil
+        }
     }
 }
 

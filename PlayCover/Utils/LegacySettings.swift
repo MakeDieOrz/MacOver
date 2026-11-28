@@ -25,29 +25,48 @@ nonisolated class LegacySettings {
                 if !monolith.isEmpty {
                     dictionary = monolith
 
-                    for (key, value) in dictionary {
-                        if let dict = value as? [String: Any] {
-                            if let settings = convertLegacySettingsDict(dict) {
-                                let settingsURL = AppSettings.appSettingsDir.appendingPathComponent(key)
-                                                                            .appendingPathExtension("plist")
-                                do {
-                                    let data = try PropertyListEncoder().encode(settings)
-                                    try data.write(to: settingsURL)
-                                } catch {
-                                    print(error)
-                                }
-                            }
+                    let encoder = PropertyListEncoder()
+                    encoder.outputFormat = .xml
 
-                            if let legacyKeymaps = dict["pc.layout"] as? [Any] {
-                                let keymap = convertLegacyKeymapArray(legacyKeymaps, key)
-                                let keymapURL = Keymapping.keymappingDir.appendingPathComponent(key)
-                                                                        .appendingPathExtension("plist")
-                                do {
-                                    let data = try PropertyListEncoder().encode(keymap)
-                                    try data.write(to: keymapURL)
-                                } catch {
-                                    print(error)
-                                }
+                    for (key, value) in dictionary {
+                        guard Shell.isValidBundleIdentifier(key),
+                              let dict = value as? [String: Any] else {
+                            continue
+                        }
+                        if let settings = convertLegacySettingsDict(dict, bundleIdentifier: key) {
+                            let settingsURL = AppSettings.appSettingsDir
+                                .appendingPathComponent(key)
+                                .appendingPathExtension("plist")
+                            do {
+                                let data = try encoder.encode(settings)
+                                try data.write(to: settingsURL, options: [.atomic])
+                            } catch {
+                                print(error)
+                            }
+                        }
+
+                        if let legacyKeymaps = dict["pc.layout"] as? [Any],
+                           let keymap = convertLegacyKeymapArray(legacyKeymaps, key) {
+                            let appKeymapDir = Keymapping.keymappingDir.appendingPathComponent(key, isDirectory: true)
+                            let keymapURL = appKeymapDir
+                                .appendingPathComponent("default")
+                                .appendingPathExtension("plist")
+                            let configURL = appKeymapDir
+                                .appendingPathComponent(".config")
+                                .appendingPathExtension("plist")
+                            do {
+                                try FileManager.default.createDirectory(
+                                    at: appKeymapDir,
+                                    withIntermediateDirectories: true
+                                )
+                                let data = try encoder.encode(keymap)
+                                try data.write(to: keymapURL, options: [.atomic])
+                                let configData = try encoder.encode(
+                                    KeymapConfig(defaultKm: keymapURL, keymapOrder: [keymapURL])
+                                )
+                                try configData.write(to: configURL, options: [.atomic])
+                            } catch {
+                                print(error)
                             }
                         }
                     }
@@ -116,13 +135,14 @@ nonisolated class LegacySettings {
         }
     }
 
-    static func convertLegacySettingsDict(_ from: [String: Any]) -> AppSettingsData? {
+    static func convertLegacySettingsDict(_ from: [String: Any], bundleIdentifier: String = "") -> AppSettingsData? {
         var dictionary: [String: Any]
 
         if !from.isEmpty {
             dictionary = from
 
             var settingsData = AppSettingsData()
+            settingsData.bundleIdentifier = bundleIdentifier
             settingsData.keymapping = dictionary["pc.keymapping"] as? Bool ?? true
             settingsData.sensitivity = floatValue(dictionary["pc.sensivity"], default: 50)
             settingsData.disableTimeout = dictionary["pc.disableTimeout"] as? Bool ?? false
