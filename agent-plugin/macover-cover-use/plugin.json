@@ -1,0 +1,9 @@
+{
+  "name": "macover-cover-use",
+  "version": "1.0.10",
+  "description": "Control and debug iOS apps running under MacOver with Accessibility-first inspection, low-token AX-DSL diffs, opt-in touch automation, MITM traffic inspection, and keymap authoring.",
+  "skills": [
+    "skills/cover-use/SKILL.md"
+  ],
+  "mcpServers": "mcp_config.json"
+}

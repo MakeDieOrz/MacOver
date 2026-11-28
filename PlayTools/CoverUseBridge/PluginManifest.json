@@ -1,0 +1,11 @@
+{
+  "manifestVersion": "1.0",
+  "identifier": "app.makedie.macover.plugin.cover-use-bridge",
+  "name": "CoverUseBridge",
+  "version": "1.0.0",
+  "minPlayToolsVersion": "1.0.10",
+  "targetBundleIdentifiers": ["*"],
+  "loadPriority": 900,
+  "capabilities": ["ui-tree", "touch-bridge", "text-input", "screenshot"],
+  "entrypoint": "CoverUseBridge.dylib"
+}

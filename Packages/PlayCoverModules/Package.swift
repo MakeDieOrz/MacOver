@@ -18,7 +18,9 @@ let package = Package(
         .library(name: "PlayCoverNetwork", targets: ["PlayCoverNetwork"]),
         .library(name: "PlayCoverSandbox", targets: ["PlayCoverSandbox"]),
         .library(name: "PlayCoverInstaller", targets: ["PlayCoverInstaller"]),
-        .library(name: "PlayCoverUI", targets: ["PlayCoverUI"])
+        .library(name: "PlayCoverUI", targets: ["PlayCoverUI"]),
+        .library(name: "PlayCoverMCP", targets: ["PlayCoverMCP"]),
+        .executable(name: "macover-mcp", targets: ["macover-mcp"])
     ],
     targets: [
         .target(
@@ -56,6 +58,25 @@ let package = Package(
             dependencies: ["PlayCoverCore"],
             swiftSettings: approachableConcurrencySettings
         ),
+        .target(
+            name: "PlayCoverMCP",
+            dependencies: [
+                "PlayCoverCore",
+                "PlayCoverMachO",
+                "PlayCoverKeymapping",
+                "PlayCoverNetwork"
+            ],
+            swiftSettings: approachableConcurrencySettings
+        ),
+        .executableTarget(
+            name: "macover-mcp",
+            dependencies: [
+                "PlayCoverMCP",
+                "PlayCoverCore",
+                "PlayCoverMachO"
+            ],
+            swiftSettings: approachableConcurrencySettings
+        ),
         .testTarget(
             name: "PlayCoverCoreSPMTests",
             dependencies: ["PlayCoverCore"],
@@ -84,6 +105,17 @@ let package = Package(
         .testTarget(
             name: "PlayCoverUISPMTests",
             dependencies: ["PlayCoverUI", "PlayCoverCore"],
+            swiftSettings: approachableConcurrencySettings
+        ),
+        .testTarget(
+            name: "PlayCoverMCPSPMTests",
+            dependencies: [
+                "PlayCoverMCP",
+                "PlayCoverCore",
+                "PlayCoverMachO",
+                "PlayCoverKeymapping",
+                "PlayCoverNetwork"
+            ],
             swiftSettings: approachableConcurrencySettings
         )
     ],
